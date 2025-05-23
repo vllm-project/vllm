@@ -6,7 +6,7 @@ import os
 import time
 from functools import cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Literal, Optional, Type, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 import huggingface_hub
 from huggingface_hub import hf_hub_download
@@ -55,11 +55,11 @@ HF_TOKEN = os.getenv('HF_TOKEN', None)
 
 logger = init_logger(__name__)
 
-_CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, Type[PretrainedConfig]] = {
+_CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
     "mllama": MllamaConfig
 }
 
-_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
+_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
@@ -199,7 +199,7 @@ def patch_rope_scaling(config: PretrainedConfig) -> None:
         patch_rope_scaling_dict(rope_scaling)
 
 
-def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
+def patch_rope_scaling_dict(rope_scaling: dict[str, Any]) -> None:
     if "rope_type" in rope_scaling and "type" in rope_scaling:
         rope_type = rope_scaling["rope_type"]
         rope_type_legacy = rope_scaling["type"]
@@ -686,9 +686,24 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
     config_dict["tie_word_embeddings"] = config_dict.get(
         "tie_embeddings", False)
-    config_dict["max_seq_len"] = config_dict.get("max_seq_len", 128_000)
-    config_dict["max_position_embeddings"] = config_dict.get(
-        "max_position_embeddings", 128_000)
+
+    if config_dict.get("max_position_embeddings") is None:
+        max_position_embeddings = 128_000
+        try:
+            trust_remote_code_val = kwargs.get("trust_remote_code", False)
+            hf_config = get_config(model=model,
+                                   trust_remote_code=trust_remote_code_val,
+                                   revision=revision,
+                                   config_format=ConfigFormat.HF)
+            if hf_value := hf_config.get_text_config().max_position_embeddings:
+                max_position_embeddings = hf_value
+        except Exception as e:
+            logger.warning(
+                "The params.json file is missing 'max_position_embeddings'"
+                " and could not get a value from the HF config."
+                " Defaulting to 128000",
+                exc_info=e)
+        config_dict["max_position_embeddings"] = max_position_embeddings
 
     if config_dict.get("quantization") is not None:
         quantization = config_dict.get("quantization", {})
@@ -748,7 +763,7 @@ def get_hf_image_processor_config(
     hf_token: Optional[Union[bool, str]] = None,
     revision: Optional[str] = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     # ModelScope does not provide an interface for image_processor
     if VLLM_USE_MODELSCOPE:
         return dict()
