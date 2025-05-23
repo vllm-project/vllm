@@ -166,6 +166,7 @@ markers = [
 [tool.pymarkdown]
 plugins.md004.style = "sublist" # ul-style
 plugins.md007.indent = 4 # ul-indent
+plugins.md007.start_indented = true # ul-indent
 plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html
