@@ -128,6 +128,13 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/update-dockerfile-graph.sh
     language: script
+  - id: check-pickle-imports
+    name: Prevent new pickle/cloudpickle imports
+    entry: python tools/check_pickle_imports.py
+    language: python
+    types: [python]
+    pass_filenames: false
+    additional_dependencies: [pathspec]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
