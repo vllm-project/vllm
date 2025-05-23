@@ -185,15 +185,16 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                         node_to_cpus.append(info.node_to_cpus(i))
 
                 if world_size > len(node_to_cpus):
-                    logger.info("[ERROR] NO AUTO OMP Bind support because request world size: %d is more than allowed numa_size: %d",
+                    logger.error("Auto thread-binding failed due to world size: %d is larger than allowed NUMA nodes number: %d. Please try to bind threads manually.",
                             world_size, len(node_to_cpus))
                 else:
                     rank_to_cpus=str(node_to_cpus[self.rank][0]) + '-' + str(node_to_cpus[self.rank][cpu_count_per_numa - 1 - num_of_reserved_cpu])
                     self.local_omp_cpuid = rank_to_cpus
-                    logger.info("local_omp_cpuid: %s",
+                    logger.info("auto thread-binding list: %s",
                         self.local_omp_cpuid)
             else:
-                logger.info("[ERROR] NO AUTO OMP Bind support. Please install py-libnuma to have the feature")
+                logger.warning("Auto thread-binding is not supported due to the lack of package numa and psutil, fallback to no thread-binding. To get better performance, please try to manually bind threads.")
+                self.local_omp_cpuid = "all"
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
