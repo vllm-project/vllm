@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import re
+from types import SimpleNamespace
 from typing import Optional
 
 import openai  # use the official client for correctness check
+import pydantic
 import pytest
 import pytest_asyncio
+from httpx import Request, Response
 from openai import BadRequestError
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import LocalOpenAIServer
+from vllm.entrypoints.openai.protocol import (CompletionRequest,
+                                              CompletionResponse,
+                                              ErrorResponse)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # any model with a chat template should work here
@@ -29,32 +36,97 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(scope="module",
-                params=[["--no-enable-prefix-caching"],
-                        [
-                            "--no-enable-prefix-caching",
-                            "--disable-frontend-multiprocessing"
-                        ]])
-def server(default_server_args, request):
-    if request.param:
-        default_server_args.extend(request.param)
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server
+@pytest_asyncio.fixture(scope="module",
+                        params=[["--no-enable-prefix-caching"],
+                                [
+                                    "--no-enable-prefix-caching",
+                                    "--disable-frontend-multiprocessing"
+                                ]])
+async def local_openai_server(default_server_args, request):
+    server_args = list(default_server_args)
+    if hasattr(request, "param") and request.param:
+        server_args.extend(request.param)
+    async with LocalOpenAIServer("facebook/opt-125m",
+                                 server_args) as local_server:
+        yield local_server
 
 
-@pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
-        yield async_client
+@pytest_asyncio.fixture(scope="module")
+async def client():
+    yield openai.AsyncOpenAI(
+        api_key="EMPTY",
+        base_url="http://localhost:8001/v1",
+        max_retries=0,
+    )
 
 
-@pytest.mark.asyncio
+@pytest.fixture
+def request_handler(local_openai_server):
+    return make_handle_request_no_streaming(local_openai_server.server_logic)
+
+
+@pytest.fixture(autouse=True)
+def setup_httpx_mock(httpx_mock, request_handler):
+    httpx_mock.add_callback(
+        request_handler,
+        url="http://localhost:8001/v1/completions",
+        method="POST",
+        is_reusable=True,
+        is_optional=True,
+    )
+
+
+def make_handle_request_no_streaming(server_logic):
+
+    async def handle_request(request: Request) -> Response:
+        request_body = json.loads(request.content.decode("utf-8"))
+        try:
+            completion_request = CompletionRequest(**request_body)
+        except pydantic.ValidationError as e:
+            return Response(status_code=400,
+                            json={"error": {
+                                "message": str(e)
+                            }})
+        generator = await server_logic.create_completion(completion_request)
+        if isinstance(generator, ErrorResponse):
+            return Response(json=generator.model_dump(),
+                            status_code=generator.code)
+        elif isinstance(generator, CompletionResponse):
+            return Response(json=generator.model_dump(), status_code=200)
+        else:
+            return Response(
+                status_code=400,
+                json={
+                    "detail":
+                    "pytest-httpx mock does not support streaming response."
+                },
+            )
+
+    return handle_request
+
+
+def convert_to_json(chunk_str: str):
+
+    def dict_to_obj(d):
+        if isinstance(d, dict):
+            return SimpleNamespace(**{k: dict_to_obj(v) for k, v in d.items()})
+        elif isinstance(d, list):
+            return [dict_to_obj(i) for i in d]
+        else:
+            return d
+
+    chunk_data = chunk_str[len("data: "):].strip()
+    chunk = dict_to_obj(json.loads(chunk_data))
+    return chunk
+
+
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_single_completion(client: openai.AsyncOpenAI,
-                                 model_name: str) -> None:
+async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
+
     completion = await client.completions.create(model=model_name,
                                                  prompt="Hello, my name is",
                                                  max_tokens=5,
@@ -80,13 +152,12 @@ async def test_single_completion(client: openai.AsyncOpenAI,
     assert completion.choices[0].prompt_logprobs is None
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
-    # test using token IDs
     completion = await client.completions.create(
         model=model_name,
         prompt=[0, 0, 0, 0, 0],
@@ -98,7 +169,7 @@ async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     assert choice.logprobs is None
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
@@ -119,7 +190,7 @@ async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
     assert len(choice.logprobs.top_logprobs[0]) == 1
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
@@ -140,14 +211,14 @@ async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
     assert 5 <= len(choice.logprobs.top_logprobs[0]) <= 6
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
-                                            model_name: str) -> None:
-
+async def test_too_many_completion_logprobs(local_openai_server,
+                                            client: openai.AsyncOpenAI,
+                                            model_name: str):
     with pytest.raises(
         (openai.BadRequestError, openai.APIError)):  # test using token IDs
         await client.completions.create(
@@ -160,20 +231,30 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
             logprobs=21,
         )
         ...
-    with pytest.raises(
-        (openai.BadRequestError, openai.APIError)):  # test using token IDs
-        stream = await client.completions.create(
-            model=model_name,
-            prompt=[0, 0, 0, 0, 0],
-            max_tokens=5,
-            temperature=0.0,
-            # vLLM has higher default max_logprobs (20 instead of 5) to support
-            # both Completion API and Chat Completion API
-            logprobs=30,
-            stream=True,
-        )
-        async for chunk in stream:
-            ...
+
+    completion_request = CompletionRequest(
+        model=model_name,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+        # vLLM has higher default max_logprobs (20 instead of 5) to support
+        # both Completion API and Chat Completion API
+        logprobs=30,
+        stream=True,
+    )
+    stream = await local_openai_server.server_logic.create_completion(
+        completion_request)
+    error_found = False
+    async for chunk in stream:
+        if isinstance(chunk, str) and chunk.startswith("data: "):
+            if chunk.strip() == "data: [DONE]":
+                continue
+            chunk = convert_to_json(chunk)
+            if hasattr(chunk, "error"):
+                error = chunk.error
+                assert error.type == "BadRequestError"
+                error_found = True
+    assert error_found
 
     # the server should still work afterwards
     completion = await client.completions.create(
@@ -185,7 +266,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
     assert len(completion.choices[0].text) >= 0
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize("model_name, prompt_logprobs", [(MODEL_NAME, -1),
                                                          (MODEL_NAME, 0),
                                                          (MODEL_NAME, 1),
@@ -216,13 +297,14 @@ async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
             assert completion.choices[0].prompt_logprobs is None
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_completion_streaming(client: openai.AsyncOpenAI,
-                                    model_name: str) -> None:
+async def test_completion_streaming(local_openai_server,
+                                    client: openai.AsyncOpenAI,
+                                    model_name: str):
     prompt = "What is an LLM?"
 
     single_completion = await client.completions.create(
@@ -232,25 +314,35 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
         temperature=0.0,
     )
     single_output = single_completion.choices[0].text
-    stream = await client.completions.create(model=model_name,
-                                             prompt=prompt,
-                                             max_tokens=5,
-                                             temperature=0.0,
-                                             stream=True)
-    chunks: list[str] = []
+
+    completion_request = CompletionRequest(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+    )
+    stream = await local_openai_server.server_logic.create_completion(
+        completion_request)
+    chunks_text: list[str] = []
+    chunks_obj: list[SimpleNamespace] = []
     finish_reason_count = 0
     async for chunk in stream:
-        chunks.append(chunk.choices[0].text)
+        if chunk.strip() == "data: [DONE]":
+            continue
+        chunk = convert_to_json(chunk)
+        chunks_text.append(chunk.choices[0].text)
+        chunks_obj.append(chunk)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
     # finish reason should only return in last block
     assert finish_reason_count == 1
-    assert chunk.choices[0].finish_reason == "length"
-    assert chunk.choices[0].text
-    assert "".join(chunks) == single_output
+    assert chunks_obj[-1].choices[0].finish_reason == "length"
+    assert chunks_obj[-1].choices[0].text
+    assert "".join(chunks_text) == single_output
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
@@ -304,12 +396,12 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
             f" repeats: {repeats}.")
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
+async def test_parallel_streaming(local_openai_server, model_name: str):
     """Streaming for parallel sampling.
     The tokens from multiple samples, are flattened into a single stream,
     with an index to indicate which sample the token belongs to.
@@ -319,16 +411,23 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     n = 3
     max_tokens = 50  # we want some to finish earlier than others
 
-    stream = await client.completions.create(model=model_name,
-                                             prompt=prompt,
-                                             max_tokens=max_tokens,
-                                             n=n,
-                                             temperature=1.0,
-                                             stream=True,
-                                             seed=42)
+    completion_request = CompletionRequest(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        n=n,
+        temperature=1.0,
+        stream=True,
+        seed=42,
+    )
+    stream = await local_openai_server.server_logic.create_completion(
+        completion_request)
     chunks: list[list[str]] = [[] for _ in range(n)]
     finish_reason_count = 0
     async for chunk in stream:
+        if chunk.strip() == "data: [DONE]":
+            continue
+        chunk = convert_to_json(chunk)
         index = chunk.choices[0].index
         text = chunk.choices[0].text
         chunks[index].append(text)
@@ -361,64 +460,86 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
                              f" repeats: {repeats}")
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_completion_stream_options(client: openai.AsyncOpenAI,
+async def test_completion_stream_options(local_openai_server,
+                                         client: openai.AsyncOpenAI,
                                          model_name: str):
     prompt = "What is the capital of France?"
 
     # Test stream=True, stream_options=
     #     {"include_usage": False, "continuous_usage_stats": False}
-    stream = await client.completions.create(model=model_name,
-                                             prompt=prompt,
-                                             max_tokens=5,
-                                             temperature=0.0,
-                                             stream=True,
-                                             stream_options={
-                                                 "include_usage": False,
-                                                 "continuous_usage_stats":
-                                                 False,
-                                             })
+    completion_request = CompletionRequest(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+        stream_options={
+            "include_usage": False,
+            "continuous_usage_stats": False,
+        },
+    )
+    stream = await local_openai_server.server_logic.create_completion(
+        completion_request)
 
     async for chunk in stream:
+        if chunk.strip() == "data: [DONE]":
+            continue
+        chunk = convert_to_json(chunk)
         assert chunk.usage is None
 
     # Test stream=True, stream_options=
     #     {"include_usage": False, "continuous_usage_stats": True}
-    stream = await client.completions.create(model=model_name,
-                                             prompt=prompt,
-                                             max_tokens=5,
-                                             temperature=0.0,
-                                             stream=True,
-                                             stream_options={
-                                                 "include_usage": False,
-                                                 "continuous_usage_stats":
-                                                 True,
-                                             })
+    completion_request = CompletionRequest(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+        stream_options={
+            "include_usage": False,
+            "continuous_usage_stats": True,
+        },
+    )
+    stream = await local_openai_server.server_logic.create_completion(
+        completion_request)
     async for chunk in stream:
+        if chunk.strip() == "data: [DONE]":
+            continue
+        chunk = convert_to_json(chunk)
         assert chunk.usage is None
 
     # Test stream=True, stream_options=
     #     {"include_usage": True, "continuous_usage_stats": False}
-    stream = await client.completions.create(model=model_name,
-                                             prompt=prompt,
-                                             max_tokens=5,
-                                             temperature=0.0,
-                                             stream=True,
-                                             stream_options={
-                                                 "include_usage": True,
-                                                 "continuous_usage_stats":
-                                                 False,
-                                             })
+    completion_request = CompletionRequest(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+        stream_options={
+            "include_usage": True,
+            "continuous_usage_stats": False,
+        },
+    )
+    stream = await local_openai_server.server_logic.create_completion(
+        completion_request)
     async for chunk in stream:
+        if chunk.strip() == "data: [DONE]":
+            continue
+        chunk = convert_to_json(chunk)
         if chunk.choices[0].finish_reason is None:
             assert chunk.usage is None
         else:
             assert chunk.usage is None
             final_chunk = await stream.__anext__()
+            if final_chunk.strip() == "data: [DONE]":
+                continue
+            final_chunk = convert_to_json(final_chunk)
             assert final_chunk.usage is not None
             assert final_chunk.usage.prompt_tokens > 0
             assert final_chunk.usage.completion_tokens > 0
@@ -429,17 +550,23 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
 
     # Test stream=True, stream_options=
     #     {"include_usage": True, "continuous_usage_stats": True}
-    stream = await client.completions.create(model=model_name,
-                                             prompt=prompt,
-                                             max_tokens=5,
-                                             temperature=0.0,
-                                             stream=True,
-                                             stream_options={
-                                                 "include_usage": True,
-                                                 "continuous_usage_stats":
-                                                 True,
-                                             })
+    completion_request = CompletionRequest(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+        stream_options={
+            "include_usage": True,
+            "continuous_usage_stats": True,
+        },
+    )
+    stream = await local_openai_server.server_logic.create_completion(
+        completion_request)
     async for chunk in stream:
+        if chunk.strip() == "data: [DONE]":
+            continue
+        chunk = convert_to_json(chunk)
         assert chunk.usage is not None
         assert chunk.usage.prompt_tokens > 0
         assert chunk.usage.completion_tokens > 0
@@ -447,6 +574,9 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                             chunk.usage.completion_tokens)
         if chunk.choices[0].finish_reason is not None:
             final_chunk = await stream.__anext__()
+            if final_chunk.strip() == "data: [DONE]":
+                continue
+            final_chunk = convert_to_json(final_chunk)
             assert final_chunk.usage is not None
             assert final_chunk.usage.prompt_tokens > 0
             assert final_chunk.usage.completion_tokens > 0
@@ -498,13 +628,13 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
             stream_options={"continuous_usage_stats": True})
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
-    # test both text and token IDs
+async def test_batch_completions(local_openai_server,
+                                 client: openai.AsyncOpenAI, model_name: str):
     for prompts in (["Hello, my name is"] * 2, [[0, 0, 0, 0, 0]] * 2):
         # test simple list
         batch = await client.completions.create(
@@ -537,22 +667,27 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
             3].text, "two copies of the same prompt should be the same"
 
         # test streaming
-        batch = await client.completions.create(
+        completion_request = CompletionRequest(
             model=model_name,
             prompt=prompts,
             max_tokens=5,
             temperature=0.0,
             stream=True,
         )
+        batch = await local_openai_server.server_logic.create_completion(
+            completion_request)
         texts = [""] * 2
         async for chunk in batch:
+            if chunk.strip() == "data: [DONE]":
+                continue
+            chunk = convert_to_json(chunk)
             assert len(chunk.choices) == 1
             choice = chunk.choices[0]
             texts[choice.index] += choice.text
         assert texts[0] == texts[1]
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
@@ -586,12 +721,13 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
         assert len(logprobs.tokens) > 5
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_invalid_json_schema(client: openai.AsyncOpenAI,
+async def test_invalid_json_schema(local_openai_server,
+                                   client: openai.AsyncOpenAI,
                                    model_name: str) -> None:
     invalid_json_schema = {
         "$defs": {
@@ -629,12 +765,13 @@ async def test_invalid_json_schema(client: openai.AsyncOpenAI,
         )
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
+async def test_invalid_regex(local_openai_server, client: openai.AsyncOpenAI,
+                             model_name: str):
     prompt = ("Generate an email address for Alan Turing, who works in Enigma."
               "End in .com and new line. Example result:"
               "alan.turing@enigma.com\n")
@@ -650,12 +787,13 @@ async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
         )
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
 )
-async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
+async def test_invalid_grammar(local_openai_server, client: openai.AsyncOpenAI,
+                               model_name: str):
     invalid_simplified_sql_grammar = """
         root ::= select_statementinvalidsyntax
 

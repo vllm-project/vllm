@@ -28,7 +28,12 @@ from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.api_server import build_async_engine_client
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    OpenAIServingModels)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -189,6 +194,53 @@ class RemoteOpenAIServer:
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
                                   **kwargs)
+
+
+class LocalOpenAIServer:
+
+    def __init__(self, model_name, server_args):
+        self.model_name = model_name
+        self.server_args = list(server_args)
+        self.server_logic = None
+        self.engine_client = None
+        self.engine_client_cm = None  # store the context manager
+
+    async def __aenter__(self):
+        parser = FlexibleArgumentParser(
+            description="vLLM's remote OpenAI server.")
+        parser = make_arg_parser(parser)
+        args = parser.parse_args(
+            ["--model", self.model_name, *self.server_args])
+        self.engine_client_cm = build_async_engine_client(args)
+        self.engine_client = await self.engine_client_cm.__aenter__()
+        vllm_config = await self.engine_client.get_vllm_config()
+        model_config = vllm_config.model_config
+        served_model_names = args.served_model_name or [args.model]
+        base_model_paths = [
+            BaseModelPath(name=name, model_path=args.model)
+            for name in served_model_names
+        ]
+        models = OpenAIServingModels(
+            engine_client=self.engine_client,
+            model_config=model_config,
+            base_model_paths=base_model_paths,
+            lora_modules=args.lora_modules,
+            prompt_adapters=args.prompt_adapters,
+        )
+        request_logger = None if args.disable_log_requests else RequestLogger(
+            max_log_len=args.max_log_len)
+        self.server_logic = OpenAIServingCompletion(
+            model_config=model_config,
+            engine_client=self.engine_client,
+            models=models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        )
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self.engine_client_cm is not None:
+            await self.engine_client_cm.__aexit__(exc_type, exc, tb)
 
 
 def _test_completion(
