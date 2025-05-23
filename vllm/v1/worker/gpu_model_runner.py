@@ -1300,12 +1300,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_ids, positions, inputs_embeds, intermediate_tensors = \
                 model_inputs(token_slice, use_dummy_input)
             with context:
+                if isinstance(context, UBatchContext):
+                    print(f"Running ubatch {context.id} with input_ids {input_ids.shape} and positions {positions.shape}")
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+                if isinstance(context, UBatchContext):
+                    print(f"Ran ubatch {context.id}putput {model_output.shape}")
                 if isinstance(context, UBatchContext):
                     # Clone before we leave the ubatch context
                     model_output = model_output.clone()
