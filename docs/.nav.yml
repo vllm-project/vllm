@@ -12,7 +12,7 @@ nav:
     - User Guide: serving/offline_inference.md
     - Developer Guide: contributing/overview.md
     - API Reference: api/README.md
-    - News:
+    - Timeline:
       - Roadmap: https://roadmap.vllm.ai
       - Releases: https://github.com/vllm-project/vllm/releases
   - User Guide:
