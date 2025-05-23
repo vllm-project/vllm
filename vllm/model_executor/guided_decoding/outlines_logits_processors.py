@@ -56,6 +56,12 @@ class BaseLogitsProcessor:
         self._fsm_state: defaultdict[int, Union[int,
                                                 CFGState]] = defaultdict(int)
 
+    def clone(self) -> "BaseLogitsProcessor":
+        cloned = copy.copy(self)
+        cloned._guide = self._guide.copy()
+        cloned._fsm_state = copy.deepcopy(self._fsm_state)
+        return cloned
+
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
@@ -217,6 +223,12 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         super().__init__(CFGLogitsProcessor._get_guide(cfg, tokenizer),
                          reasoner)
         self._guide = self._guide.copy()
+
+    def clone(self) -> "CFGLogitsProcessor":
+        cloned = copy.copy(self)
+        cloned._fsm_state = copy.deepcopy(self._fsm_state)
+        cloned._guide = self._guide.copy()
+        return cloned
 
 
 @lru_cache(maxsize=32)
