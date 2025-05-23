@@ -60,6 +60,10 @@ plugins:
   - api-autonav:
       modules: ["vllm"]
       api_root_uri: "api"
+      exclude:
+        - "re:vllm\\._.*"  # Internal modules
+        - "vllm.third_party"
+        - "vllm.vllm_flash_attn"
   - mkdocstrings:
       handlers:
         python:
