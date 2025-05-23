@@ -3,12 +3,13 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable
 
+from vllm.config import ForestedCascadeConfig
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          KVCacheBlockPrefixTrie, CommonPrefixGroups)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
-                                        SlidingWindowSpec, ForestedPrefixSpec)
+                                        SlidingWindowSpec)
 from vllm.v1.request import Request
 
 class SingleTypeKVCacheManager(ABC):
@@ -20,7 +21,7 @@ class SingleTypeKVCacheManager(ABC):
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
-        forested_prefix_spec: ForestedPrefixSpec,
+        forested_cascade_config: ForestedCascadeConfig,
         block_pool: BlockPool,
         use_eagle: bool,
         num_kv_cache_groups: int,
@@ -30,6 +31,8 @@ class SingleTypeKVCacheManager(ABC):
         Initializes the SpecializedManager.
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
+            forested_cascade_config: Defines parameters relevant to forested
+            cascade attention.
             block_pool: The block pool.
             use_eagle: Whether to use eagle.
             num_kv_cache_groups: The number of kv cache groups managed by this 
@@ -39,7 +42,7 @@ class SingleTypeKVCacheManager(ABC):
 
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.forested_prefix_spec = forested_prefix_spec
+        self.forested_cascade_config = forested_cascade_config
         self.block_pool = block_pool
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
@@ -173,11 +176,11 @@ class SingleTypeKVCacheManager(ABC):
         if req_id not in self.req_to_depth:
             self.req_to_depth[req_id] = 1
 
-        use_forested_prefix = False if self.forested_prefix_spec is None \
-            else self.forested_prefix_spec.use_forested_prefix
+        use_forested_prefix = False if self.forested_cascade_config is None \
+            else self.forested_cascade_config.use_forested_prefix
 
-        absorption_threshold_ratio = self.forested_prefix_spec.absorption_threshold_ratio if (
-            self.forested_prefix_spec is not None) else float('inf')
+        absorption_threshold_ratio = self.forested_cascade_config.absorption_threshold_ratio if (
+                self.forested_cascade_config is not None) else float('inf')
 
         if use_forested_prefix:
             req_depth = self.req_to_depth[req_id]
@@ -222,7 +225,7 @@ class SingleTypeKVCacheManager(ABC):
 
         Args:
             request_id: The request ID.
-            block_hashes: The block hashes of the request.
+            num_running_requests: The number of currently running requests.
 
         Returns:
             The number of common prefix blocks.
@@ -316,22 +319,25 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                 break
         return num_common_blocks
 
-    def get_common_prefix_groups(self) -> list[CommonPrefixGroups] | None:
-        if self.forested_prefix_spec is None:
+    def get_common_prefix_groups(self) -> CommonPrefixGroups | None:
+        if self.forested_cascade_config is None:
             return None
-        common_prefix_list = []
-        alloc_method = self.forested_prefix_spec.allocate_method
+        common_prefix_groups = CommonPrefixGroups([], [])
+        alloc_method = self.forested_cascade_config.allocate_method
         for depth in self.depth_to_prefix_trie:
             prefix_trie = self.depth_to_prefix_trie[depth]
             groups = prefix_trie.allocate_group(alloc_method)
-            common_prefix_list.append(groups)
-        return common_prefix_list
+            common_prefix_groups.extend(groups)
+        return common_prefix_groups
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
 
-    def __init__(self, kv_cache_spec: SlidingWindowSpec, block_pool: BlockPool,
+    def __init__(self, kv_cache_spec: SlidingWindowSpec,
+                 forested_cascade_config: ForestedCascadeConfig,
+                 block_pool: BlockPool,
                  use_eagle: bool, **kwargs) -> None:
-        super().__init__(kv_cache_spec, block_pool, use_eagle, **kwargs)
+        super().__init__(kv_cache_spec, forested_cascade_config, block_pool,
+                         use_eagle, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
@@ -399,8 +405,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
 
-        use_forested_prefix = False if self.forested_prefix_spec is None \
-            else self.forested_prefix_spec.use_forested_prefix
+        use_forested_prefix = False if self.forested_cascade_config is None \
+            else self.forested_cascade_config.use_forested_prefix
 
         old_req_depth = -1
         if removed_blocks:

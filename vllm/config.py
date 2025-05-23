@@ -713,6 +713,8 @@ class ModelConfig:
         return None
 
     def _init_forested_cascade_config(self) -> "ForestedCascadeConfig":
+        """ Sets the forested cascade config based on user input. Sets
+        to default otherwise."""
         if isinstance(self.override_forested_cascade_config, dict):
             self.override_forested_cascade_config = ForestedCascadeConfig(
                 **self.override_forested_cascade_config)
@@ -3058,8 +3060,8 @@ class ForestedCascadeConfig:
     """
     absorption_threshold_ratio: float = 0.8
     """
-    Specifies the method used to allocate groups for forested
-    cascade attention.
+    Specifies the method used to allocate groups of requests
+    for forested cascade attention.
     """
     class GroupAllocationMethod(enum.Enum, str):
         LEAF_PASS = "leaf_pass"

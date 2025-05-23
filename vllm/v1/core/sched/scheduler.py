@@ -523,7 +523,7 @@ class Scheduler(SchedulerInterface):
             ) for req in scheduled_running_reqs
         ]
 
-        common_prefix_list = self.kv_cache_manager.get_common_prefix_groups()
+        common_prefix_groups = self.kv_cache_manager.get_common_prefix_groups()
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -533,7 +533,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
-            common_prefix_list=common_prefix_list,
+            common_prefix_groups=common_prefix_groups,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between

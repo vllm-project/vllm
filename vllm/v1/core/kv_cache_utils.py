@@ -16,7 +16,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
-from vllm.v1.utils import ConstantList
 
 logger = init_logger(__name__)
 
@@ -172,10 +171,21 @@ class KVCacheBlock:
 
 @dataclass
 class CommonPrefixGroups:
-    request_ids: ConstantList[str]
-    # Group metadata composed of (num_common_prefix_blocks, start_index, end_index)
-    # tuples where the index vars index into request_ids
-    group_metadata: ConstantList[tuple[int, int, int]]
+    """List of request ids for requests which we group together.
+    We group together consecutive requests."""
+    request_ids: list[str]
+
+    """Group metadata composed of list of 
+    (num_common_prefix_blocks, start_index, end_index). 
+    The requests corresponding to request_ids[start_index: end_index + 1] 
+    form a group with the specified num_common_prefix_blocks."""
+    group_metadata: list[tuple[int, int, int]]
+
+    def extend(self, groups: CommonPrefixGroups):
+        num_old_reqs = len(self.request_ids)
+        self.request_ids.extend(groups.request_ids)
+        self.group_metadata.extend([(a, b + num_old_reqs, c + num_old_reqs)
+                                    for a,b,c in groups.group_metadata])
 
 def get_scheduled_requests(request_list: list[tuple[str, bool]],
                            groups_list: list[tuple[int, int, int]]) \
@@ -196,8 +206,7 @@ def get_scheduled_requests(request_list: list[tuple[str, bool]],
             actual_groups_list.append((group_num_common_blocks, actual_start_id,
                                        len(actual_request_list)))
 
-    return CommonPrefixGroups(ConstantList(actual_request_list),
-                              ConstantList(actual_groups_list))
+    return CommonPrefixGroups(actual_request_list, actual_groups_list)
 
 
 class KVCacheBlockPrefixTrie:
