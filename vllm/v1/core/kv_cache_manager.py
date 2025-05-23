@@ -8,7 +8,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils import sha256
 from vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
-from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlockBundle,
+from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
@@ -19,26 +19,17 @@ logger = init_logger(__name__)
 
 @dataclass
 class KVCacheBlocks:
-    blocks: list[list[KVCacheBlockBundle]]
+    blocks: list[list[KVCacheBlock]]
     """
-    blocks[i][j].blocks[k] refers to the i-th single_type_manager, the j-th 
-    block of the tokens, and the k-th kv cache group managed by that 
-    single_type_manager.
+    blocks[i][j].blocks[k] refers to the i-th kv_cache_group and the j-th 
+    block of the tokens.
     """
-    group_to_manager: ClassVar[list[tuple[int, int]]] = []
-    """
-    tuple(manager_id, group_id_in_manager) for each kv cache group.
-    """
+    num_kv_cache_groups: ClassVar[int]
 
     def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
         """Adds two KVCacheBlocks instances."""
         return KVCacheBlocks(
             [blk1 + blk2 for blk1, blk2 in zip(self.blocks, other.blocks)])
-
-    @classmethod
-    def create_empty(cls) -> "KVCacheBlocks":
-        """Creates a new KVCacheBlocks instance with no blocks."""
-        return cls([[] for _ in range(len(cls.group_to_manager))])
 
     def get_block_ids(self) -> list[list[int]]:
         """
@@ -50,18 +41,20 @@ class KVCacheBlocks:
             * each inner list contains the block_ids of the blocks in that group
         """
         block_ids = []
-        for manager_id, group_id_in_manager in self.group_to_manager:
-            block_ids.append([
-                blk.blocks[group_id_in_manager].block_id
-                for blk in self.blocks[manager_id]
-            ])
+        for group in self.blocks:
+            block_ids.append([blk.block_id for blk in group])
         return block_ids
+
+    @classmethod
+    def create_empty(cls) -> "KVCacheBlocks":
+        """Creates a new KVCacheBlocks instance with no blocks."""
+        return cls([[] for _ in range(cls.num_kv_cache_groups)])
 
     def get_unhashed_block_ids(self) -> list[int]:
         """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
-        assert len(self.group_to_manager) == 1, "Only one group is supported"
+        assert self.num_kv_cache_groups == 1, "Only one group is supported"
         return [
-            block.master_block_id for block in self.blocks[0]
+            block.block_id for block in self.blocks[0]
             if block.block_hash is None
         ]
 
@@ -95,8 +88,8 @@ class KVCacheManager:
             caching_hash_fn=self.caching_hash_fn,
             enable_kv_cache_events=enable_kv_cache_events,
         )
-        self.group_to_manager = self.coordinator.group_to_manager
-        KVCacheBlocks.group_to_manager = self.group_to_manager
+        KVCacheBlocks.num_kv_cache_groups = len(
+            kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
 
         self.all_block_sizes = set(g.kv_cache_spec.block_size
@@ -175,7 +168,8 @@ class KVCacheManager:
         # could slightly improve performance in the future.
         max_cache_hit_length = request.num_tokens - 1
         computed_blocks, num_new_computed_tokens = (
-            self.coordinator.find_longest_cache_hit(block_hashes,
+            self.coordinator.find_longest_cache_hit(request.request_id,
+                                                    block_hashes,
                                                     max_cache_hit_length))
 
         if self.log_stats:
@@ -190,7 +184,6 @@ class KVCacheManager:
         request: Request,
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
-        new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
@@ -232,12 +225,9 @@ class KVCacheManager:
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")
 
-        if new_computed_blocks is not None:
-            new_computed_block_list = new_computed_blocks.blocks
-        else:
-            new_computed_block_list = [
-                [] for _ in self.coordinator.single_type_managers
-            ]
+        # Get the new computed blocks detected by get_computed_blocks.
+        new_computed_blocks = self.coordinator.get_computed_blocks(
+            request.request_id, num_new_computed_tokens)
 
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
@@ -259,7 +249,7 @@ class KVCacheManager:
         num_blocks_to_allocate = (self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
-            new_computed_blocks=new_computed_block_list,
+            new_computed_blocks=new_computed_blocks,
         ))
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
@@ -268,16 +258,16 @@ class KVCacheManager:
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self.block_pool.touch(new_computed_block_list)
+            self.block_pool.touch(new_computed_blocks)
         else:
-            assert all(not blocks for blocks in new_computed_block_list), (
+            assert all(not blocks for blocks in new_computed_blocks), (
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
         self.coordinator.save_new_computed_blocks(request.request_id,
-                                                  new_computed_block_list)
+                                                  new_computed_blocks)
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id, num_tokens_need_slot)
@@ -384,4 +374,4 @@ class KVCacheManager:
     def get_block_ids(self, request_id: str) -> list[list[int]]:
         """Get the block ids of a request."""
         return KVCacheBlocks(
-            self.coordinator.get_block_ids(request_id)).get_block_ids()
+            self.coordinator.get_blocks(request_id)).get_block_ids()

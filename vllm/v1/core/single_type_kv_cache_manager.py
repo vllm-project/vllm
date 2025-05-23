@@ -51,6 +51,9 @@ class SingleTypeKVCacheManager(ABC):
         self.req_to_blocks: defaultdict[
             str, list[KVCacheBlockBundle]] = defaultdict(list)
 
+        self.req_to_hit_blocks: defaultdict[
+            str, list[KVCacheBlockBundle]] = defaultdict(list)
+
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
         # This is only used to track the RUNNING requests, we do not track the
