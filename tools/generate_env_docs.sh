@@ -3,9 +3,9 @@
 # Set the path to envs.py
 ENVS_FILE="vllm/envs.py"
 
-# Set output directory and file
-OUTPUT_DIR="docs/source/api"
-output_file="$OUTPUT_DIR/environment_variables.md"
+# Set input and temp files
+INPUT_FILE="docs/source/serving/env_vars.md"
+TEMP_FILE="/tmp/env_vars_temp.md"
 
 # Check if envs.py exists
 if [ ! -f "$ENVS_FILE" ]; then
@@ -13,14 +13,14 @@ if [ ! -f "$ENVS_FILE" ]; then
     exit 1
 fi
 
-# Create output directory if it doesn't exist
-mkdir -p "$OUTPUT_DIR"
+# Check if input file exists
+if [ ! -f "$INPUT_FILE" ]; then
+    echo "Error: $INPUT_FILE file not found"
+    exit 1
+fi
 
-# Write the header
-cat << 'EOF' > "$output_file"
-# Environment Variables Documentation
-
-This document lists all available environment variables and their configurations.
+# Create the table
+cat << 'EOF' > "$TEMP_FILE"
 
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
@@ -86,7 +86,7 @@ add_table_row() {
         description="-"
     fi
 
-    echo "| \`$var_name\` | \`$var_type\` | \`$default_value\` | $description |" >> "$output_file"
+    echo "| \`$var_name\` | \`$var_type\` | \`$default_value\` | $description |" >> "$TEMP_FILE"
 }
 
 # Extract environment variables
@@ -100,7 +100,10 @@ while IFS= read -r var; do
     add_table_row "$var"
 done < /tmp/env_vars.txt
 
-# Cleanup
-rm /tmp/env_vars.txt
+# Append the generated table to the existing file
+cat "$TEMP_FILE" >> "$INPUT_FILE"
 
-echo "Documentation generated in $output_file"
+# Cleanup
+rm /tmp/env_vars.txt "$TEMP_FILE"
+
+echo "Documentation appended to $INPUT_FILE"
