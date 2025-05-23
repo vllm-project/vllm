@@ -19,7 +19,7 @@ from vllm.v1.core.kv_cache_utils import (FreeKVCacheBlockQueue, KVCacheBlock,
                                          hash_request_tokens,
                                          unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheTensor,
+                                        KVCacheGroupSpec, KVCacheNewTensor,
                                         SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
@@ -91,14 +91,7 @@ def test_kv_cache_block():
     # Test KVCacheBlock initialization
     block = KVCacheBlock(block_id=0)
     assert block.block_id == 0
-    assert block.ref_cnt == 0
     assert block.block_hash is None
-
-    # Test reference count manipulation
-    block.incr_ref()
-    assert block.ref_cnt == 1
-    block.decr_ref()
-    assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
     block_hash = vllm.v1.core.kv_cache_utils.BlockHashType(hash_value=123,
@@ -408,8 +401,8 @@ def test_unify_kv_cache_configs():
         KVCacheConfig(
             num_blocks=10,
             tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
+                "layer1": KVCacheNewTensor(100),
+                "layer2": KVCacheNewTensor(100),
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
@@ -420,8 +413,8 @@ def test_unify_kv_cache_configs():
         KVCacheConfig(
             num_blocks=20,
             tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
+                "layer1": KVCacheNewTensor(100),
+                "layer2": KVCacheNewTensor(100),
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
@@ -438,8 +431,8 @@ def test_unify_kv_cache_configs():
         KVCacheConfig(
             num_blocks=10,
             tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
+                "layer1": KVCacheNewTensor(100),
+                "layer2": KVCacheNewTensor(100),
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
@@ -450,8 +443,8 @@ def test_unify_kv_cache_configs():
         KVCacheConfig(
             num_blocks=20,
             tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
+                "layer1": KVCacheNewTensor(100),
+                "layer2": KVCacheNewTensor(100),
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer2"],
@@ -469,8 +462,8 @@ def test_unify_kv_cache_configs():
         KVCacheConfig(
             num_blocks=10,
             tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
+                "layer1": KVCacheNewTensor(100),
+                "layer2": KVCacheNewTensor(100),
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
@@ -481,8 +474,8 @@ def test_unify_kv_cache_configs():
         KVCacheConfig(
             num_blocks=20,
             tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
+                "layer1": KVCacheNewTensor(100),
+                "layer2": KVCacheNewTensor(100),
             },
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
@@ -605,7 +598,7 @@ def test_allocate_with_lookahead():
     config = KVCacheConfig(
         num_blocks=10,
         tensors={
-            "layer1": KVCacheTensor(100),
+            "layer1": KVCacheNewTensor(100),
         },
         kv_cache_groups=[
             KVCacheGroupSpec(["layer1"],
@@ -628,7 +621,7 @@ def test_allocate_with_lookahead():
         num_new_tokens=3,
         num_lookahead_tokens=2,  # Total required: 3+2=5 tokens
     )
-    assert len(blocks.blocks) == 2  # ceil(5/4)=2 blocks
+    assert len(blocks.get_block_ids()[0]) == 2  # ceil(5/4)=2 blocks
 
     # Test case 2: With precomputed blocks
     kv_cache_manager = KVCacheManager(kv_cache_config=config,
@@ -639,7 +632,7 @@ def test_allocate_with_lookahead():
         num_new_tokens=3,
         num_lookahead_tokens=2,
     )
-    assert len(blocks.blocks) == 2
+    assert len(blocks.get_block_ids()[0]) == 2
 
     # Test case 3: With precomputed blocks
     # required_blocks = ceil((3 + 4) / 4) = 2
@@ -650,4 +643,4 @@ def test_allocate_with_lookahead():
         num_new_tokens=3,
         num_lookahead_tokens=4,
     )
-    assert len(blocks.blocks) == 2
+    assert len(blocks.get_block_ids()[0]) == 2

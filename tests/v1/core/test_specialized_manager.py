@@ -3,7 +3,8 @@
 import torch
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+                                         KVCacheBlockBundle)
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
@@ -13,7 +14,8 @@ def get_sliding_window_manager(sliding_window_spec, block_pool):
                                 block_pool,
                                 use_eagle=False,
                                 num_kv_cache_groups=1,
-                                caching_hash_fn=lambda x: x)
+                                caching_hash_fn=lambda x: x,
+                                manager_id=0)
 
 
 def test_sliding_window_possible_cached_prefix():
@@ -27,7 +29,9 @@ def test_sliding_window_possible_cached_prefix():
         use_mla=False,
     )
 
-    block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
+    block_pool = BlockPool(num_gpu_blocks=100,
+                           enable_caching=True,
+                           num_single_type_managers=1)
     manager = get_sliding_window_manager(sliding_window_spec, block_pool)
 
     def run_one_case(block_is_cached, expect_length):
@@ -35,14 +39,14 @@ def test_sliding_window_possible_cached_prefix():
             BlockHashType(i, ()) for i in range(len(block_is_cached))
         ]
 
-        block_pool.cached_block_hash_to_block.clear()
+        block_pool.cached_block_hash_to_block[0].clear()
 
         # Mock the block pool with the cached blocks
         for i, (block_hash,
                 is_cached) in enumerate(zip(block_hash_list, block_is_cached)):
             if is_cached:
-                block_pool.cached_block_hash_to_block[block_hash] = {
-                    i: block_pool.blocks[i + 10]
+                block_pool.cached_block_hash_to_block[0][block_hash] = {
+                    i: KVCacheBlockBundle(blocks=(block_pool.blocks[i + 10], ))
                 }
 
         computed_blocks = manager.find_longest_cache_hit(
@@ -50,13 +54,13 @@ def test_sliding_window_possible_cached_prefix():
             len(block_hash_list) * block_size)
         assert len(computed_blocks) == expect_length
 
-        assert all(block == block_pool.null_block
+        assert all(block == manager.null_block
                    for block in computed_blocks[:expect_length - 2])
         for i in range(2):
             if i < expect_length:
                 block_index = expect_length - i - 1
                 assert computed_blocks[
-                    block_index].block_id == block_index + 10
+                    block_index].master_block_id == block_index + 10
 
     run_one_case([False] * 10, 0)
     run_one_case([True], 1)
@@ -88,29 +92,33 @@ def test_sliding_window_remove_skipped_blocks():
         use_mla=False,
     )
 
-    block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True)
+    block_pool = BlockPool(num_gpu_blocks=2000,
+                           enable_caching=True,
+                           num_single_type_managers=1)
 
     manager = get_sliding_window_manager(sliding_window_spec, block_pool)
 
     null_block_id = block_pool.null_block.block_id
 
-    def id_to_block_table(ids):
+    def id_to_block_table(ids) -> list[KVCacheBlockBundle]:
         return [
-            KVCacheBlock(id_)
-            if id_ != null_block_id else block_pool.null_block for id_ in ids
+            KVCacheBlockBundle(blocks=(KVCacheBlock(id_), ))
+            if id_ != null_block_id else manager.null_block for id_ in ids
         ]
 
-    def assert_block_id(block_table, ids):
+    def assert_block_id(block_table: list[KVCacheBlockBundle], ids: list[int]):
         for block, id_ in zip(block_table, ids):
             if id_ == null_block_id:
-                assert block == block_pool.null_block
+                assert block == manager.null_block
             else:
-                assert block.block_id == id_
+                assert block.master_block_id == id_
 
     original_block_ids = [
         1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010
     ]
     block_table = id_to_block_table(original_block_ids)
+    for block in block_table:
+        block.incr_ref()
     manager.req_to_blocks["test"] = block_table
 
     manager.remove_skipped_blocks("test", 0)
@@ -143,3 +151,5 @@ def test_sliding_window_remove_skipped_blocks():
     # of removed blocks should be [1003, 1002].
     manager.remove_skipped_blocks("test", 11)
     assert_block_id(block_table, [null_block_id] * 4 + original_block_ids[4:])
+
+    manager.free("test")

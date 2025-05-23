@@ -154,13 +154,28 @@ class SlidingWindowSpec(AttentionSpec):
 
 
 @dataclass
-class KVCacheTensor:
+class KVCacheTensorBase:
     """
     A dataclass for specifying how the workers should initialize the KV cache
-    for a layer. Only contains the size of KV cache for that layer for now. Will
-    be extended to support multiple layers sharing the same memory pool.
+    for a layer.
+    """
+    pass
+
+
+@dataclass
+class KVCacheNewTensor(KVCacheTensorBase):
+    """
+    Initialize the KV cache with a tensor of `size` bytes.
     """
     size: int  # The size of KV cache Tensor in bytes
+
+
+@dataclass
+class KVCacheReuseTensor(KVCacheTensorBase):
+    """
+    Reuse the KV cache tensor of `layer_name` for the current layer.
+    """
+    reused_layer_name: str
 
 
 @dataclass
@@ -183,7 +198,7 @@ class KVCacheConfig:
     """The number of KV cache blocks"""
     num_blocks: int
     """layer_name -> how to initialize KV cache for that layer"""
-    tensors: dict[str, KVCacheTensor]
+    tensors: dict[str, KVCacheTensorBase]
     """
     The kv cache groups of the model.
     The layers in the models are repeated with some patterns, e.g., a model
@@ -201,7 +216,7 @@ class KVCacheConfig:
     1. A model only uses full attention. The pattern is 
     (num_hidden_layers * full), so there is only one group and the block table 
     is shared by all layers.
-    2. (WIP) A model with 10 full attention layers and 20 sliding window 
+    2. A model with 10 full attention layers and 20 sliding window 
     attention layers. There are 3 layers in the pattern (1 * full, 2 * sw), so 
     there are 3 groups, each of which represents 10 layers in the model.
     """

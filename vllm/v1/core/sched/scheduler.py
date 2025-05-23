@@ -406,7 +406,6 @@ class Scheduler(SchedulerInterface):
                     request,
                     num_new_tokens + num_external_computed_tokens,
                     num_native_computed_tokens,
-                    new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
                 )
@@ -976,7 +975,7 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens = len(block_ids) * self.block_size
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1
-        self.kv_cache_manager.single_type_manager.cache_blocks(
+        self.kv_cache_manager.coordinator.cache_blocks(
             request,
             self.kv_cache_manager.req_to_block_hashes[request.request_id],
             num_computed_tokens,
