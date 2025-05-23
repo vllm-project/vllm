@@ -19,7 +19,6 @@ import json
 import multiprocessing
 import os
 import pickle
-import re
 import signal
 import socket
 import subprocess
@@ -54,6 +53,7 @@ import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
+import regex as re
 import torch
 import torch.types
 import yaml
