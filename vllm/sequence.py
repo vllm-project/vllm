@@ -27,7 +27,7 @@ VLLM_INVALID_TOKEN_ID = -1
 
 
 def array_full(token_id: int, count: int):
-    """{class}`array` equivalent of {func}`numpy.full`."""
+    """{class}`array` equivalent of [numpy.full][]."""
     return array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
 
 
