@@ -85,32 +85,32 @@ class CarDescription(pydantic.BaseModel):
 
 PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
     "choice": {
-        "messages": [{
-            "role": "user",
-            "content": "Classify this sentiment: vLLM is wonderful!",
-        }],
-        "extra_body": {
-            "guided_choice": ["positive", "negative"]
-        },
+        "messages": [
+            {
+                "role": "user",
+                "content": "Classify this sentiment: vLLM is wonderful!",
+            }
+        ],
+        "extra_body": {"guided_choice": ["positive", "negative"]},
     },
     "regex": {
-        "messages": [{
-            "role":
-            "user",
-            "content":
-            "Generate an email address for Alan Turing, who works in Enigma.End in .com and new line. Example result: 'alan.turing@enigma.com\n'",
-        }],
+        "messages": [
+            {
+                "role": "user",
+                "content": "Generate an email address for Alan Turing, who works in Enigma.End in .com and new line. Example result: 'alan.turing@enigma.com\n'",
+            }
+        ],
         "extra_body": {
             "guided_regex": r"[a-z0-9.]{1,20}@\w{6,10}\.com\n",
         },
     },
     "json": {
-        "messages": [{
-            "role":
-            "user",
-            "content":
-            "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
-        }],
+        "messages": [
+            {
+                "role": "user",
+                "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
+            }
+        ],
         "response_format": {
             "type": "json_schema",
             "json_schema": {
@@ -120,15 +120,14 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
         },
     },
     "grammar": {
-        "messages": [{
-            "role":
-            "user",
-            "content":
-            "Generate an SQL query to show the 'username' and 'email'from the 'users' table.",
-        }],
+        "messages": [
+            {
+                "role": "user",
+                "content": "Generate an SQL query to show the 'username' and 'email'from the 'users' table.",
+            }
+        ],
         "extra_body": {
-            "guided_grammar":
-            """
+            "guided_grammar": """
 root ::= select_statement
 
 select_statement ::= "SELECT " column " from " table " where " condition
@@ -146,10 +145,8 @@ number ::= "1 " | "2 "
     "structural_tag": {
         "messages": [
             {
-                "role":
-                "user",
-                "content":
-                """
+                "role": "user",
+                "content": """
 You have access to the following function to retrieve the weather in a city:
 
 {
@@ -189,21 +186,18 @@ and San Francisco?""",
             },
         ],
         "response_format": {
-            "type":
-            "structural_tag",
-            "structures": [{
-                "begin": "<function=get_weather>",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "city": {
-                            "type": "string"
-                        }
+            "type": "structural_tag",
+            "structures": [
+                {
+                    "begin": "<function=get_weather>",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
                     },
-                    "required": ["city"],
-                },
-                "end": "</function>",
-            }],
+                    "end": "</function>",
+                }
+            ],
             "triggers": ["<function="],
         },
     },
@@ -212,8 +206,7 @@ and San Francisco?""",
 
 async def cli():
     parser = argparse.ArgumentParser(
-        description=
-        "Run OpenAI Chat Completion with various structured outputs capabilities",
+        description="Run OpenAI Chat Completion with various structured outputs capabilities",
     )
     _ = parser.add_argument(
         "--constraint",
@@ -247,25 +240,31 @@ async def cli():
     model = (await client.models.list()).data[0].id
 
     if args.stream:
-        results = await asyncio.gather(*[
-            client.chat.completions.create(
-                model=model,
-                max_tokens=1024,
-                stream=True,
-                **PARAMS[name],
-            ) for name in constraints
-        ])
+        results = await asyncio.gather(
+            *[
+                client.chat.completions.create(
+                    model=model,
+                    max_tokens=1024,
+                    stream=True,
+                    **PARAMS[name],
+                )
+                for name in constraints
+            ]
+        )
         for constraint, stream in zip(constraints, results):
             await print_stream_response(stream, constraint, args)
     else:
-        results = await asyncio.gather(*[
-            client.chat.completions.create(
-                model=model,
-                max_tokens=1024,
-                stream=False,
-                **PARAMS[name],
-            ) for name in constraints
-        ])
+        results = await asyncio.gather(
+            *[
+                client.chat.completions.create(
+                    model=model,
+                    max_tokens=1024,
+                    stream=False,
+                    **PARAMS[name],
+                )
+                for name in constraints
+            ]
+        )
         for constraint, response in zip(constraints, results):
             print(f"\n\n{constraint}:")
             message = response.choices[0].message
