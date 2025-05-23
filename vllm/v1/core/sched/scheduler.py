@@ -310,14 +310,14 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = self.waiting[0]
-                num_prealloc_computed_tokens = 0
-                # P/D: skip request if still waiting for remote kvs.
+
+                # KVTransfer: handle requests that are waiting for remote KVs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                    # Cache blocks once the KV xfer is done and try scheduling.
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
                         request.status = RequestStatus.WAITING
-                        num_prealloc_computed_tokens = (
-                            request.num_computed_tokens)
+                    # Skip scheduling if the KV xfer is not done.
                     else:
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
@@ -346,36 +346,35 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 num_external_computed_tokens = 0
-                load_kv_async = False
+                do_async_kv_recv = False
+
+                # KVTransfer: if there are already computed tokens
+                if request.num_computed_tokens > 0:
+                    assert request.kv_transfer_params is not None
+                    new_computed_blocks = KVCacheBlocks.create_empty()
+                    num_native_computed_tokens = 0
 
                 # Get already-cached tokens.
-                if num_prealloc_computed_tokens == 0:
+                else:
                     new_computed_blocks, num_native_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
                             request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        num_external_computed_tokens, load_kv_async = (
+                        num_external_computed_tokens, do_async_kv_recv = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_native_computed_tokens))
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_native_computed_tokens +
                                            num_external_computed_tokens)
-                else:
-                    # P/D: skip checking prefix cache if loaded from remote kvs.
-                    new_computed_blocks = KVCacheBlocks.create_empty()
-                    num_native_computed_tokens = 0
-
-                    # Total computed tokens (allocated in prior step).
-                    num_computed_tokens = num_prealloc_computed_tokens
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
 
-                # P/D: loading remote KV, do not allocate for new work.
-                if load_kv_async:
+                # KVTransfer: allocate space for just the remote KVs.
+                if do_async_kv_recv:
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
                 # Number of tokens to be scheduled.
@@ -408,17 +407,15 @@ class Scheduler(SchedulerInterface):
                     num_native_computed_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
-                    delay_cache_blocks=load_kv_async,
+                    delay_cache_blocks=do_async_kv_recv,
                 )
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
 
-                # KVConnector: update internal state after allocation.
-                # This information is used to determine if a load is
-                # needed for this request.
-                if num_external_computed_tokens:
-                    assert self.connector is not None
+                # KVTransfer: update connector state. Used to create metadata
+                # to instruct the Worker to do a KV load if needed.
+                if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
@@ -426,9 +423,8 @@ class Scheduler(SchedulerInterface):
                     )
 
                 self.waiting.popleft()
-                if load_kv_async:
-                    # If loading async, allocate memory and put request
-                    # into the WAITING_FOR_REMOTE_KV state.
+                # KVTransfer: if async kv recv, wait until complete.
+                if do_async_kv_recv:
                     skipped_waiting_requests.appendleft(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
