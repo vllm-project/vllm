@@ -137,7 +137,7 @@ class BenchmarkDataset(ABC):
 
         Returns:
             A tuple with the following elements:
-                - A new [LoRARequest] (or `None` if not applicable)/
+                - A new [LoRARequest][] (or `None` if not applicable).
                 - The tokenizer associated with the LoRA request
                   (or the base tokenizer).
         """
