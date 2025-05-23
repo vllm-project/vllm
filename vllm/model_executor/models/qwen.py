@@ -32,6 +32,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
+from .layer_skip import LayerSkipModelMixin
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -326,7 +327,7 @@ class QWenBaseModel(nn.Module):
         return loaded_params
 
 
-class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
+class QWenLMHeadModel(LayerSkipModelMixin, QWenBaseModel, SupportsPP, SupportsLoRA):
     packed_modules_mapping = {
         "c_attn": ["c_attn"],
         "gate_up_proj": [
@@ -336,6 +337,7 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        LayerSkipModelMixin.__init__(self)  # Initialize mixin
         config = vllm_config.model_config.hf_config
         if hasattr(config, "visual"):
             hf_overrides = {

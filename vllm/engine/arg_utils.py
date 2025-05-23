@@ -383,6 +383,10 @@ class EngineArgs:
 
     speculative_config: Optional[Dict[str, Any]] = None
 
+    # Layer skip arguments (optional CLI for convenience)
+    speculative_layer_skip: Optional[int] = None
+    lsq_head_path: Optional[str] = None
+
     qlora_adapter_name_or_path: Optional[str] = None
     show_hidden_metrics_for_version: Optional[str] = \
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -752,6 +756,16 @@ class EngineArgs:
             default=None,
             help="The configurations for speculative decoding. Should be a "
             "JSON string.")
+        speculative_group.add_argument(
+            "--speculative-layer-skip",
+            type=int,
+            default=None,
+            help="Layer to exit at for layer skip self-speculative decoding")
+        speculative_group.add_argument(
+            "--lsq-head-path",
+            type=str,
+            default=None,
+            help="Path to directory containing LSQ projection heads (h*.pt files)")
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -944,6 +958,12 @@ class EngineArgs:
         """
         if self.speculative_config is None:
             return None
+        
+        # Add layer skip fields if provided via CLI
+        if self.speculative_layer_skip:
+            self.speculative_config["layer_skip"] = self.speculative_layer_skip
+            self.speculative_config["lsq_head_path"] = self.lsq_head_path
+            self.speculative_config["num_speculative_tokens"] = self.speculative_config.get("num_speculative_tokens") or 5
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine

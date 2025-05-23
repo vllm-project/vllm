@@ -200,6 +200,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.drafter = MedusaProposer(
                         vllm_config=self.vllm_config,
                         device=self.device)  # type: ignore
+                elif self.speculative_config.method == "layer_skip":
+                    pass  # handled by proposer
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")

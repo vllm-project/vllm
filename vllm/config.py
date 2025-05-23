@@ -2255,7 +2255,7 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "medusa", "mlp_speculator",
-                            "draft_model"]
+                            "draft_model", "layer_skip"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
 
@@ -2342,6 +2342,14 @@ class SpeculativeConfig:
     speculative_token_tree: Optional[str] = None
     """Specifies the tree structure for speculative token generation.
     """
+    
+    # Layer skip configuration
+    layer_skip: Optional[int] = None
+    """Which layer to exit at when using layer_skip method."""
+    lsq_head_path: Optional[str] = None  
+    """Path to directory containing LSQ projection heads (h*.pt files)."""
+    draft_entropy_threshold: float = 2.0
+    """Entropy threshold for accepting draft tokens (lower=more selective)."""
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
                                              init=True)  # type: ignore

@@ -232,6 +232,24 @@ A variety of EAGLE draft models are available on the Hugging Face hub:
 | Qwen2-7B-Instruct                                                    | yuhuili/EAGLE-Qwen2-7B-Instruct          | 0.26B              |
 | Qwen2-72B-Instruct                                                   | yuhuili/EAGLE-Qwen2-72B-Instruct         | 1.05B              |
 
+## Layer Skip Self-Speculative Decoding
+
+Layer Skip is a self-speculative decoding method that achieves speedup by performing early exit at intermediate transformer layers without requiring a separate draft model. Instead of processing tokens through all layers, the model can exit early (e.g., at layer 12 of 48) and use learned linear projection heads (LSQ heads) to predict tokens directly from intermediate representations.
+
+### Usage
+
+```bash
+# Basic usage with layer skip at layer 12 and LSQ head
+vllm serve microsoft/Phi-3.5-mini-instruct \
+    --speculative-model microsoft/Phi-3.5-mini-instruct \
+    --use-v2-block-manager \
+    --speculative-method layer_skip \
+    --speculative-layer-skip 12 \
+    --lsq-head-path /path/to/lsq_head_l12.pt
+```
+
+The method uses entropy-based gating to decide whether to accept early predictions or continue processing through remaining layers, achieving approximately 2x speedup on compatible models.
+
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of

@@ -94,6 +94,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         vllm_config=draft_worker_config,
         ngram_prompt_lookup_max=speculative_config.prompt_lookup_max,
         ngram_prompt_lookup_min=speculative_config.prompt_lookup_min,
+        layer_skip_method=getattr(speculative_config, 'method', None) == "layer_skip",
+        layer_skip_config=speculative_config if getattr(speculative_config, 'method', None) == "layer_skip" else None,
     )
 
     spec_decode_worker = SpecDecodeWorker.create_worker(
@@ -164,10 +166,18 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
+        layer_skip_method = draft_worker_kwargs.pop("layer_skip_method", False)
+        layer_skip_config = draft_worker_kwargs.pop("layer_skip_config", None)
         draft_model_config = draft_worker_kwargs["vllm_config"].model_config
         draft_parallel_config: ParallelConfig = draft_worker_kwargs[
             'vllm_config'].parallel_config
-        if ngram_prompt_lookup_max > 0:
+        
+        if layer_skip_method:
+            from vllm.spec_decode.layer_skip_worker import LayerSkipProposer
+            # For layer skip, we use the target model config but attach layer skip config
+            draft_worker_kwargs["vllm_config"].model_config.speculative_config = layer_skip_config
+            proposer_worker = LayerSkipProposer(**draft_worker_kwargs)
+        elif ngram_prompt_lookup_max > 0:
             draft_worker_kwargs[
                 "device_type"] = scorer_worker.device_config.device.type
             proposer_worker = NGramWorker(**draft_worker_kwargs)
