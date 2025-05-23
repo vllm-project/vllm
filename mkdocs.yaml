@@ -66,6 +66,7 @@ plugins:
           options:
             show_symbol_type_heading: true
             show_symbol_type_toc: true
+            filters: []
             summary:
               modules: true
             show_if_no_docstring: true
