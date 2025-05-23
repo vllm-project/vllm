@@ -39,7 +39,7 @@ if __name__ == "__main__":
                     kv_role = "kv_producer",
                     kv_connector_extra_config = {},
                   ),
-              load_format="dummy",
+              #load_format="dummy",
               max_model_len=2048, 
               max_num_batched_tokens=2048,
               block_size=128,

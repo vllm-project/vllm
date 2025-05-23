@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
 if __name__ == "__main__":
 
     context = "Hi " * 1000
-    context2 = "Hi" * 1000
+    context2 = "Hi " * 1000
     context3 = "Hello " * 1000 
     context4 = "How " * 1000
     prompts = [
@@ -29,7 +29,7 @@ if __name__ == "__main__":
         context4 + "The capital of China is",
     ]
     
-    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
+    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
     
     llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct",
               enforce_eager=True,
@@ -39,7 +39,7 @@ if __name__ == "__main__":
                     kv_role = "kv_consumer",
                     kv_connector_extra_config = {},
                   ),
-              load_format="dummy",
+              #load_format="dummy",
               max_model_len=2048, 
               max_num_batched_tokens=2048,
               block_size=128,
@@ -59,7 +59,7 @@ if __name__ == "__main__":
         #print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     
     # Write new_prompts to output.txt
-    with open("output.txt", "w") as f:
+    with open("output_decode.txt", "w") as f:
         for prompt in new_prompts:
             f.write(prompt + "\n")
     print(f"Saved {len(new_prompts)} prompts to output.txt")
