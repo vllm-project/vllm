@@ -329,7 +329,9 @@ COPY vllm/v1 /usr/local/lib/python3.12/dist-packages/vllm/v1
 # will not be imported by other tests
 RUN mkdir test_docs
 RUN mv docs test_docs/
+RUN cp -r examples test_docs/
 RUN mv vllm test_docs/
+RUN mv mkdocs.yaml test_docs/
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################

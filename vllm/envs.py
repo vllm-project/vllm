@@ -175,7 +175,7 @@ def get_vllm_port() -> Optional[int]:
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
-# begin-env-vars-definition
+# --8<-- [start:env-vars-definition]
 
 environment_variables: dict[str, Callable[[], Any]] = {
 
@@ -813,7 +813,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 }
 
-# end-env-vars-definition
+# --8<-- [end:env-vars-definition]
 
 
 def __getattr__(name: str):
