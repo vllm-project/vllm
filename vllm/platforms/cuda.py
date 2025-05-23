@@ -154,8 +154,9 @@ class CudaPlatformBase(Platform):
         if (parallel_config.data_parallel_size > 1
                 and compilation_config.use_cudagraph):
             logger.info(
-                "Data Parallel: Forcing enforce eager to be True since DP is "
-                "currently not supported with CUDA Graphs.")
+                "Data Parallel: Forcing enforce eager to be True since DP "
+                "with PPLX/DeepEP kernels currently not supported with "
+                "CUDA Graphs.")
             vllm_config.model_config.enforce_eager = True
             compilation_config.use_cudagraph = False
             compilation_config.use_inductor = False

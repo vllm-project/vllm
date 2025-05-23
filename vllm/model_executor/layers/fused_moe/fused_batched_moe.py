@@ -9,7 +9,8 @@ import triton.language as tl
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache, moe_kernel_quantize_input)
 
 
 @triton.jit
@@ -396,6 +397,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.rank = rank
         self.max_num_tokens = max_num_tokens
 
+    def max_num_tokens_per_dp_rank(self) -> Optional[int]:
+        return self.max_num_tokens
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -449,7 +453,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  first_expert, :rows, :] = a1[:topks.numel()][topks]
             tokens_per_expert[expert_id - first_expert] = rows
 
-        return b_a1, a1_scale, tokens_per_expert
+        return b_a1, a1_scale, tokens_per_expert, None, None
 
     def finalize(
         self,
@@ -731,14 +735,28 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                         intermediate_cache1.view(-1, N))
 
         #qintermediate_cache2 = intermediate_cache2
-        a2q_scale = a2_scale
+        #a2q_scale = a2_scale
         # TODO (varun) : support w8a8
-        assert not self.use_fp8_w8a8
+        #assert not self.use_fp8_w8a8
         #if self.use_fp8_w8a8:
         #    qintermediate_cache2, a2q_scale = _fp8_quantize(
         #        intermediate_cache2, a2_scale, self.block_shape)
 
-        invoke_moe_batched_triton_kernel(A=intermediate_cache2,
+        num_experts = intermediate_cache2.size(0)
+        hidden_dim = intermediate_cache2.size(-1)
+        intermediate_cache2 = intermediate_cache2.view(-1, hidden_dim)
+
+        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
+            A=intermediate_cache2,
+            A_scale=a2_scale,
+            qtype=torch.float8_e4m3fn if self.use_fp8_w8a8 else None,
+            per_channel_quant=False,
+            block_shape=self.block_shape)
+
+        qintermediate_cache2 = qintermediate_cache2.view(
+            (num_experts, -1, hidden_dim))
+
+        invoke_moe_batched_triton_kernel(A=qintermediate_cache2,
                                          B=w2,
                                          C=intermediate_cache3,
                                          expert_num_tokens=expert_num_tokens,

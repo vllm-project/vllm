@@ -461,6 +461,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.warning_once(
                     "DeepGemm not supported on the current platform.")
 
+        # TODO (varun) : deepgemm integration
+        self.use_batched_experts = False
+        if envs.VLLM_ALL2ALL_BACKEND == "deepep_ll":
+            self.use_batched_experts = True
+
         self.fused_experts = functools.partial(
             fused_experts,
             block_shape=self.quant_config.weight_block_size,
@@ -797,17 +802,33 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         world_size: int,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
     ) -> bool:
+        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+            BatchedTritonExperts)
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            is_rocm_aiter_moe_enabled)
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts)
 
-        if self.use_marlin or self.rocm_aiter_moe_enabled:
+        if self.use_marlin or is_rocm_aiter_moe_enabled():
             return False
 
-        experts = TritonOrDeepGemmExperts(
-            use_fp8_w8a8=True,
-            block_shape=self.quant_config.weight_block_size,
-            allow_deep_gemm=self.allow_deep_gemm,
-        )
+        if self.use_batched_experts:
+            experts = BatchedTritonExperts(
+                max_num_tokens=prepare_finalize.max_num_tokens_per_dp_rank(),
+                world_size=world_size,
+                dp_size=dp_size,
+                use_fp8_w8a8=True,
+                use_int8_w8a8=False,
+                use_int8_w8a16=False,
+                use_int4_w4a16=False,
+                block_shape=None,
+            )
+        else:
+            experts = TritonOrDeepGemmExperts(
+                use_fp8_w8a8=True,
+                block_shape=self.quant_config.weight_block_size,
+                allow_deep_gemm=self.allow_deep_gemm,
+            )
 
         self.fused_experts = mk.FusedMoEModularKernel(
             prepare_finalize,
@@ -834,6 +855,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
+
+        indices_type = None
+        if layer.use_deepep_kernels or layer.use_deepep_ll_kernels:
+            indices_type = torch.int64
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -845,6 +871,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            indices_type=indices_type,
         )
 
         if self.rocm_aiter_moe_enabled:
@@ -892,7 +919,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 topk_ids=topk_ids,
                 inplace=True,
                 activation=activation,
-                use_fp8_w8a8=True,
                 global_num_experts=global_num_experts,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 expert_map=expert_map,

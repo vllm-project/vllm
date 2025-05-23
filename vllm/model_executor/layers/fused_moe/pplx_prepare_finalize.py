@@ -32,6 +32,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.dp_size = dp_size
         self.quant_dtype = quant_dtype
 
+    def max_num_tokens_per_dp_rank(self) -> Optional[int]:
+        return self.max_num_tokens
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -115,7 +118,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             bound_m=bound_m,
         )
 
-        return expert_x, expert_x_scale, expert_num_tokens
+        return expert_x, expert_x_scale, expert_num_tokens, None, None
 
     def finalize(
         self,

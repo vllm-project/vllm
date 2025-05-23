@@ -809,6 +809,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
 
     # all2all backend for vllm's expert parallel communication
+    # Available options:
+    # - "naive": naive all2all implementation using all-reduce
+    # - "pplx": use pplx kernels
+    # - "deepep", use deepep kernels
+    # - "deepep_ll", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 }

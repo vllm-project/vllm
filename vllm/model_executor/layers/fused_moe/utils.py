@@ -18,7 +18,7 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     used to resize the intermediate fused_moe caches.
     """
     assert prod(
-        v) <= x.numel(), f"{prod(v)} <= {x.numel()}"  # CUDAGRAPH unfriendly?
+        v) <= x.numel(), f"{v} ({prod(v)}) <= {x.shape} ({x.numel()})"  # CUDAGRAPH unfriendly?
     return x.flatten()[:prod(v)].view(*v)
 
 
