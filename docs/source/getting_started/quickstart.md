@@ -21,25 +21,28 @@ It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python env
 ```console
 uv venv --python 3.12 --seed
 source .venv/bin/activate
-uv pip install vllm
+uv pip install vllm --torch-backend=auto
 ```
 
-Another delightful way is to use `uv run` with `--with [dependency]` option, which allows you to run commands such as `vllm serve` without creating an environment:
+`uv` can [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu126`), set `--torch-backend=cu126` (or `UV_TORCH_BACKEND=cu126`).
+
+Another delightful way is to use `uv run` with `--with [dependency]` option, which allows you to run commands such as `vllm serve` without creating any permanent environment:
 
 ```console
 uv run --with vllm vllm --help
 ```
 
-You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
+You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments. You can install `uv` to the conda environment through `pip` if you want to manage it within the environment.
 
 ```console
 conda create -n myenv python=3.12 -y
 conda activate myenv
-pip install vllm
+pip install --upgrade uv
+uv pip install vllm --torch-backend=auto
 ```
 
 :::{note}
-For non-CUDA platforms, please refer [here](#installation-index) for specific instructions on how to install vLLM.
+For more detail and non-CUDA platforms, please refer [here](#installation-index) for specific instructions on how to install vLLM.
 :::
 
 (quickstart-offline)=

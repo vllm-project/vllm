@@ -1,6 +1,6 @@
 # Installation
 
-vLLM contains pre-compiled C++ and CUDA (12.6) binaries.
+vLLM contains pre-compiled C++ and CUDA (12.8) binaries.
 
 ## Requirements
 
@@ -23,18 +23,26 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 You can install vLLM using either `pip` or `uv pip`:
 
 ```console
-# Install vLLM with CUDA 12.6.
-pip install vllm # If you are using pip.
-uv pip install vllm # If you are using uv.
+# Install vLLM with CUDA 12.8.
+# If you are using pip.
+pip install vllm --extra-index-url https://download.pytorch.org/whl/cu128
+# If you are using uv.
+uv pip install vllm --torch-backend=auto
 ```
 
-As of now, vLLM's binaries are compiled with CUDA 12.6 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 11.8, and public PyTorch release versions:
+We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu126`), set `--torch-backend=cu126` (or `UV_TORCH_BACKEND=cu126`). If this doesn't work, try running `uv self update` to update `uv` first.
+
+:::{note}
+NVIDIA Blackwell GPUs (B200, GB200) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
+:::
+
+As of now, vLLM's binaries are compiled with CUDA 12.8 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.6, 11.8, and public PyTorch release versions:
 
 ```console
 # Install vLLM with CUDA 11.8.
 export VLLM_VERSION=0.6.1.post1
-export PYTHON_VERSION=310
-pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu118
+export PYTHON_VERSION=312
+uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu118
 ```
 
 (install-the-latest-code)=
@@ -51,6 +59,14 @@ pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 
 `--pre` is required for `pip` to consider pre-released versions.
 
+Another way to install the latest code is to use `uv`:
+
+```console
+uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly
+```
+
+##### Install specific revisions using `pip`
+
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), due to the limitation of `pip`, you have to specify the full URL of the wheel file by embedding the commit hash in the URL:
 
 ```console
@@ -60,21 +76,13 @@ pip install https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manyl
 
 Note that the wheels are built with Python 3.8 ABI (see [PEP 425](https://peps.python.org/pep-0425/) for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (`1.0.0.dev`) is just a placeholder to have a unified URL for the wheels, the actual versions of wheels are contained in the wheel metadata (the wheels listed in the extra index url have correct versions). Although we don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
 
-##### Install the latest code using `uv`
-
-Another way to install the latest code is to use `uv`:
-
-```console
-uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly
-```
-
 ##### Install specific revisions using `uv`
 
 If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
 ```console
 export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
+uv pip install vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
 ```
 
 The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-remember command. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
