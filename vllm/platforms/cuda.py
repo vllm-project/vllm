@@ -313,6 +313,10 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
+    def use_quick_allreduce(cls) -> bool:
+        return False
+    
+    @classmethod
     def get_piecewise_backend_cls(cls) -> str:
         return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
 

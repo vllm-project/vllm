@@ -136,6 +136,7 @@ def run_model(compile_config: Union[int, CompilationConfig], model: str,
         enforce_eager=True,
         tensor_parallel_size=1,
         disable_custom_all_reduce=True,
+        disable_quick_all_reduce=True,
         compilation_config=compile_config,
         **model_kwargs,
     )
