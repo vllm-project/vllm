@@ -579,30 +579,25 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         activation: str = "silu",
     ) -> torch.Tensor:
         if envs.VLLM_USE_EXP_TRITON_KERNEL:
-            # feature check
-            # assert renormalize == True, "renormalize can only be True in new triton MoE kernel, false not supported"
-            # assert use_grouped_topk == False, "use_grouped_topk is not supported in new triton MoE kernel"
-            # assert topk_group is None, "topk_group is not supported in new triton MoE kernel"
-            # assert num_expert_group is None, "num_expert_group is not supported in new triton MoE kernel"
-            # assert custom_routing_function is None, "custom_routing_function is not supported in new triton MoE kernel"
-            # assert scoring_func == "softmax", "scoring_func is not supported in new triton MoE kernel"
-            # assert e_score_correction_bias is None, "e_score_correction_bias is not supported in new triton MoE kernel"
+            assert custom_routing_function is None, "custom_routing_function is not supported in new triton MoE kernel"
 
-            from triton_kernels.routing import (routing)
-
-            routing_data, gather_idx, scatter_idx = routing(router_logits, top_k, renormalize)
-
-            return fused_experts_triton_exp(
+            return torch.ops.vllm.forward_cuda_triton(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
-                routing_data=routing_data,
-                gather_indx=gather_idx,
-                scatter_indx=scatter_idx,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                router_logits=router_logits,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map
+                expert_map=expert_map,
+                # custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=activation
             )
         else:
             topk_weights, topk_ids = FusedMoE.select_experts(
