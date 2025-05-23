@@ -76,4 +76,7 @@ def test_eagle():
 
     for output in outputs:
         generated_text = output.outputs[0].text
+        print(f"Prompt: {output.prompt!r}, Generated text: {generated_text!r}")
         assert (expected_output == generated_text)
+
+    print("Neuron Eagle speculation test passed.")
