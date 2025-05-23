@@ -174,7 +174,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                 cpus_allow_list = psutil.Process().cpu_affinity()
                 numa_size = info.get_num_configured_nodes()
                 cpu_count_per_numa = cpu_count // numa_size
-                num_of_reserved_cpu = envs.VLLM_CPU_NUM_OF_RESERVED_CPU if envs.VLLM_CPU_NUM_OF_RESERVED_CPU < (cpu_count_per_numa//2) else (cpu_count_per_numa//2)
+                num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU, cpu_count_per_numa // 2)
 
                 # check allow node_to_cpus list
                 node_to_cpus= []
