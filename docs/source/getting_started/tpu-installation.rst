@@ -22,7 +22,7 @@ Installation options:
 Build a docker image with :code:`Dockerfile.tpu`
 ------------------------------------------------
 
-`Dockerfile.tpu <https://github.com/vllm-project/vllm/blob/main/Dockerfile.tpu>`_ is provided to build a docker image with TPU support.
+`Dockerfile.tpu <https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.tpu>`_ is provided to build a docker image with TPU support.
 
 .. code-block:: console
 
@@ -65,7 +65,7 @@ First, install the dependencies:
     $ pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
     $ # Install other build dependencies.
-    $ pip install -r requirements-tpu.txt
+    $ pip install -r requirements/tpu.txt
 
 
 Next, build vLLM from source. This will only take a few seconds:
