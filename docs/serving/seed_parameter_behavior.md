@@ -1,4 +1,4 @@
-# Seed Parameter Behavior in vLLM
+# Seed Parameter Behavior
 
 ## Overview
 
