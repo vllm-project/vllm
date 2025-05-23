@@ -4,7 +4,7 @@ import copy
 import gc
 import time
 import weakref
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import torch
@@ -78,6 +78,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
+        self.compilation_config = vllm_config.compilation_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
@@ -146,7 +147,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             raise NotImplementedError(
                 "Non-Attention backend is not supported by V1 GPUModelRunner.")
 
-        if self.vllm_config.compilation_config.full_cuda_graph:
+        if self.compilation_config.full_cuda_graph:
             attn_backend_name = self.attn_backend.__name__
             flash_attn_version = get_flash_attn_version()
             if attn_backend_name != "FlashAttentionBackend" or \
@@ -218,7 +219,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=model_config.get_vocab_size(),
         )
 
-        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+        self.use_cuda_graph = (self.compilation_config.level
                                == CompilationLevel.PIECEWISE
                                and not self.model_config.enforce_eager)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
@@ -226,8 +227,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # self.cudagraph_batch_sizes sorts in ascending order.
         # The batch sizes in the config are in descending order.
         self.cudagraph_batch_sizes = list(
-            reversed(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+            reversed(self.compilation_config.cudagraph_capture_sizes))
+
+        self.full_cuda_graph = self.compilation_config.full_cuda_graph
+        if self.full_cuda_graph:
+            attn_backend_name = self.attn_backend.__name__
+            flash_attn_version = get_flash_attn_version()
+            if ((attn_backend_name != "FlashAttentionBackend"
+                 or flash_attn_version != 3)
+                    and attn_backend_name != "FlashMLABackend"):
+                raise ValueError(
+                    f"full_cuda_graph is only supported with FA3 or FlashMLA."
+                    f"Current attention backend is {attn_backend_name}, "
+                    f"FlashAttention version is {flash_attn_version}.")
 
         # Cache the device properties.
         self.device_properties = torch.cuda.get_device_properties(self.device)
@@ -1075,7 +1087,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert self.intermediate_tensors is not None
 
         tp = self.vllm_config.parallel_config.tensor_parallel_size
-        enabled_sp = self.vllm_config.compilation_config.pass_config. \
+        enabled_sp = self.compilation_config.pass_config. \
             enable_sequence_parallelism
         if enabled_sp:
             # When sequence parallelism is enabled, we always pad num_tokens
@@ -1132,7 +1144,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Pad tokens to multiple of tensor_parallel_size when
             # enabled collective fusion for SP
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            if self.vllm_config.compilation_config.pass_config. \
+            if self.compilation_config.pass_config. \
                 enable_sequence_parallelism and tp_size > 1:
                 from vllm.utils import round_up
                 num_input_tokens = round_up(num_scheduled_tokens, tp_size)
@@ -1187,12 +1199,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                  num_tokens=num_input_tokens):
             self.maybe_setup_kv_connector(scheduler_output)
 
-            model_output = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-            )
+            # TODO bypass typecheck, in the future either:
+            # - fix dtype on _prepare_inputs return
+            # - add has_prefill method to metadata
+            def has_prefill(attn_metadata: Any):
+                return any(m.prefill is not None
+                           for _, m in attn_metadata.items())
+
+            direct_call = has_prefill(attn_metadata) and self.full_cuda_graph
+            if direct_call:
+                # Skip the outer model layer as inner model is compiled
+                model_output = self.model.model.forward(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
+            else:
+                model_output = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (
@@ -1669,6 +1698,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc, seq_lens=seq_lens)
 
+            # hack for flashMLA state
+            self.attn_metadata_builder._num_decodes = num_tokens
+            self.attn_metadata_builder._num_decode_tokens = num_tokens
+            self.attn_metadata_builder._num_prefills = 0
+
             attn_metadata = self.attn_metadata_builder.build(
                 num_reqs=num_tokens,
                 num_actual_tokens=num_tokens,
@@ -1894,10 +1928,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
-            skip_attn = not self.vllm_config.compilation_config.full_cuda_graph
+            skip_attn = not self.full_cuda_graph
             for num_tokens in reversed(self.cudagraph_batch_sizes):
-                for _ in range(self.vllm_config.compilation_config.
-                               cudagraph_num_of_warmups):
+                for _ in range(
+                        self.compilation_config.cudagraph_num_of_warmups):
                     self._dummy_run(num_tokens, skip_attn=skip_attn)
                 self._dummy_run(num_tokens, skip_attn=skip_attn)
 
@@ -1951,10 +1985,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
 
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
+        bind_kv_cache(kv_caches,
+                      self.compilation_config.static_forward_context,
+                      self.kv_caches)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
