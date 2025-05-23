@@ -313,11 +313,9 @@ class Scheduler(SchedulerInterface):
 
                 # KVTransfer: handle requests that are waiting for remote KVs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                    # Cache blocks once the KV xfer is done and try scheduling.
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
                         request.status = RequestStatus.WAITING
-                    # Skip scheduling if the KV xfer is not done.
                     else:
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
@@ -348,8 +346,8 @@ class Scheduler(SchedulerInterface):
                 num_new_external_computed_tokens = 0
                 do_async_kv_recv = False
 
-                # KVTransfer: WAITING reqs have computed tokens after
-                # async KV recvs are completed.
+                # KVTransfer: WAITING reqs have num_computed_tokens > 0
+                # after async KV recvs are completed.
                 if request.num_computed_tokens > 0:
                     assert request.kv_transfer_params is not None
                     new_computed_blocks = KVCacheBlocks.create_empty()
