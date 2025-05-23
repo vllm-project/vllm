@@ -167,7 +167,7 @@ class BenchmarkDataset(ABC):
 
         Args:
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
-             for processing the dataset's text.
+                for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
 
         Returns:
@@ -184,7 +184,8 @@ class BenchmarkDataset(ABC):
 
         Args:
             requests (List[SampleRequest]): The current list of sampled
-            requests.  num_requests (int): The target number of requests.
+                requests.
+            num_requests (int): The target number of requests.
         """
         if len(requests) < num_requests:
             random.seed(self.random_seed)
