@@ -10,8 +10,8 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.v1.attention.backends.flash_attn import (FlashAttentionMetadata,
-                                                   CommonAttentionMetadata)
+from vllm.v1.attention.backends.flash_attn import (CommonAttentionMetadata,
+                                                   FlashAttentionMetadata)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import prepare_input_kernel
 
@@ -32,7 +32,7 @@ class EagleProposer:
         self.speculative_config = vllm_config.speculative_config
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
-        
+
         self.runner = runner
 
         self.dtype = vllm_config.model_config.dtype
@@ -71,7 +71,7 @@ class EagleProposer:
                                    1,
                                    device=device,
                                    dtype=torch.int32)
-    
+
     def propose(
         self,
         # [num_tokens]
@@ -113,7 +113,8 @@ class EagleProposer:
         if self.method in ["eagle", "eagle3"]:
             # FIXME(woosuk): The below two ops cause synchronization. Optimize.
             max_seq_len = seq_lens.max().item()
-            max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
+            max_num_tokens = (cu_num_tokens[1:] - 
+                              cu_num_tokens[:-1]).max().item()
             attn_metadata = FlashAttentionMetadata(
                 num_actual_tokens=num_tokens,
                 max_query_len=max_num_tokens,
@@ -134,7 +135,7 @@ class EagleProposer:
             max_query_len = query_lens.max().item()
             
             common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=cu_num_tokens, seq_lens=seq_lens)
+                query_start_loc=cu_num_tokens, seq_lens=seq_lens)
             # FIXME: reorder_batch() needs to be called before build()
             # because fields of attn_metadata_builder needs to be updated.
             # However, currently reorder_batch() takes input_batch and
@@ -156,7 +157,7 @@ class EagleProposer:
             )
         else:
             raise ValueError(f"Unsupported method: {self.method}")
-        
+
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -191,7 +192,7 @@ class EagleProposer:
         # one layer. Adapt this code to support multiple layers once
         # there's a multi-layer MTP module.
         assert self.method != "deepseek_mtp"
-        
+
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
