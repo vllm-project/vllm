@@ -391,15 +391,6 @@ class PoolingRequestOutput(Generic[_O]):
                                     prompt_token_ids, finished)
 
     def __repr__(self):
-        """
-        Returns a string representation of an PoolingRequestOutput instance.
-
-        The representation includes the request_id and the number of outputs,
-        providing a quick overview of the pooling request's results.
-
-        Returns:
-            str: A string representation of the PoolingRequestOutput instance.
-        """
         return (f"{type(self).__name__}(request_id={self.request_id!r}, "
                 f"outputs={self.outputs!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "

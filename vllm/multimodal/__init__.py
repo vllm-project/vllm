@@ -12,7 +12,7 @@ The global {class}`~MultiModalRegistry` is used by model runners to
 dispatch data processing according to the target model.
 
 Info:
-    {ref}`mm-processing`
+    [mm-processing][]
 """
 
 __all__ = [

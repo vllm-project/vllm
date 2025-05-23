@@ -129,16 +129,16 @@ class BenchmarkDataset(ABC):
 
         Args:
             tokenizer (PreTrainedTokenizerBase): The base tokenizer to use if no
-            LoRA is selected.  max_loras (Optional[int]): The maximum number of
-            LoRAs available. If None, LoRA is not used.  lora_path
-            (Optional[str]): Path to the LoRA parameters on disk. If None, LoRA
-            is not used.
+                LoRA is selected.
+            max_loras (Optional[int]): The maximum number of LoRAs available.
+                If `None`, LoRA is not used.
+            lora_path (Optional[str]): Path to the LoRA parameters on disk.
+                If `None`, LoRA is not used.
 
         Returns:
-            tuple[Optional[LoRARequest], AnyTokenizer]: A tuple where the first
-            element is a LoRARequest (or None if not applicable) and the second
-            element is the tokenizer associated with the LoRA request (or the
-            base tokenizer).
+            A tuple where the first element is a LoRARequest
+            (or `None` if not applicable) and the second element is the
+            tokenizer associated with the LoRA request (or the base tokenizer).
         """
         if max_loras is None or lora_path is None:
             return None, tokenizer
