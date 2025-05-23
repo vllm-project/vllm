@@ -44,8 +44,8 @@ class UBatchContext:
         self.original_stream.record_event(start_event)
         self.stream.wait_event(start_event)
         print("Starting ubatch %d" % self.id)
-        if self.gpu_wait_on_launch:
-            self.gpu_stream_wait()
+        # if self.gpu_wait_on_launch:
+        #     self.gpu_stream_wait()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -84,10 +84,10 @@ class UBatchContext:
         self.stream.wait_event(self.gpu_wait_event)
 
     def _yield(self, gpu_wait: bool = True):
-        print("Yielding ubatch %d" % self.id)
+        #print("Yielding ubatch %d" % self.id)
         self._signal()
         self._cpu_wait()
-        print("Resuming ubatch %d" % self.id)
+        #print("Resuming ubatch %d" % self.id)
         if gpu_wait:
             self.gpu_stream_wait()
 
@@ -115,7 +115,7 @@ def get_current_ubatch_context() -> Optional[UBatchContext]:
 def yield_impl(schedule="default", gpu_wait: bool = True):
     # Perform the barrier if a context exists for this thread
     ctx = get_current_ubatch_context() 
-    print("you are in yield_impl", ctx)
+    #print("you are in yield_impl", ctx)
     if ctx is not None:
         ctx._yield(gpu_wait=gpu_wait)
 
@@ -146,7 +146,7 @@ def make_ubatch_context_chain(
     Create a context manager for micro-batching synchronization.
     """
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
-    gpu_events = [torch.cuda.Event() for _ in range(num_micro_batches)]
+    gpu_events = [torch.cuda.Event(blocking=True) for _ in range(num_micro_batches)]
     device = device or torch.cuda.current_device()
     
     ctxs = []

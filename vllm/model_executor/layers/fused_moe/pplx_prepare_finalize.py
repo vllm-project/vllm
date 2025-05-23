@@ -119,14 +119,14 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_recv=not send,
             )
         
-        print("Dispatch pre-wait")
+        #print("Dispatch pre-wait")
         if (ubatch_ctx := get_current_ubatch_context()) is not None:
             ubatch_ctx.gpu_stream_wait()
-        print("Dispatch launched")
+        #print("Dispatch launched")
         dispatch(True) # Send
         yield_impl(gpu_wait=False)
         dispatch(False) # Recv
-        print("Finished dispatch")
+        #print("Finished dispatch")
 
         return expert_x, expert_x_scale, expert_num_tokens
 
@@ -164,11 +164,11 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_recv=not send,
             )
             
-        print("Combine pre-wait")
+        #print("Combine pre-wait")
         if (ubatch_ctx := get_current_ubatch_context()) is not None:
             ubatch_ctx.gpu_stream_wait()
         combine(True)
-        print("Combine launched")
+        #print("Combine launched")
         yield_impl(gpu_wait=False)
         combine(False)
-        print("Finished combine")
+        #print("Finished combine")

@@ -1300,8 +1300,8 @@ class FusedMoE(torch.nn.Module):
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = MOE_DP_CHUNK_SIZE
 
-        if (ubatch_ctdx := get_current_ubatch_context()) is not None:
-            print("in fused moe, ubatch:", ubatch_ctdx.id, "chunk size:", max_tokens_across_dp, "moe_dp_chunk_size_per_rank", moe_dp_chunk_size_per_rank)
+        # if (ubatch_ctdx := get_current_ubatch_context()) is not None:
+        #     print("in fused moe, ubatch:", ubatch_ctdx.id, "chunk size:", max_tokens_across_dp, "moe_dp_chunk_size_per_rank", moe_dp_chunk_size_per_rank)
 
         num_tokens = full_hidden_states.size(0)
         for chunk_start_ in range(0, max_tokens_across_dp,
@@ -1401,8 +1401,8 @@ def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.quant_method is not None
-    if (ubatch_ctx := get_current_ubatch_context()) is not None:
-        print("in fused moe, ubatch:", ubatch_ctx.id, self)
+    # if (ubatch_ctx := get_current_ubatch_context()) is not None:
+    #     print("in fused moe, ubatch:", ubatch_ctx.id, self)
 
     return self.forward_impl(hidden_states, router_logits)
 
