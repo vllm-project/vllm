@@ -217,9 +217,9 @@ class RocmPlatform(Platform):
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
-    @staticmethod
+    @classmethod
     @with_amdsmi_context
-    def is_fully_connected(physical_device_ids: list[int]) -> bool:
+    def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """
@@ -382,3 +382,7 @@ class RocmPlatform(Platform):
     @classmethod
     def is_navi(cls) -> bool:
         return 'gfx1' in torch.cuda.get_device_properties(0).gcnArchName
+
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa

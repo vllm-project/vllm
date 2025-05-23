@@ -42,9 +42,11 @@ def initialize_model(
     *,
     prefix: str = "",
     model_class: Optional[type[nn.Module]] = None,
+    model_config: Optional[ModelConfig] = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
-    model_config = vllm_config.model_config
+    if model_config is None:
+        model_config = vllm_config.model_config
     if model_class is None:
         model_class, _ = get_model_architecture(model_config)
 
