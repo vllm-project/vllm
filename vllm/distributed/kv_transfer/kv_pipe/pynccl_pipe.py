@@ -161,8 +161,8 @@ class PyNcclPipe(KVPipeBase):
         Receive the metadata dictionary from the target rank.
 
         Returns:
-            - metadata: A dictionary with keys "dtype" and "shape" describing
-              the tensor.
+            - metadata (Metadata): A dictionary with keys "dtype" and "shape"
+                describing the tensor.
         """
         return self.group.recv_obj(self.target_rank_for_recv)
 
@@ -172,8 +172,8 @@ class PyNcclPipe(KVPipeBase):
         target rank.
 
         Parameters:
-            - tensor: The input tensor to be sent, or None if no tensor is
-              being sent.
+            - tensor (torch.Tensor): The input tensor to be sent,
+                or `None` if no tensor is being sent.
         """
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
@@ -187,7 +187,8 @@ class PyNcclPipe(KVPipeBase):
         the target rank.
 
         Returns:
-            - buffer: The received tensor, or None if no tensor is received.
+            - buffer (Optional[torch.Tensor]): The received tensor,
+                or `None` if no tensor is received.
         """
         metadata = self._recv_metadata()
         if metadata["dtype"] is None:
@@ -228,7 +229,8 @@ class PyNcclPipe(KVPipeBase):
         non-blocking way.
 
         Parameters:
-            - tensor: The tensor to send, or None if no tensor is being sent.
+            - tensor (Optional[torch.Tensor]): The tensor to send,
+                or `None` if no tensor is being sent.
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
@@ -251,7 +253,8 @@ class PyNcclPipe(KVPipeBase):
         Receives a tensor and its metadata from the source rank. Blocking call.
 
         Returns:
-            - tensor: The received tensor, or None if no tensor is received.
+            - tensor (torch.Tensor): The received tensor,
+                or `None` if no tensor is received.
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
