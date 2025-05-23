@@ -6,13 +6,6 @@
 # docs/source/assets/contributing/dockerfile-stages-dependency.png
 
 ARG CUDA_VERSION=12.8.1
-# cuda arch list used by torch
-# can be useful for both `dev` and `test`
-# explicitly set the list to avoid issues with torch 2.2
-# see https://github.com/pytorch/pytorch/pull/123243
-# Also allow explicitly setting for cuda-11.8
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
@@ -81,6 +74,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/cuda.txt \
     --extra-index-url https://download.pytorch.org/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
+# cuda arch list used by torch
+# can be useful for both `dev` and `test`
+# explicitly set the list to avoid issues with torch 2.2
+# see https://github.com/pytorch/pytorch/pull/123243
+# Also allow explicitly setting for cuda-11.8
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # Override the arch list for flash-attn to reduce the binary size
 ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
 ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
@@ -190,6 +190,15 @@ ARG PYTHON_VERSION=3.12
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
+
+# TODO: Can be removed once vllm-base starts from the base image
+# cuda arch list used by torch
+# can be useful for both `dev` and `test`
+# explicitly set the list to avoid issues with torch 2.2
+# see https://github.com/pytorch/pytorch/pull/123243
+# Also allow explicitly setting for cuda-11.8
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 SHELL ["/bin/bash", "-c"]
 
