@@ -9,9 +9,10 @@ nav:
       - getting_started/examples/offline_inference
       - getting_started/examples/online_serving
       - getting_started/examples/other
-    - User Guide: serving/offline_inference.md
-    - Developer Guide: contributing/overview.md
-    - API Reference: api/README.md
+    - Quick Links:
+      - User Guide: serving/offline_inference.md
+      - Developer Guide: contributing/overview.md
+      - API Reference: api/README.md
     - Timeline:
       - Roadmap: https://roadmap.vllm.ai
       - Releases: https://github.com/vllm-project/vllm/releases
