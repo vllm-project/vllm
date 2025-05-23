@@ -203,9 +203,9 @@ class MtpProposer:
 
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
-                input_ids=self.input_ids[:num_input_tokens],
-                positions=self.positions[:num_input_tokens],
-                previous_hidden_states=self.hidden_states[:num_input_tokens],
+                self.input_ids[:num_input_tokens],
+                self.positions[:num_input_tokens],
+                self.hidden_states[:num_input_tokens],
             )
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
@@ -258,7 +258,7 @@ class MtpProposer:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
             self.model(
-                input_ids=self.input_ids[:num_tokens],
-                positions=self.positions[:num_tokens],
-                previous_hidden_states=self.hidden_states[:num_tokens],
+                self.input_ids[:num_tokens],
+                self.positions[:num_tokens],
+                self.hidden_states[:num_tokens],
             )

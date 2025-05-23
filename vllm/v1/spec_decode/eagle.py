@@ -12,7 +12,8 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flash_attn import (FlashAttentionMetadata,
+                                                   CommonAttentionMetadata)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import prepare_input_kernel
 
@@ -69,7 +70,7 @@ class EagleProposer:
                                    1,
                                    device=device,
                                    dtype=torch.int32)
-
+    
     def propose(
         self,
         # [num_tokens]
@@ -108,24 +109,53 @@ class EagleProposer:
         # FA requires seq_len to have dtype int32.
         seq_lens = (target_positions[last_token_indices] + 1).int()
 
-        # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        max_seq_len = seq_lens.max().item()
-        max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
-        attn_metadata = FlashAttentionMetadata(
-            num_actual_tokens=num_tokens,
-            max_query_len=max_num_tokens,
-            query_start_loc=cu_num_tokens,
-            max_seq_len=max_seq_len,
-            seq_lens=seq_lens,
-            block_table=block_table,
-            slot_mapping=target_slot_mapping,
-            # TODO(woosuk): Support cascade attention.
-            use_cascade=False,
-            common_prefix_len=0,
-            cu_prefix_query_lens=None,
-            prefix_kv_lens=None,
-            suffix_kv_lens=None,
-        )
+        if self.method in []:
+            # FIXME(woosuk): The below two ops cause synchronization. Optimize.
+            max_seq_len = seq_lens.max().item()
+            max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
+            attn_metadata = FlashAttentionMetadata(
+                num_actual_tokens=num_tokens,
+                max_query_len=max_num_tokens,
+                query_start_loc=cu_num_tokens,
+                max_seq_len=max_seq_len,
+                seq_lens=seq_lens,
+                block_table=block_table,
+                slot_mapping=target_slot_mapping,
+                # TODO(woosuk): Support cascade attention.
+                use_cascade=False,
+                common_prefix_len=0,
+                cu_prefix_query_lens=None,
+                prefix_kv_lens=None,
+                suffix_kv_lens=None,
+            )
+        elif self.method == "eagle3":
+            query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
+            max_query_len = query_lens.max().item()
+            
+            common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=cu_num_tokens, seq_lens=seq_lens)
+            # FIXME: reorder_batch() needs to be called before build()
+            # because fields of attn_metadata_builder needs to be updated.
+            # However, currently reorder_batch() takes input_batch and
+            # scheduler_output as arguments, we should probably refactor
+            # the method to use new data structures which are independent
+            # from input_batch and scheduler_output.
+            # self.runner.attn_metadata_builder.reorder_batch(
+            #     input_batch=self.runner.input_batch,
+            #     scheduler_output=self.runner.scheduler_output,
+            # )
+
+            # FIXME: need to consider multiple kv_cache_groups
+            attn_metadata = self.runner.attn_metadata_builders[0].build(
+                num_reqs=batch_size,
+                num_actual_tokens=num_tokens,
+                max_query_len=max_query_len,
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+        else:
+            raise ValueError(f"Unsupported method: {self.method}")
+        
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -152,6 +182,11 @@ class EagleProposer:
             # [batch_size, 1]
             return draft_token_ids.view(-1, 1)
 
+        # TODO: Currently, MTP module released by deepseek only has
+        # one layer. Adapt this code to support multiple layers once
+        # there's a multi-layer MTP module.
+        assert self.method != "deepseek_mtp"
+        
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
@@ -342,9 +377,9 @@ class EagleProposer:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
             self.model(
-                input_ids=self.input_ids[:num_tokens],
-                positions=self.positions[:num_tokens],
-                hidden_states=self.hidden_states[:num_tokens],
+                self.input_ids[:num_tokens],
+                self.positions[:num_tokens],
+                self.hidden_states[:num_tokens],
             )
 
 

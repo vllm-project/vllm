@@ -159,14 +159,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
                 elif self.speculative_config.use_eagle():
-                    if self.speculative_config.method == "deepseek_mtp":
-                        self.drafter = MtpProposer(self.vllm_config,
-                                                   self)  # type: ignore
-                    else:
-                        self.drafter = EagleProposer(
-                            self.vllm_config, self.device)  # type: ignore
-                        if self.speculative_config.method == "eagle3":
-                            self.use_aux_hidden_state_outputs = True
+                    self.drafter = EagleProposer(
+                        self.vllm_config, self.device)  # type: ignore
+                    if self.speculative_config.method == "eagle3":
+                        self.use_aux_hidden_state_outputs = True
                 elif self.speculative_config.method == "medusa":
                     self.drafter = MedusaProposer(
                         vllm_config=self.vllm_config,
