@@ -33,7 +33,7 @@ class DPCoordinator:
 
       The engines alternate between a global running/paused state. The global
       "request wave" number is a count of the number of times that the workers
-      collectively move from running paused state. This transition is
+      collectively move from a running state to a paused state. This transition is
       synchronized via the all-reduce operation performed in the
       DPEngineCoreProc._has_global_unfinished_reqs method.
 
