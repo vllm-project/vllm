@@ -83,7 +83,7 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
         if current_platform.is_cuda():
             device_available = current_platform.has_device_capability(80)
             if device_available and support_fa:
-                selected_backend = _Backend.FLASH_ATTN_VLLM_V1
+                selected_backend = _Backend.FLASH_ATTN
             else:
                 # For Volta and Turing GPUs, use xformers instead.
                 selected_backend = _Backend.XFORMERS
