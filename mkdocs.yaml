@@ -41,6 +41,9 @@ theme:
     - toc.follow
   custom_dir: docs/mkdocs/overrides
 
+extra_css:
+  - docs/stylesheets/extra.css
+
 hooks:
   - docs/mkdocs/hooks/remove_announcement.py
   - docs/mkdocs/hooks/generate_examples.py
