@@ -180,7 +180,6 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                 node_to_cpus= []
                 for i in range(numa_size):
                     if set(info.node_to_cpus(i)).issubset(cpus_allow_list):
-                        #print(info.node_to_cpus(i))
                         node_to_cpus.append(info.node_to_cpus(i))
 
                 if world_size > len(node_to_cpus):
