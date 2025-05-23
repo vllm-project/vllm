@@ -1,14 +1,8 @@
-[build-system]
-requires = ["setuptools>=77.0.3,<80.0.0", "setuptools-scm"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "examples-online-structured-outputs"
 requires-python = ">=3.9, <3.13"
 dependencies = ["openai==1.78.1", "pydantic==2.11.4"]
-dynamic = ["version"]
-
-[tool.setuptools_scm]
+version = "0.0.0"
 
 [project.scripts]
 structured-outputs = "structured_outputs:main"
