@@ -2255,7 +2255,7 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "medusa", "mlp_speculator",
-                            "draft_model"]
+                            "draft_model", "deepseek_mtp"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
 
@@ -2519,6 +2519,15 @@ class SpeculativeConfig:
                 elif (self.draft_model_config.hf_config.model_type ==
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "deepseek_mtp"):
+                    self.method = "deepseek_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "All Deepseek MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
                 else:
                     self.method = "draft_model"
 
@@ -2738,7 +2747,7 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp")
 
     def __repr__(self) -> str:
         method = self.method

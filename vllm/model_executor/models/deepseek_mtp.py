@@ -19,6 +19,7 @@ from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import (DeepseekV2DecoderLayer,
                           get_spec_layer_idx_from_weight_name)
+from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 
@@ -145,7 +146,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         return logits
 
 
-class DeepSeekMTP(nn.Module):
+class DeepSeekMTP(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

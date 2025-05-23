@@ -10,9 +10,10 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flash_attn import (CommonAttentionMetadata,
+                                                   FlashAttentionMetadata)
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.utils import prepare_eagle_input_kernel
 
 logger = init_logger(__name__)
 
@@ -25,11 +26,14 @@ class EagleProposer:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        runner=None,
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
+
+        self.runner = runner
 
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -106,24 +110,46 @@ class EagleProposer:
         # FA requires seq_len to have dtype int32.
         seq_lens = (target_positions[last_token_indices] + 1).int()
 
-        # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        max_seq_len = seq_lens.max().item()
-        max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
-        attn_metadata = FlashAttentionMetadata(
-            num_actual_tokens=num_tokens,
-            max_query_len=max_num_tokens,
-            query_start_loc=cu_num_tokens,
-            max_seq_len=max_seq_len,
-            seq_lens=seq_lens,
-            block_table=block_table,
-            slot_mapping=target_slot_mapping,
-            # TODO(woosuk): Support cascade attention.
-            use_cascade=False,
-            common_prefix_len=0,
-            cu_prefix_query_lens=None,
-            prefix_kv_lens=None,
-            suffix_kv_lens=None,
-        )
+        if self.method in ["eagle", "eagle3"]:
+            # FIXME(woosuk): The below two ops cause synchronization. Optimize.
+            max_seq_len = seq_lens.max().item()
+            max_num_tokens = (cu_num_tokens[1:] -
+                              cu_num_tokens[:-1]).max().item()
+            attn_metadata = FlashAttentionMetadata(
+                num_actual_tokens=num_tokens,
+                max_query_len=max_num_tokens,
+                query_start_loc=cu_num_tokens,
+                max_seq_len=max_seq_len,
+                seq_lens=seq_lens,
+                block_table=block_table,
+                slot_mapping=target_slot_mapping,
+                # TODO(woosuk): Support cascade attention.
+                use_cascade=False,
+                common_prefix_len=0,
+                cu_prefix_query_lens=None,
+                prefix_kv_lens=None,
+                suffix_kv_lens=None,
+            )
+        elif self.method == "deepseek_mtp":
+            query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
+            max_query_len = query_lens.max().item()
+
+            common_attn_metadata = CommonAttentionMetadata(
+                query_start_loc=cu_num_tokens, seq_lens=seq_lens)
+
+            assert self.runner is not None
+
+            # FIXME: need to consider multiple kv_cache_groups
+            attn_metadata = self.runner.attn_metadata_builder.build(
+                num_reqs=batch_size,
+                num_actual_tokens=num_tokens,
+                max_query_len=max_query_len,
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+        else:
+            raise ValueError(f"Unsupported method: {self.method}")
+
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -136,11 +162,15 @@ class EagleProposer:
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
-            last_hidden_states, hidden_states = self.model(
-                input_ids=self.input_ids[:num_input_tokens],
-                positions=self.positions[:num_input_tokens],
-                hidden_states=self.hidden_states[:num_input_tokens],
+            ret_hidden_states = self.model(
+                self.input_ids[:num_input_tokens],
+                self.positions[:num_input_tokens],
+                self.hidden_states[:num_input_tokens],
             )
+            if self.method == "deepseek_mtp":
+                last_hidden_states = ret_hidden_states
+            else:
+                last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
@@ -149,6 +179,10 @@ class EagleProposer:
         if self.num_speculative_tokens == 1:
             # [batch_size, 1]
             return draft_token_ids.view(-1, 1)
+
+        # TODO: Currently, MTP module released by deepseek only has
+        # one layer. Adapt this code to support multiple layers once
+        # there's a multi-layer MTP module.
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
@@ -215,9 +249,9 @@ class EagleProposer:
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
                 last_hidden_states, hidden_states = self.model(
-                    input_ids=self.input_ids[:input_batch_size],
-                    positions=self.positions[:input_batch_size],
-                    hidden_states=self.hidden_states[:input_batch_size],
+                    self.input_ids[:input_batch_size],
+                    self.positions[:input_batch_size],
+                    self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
@@ -268,7 +302,7 @@ class EagleProposer:
 
         batch_size = num_rejected_tokens.shape[0]
         BLOCK_SIZE = 1024
-        prepare_input_kernel[(batch_size, )](
+        prepare_eagle_input_kernel[(batch_size, )](
             token_indices,
             cu_target_query_lens,
             cu_num_tokens,
@@ -320,9 +354,9 @@ class EagleProposer:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
             self.model(
-                input_ids=self.input_ids[:num_tokens],
-                positions=self.positions[:num_tokens],
-                hidden_states=self.hidden_states[:num_tokens],
+                self.input_ids[:num_tokens],
+                self.positions[:num_tokens],
+                self.hidden_states[:num_tokens],
             )
 
 
@@ -367,29 +401,3 @@ def compute_probs_and_sample_next_token(
             next_token_ids,
         )
     return next_token_ids, probs
-
-
-@triton.jit
-def prepare_input_kernel(
-    out_ptr,
-    cu_query_lens_ptr,
-    cu_num_tokens_ptr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    # [start_pos, end_pos)
-    start_pos = tl.load(cu_num_tokens_ptr + pid)
-    end_pos = tl.load(cu_num_tokens_ptr + pid + 1)
-    num_tokens = end_pos - start_pos
-
-    index_start = tl.load(cu_query_lens_ptr + pid)
-
-    num_blocks = tl.cdiv(num_tokens, BLOCK_SIZE)
-    for i in tl.range(num_blocks):
-        offset = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(
-            out_ptr + start_pos + offset,
-            index_start + offset,
-            mask=offset < num_tokens,
-        )
