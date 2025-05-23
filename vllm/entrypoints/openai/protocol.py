@@ -251,7 +251,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
 
-    # doc: begin-chat-completion-sampling-params
+    # --8<-- [start:chat-completion-sampling-params]
     best_of: Optional[int] = None
     use_beam_search: bool = False
     top_k: Optional[int] = None
@@ -266,9 +266,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     prompt_logprobs: Optional[int] = None
-    # doc: end-chat-completion-sampling-params
+    # --8<-- [end:chat-completion-sampling-params]
 
-    # doc: begin-chat-completion-extra-params
+    # --8<-- [start:chat-completion-extra-params]
     echo: bool = Field(
         default=False,
         description=(
@@ -407,7 +407,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
 
-    # doc: end-chat-completion-extra-params
+    # --8<-- [end:chat-completion-extra-params]
 
     # Default sampling parameters for chat completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
@@ -764,7 +764,7 @@ class CompletionRequest(OpenAIBaseModel):
     top_p: Optional[float] = None
     user: Optional[str] = None
 
-    # doc: begin-completion-sampling-params
+    # --8<-- [start:completion-sampling-params]
     use_beam_search: bool = False
     top_k: Optional[int] = None
     min_p: Optional[float] = None
@@ -779,9 +779,9 @@ class CompletionRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     allowed_token_ids: Optional[list[int]] = None
     prompt_logprobs: Optional[int] = None
-    # doc: end-completion-sampling-params
+    # --8<-- [end:completion-sampling-params]
 
-    # doc: begin-completion-extra-params
+    # --8<-- [start:completion-extra-params]
     add_special_tokens: bool = Field(
         default=True,
         description=(
@@ -858,7 +858,7 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
 
-    # doc: end-completion-extra-params
+    # --8<-- [end:completion-extra-params]
 
     # Default sampling parameters for completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
@@ -1045,11 +1045,11 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
-    # doc: begin-embedding-pooling-params
+    # --8<-- [start:embedding-pooling-params]
     additional_data: Optional[Any] = None
-    # doc: end-embedding-pooling-params
+    # --8<-- [end:embedding-pooling-params]
 
-    # doc: begin-embedding-extra-params
+    # --8<-- [start:embedding-extra-params]
     add_special_tokens: bool = Field(
         default=True,
         description=(
@@ -1064,7 +1064,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."),
     )
 
-    # doc: end-embedding-extra-params
+    # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(dimensions=self.dimensions,
@@ -1080,11 +1080,11 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     user: Optional[str] = None
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
-    # doc: begin-chat-embedding-pooling-params
+    # --8<-- [start:chat-embedding-pooling-params]
     additional_data: Optional[Any] = None
-    # doc: end-chat-embedding-pooling-params
+    # --8<-- [end:chat-embedding-pooling-params]
 
-    # doc: begin-chat-embedding-extra-params
+    # --8<-- [start:chat-embedding-extra-params]
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -1118,7 +1118,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
     )
-    # doc: end-chat-embedding-extra-params
+    # --8<-- [end:chat-embedding-extra-params]
 
     @model_validator(mode="before")
     @classmethod
@@ -1147,11 +1147,11 @@ class ScoreRequest(OpenAIBaseModel):
     text_2: Union[list[str], str]
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
-    # doc: begin-score-pooling-params
+    # --8<-- [start:score-pooling-params]
     additional_data: Optional[Any] = None
-    # doc: end-score-pooling-params
+    # --8<-- [end:score-pooling-params]
 
-    # doc: begin-score-extra-params
+    # --8<-- [start:score-extra-params]
     priority: int = Field(
         default=0,
         description=(
@@ -1160,7 +1160,7 @@ class ScoreRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."),
     )
 
-    # doc: end-score-extra-params
+    # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)
@@ -1173,11 +1173,11 @@ class RerankRequest(OpenAIBaseModel):
     top_n: int = Field(default_factory=lambda: 0)
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
-    # doc: begin-rerank-pooling-params
+    # --8<-- [start:rerank-pooling-params]
     additional_data: Optional[Any] = None
-    # doc: end-rerank-pooling-params
+    # --8<-- [end:rerank-pooling-params]
 
-    # doc: begin-rerank-extra-params
+    # --8<-- [start:rerank-extra-params]
     priority: int = Field(
         default=0,
         description=(
@@ -1186,7 +1186,7 @@ class RerankRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."),
     )
 
-    # doc: end-rerank-extra-params
+    # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)
@@ -1321,11 +1321,11 @@ class ClassificationRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[int] = None
     user: Optional[str] = None
 
-    # doc: begin-classification-pooling-params
+    # --8<-- [start:classification-pooling-params]
     additional_data: Optional[Any] = None
-    # doc: end-classification-pooling-params
+    # --8<-- [end:classification-pooling-params]
 
-    # doc: begin-classification-extra-params
+    # --8<-- [start:classification-extra-params]
     priority: int = Field(
         default=0,
         description=(
@@ -1334,7 +1334,7 @@ class ClassificationRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."),
     )
 
-    # doc: end-classification-extra-params
+    # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)
@@ -1698,7 +1698,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     timestamps incurs additional latency.
     """
 
-    # doc: begin-transcription-extra-params
+    # --8<-- [start:transcription-extra-params]
     stream: Optional[bool] = False
     """Custom field not present in the original OpenAI definition. When set,
     it will enable output to be streamed in a similar fashion as the Chat
@@ -1707,9 +1707,9 @@ class TranscriptionRequest(OpenAIBaseModel):
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
-    # doc: end-transcription-extra-params
+    # --8<-- [end:transcription-extra-params]
 
-    # doc: begin-transcription-sampling-params
+    # --8<-- [start:transcription-sampling-params]
     temperature: float = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
 
@@ -1743,7 +1743,7 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     presence_penalty: Optional[float] = 0.0
     """The presence penalty to use for sampling."""
-    # doc: end-transcription-sampling-params
+    # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {

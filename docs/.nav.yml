@@ -1,0 +1,51 @@
+nav:
+  - Home: 
+    - vLLM: README.md
+    - Getting Started:
+      - getting_started/quickstart.md
+      - getting_started/installation
+    - Examples:
+      - LMCache: getting_started/examples/lmcache
+      - getting_started/examples/offline_inference
+      - getting_started/examples/online_serving
+      - getting_started/examples/other
+    - Roadmap: https://roadmap.vllm.ai
+    - Releases: https://github.com/vllm-project/vllm/releases
+  - User Guide:
+    - Inference and Serving:
+      - serving/offline_inference.md
+      - serving/openai_compatible_server.md
+      - serving/*
+      - serving/integrations
+    - Training: training
+    - Deployment:
+      - deployment/*
+      - deployment/frameworks
+      - deployment/integrations
+    - Performance: performance
+    - Models:
+      - models/supported_models.md
+      - models/generative_models.md
+      - models/pooling_models.md
+      - models/extensions
+    - Features:
+      - features/compatibility_matrix.md
+      - features/*
+      - features/quantization
+    - Other:
+      - getting_started/*
+  - Developer Guide:
+    - contributing/overview.md
+    - glob: contributing/*
+      flatten_single_child_sections: true
+    - contributing/model
+    - Design Documents:
+      - V0: design
+      - V1: design/v1
+  - API Reference:
+    - api/README.md
+    - glob: api/vllm/*
+      preserve_directory_names: true
+  - Community:
+    - community/*
+    - vLLM Blog: https://blog.vllm.ai
