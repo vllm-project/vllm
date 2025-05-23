@@ -75,7 +75,7 @@ class AutoRoundConfig(QuantizationConfig):
                 f"group_size={self.group_size}, sym={self.sym})")
 
     @classmethod
-    def get_name(cls) -> QuantizationMethods :  ## use str will trigger preci issue
+    def get_name(cls) -> QuantizationMethods:
         return "auto-round"
 
     @classmethod
