@@ -344,7 +344,7 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 num_new_external_computed_tokens = 0
-                do_async_kv_recv = False
+                load_kv_async = False
 
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
@@ -363,7 +363,7 @@ class Scheduler(SchedulerInterface):
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        num_new_external_computed_tokens, do_async_kv_recv = (
+                        num_new_external_computed_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_native_computed_tokens))
 
@@ -375,7 +375,7 @@ class Scheduler(SchedulerInterface):
                 new_encoder_budget = encoder_budget
 
                 # KVTransfer: allocate space for just the remote KVs.
-                if do_async_kv_recv:
+                if load_kv_async:
                     assert num_new_external_computed_tokens > 0
                     num_new_tokens = 0
                 # Otherwise, compute the number of tokens to be scheduled.
@@ -408,7 +408,7 @@ class Scheduler(SchedulerInterface):
                     num_native_computed_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
-                    delay_cache_blocks=do_async_kv_recv,
+                    delay_cache_blocks=load_kv_async,
                 )
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -425,7 +425,7 @@ class Scheduler(SchedulerInterface):
 
                 self.waiting.popleft()
                 # KVTransfer: wait until remove KVs have arrived.
-                if do_async_kv_recv:
+                if load_kv_async:
                     skipped_waiting_requests.appendleft(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
