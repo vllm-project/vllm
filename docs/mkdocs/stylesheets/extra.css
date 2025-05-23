@@ -1,11 +1,4 @@
-/* Light mode: change from "white" to "amber" palette */
-.md-banner[data-md-color-primary="white"] {
-    background-color: #ffc105;  /* --md-primary-fg-color--light */
-    color: #0000008a;           /* --md-primary-bg-color--light */
-}
-
-/* Dark mode: change from "black" to "deep orange" palette */
-.md-banner[data-md-color-primary="black"] {
-    background-color: #f4511f;  /* --md-primary-fg-color--dark */
-    color: #fff;                /* --md-primary-bg-color */
+.md-banner {
+    background-color: var(--md-warning-bg-color);
+    color: var(--md-warning-fg-color);
 }
