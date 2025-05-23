@@ -405,9 +405,11 @@ def test_cannot_schedule_after_recv():
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 1
 
-    # Step 6: now we can schedule.
+    # Step 6: now we can schedule (with 2 blocks computed).
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_remote])
+    assert (scheduler_output.scheduled_new_reqs[0].num_computed_tokens ==
+            NUM_PROMPT_BLOCKS * BLOCK_SIZE)
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
