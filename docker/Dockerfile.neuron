@@ -1,6 +1,6 @@
 # default base image
 # https://gallery.ecr.aws/neuron/pytorch-inference-neuronx
-ARG BASE_IMAGE="public.ecr.aws/neuron/pytorch-inference-neuronx:2.5.1-neuronx-py310-sdk2.22.0-ubuntu22.04"
+ARG BASE_IMAGE="public.ecr.aws/neuron/pytorch-inference-neuronx:2.6.0-neuronx-py310-sdk2.23.0-ubuntu22.04"
 
 FROM $BASE_IMAGE
 
@@ -22,8 +22,7 @@ WORKDIR ${APP_MOUNT}/vllm
 
 RUN python3 -m pip install --upgrade pip
 RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers pandas tenacity
-RUN python3 -m pip install sentencepiece transformers==4.48.0 -U
-RUN python3 -m pip install neuronx-cc==2.17.194.0 --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
+RUN python3 -m pip install neuronx-cc==2.* --extra-index-url=https://pip.repos.neuron.amazonaws.com -U
 RUN python3 -m pip install pytest
 
 # uninstall transformers-neuronx package explicitly to avoid version conflict
@@ -48,6 +47,8 @@ RUN python3 -m pip install -e tests/vllm_test_utils
 # install transformers-neuronx package as an optional dependencies (for V0)
 # FIXME: `--no-deps` argument is temporarily added to resolve transformers package version conflict
 RUN python3 -m pip install transformers-neuronx==0.13.* --extra-index-url=https://pip.repos.neuron.amazonaws.com -U --no-deps
+
+RUN python3 -m pip install sentencepiece transformers==4.48.0 -U
 
 # overwrite entrypoint to run bash script
 RUN echo "import subprocess; import sys; subprocess.check_call(sys.argv[1:])" > /usr/local/bin/dockerd-entrypoint.py

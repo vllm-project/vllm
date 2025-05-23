@@ -77,7 +77,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor topk_ids,Tensor src_row_id2dst_row_id_map, Tensor "
       "expert_first_token_offset, int n_expert, int n_local_expert,int "
       "topk, Tensor! hidden_states)->()");
-  // conditionally compiled so impl registration is in source file
+
+  m.def("moe_permute_unpermute_supported() -> bool");
+  m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
 
 #endif
 }

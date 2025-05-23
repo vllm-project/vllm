@@ -42,9 +42,11 @@ def initialize_model(
     *,
     prefix: str = "",
     model_class: Optional[type[nn.Module]] = None,
+    model_config: Optional[ModelConfig] = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
-    model_config = vllm_config.model_config
+    if model_config is None:
+        model_config = vllm_config.model_config
     if model_class is None:
         model_class, _ = get_model_architecture(model_config)
 
@@ -223,17 +225,16 @@ def get_model_architecture(
         "fp8", "compressed-tensors", "gptq_marlin", "awq_marlin", "quark"
     ]
 
-    if (model_config.quantization is not None
-            and model_config.quantization not in mixtral_supported
-            and "MixtralForCausalLM" in architectures):
-        architectures = ["QuantMixtralForCausalLM"]
-
     vllm_supported_archs = ModelRegistry.get_supported_archs()
     vllm_not_supported = not any(arch in vllm_supported_archs
                                  for arch in architectures)
     if (model_config.model_impl == ModelImpl.TRANSFORMERS or
             model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):
         architectures = resolve_transformers_arch(model_config, architectures)
+    elif (model_config.quantization is not None
+          and model_config.quantization not in mixtral_supported
+          and "MixtralForCausalLM" in architectures):
+        architectures = ["QuantMixtralForCausalLM"]
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
     if model_config.task == "embed":
