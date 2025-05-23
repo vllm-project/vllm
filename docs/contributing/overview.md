@@ -130,9 +130,8 @@ The PR needs to meet the following code quality standards:
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This
   includes both unit tests and integration tests.
-- Please add documentation to `docs/source/` if the PR modifies the
-  user-facing behaviors of vLLM. It helps vLLM users understand and utilize the
-  new features or changes.
+- Please add documentation to `docs/` if the PR modifies the user-facing behaviors of vLLM.
+  It helps vLLM users understand and utilize the new features or changes.
 
 ### Adding or Changing Kernels
 

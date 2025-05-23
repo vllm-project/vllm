@@ -1084,7 +1084,7 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
         )
 
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:

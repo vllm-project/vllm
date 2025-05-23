@@ -114,7 +114,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     return spec_decode_worker
 
 
-# Reminder: Please update docs/source/features/compatibility_matrix.md
+# Reminder: Please update docs/features/compatibility_matrix.md
 # If the feature combo become valid
 class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     """Worker which implements speculative decoding.
