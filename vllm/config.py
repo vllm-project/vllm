@@ -4552,7 +4552,7 @@ def contains_object_print(text):
         text (str): The text to check
 
     Returns:
-        bool: True if a match is found, False otherwise
+        result (bool): `True` if a match is found, `False` otherwise.
     """
     pattern = r'at 0x[a-fA-F0-9]{2,16}>'
     match = re.search(pattern, text)

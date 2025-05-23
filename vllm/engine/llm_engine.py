@@ -130,26 +130,16 @@ class LLMEngine:
     iteration-level scheduling and efficient memory management to maximize the
     serving throughput.
 
-    The {class}`~vllm.LLM` class wraps this class for offline batched inference
-    and the {class}`AsyncLLMEngine` class wraps this class for online serving.
+    The [LLM][vllm.LLM] class wraps this class for offline batched inference
+    and the [AsyncLLMEngine][] class wraps this class for online serving.
 
-    The config arguments are derived from {class}`~vllm.EngineArgs`. (See
-    {ref}`engine-args`)
+    The config arguments are derived from [EngineArgs][vllm.EngineArgs]. (See
+    [engine-args][])
 
     Args:
-        model_config: The configuration related to the LLM model.
-        cache_config: The configuration related to the KV cache memory
-            management.
-        parallel_config: The configuration related to distributed execution.
-        scheduler_config: The configuration related to the request scheduler.
-        device_config: The configuration related to the device.
-        lora_config (Optional): The configuration related to serving multi-LoRA.
-        speculative_config (Optional): The configuration related to speculative
-            decoding.
+        vllm_config: The configuration for initializing and running vLLM.
         executor_class: The model executor class for managing distributed
             execution.
-        prompt_adapter_config (Optional): The configuration related to serving
-            prompt adapters.
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
     """
@@ -695,11 +685,12 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            prompt: The prompt to the LLM. See {class}`~vllm.inputs.PromptType`
+            prompt: The prompt to the LLM. See
+                [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each input.
             params: Parameters for sampling or pooling.
-                {class}`~vllm.SamplingParams` for text generation.
-                {class}`~vllm.PoolingParams` for pooling.
+                [SamplingParams][vllm.SamplingParams] for text generation.
+                [PoolingParams][vllm.PoolingParams] for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
             lora_request: The LoRA request to add.
@@ -711,10 +702,11 @@ class LLMEngine:
         Details:
             - Set arrival_time to the current time if it is None.
             - Set prompt_token_ids to the encoded prompt if it is None.
-            - Create `n` number of {class}`~vllm.Sequence` objects.
-            - Create a {class}`~vllm.SequenceGroup` object
-              from the list of {class}`~vllm.Sequence`.
-            - Add the {class}`~vllm.SequenceGroup` object to the scheduler.
+            - Create `n` number of [Sequence][vllm.Sequence] objects.
+            - Create a [SequenceGroup][vllm.SequenceGroup] object
+              from the list of [Sequence][vllm.Sequence].
+            - Add the [SequenceGroup][vllm.SequenceGroup] object to the
+              scheduler.
 
         Example:
             >>> # initialize engine
@@ -861,9 +853,7 @@ class LLMEngine:
             request_id: The ID(s) of the request to abort.
 
         Details:
-            - Refer to the
-              {meth}`~vllm.core.scheduler.Scheduler.abort_seq_group`
-              from class {class}`~vllm.core.scheduler.Scheduler`.
+            - Refer to [vllm.core.scheduler.Scheduler.abort_seq_group][].
 
         Example:
             >>> # initialize engine and add a request with request_id
