@@ -1,4 +1,4 @@
-/* Light mode: "amber" palette */
+/* Light mode: change from "white" to "amber" palette */
 [data-md-component="announce"][data-md-color-scheme="white"] {
     --md-primary-fg-color: #ffc105;
     --md-primary-fg-color--light: #ffc929;
@@ -7,7 +7,7 @@
     --md-primary-bg-color--light: #0000008a;
 }
 
-/* Dark mode: "deep orange" palette */
+/* Dark mode: change from "black" to "deep orange" palette */
 [data-md-component="announce"][data-md-color-scheme="black"] {
     --md-primary-fg-color: #ff6e42;
     --md-primary-fg-color--light: #ff8a66;
