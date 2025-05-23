@@ -373,9 +373,9 @@ class Scheduler(SchedulerInterface):
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
-
-                # KVTransfer: allocate space for just the remote KVs.
                 if load_kv_async:
+                    # If loading async, allocate memory and put request
+                    # into the WAITING_FOR_REMOTE_KV state.
                     assert num_new_external_computed_tokens > 0
                     num_new_tokens = 0
                 # Otherwise, compute the number of tokens to be scheduled.
