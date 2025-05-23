@@ -20,7 +20,6 @@ class SpecDecodeMetadata:
     bonus_logits_indices: torch.Tensor
     # [num_tokens + batch_size]
     logits_indices: torch.Tensor
-    total_num_scheduled_tokens: int
 
     def __post_init__(self):
         self.max_spec_len = max(self.num_draft_tokens)
@@ -59,5 +58,4 @@ class SpecDecodeMetadata:
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
-            total_num_scheduled_tokens=num_tokens,
         )
