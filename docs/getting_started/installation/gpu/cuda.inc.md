@@ -102,10 +102,11 @@ VLLM_USE_PRECOMPILED=1 pip install --editable .
 ```
 
 This command will do the following:
+
 1. Look for the current branch in your vLLM clone.
-2. Identify the corresponding base commit in the main branch.
-3. Download the pre-built wheel of the base commit.
-4. Use its compiled libraries in the installation.
+1. Identify the corresponding base commit in the main branch.
+1. Download the pre-built wheel of the base commit.
+1. Use its compiled libraries in the installation.
 
 !!! note
     1. If you change C++ or kernel code, you cannot use Python-only build; otherwise you will see an import error about library not found or undefined symbol.
