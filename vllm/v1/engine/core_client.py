@@ -276,6 +276,7 @@ class BackgroundResources:
     coordinator: Optional[DPCoordinator] = None
     output_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     input_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
+    first_req_send_socket: Optional[zmq.asyncio.Socket] = None
     output_queue_task: Optional[asyncio.Task] = None
     stats_update_task: Optional[asyncio.Task] = None
     shutdown_path: Optional[str] = None
@@ -300,10 +301,11 @@ class BackgroundResources:
 
         # ZMQ context termination can hang if the sockets
         # aren't explicitly closed first.
-        if self.output_socket is not None:
-            self.output_socket.close(linger=0)
-        if self.input_socket is not None:
-            self.input_socket.close(linger=0)
+        for socket in (self.output_socket, self.input_socket,
+                       self.first_req_send_socket):
+            if socket is not None:
+                socket.close(linger=0)
+
         if self.shutdown_path is not None:
             # We must ensure that the sync output socket is
             # closed cleanly in its own thread.
@@ -900,10 +902,11 @@ class DPAsyncMPClient(AsyncMPClient):
         self.lb_engines: list[list[int]] = []
 
         self.first_req_sock_addr = get_open_zmq_inproc_path()
-        self.first_req_send_socket = make_zmq_socket(self.ctx,
-                                                     self.first_req_sock_addr,
-                                                     zmq.PAIR,
-                                                     bind=True)
+        self.first_req_send_socket = self.resources.first_req_send_socket = (
+            make_zmq_socket(self.ctx,
+                            self.first_req_sock_addr,
+                            zmq.PAIR,
+                            bind=True))
         try:
             # If we are running in an asyncio event loop, start the stats task.
             # Otherwise, it will be started lazily.

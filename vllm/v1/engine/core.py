@@ -688,7 +688,6 @@ class EngineCoreProc(EngineCore):
                 if output == EngineCoreProc.ENGINE_CORE_DEAD:
                     for socket in sockets:
                         socket.send(output)
-                        #TODO also send to coordinator here?
                     break
                 assert not isinstance(output, bytes)
                 client_index, outputs = output
