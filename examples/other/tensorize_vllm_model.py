@@ -106,12 +106,10 @@ You can then use the LoRA adapter with `vllm serve`, for instance, by ensuring
 the LoRA artifacts are in your model artifacts directory and specifying 
 `--enable-lora`. For instance:
 
-```
 vllm serve <model_path> \
     --load-format tensorizer \
     --model-loader-extra-config '{"tensorizer_uri": "<model_path>.tensors"}' \
     --enable-lora
-```
 """
 
 
