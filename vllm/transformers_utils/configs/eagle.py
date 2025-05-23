@@ -70,7 +70,8 @@ class EAGLEConfig(PretrainedConfig):
 
         if self.model is not None:
             for k, v in self.model.to_dict().items():
-                setattr(self, k, v)
+                if not hasattr(self, k):
+                    setattr(self, k, v)
 
     @classmethod
     def from_pretrained(
