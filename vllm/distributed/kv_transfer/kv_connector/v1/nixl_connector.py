@@ -537,6 +537,7 @@ class NixlConnectorWorker:
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
         engine_id = nixl_agent_meta.engine_id
+        assert engine_id != self.engine_id, "Conflict engine id found!"
         if engine_id in self._remote_agents:
             return
 

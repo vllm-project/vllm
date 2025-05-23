@@ -239,3 +239,11 @@ def get_connector_events() -> dict[str, list[str]]:
             print(f"[ERROR] Could not read connector events for {name}: {e}")
 
     return connector_events
+
+
+def test_engine_id_conflict():
+    configs = [KVTransferConfig() for _ in range(2)]
+    ids = [config.engine_id for config in configs]
+    assert ids[0] != ids[1], (
+        "Engine IDs should be different for different configs. "
+        f"Got {ids}")

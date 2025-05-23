@@ -3495,7 +3495,7 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
-    engine_id: str = str(uuid.uuid4())
+    engine_id: Optional[str] = None
     """The engine id for KV transfers."""
 
     kv_buffer_device: Optional[str] = "cuda"
@@ -3552,6 +3552,9 @@ class KVTransferConfig:
         return hash_str
 
     def __post_init__(self) -> None:
+        if self.engine_id is None:
+            self.engine_id = str(uuid.uuid4())
+
         if self.kv_role is not None and self.kv_role not in get_args(KVRole):
             raise ValueError(f"Unsupported kv_role: {self.kv_role}. "
                              f"Supported roles are {get_args(KVRole)}")
