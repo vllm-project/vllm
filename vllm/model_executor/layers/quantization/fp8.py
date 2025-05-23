@@ -833,6 +833,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -845,6 +848,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            enable_eplb=enable_eplb,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
         )
 
         if self.rocm_aiter_moe_enabled:

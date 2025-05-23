@@ -18,6 +18,7 @@ from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.distributed.eplb.states import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -271,6 +272,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -738,6 +742,9 @@ class FusedMoE(torch.nn.Module):
         reduce_results: Whether to all all_reduce on the output of the layer
         renomalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
+        enable_eplb: Whether to enable expert parallelism load balancer.
+        logical_to_physical_map: Logical to physical expert mapping.
+        logical_replica_count: Count of physical replicas for logical experts.
     """
 
     def __init__(
@@ -762,6 +769,8 @@ class FusedMoE(torch.nn.Module):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        num_redundant_experts: int = 0,
     ):
         super().__init__()
 
@@ -789,12 +798,26 @@ class FusedMoE(torch.nn.Module):
             compilation_config.static_forward_context[prefix] = self
             self.layer_name = prefix
 
+        self.enable_eplb = enable_eplb
+
         # Determine expert maps
         if self.use_ep:
+            global_physical_experts = num_experts + num_redundant_experts
+            if self.enable_eplb:
+                assert global_physical_experts % self.ep_size == 0, \
+                    "EPLB currently only supports even distribution of " \
+                    "experts across ranks."
+                self.initial_global_logical_to_physical_map = \
+                    EplbState.build_initial_global_logical_to_physical_map(
+                    num_experts, num_redundant_experts,)
+                '''Used in initial weight loading only in EPLB.'''
+            else:
+                assert num_redundant_experts == 0, \
+                    "Redundant experts are only supported with EPLB."
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
+                global_num_experts=global_physical_experts)
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
@@ -1031,10 +1054,30 @@ class FusedMoE(torch.nn.Module):
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
+        if self.enable_eplb:
+            # `expert_id` is logical; with redundant experts,
+            # we need to convert it to physical id
+            global_physical_ids = self.initial_global_logical_to_physical_map[
+                expert_id]
+            for global_physical_id in global_physical_ids:
+                local_physical_id = \
+                    self._map_global_expert_id_to_local_expert_id(
+                    global_physical_id)
+                if local_physical_id != -1:
+                    # Found a local replica of this logical expert
+                    expert_id = local_physical_id
+                    break
+            else:
+                # All of this logical expert's physical replica
+                # is not in our local space; skip loading
+                return
+        else:
+            expert_id = self._map_global_expert_id_to_local_expert_id(
+                expert_id)
+            if expert_id == -1:
+                return
+        # Hereafter, `expert_id` is local physical id
 
-        expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
-        if expert_id == -1:
-            return
         quant_method_name = self.quant_method.__class__.__name__
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
@@ -1183,20 +1226,43 @@ class FusedMoE(torch.nn.Module):
             return
 
     @staticmethod
-    def select_experts(hidden_states: torch.Tensor,
-                       router_logits: torch.Tensor,
-                       top_k: int,
-                       use_grouped_topk: bool,
-                       renormalize: bool,
-                       topk_group: Optional[int] = None,
-                       num_expert_group: Optional[int] = None,
-                       custom_routing_function: Optional[Callable] = None,
-                       scoring_func: str = "softmax",
-                       e_score_correction_bias: Optional[torch.Tensor] = None,
-                       indices_type: Optional[torch.dtype] = None):
+    def select_experts(
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        use_grouped_topk: bool,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        indices_type: Optional[torch.dtype] = None,
+        enable_eplb: bool = False,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Route the input hidden states to the top-k experts based on the 
+        router logits.
+        
+        Returns:
+            (topk_weights, topk_ids) (tuple[torch.Tensor, torch.Tensor]):
+            The weights and *global physical* expert ids of the top-k experts.
+
+            **Compatibility**: When EPLB is not enabled, the returned ids are
+            equivalent to global logical ids, so should be compatible with
+            plain MoE implementations without redundant experts.
+        """
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
-        # DeekSeekv2 uses grouped_top_k
+        if enable_eplb:
+            assert logical_to_physical_map is not None
+            assert logical_replica_count is not None
+            # TODO(bowen): come back soon
+            raise NotImplementedError
+
+        # DeepSeekv2 uses grouped_top_k
         if use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
@@ -1272,6 +1338,12 @@ class FusedMoE(torch.nn.Module):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
+            eplb_kwargs = {
+                "enable_eplb": True,
+                "logical_to_physical_map": self.logical_to_physical_map,
+                "logical_replica_count": self.logical_replica_count,
+            } if self.enable_eplb else {}
+
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
@@ -1288,6 +1360,7 @@ class FusedMoE(torch.nn.Module):
                 scoring_func=self.scoring_func,
                 e_score_correction_bias=self.e_score_correction_bias,
                 activation=self.activation,
+                **eplb_kwargs,
             )
 
             if not skip_result_store:
@@ -1323,6 +1396,13 @@ class FusedMoE(torch.nn.Module):
         if self.dp_size > 1:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
+
+        eplb_kwargs = {
+            "enable_eplb": True,
+            "logical_to_physical_map": self.logical_to_physical_map,
+            "logical_replica_count": self.logical_replica_count,
+        } if self.enable_eplb else {}
+
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
@@ -1340,6 +1420,7 @@ class FusedMoE(torch.nn.Module):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
+            **eplb_kwargs,
         )
 
         if self.dp_size > 1:
