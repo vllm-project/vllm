@@ -47,8 +47,8 @@ def test_prompt_less_than_block_size():
     In this case, the P worker will send empty remote_block_ids.
     The D worker should not schedule the request but without
     any async read (empty local_block_ids) since there is nothing to pull.
-    Keeping the request int connector metaata is for notifying the
-    prefill worker so that the remote blocks are freed.
+    Keeping the request int connector metadata is for notifying the
+    prefill worker so that its remote blocks can be released.
     """
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
@@ -72,6 +72,7 @@ def test_prompt_less_than_block_size():
     assert len(kv_connector_metadata.requests) == 1
     req_id, meta = next(iter(kv_connector_metadata.requests.items()))
     # empty local_block_ids, so that async read will be skipped
+    assert hasattr(meta, "local_block_ids")
     assert not meta.local_block_ids
 
     # This request should be scheduled regularly.
