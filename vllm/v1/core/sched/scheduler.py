@@ -345,39 +345,42 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.appendleft(request)
                     continue
 
-                num_external_computed_tokens = 0
+                num_new_external_computed_tokens = 0
                 do_async_kv_recv = False
 
-                # KVTransfer: if there are already computed tokens
+                # KVTransfer: WAITING reqs have computed tokens after
+                # async KV recvs are completed.
                 if request.num_computed_tokens > 0:
                     assert request.kv_transfer_params is not None
                     new_computed_blocks = KVCacheBlocks.create_empty()
                     num_native_computed_tokens = 0
+                    num_computed_tokens = request.num_computed_tokens
 
-                # Get already-cached tokens.
+                # Otherwise, get already-cached tokens.
                 else:
-                    new_computed_blocks, num_native_computed_tokens = \
+                    # Get locally-cache tokens.
+                    new_computed_blocks, num_new_native_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
                             request)
 
-                    # Get externally-cached tokens if using a KVConnector.
+                    # Get externally-cached tokens.
                     if self.connector is not None:
-                        num_external_computed_tokens, do_async_kv_recv = (
+                        num_new_external_computed_tokens, do_async_kv_recv = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_native_computed_tokens))
 
                     # Total computed tokens (local + external).
-                    num_computed_tokens = (num_native_computed_tokens +
-                                           num_external_computed_tokens)
+                    num_computed_tokens = (num_new_native_computed_tokens +
+                                           num_new_external_computed_tokens)
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
 
                 # KVTransfer: allocate space for just the remote KVs.
                 if do_async_kv_recv:
-                    assert num_external_computed_tokens > 0
+                    assert num_new_external_computed_tokens > 0
                     num_new_tokens = 0
-                # Number of tokens to be scheduled.
+                # Otherwise, compute the number of tokens to be scheduled.
                 else:
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
@@ -403,7 +406,7 @@ class Scheduler(SchedulerInterface):
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens + num_external_computed_tokens,
+                    num_new_tokens + num_new_external_computed_tokens,
                     num_native_computed_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
@@ -419,11 +422,11 @@ class Scheduler(SchedulerInterface):
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
-                        num_external_computed_tokens,
+                        num_new_external_computed_tokens,
                     )
 
                 self.waiting.popleft()
-                # KVTransfer: if async kv recv, wait until complete.
+                # KVTransfer: wait until remove KVs have arrived.
                 if do_async_kv_recv:
                     skipped_waiting_requests.appendleft(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
