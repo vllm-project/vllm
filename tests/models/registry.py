@@ -55,8 +55,17 @@ class _HfExamplesInfo:
     trust_remote_code: bool = False
     """The ``trust_remote_code`` level required to load the model."""
 
+    v0_only: bool = False
+    """The model is only available with the vLLM V0 engine."""
+
     hf_overrides: dict[str, Any] = field(default_factory=dict)
     """The ``hf_overrides`` required to load the model."""
+
+    max_model_len: Optional[int] = None
+    """
+    The maximum model length to use for this model. Some models default to a
+    length that is too large to fit into memory in CI.
+    """
 
     def check_transformers_version(
         self,
@@ -215,10 +224,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OrionForCausalLM": _HfExamplesInfo("OrionStarAI/Orion-14B-Chat",
                                         trust_remote_code=True),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
-    "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
+    "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2", v0_only=True),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
     "Phi3SmallForCausalLM": _HfExamplesInfo("microsoft/Phi-3-small-8k-instruct",
-                                            trust_remote_code=True),
+                                            trust_remote_code=True,
+                                            v0_only=True),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
     "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",
@@ -234,7 +244,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                      is_available_online=False),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b",  # noqa: E501
                                                 is_available_online=False),
-    "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
+    "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t",
+                                           v0_only=True),
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),
     "SolarForCausalLM": _HfExamplesInfo("upstage/solar-pro-preview-instruct"),
     "TeleChat2ForCausalLM": _HfExamplesInfo("Tele-AI/TeleChat2-3B",
@@ -303,7 +314,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b"), # noqa: E501
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b",  # noqa: E501
-                                                     extras={"6b": "Salesforce/blip2-opt-6.7b"}),  # noqa: E501
+                                                     extras={"6b": "Salesforce/blip2-opt-6.7b"},  # noqa: E501
+                                                     v0_only=True),
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
                                                 extras={"fork": "Isotr0py/deepseek-vl2-tiny"},  # noqa: E501
@@ -328,9 +340,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
                                                       extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
-                                                      trust_remote_code=True),
+                                                      trust_remote_code=True,
+                                                      v0_only=True),
     "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
-                                                      min_transformers_version="4.51"),
+                                                      min_transformers_version="4.51",
+                                                      max_model_len=10240),
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
                                                      extras={"mistral": "mistral-community/pixtral-12b", # noqa: E501
                                                              "mistral-fp8": "nm-testing/pixtral-12b-FP8-dynamic"}),  # noqa: E501
@@ -349,7 +363,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                 extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo("MiniMaxAI/MiniMax-VL-01", # noqa: E501
-                                              trust_remote_code=True),
+                                              trust_remote_code=True,
+                                              v0_only=True),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo("mistralai/Mistral-Small-3.1-24B-Instruct-2503",  # noqa: E501
                                                         extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"}),  # noqa: E501
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
@@ -372,7 +387,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
-                                                       tokenizer_mode="mistral"),
+                                                       tokenizer_mode="mistral",
+                                                       v0_only=True),
     "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",
                                                       extras={"chat": "Qwen/Qwen-VL-Chat"},  # noqa: E501
                                                       trust_remote_code=True,
