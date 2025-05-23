@@ -201,7 +201,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         vllm_config=self.vllm_config,
                         device=self.device)  # type: ignore
                 elif self.speculative_config.method == "layer_skip":
-                    pass  # handled by proposer
+                    raise NotImplementedError(
+                        "Layer skip speculative decoding is not yet "
+                        "implemented for v1 workers. The feature is "
+                        "available with the default worker. To use it, "
+                        "ensure you're not using --worker-type v1.")
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
