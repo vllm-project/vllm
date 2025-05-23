@@ -9,8 +9,13 @@ nav:
       - getting_started/examples/offline_inference
       - getting_started/examples/online_serving
       - getting_started/examples/other
-    - Roadmap: https://roadmap.vllm.ai
-    - Releases: https://github.com/vllm-project/vllm/releases
+    - Quick Links:
+      - User Guide: serving/offline_inference.md
+      - Developer Guide: contributing/overview.md
+      - API Reference: api/README.md
+    - Timeline:
+      - Roadmap: https://roadmap.vllm.ai
+      - Releases: https://github.com/vllm-project/vllm/releases
   - User Guide:
     - Inference and Serving:
       - serving/offline_inference.md
@@ -38,7 +43,7 @@ nav:
     - contributing/overview.md
     - glob: contributing/*
       flatten_single_child_sections: true
-    - contributing/model
+    - Model Implementation: contributing/model
     - Design Documents:
       - V0: design
       - V1: design/v1

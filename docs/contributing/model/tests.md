@@ -33,14 +33,14 @@ These tests compare the model outputs of vLLM against [HF Transformers](https://
 
 #### Generative models
 
-For [generative models][generative-models], there are two levels of correctness tests, as defined in <gh-file:tests/models/utils.py>:
+For [generative models](../../models/generative_models.md), there are two levels of correctness tests, as defined in <gh-file:tests/models/utils.py>:
 
 - Exact correctness (`check_outputs_equal`): The text outputted by vLLM should exactly match the text outputted by HF.
 - Logprobs similarity (`check_logprobs_close`): The logprobs outputted by vLLM should be in the top-k logprobs outputted by HF, and vice versa.
 
 #### Pooling models
 
-For [pooling models][pooling-models], we simply check the cosine similarity, as defined in <gh-file:tests/models/embedding/utils.py>.
+For [pooling models](../../models/pooling_models.md), we simply check the cosine similarity, as defined in <gh-file:tests/models/utils.py>.
 
 [](){ #mm-processing-tests }
 
