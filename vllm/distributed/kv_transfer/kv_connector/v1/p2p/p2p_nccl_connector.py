@@ -44,6 +44,13 @@ class ReqMeta:
         slot_mapping = block_offsets.reshape((1, block_size)) + \
                 block_ids_tensor.reshape((num_blocks, 1)) * block_size
         slot_mapping = slot_mapping.flatten()[:valid_num_tokens]
+
+        logger.info(
+            "🐞P2pNcclConnector make_meta, request_id:%s, token_ids:%s, "
+            "valid_num_tokens:%d, block_ids:%s, num_blocks:%d, block_size:%d, "
+            "slot_mapping:%s", request_id, token_ids, valid_num_tokens,
+            block_ids, num_blocks, block_size, slot_mapping.tolist())
+
         return ReqMeta(
             request_id=request_id,
             token_ids=token_ids_tensor,
@@ -85,6 +92,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self.config = vllm_config.kv_transfer_config
         self.rank = rank
         self.is_producer = self.config.is_kv_producer
+        self.chunked_prefill: dict[str, Any] = {}
 
         self.p2p_nccl_engine = P2pNcclEngine(
             local_rank=local_rank,
@@ -110,6 +118,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
             The number of elements in kv_caches and layer_names should be
             the same.
         """
+
+        # Only consumer/decode loads KV Cache
+        if self.is_producer:
+            return
+
         assert self.p2p_nccl_engine is not None
 
         attn_metadata = forward_context.attn_metadata
@@ -122,6 +135,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             dst_kv_cache_layer: torch.Tensor,
             src_kv_cache: torch.Tensor,
             slot_mapping: torch.Tensor,
+            request_id: str,
         ) -> None:
             """Inject the KV cache into the layer.
 
@@ -134,6 +148,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     otherwise.
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
+                request_id (str): request id for log
             """
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
             if isinstance(attn_metadata, MLACommonMetadata):
@@ -149,7 +164,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                        ...] = src_kv_cache
                     logger.warning(
                         "🚧src_kv_cache does not match, num_slot:%d, "
-                        "num_token:%d", len(slot_mapping), num_token)
+                        "num_token:%d, request_id:%s", len(slot_mapping),
+                        num_token, request_id)
 
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
             else:
@@ -165,7 +181,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                        ...] = src_kv_cache
                     logger.warning(
                         "🚧src_kv_cache does not match, num_slot:%d, "
-                        "num_token:%d", len(slot_mapping), num_token)
+                        "num_token:%d, request_id:%s", len(slot_mapping),
+                        num_token, request_id)
 
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
@@ -182,8 +199,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         # Load the KV for each request each layer
         for request in metadata.requests:
-            if self.is_producer:
-                continue
             for layer_name in forward_context.no_compile_layers:
                 attn_layer = forward_context.no_compile_layers[layer_name]
                 kv_cache_layer = attn_layer.kv_cache[ \
@@ -198,7 +213,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     continue
 
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
-                                     request.slot_mapping)
+                                     request.slot_mapping, request.request_id)
 
             logger.info("Inject KV cache of %d tokens to the paged memory, %s",
                         len(request.slot_mapping), request.request_id)
@@ -226,6 +241,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+
+        # Only producer/prefill saves KV Cache
+        if not self.is_producer:
+            return
+
         assert self.p2p_nccl_engine is not None
 
         def extract_kv_from_layer(
@@ -248,14 +268,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
-            if self.is_producer:
-                request_id = request.request_id
-                ip, port = self.parse_request_id(request_id, True)
-                remote_address = ip + ":" + str(port + self._rank)
-                kv_cache = extract_kv_from_layer(kv_layer,
-                                                 request.slot_mapping)
-                self.p2p_nccl_engine.send_tensor(request_id + "#" + layer_name,
-                                                 kv_cache, remote_address)
+            request_id = request.request_id
+            ip, port = self.parse_request_id(request_id, True)
+            remote_address = ip + ":" + str(port + self._rank)
+            kv_cache = extract_kv_from_layer(kv_layer,
+                                             request.slot_mapping)
+            self.p2p_nccl_engine.send_tensor(request_id + "#" + layer_name,
+                                             kv_cache, remote_address)
 
     def wait_for_save(self):
         if self.is_producer:
@@ -276,7 +295,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             call to this method (this call or a prior one).
         """
 
-        logger.debug("🐞get_finished, finished_req_ids:%s", finished_req_ids)
+        logger.info("🐞get_finished, finished_req_ids:%s", finished_req_ids)
 
         return None, None
 
@@ -336,27 +355,64 @@ class P2pNcclConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        logger.debug("🐞build_connector_meta, scheduler_output:%s",
+        logger.info("🐞build_connector_meta, scheduler_output:%s",
                      scheduler_output)
 
         meta = P2pNcclConnectorMetadata()
 
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
+            if self.is_producer:
+                num_scheduled_tokens = (
+                    scheduler_output.num_scheduled_tokens)[new_req.req_id]
+                num_tokens = num_scheduled_tokens + new_req.num_computed_tokens
+                # the request's prompt is chunked prefill
+                if num_tokens < len(new_req.prompt_token_ids):
+                    # 'CachedRequestData' has no attribute 'prompt_token_ids'
+                    self.chunked_prefill[new_req.req_id] = (new_req.block_ids, new_req.prompt_token_ids)
+                    logger.info(
+                        "🐞build_connector_meta, chunked prefill, request_id:%s,"
+                        "num_scheduled_tokens:%d, num_prompt_tokens:%d, "
+                        "num_computed_tokens:%d, num_tokens:%d", new_req.req_id,
+                        num_scheduled_tokens, len(new_req.prompt_token_ids),
+                        new_req.num_computed_tokens, num_tokens)
+                    continue
+                # the request's prompt is not chunked prefill
+                meta.add_request(request_id=new_req.req_id,
+                                 token_ids=new_req.prompt_token_ids,
+                                 block_ids=new_req.block_ids,
+                                 block_size=self._block_size)
+                continue
             if new_req.req_id in self._requests_need_load:
                 meta.add_request(request_id=new_req.req_id,
                                  token_ids=new_req.prompt_token_ids,
                                  block_ids=new_req.block_ids,
                                  block_size=self._block_size)
                 total_need_load += 1
-            else:
-                if self.is_producer:
-                    meta.add_request(request_id=new_req.req_id,
-                                     token_ids=new_req.prompt_token_ids,
-                                     block_ids=new_req.block_ids,
-                                     block_size=self._block_size)
 
         for cached_req in scheduler_output.scheduled_cached_reqs:
+            if self.is_producer:
+                num_scheduled_tokens = (
+                    scheduler_output.num_scheduled_tokens)[cached_req.req_id]
+                num_tokens = num_scheduled_tokens + cached_req.num_computed_tokens
+                assert cached_req.req_id in self.chunked_prefill
+                block_ids = (self.chunked_prefill[cached_req.req_id][0] +
+                             cached_req.new_block_ids)
+                prompt_token_ids = self.chunked_prefill[cached_req.req_id][1]
+                logger.info("🐞build_connector_meta, cached_req, request_id:%s, num_scheduled_tokens:%d, num_prompt_tokens:%d",
+                             cached_req.req_id, num_scheduled_tokens, len(prompt_token_ids))
+                # the request's prompt is chunked prefill again
+                if num_tokens < len(prompt_token_ids):
+                    self.chunked_prefill[cached_req.req_id] = (block_ids, prompt_token_ids)
+                    continue
+                # the request's prompt is all prefilled finally
+                meta.add_request(request_id=cached_req.req_id,
+                                 token_ids=prompt_token_ids,
+                                 block_ids=block_ids,
+                                 block_size=self._block_size)
+                self.chunked_prefill.pop(cached_req.req_id, None)
+                continue
+
             # NOTE(rob): here we rely on the resumed requests being
             # the first N requests in the list scheduled_cache_reqs.
             if not cached_req.resumed_from_preemption:
@@ -380,10 +436,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  block_size=self._block_size)
                 total_need_load += 1
 
-        for finished_req in scheduler_output.finished_req_ids:
-            # TODO: Abatom
-            break
-
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
         return meta
@@ -404,7 +456,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             returned by the engine.
         """
 
-        logger.debug("🐞request_finished, request_id:%s, block_ids:%s",
+        logger.info("🐞request_finished, request_id:%s, block_ids:%s",
                      request.request_id, block_ids)
 
         return False, None
