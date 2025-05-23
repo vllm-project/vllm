@@ -349,7 +349,7 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cache tokens.
-                    new_computed_blocks, num_new_native_computed_tokens = \
+                    new_computed_blocks, num_new_local_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
                             request)
 
@@ -357,10 +357,10 @@ class Scheduler(SchedulerInterface):
                     if self.connector is not None:
                         num_new_external_computed_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
-                                request, num_new_native_computed_tokens))
+                                request, num_new_local_computed_tokens))
 
                     # Total computed tokens (local + external).
-                    num_computed_tokens = (num_new_native_computed_tokens +
+                    num_computed_tokens = (num_new_local_computed_tokens +
                                            num_new_external_computed_tokens)
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
