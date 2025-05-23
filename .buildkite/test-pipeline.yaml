@@ -199,8 +199,9 @@ steps:
   - tests/test_sequence
   - tests/test_config
   - tests/test_logger
+  - tests/test_vllm_port
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
