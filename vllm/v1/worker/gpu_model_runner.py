@@ -34,9 +34,8 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LayerBlockType, LazyLoader,
-                        async_tensor_h2d, cdiv, check_use_alibi,
-                        is_pin_memory_available)
+                        GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
+                        check_use_alibi, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
