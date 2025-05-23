@@ -61,7 +61,7 @@ class _HfExamplesInfo:
     hf_overrides: dict[str, Any] = field(default_factory=dict)
     """The ``hf_overrides`` required to load the model."""
 
-    max_model_len: int = None
+    max_model_len: Optional[int] = None
     """
     The maximum model length to use for this model. Some models default to a
     length that is too large to fit into memory in CI.
