@@ -46,9 +46,6 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
-    # Used for EPLB to collect expert load metrics.
-    # TODO(bowen): see if we can find a better accommodation for this
-    expert_load_pass: Optional[torch.Tensor] = None
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -66,8 +63,7 @@ def get_forward_context() -> ForwardContext:
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
                         virtual_engine: int = 0,
-                        num_tokens: int = 0,
-                        expert_load_pass: Optional[torch.Tensor] = None):
+                        num_tokens: int = 0):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -107,8 +103,7 @@ def set_forward_context(attn_metadata: Any,
         static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
-        dp_metadata=dp_metadata,
-        expert_load_pass=expert_load_pass)
+        dp_metadata=dp_metadata)
 
     try:
         yield
