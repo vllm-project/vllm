@@ -40,9 +40,9 @@ class UBatchContext:
         global _CURRENT_CONTEXT
         _CURRENT_CONTEXT[threading.get_ident()] = self
         self._cpu_wait()
-        start_event = torch.cuda.Event()
-        self.original_stream.record_event(start_event)
-        self.stream.wait_event(start_event)
+        # start_event = torch.cuda.Event()
+        # self.original_stream.record_event(start_event)
+        # self.stream.wait_event(start_event)
         print("Starting ubatch %d" % self.id)
         # if self.gpu_wait_on_launch:
         #     self.gpu_stream_wait()
@@ -130,6 +130,21 @@ def yield_(x: torch.Tensor, schedule: str="default") -> None:
 @yield_.register_fake
 def yield_(x: torch.Tensor, schedule: str="default") -> None:
     pass
+
+def dump_ubatching_state():
+    """
+    Dump the current UBatchContext state for debugging.
+    """
+    for ctx in _CURRENT_CONTEXT.values():
+        print(f"UBatchContext: {ctx.id}\n"
+              f" Stream: {ctx.stream}, ({ctx.stream.query()})\n"
+              f" Original Stream: {ctx.original_stream}, ({ctx.original_stream.query()})\n"
+              f" CPU Wait Event: {ctx.cpu_wait_event}\n"
+              f" GPU Wait Event: {ctx.gpu_wait_event}  ({ctx.gpu_wait_event.query()})\n"
+              f" CPU Signal Event: {ctx.cpu_signal_event}\n"
+              f" GPU Signal Event: {ctx.gpu_signal_event} ({ctx.gpu_signal_event.query()})\n")
+
+
 
 """
 

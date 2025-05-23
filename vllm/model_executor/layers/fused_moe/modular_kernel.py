@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 import torch
-from vllm.v1.worker.ubatching import get_current_ubatch_context
+from vllm.v1.worker.ubatching import get_current_ubatch_context, dump_ubatching_state
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -347,6 +347,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         #     print("in modular moe2, ubatch:", ubatch_ctx.id, self.fused_experts)
 
         print("pre synchronize")
+        dump_ubatching_state()
         torch.cuda.synchronize(a1.device)
         print("post synchronize")
 
