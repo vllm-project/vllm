@@ -100,7 +100,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
-                lora_path, self.max_position_embeddings)
+                lora_path, self.max_position_embeddings,
+                lora_request.tensorizer_config_dict)
 
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
@@ -125,6 +126,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 self.lora_config.lora_extra_vocab_size,
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
+                tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper)
 
         except FileNotFoundError as e:
