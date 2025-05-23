@@ -136,12 +136,12 @@ class PyNcclPipe(KVPipeBase):
         Create a buffer to receive the tensor based on the provided metadata.
 
         Parameters:
-            - metadata: A dictionary with keys "dtype" and "shape", describing
-              the tensor's data type and shape.
+            metadata (Metadata): A dictionary with keys "dtype" and "shape",
+                describing the tensor's data type and shape.
 
         Returns:
-            - buffer: A tensor of the specified type and shape, allocated on
-              self.device.
+            buffer (torch.Tensor): A tensor of the specified type and shape,
+                allocated on `self.device`.
         """
         return torch.empty(metadata["shape"],
                            dtype=metadata["dtype"],
