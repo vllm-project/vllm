@@ -26,11 +26,14 @@ class EagleProposer:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        runner,
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
+        
+        self.runner = runner
 
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -107,7 +110,7 @@ class EagleProposer:
         # FA requires seq_len to have dtype int32.
         seq_lens = (target_positions[last_token_indices] + 1).int()
 
-        if self.method in []:
+        if self.method in ["eagle", "eagle3"]:
             # FIXME(woosuk): The below two ops cause synchronization. Optimize.
             max_seq_len = seq_lens.max().item()
             max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
@@ -126,7 +129,7 @@ class EagleProposer:
                 prefix_kv_lens=None,
                 suffix_kv_lens=None,
             )
-        elif self.method == "eagle3":
+        elif self.method == "deepseek_mtp":
             query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
             max_query_len = query_lens.max().item()
             
@@ -144,7 +147,7 @@ class EagleProposer:
             # )
 
             # FIXME: need to consider multiple kv_cache_groups
-            attn_metadata = self.runner.attn_metadata_builders[0].build(
+            attn_metadata = self.runner.attn_metadata_builder.build(
                 num_reqs=batch_size,
                 num_actual_tokens=num_tokens,
                 max_query_len=max_query_len,
@@ -166,11 +169,15 @@ class EagleProposer:
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
-            last_hidden_states, hidden_states = self.model(
-                input_ids=self.input_ids[:num_input_tokens],
-                positions=self.positions[:num_input_tokens],
-                hidden_states=self.hidden_states[:num_input_tokens],
+            ret_hidden_states = self.model(
+                self.input_ids[:num_input_tokens],
+                self.positions[:num_input_tokens],
+                self.hidden_states[:num_input_tokens],
             )
+            if self.method == "deepseek_mtp":
+                last_hidden_states = ret_hidden_states
+            else:
+                last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
@@ -250,9 +257,9 @@ class EagleProposer:
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
                 last_hidden_states, hidden_states = self.model(
-                    input_ids=self.input_ids[:input_batch_size],
-                    positions=self.positions[:input_batch_size],
-                    hidden_states=self.hidden_states[:input_batch_size],
+                    self.input_ids[:input_batch_size],
+                    self.positions[:input_batch_size],
+                    self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],

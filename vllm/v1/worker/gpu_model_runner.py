@@ -48,7 +48,6 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.mtp_proposer import MtpProposer
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
@@ -198,7 +197,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.drafter = NgramProposer(self.vllm_config)
                 elif self.speculative_config.use_eagle():
                     self.drafter = EagleProposer(
-                        self.vllm_config, self.device)  # type: ignore
+                        self.vllm_config, self.device, self)  # type: ignore
                     if self.speculative_config.method == "eagle3":
                         self.use_aux_hidden_state_outputs = True
                 elif self.speculative_config.method == "medusa":
@@ -1347,7 +1346,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
         elif self.speculative_config.use_eagle():
-            assert isinstance(self.drafter, (EagleProposer, MtpProposer))
+            assert isinstance(self.drafter, EagleProposer)
             # TODO(woosuk): Refactor the loop.
             next_token_ids: list[int] = []
             for i, token_ids in enumerate(valid_sampled_token_ids):
@@ -1733,7 +1732,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.use_spec_decode and \
                 self.speculative_config.method in (
                     'eagle', 'eagle3', "deepseek_mtp"):
-                assert isinstance(self.drafter, (EagleProposer, MtpProposer))
+                assert isinstance(self.drafter, EagleProposer)
                 self.drafter.dummy_run(num_tokens)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
