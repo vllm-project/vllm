@@ -447,7 +447,7 @@ class EngineCoreProc(EngineCore):
                                f"minutes")
         init_bytes = handshake_socket.recv()
         init_message: EngineHandshakeMetadata = msgspec.msgpack.decode(
-            init_bytes)
+            init_bytes, type=EngineHandshakeMetadata)
         logger.debug("Received init message: %s", init_message)
 
         received_parallel_config = init_message.parallel_config
