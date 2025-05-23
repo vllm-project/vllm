@@ -309,12 +309,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
+    # Note: used for model runner override.
     def _init_device_properties(self) -> None:
         """Initialize attributes from torch.cuda.get_device_properties
         """
         self.device_properties = torch.cuda.get_device_properties(self.device)
         self.num_sms = self.device_properties.multi_processor_count
 
+    # Note: used for model runner override.
     def _sync_device(self) -> None:
         torch.cuda.synchronize()
 
