@@ -339,7 +339,7 @@ def resolve_hf_chat_template(
     tools: Optional[list[dict[str, Any]]],
     *,
     model_config: ModelConfig,
-    trsut_remote_code: Optional[bool] = None,
+    trust_remote_code: Optional[bool] = None,
 ) -> Optional[str]:
     # 1st priority: The given chat template
     if chat_template is not None:
@@ -387,7 +387,6 @@ def resolve_hf_chat_template(
 def _resolve_chat_template_content_format(
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
-    given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
     *,
     model_config: ModelConfig,
@@ -408,7 +407,7 @@ def _resolve_chat_template_content_format(
     detected_format = ("string" if jinja_text is None else
                        _detect_content_format(jinja_text, default="string"))
 
-    return detected_format if given_format == "auto" else given_format
+    return detected_format
 
 
 @lru_cache
@@ -451,7 +450,6 @@ def resolve_chat_template_content_format(
     detected_format = _resolve_chat_template_content_format(
         chat_template,
         tools,
-        given_format,
         tokenizer,
         model_config=model_config,
     )
@@ -462,7 +460,8 @@ def resolve_chat_template_content_format(
         detected_format=detected_format,
     )
 
-    return detected_format
+    return detected_format if given_format == "auto" else given_format
+
 
 
 ModalityStr = Literal["image", "audio", "video", "image_embeds"]

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
-from typing import Dict, Generator, Tuple
+from collections.abc import Generator
 
 import gguf
 import torch
@@ -84,17 +84,17 @@ class GGUFModelLoader(BaseModelLoader):
         return gguf_to_hf_name_map
 
     def _get_weights_iterator(
-        self, model_name_or_path: str, gguf_to_hf_name_map: Dict[str, str]
-    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        self, model_name_or_path: str, gguf_to_hf_name_map: dict[str, str]
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         return gguf_quant_weights_iterator(model_name_or_path,
                                            gguf_to_hf_name_map)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model)
 
-    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> nn.Module:
         device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
         local_model_path = self._prepare_weights(model_config.model)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         # we can only know if tie word embeddings after mapping weights

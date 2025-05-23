@@ -65,6 +65,8 @@ class OpenAIServingTokenization(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             if isinstance(request, TokenizeChatRequest):
+                tool_dicts = (None if request.tools is None else
+                              [tool.model_dump() for tool in request.tools])
                 (
                     _,
                     request_prompts,
@@ -73,6 +75,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     request,
                     tokenizer,
                     request.messages,
+                    tool_dicts=tool_dicts,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.
                     chat_template_content_format,
@@ -103,8 +106,9 @@ class OpenAIServingTokenization(OpenAIServing):
 
             # Silently ignore prompt adapter since it does not affect
             # tokenization (Unlike in Embeddings API where an error is raised)
-
-            input_ids.extend(engine_prompt["prompt_token_ids"])
+            if isinstance(engine_prompt,
+                          dict) and "prompt_token_ids" in engine_prompt:
+                input_ids.extend(engine_prompt["prompt_token_ids"])
 
         return TokenizeResponse(tokens=input_ids,
                                 count=len(input_ids),

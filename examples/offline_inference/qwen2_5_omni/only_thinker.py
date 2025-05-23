@@ -11,6 +11,7 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
+from vllm.multimodal.image import convert_image_mode
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -45,7 +46,8 @@ def get_mixed_modalities_query() -> QueryResult:
                 "audio":
                 AudioAsset("mary_had_lamb").audio_and_sample_rate,
                 "image":
-                ImageAsset("cherry_blossom").pil_image.convert("RGB"),
+                convert_image_mode(
+                    ImageAsset("cherry_blossom").pil_image, "RGB"),
                 "video":
                 VideoAsset(name="baby_reading", num_frames=16).np_ndarrays,
             },
@@ -140,7 +142,7 @@ def main(args):
         print(generated_text)
 
 
-if __name__ == "__main__":
+def parse_args():
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
         'audio language models')
@@ -155,5 +157,9 @@ if __name__ == "__main__":
                         default=None,
                         help="Set the seed when initializing `vllm.LLM`.")
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(args)
