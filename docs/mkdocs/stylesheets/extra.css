@@ -1,17 +1,11 @@
 /* Light mode: change from "white" to "amber" palette */
 [data-md-component="announce"][data-md-color-primary="white"] {
-    --md-primary-fg-color: #ffc105;
-    --md-primary-fg-color--light: #ffc929;
-    --md-primary-fg-color--dark: #ffa200;
-    --md-primary-bg-color: #000000de;
-    --md-primary-bg-color--light: #0000008a;
+    background-color: #ffc105;  /* --md-primary-fg-color--light */
+    color: #0000008a;           /* --md-primary-bg-color--light */
 }
 
 /* Dark mode: change from "black" to "deep orange" palette */
 [data-md-component="announce"][data-md-color-primary="black"] {
-    --md-primary-fg-color: #ff6e42;
-    --md-primary-fg-color--light: #ff8a66;
-    --md-primary-fg-color--dark: #f4511f;
-    --md-primary-bg-color: #fff;
-    --md-primary-bg-color--light: #ffffffb3;
+    background-color: #f4511f;  /* --md-primary-fg-color--dark */
+    color: #fff;                /* --md-primary-bg-color */
 }
