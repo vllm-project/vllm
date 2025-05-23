@@ -797,6 +797,8 @@ class NixlCPUReceiver:
             self._handshake_listener_t = None
 
     def close(self):
+        logger.info("Watermark information before closing: (low: %d, high: %d)",
+                    self._allocator.low_watermark, self._allocator.high_watermark)
         self.stop_handshake_listener()
         self._nixl_wrapper.deregister_memory(self._reg_dlist)
         del self._nixl_wrapper
