@@ -22,6 +22,25 @@ def rescale_image_size(image: Image.Image,
     return image
 
 
+# TODO: Support customizable background color to fill in.
+def rgba_to_rgb(
+    image: Image.Image, background_color=(255, 255, 255)) -> Image.Image:
+    """Convert an RGBA image to RGB with filled background color."""
+    assert image.mode == "RGBA"
+    converted = Image.new("RGB", image.size, background_color)
+    converted.paste(image, mask=image.split()[3])  # 3 is the alpha channel
+    return converted
+
+
+def convert_image_mode(image: Image.Image, to_mode: str):
+    if image.mode == to_mode:
+        return image
+    elif image.mode == "RGBA" and to_mode == "RGB":
+        return rgba_to_rgb(image)
+    else:
+        return image.convert(to_mode)
+
+
 class ImageMediaIO(MediaIO[Image.Image]):
 
     def __init__(self, *, image_mode: str = "RGB") -> None:
@@ -32,7 +51,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
     def load_bytes(self, data: bytes) -> Image.Image:
         image = Image.open(BytesIO(data))
         image.load()
-        return image.convert(self.image_mode)
+        return convert_image_mode(image, self.image_mode)
 
     def load_base64(self, media_type: str, data: str) -> Image.Image:
         return self.load_bytes(base64.b64decode(data))
@@ -40,7 +59,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
     def load_file(self, filepath: Path) -> Image.Image:
         image = Image.open(filepath)
         image.load()
-        return image.convert(self.image_mode)
+        return convert_image_mode(image, self.image_mode)
 
     def encode_base64(
         self,
@@ -51,7 +70,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
         image = media
 
         with BytesIO() as buffer:
-            image = image.convert(self.image_mode)
+            image = convert_image_mode(image, self.image_mode)
             image.save(buffer, image_format)
             data = buffer.getvalue()
 
