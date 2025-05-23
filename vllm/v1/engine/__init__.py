@@ -3,7 +3,7 @@
 import enum
 import time
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Mapping
 
 import msgspec
 
@@ -39,10 +39,10 @@ class FinishReason(enum.IntEnum):
 
 
 class EngineCoreRequest(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False):  # type: ignore[call-arg]
 
     # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
     # but this object is currently not playing well with msgspec
@@ -63,6 +63,8 @@ class EngineCoreRequest(
     # belong to, to cover a race condition where the request is sent before
     # a wave finished notification is received.
     current_wave: int = 0
+
+    trace_headers: Optional[Mapping[str, str]] = None
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -91,10 +93,10 @@ class EngineCoreEvent(msgspec.Struct):
 
 
 class EngineCoreOutput(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False):  # type: ignore[call-arg]
 
     request_id: str
     new_token_ids: list[int]
@@ -107,15 +109,17 @@ class EngineCoreOutput(
     events: Optional[list[EngineCoreEvent]] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
 
+    trace_headers: Optional[Mapping[str, str]] = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
 
 
 class UtilityOutput(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    gc=False):  # type: ignore[call-arg]
 
     call_id: int
 
@@ -125,12 +129,12 @@ class UtilityOutput(
 
 
 class EngineCoreOutputs(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False):  # type: ignore[call-arg]
 
-    #NOTE(Nick): We could consider ways to make this more compact,
+    # NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 
     engine_index: int = 0
