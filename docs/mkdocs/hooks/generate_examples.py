@@ -107,12 +107,15 @@ class Example:
         content = f"---\ntitle: {self.title}\n---\n\n"
         content += f"Source <gh-file:{self.path.relative_to(ROOT_DIR)}>.\n\n"
 
+        # Use long code fence to avoid issues with
+        # included files containing code fences too
+        code_fence = "``````"
         is_code = self.main_file.suffix != ".md"
         if is_code:
-            content += f"```{self.main_file.suffix[1:]}\n"
+            content += f"{code_fence}{self.main_file.suffix[1:]}\n"
         content += f'--8<-- "{self.main_file}"\n'
         if is_code:
-            content += "```\n"
+            content += f"{code_fence}\n"
         content += "\n"
 
         if not self.other_files:
@@ -122,10 +125,10 @@ class Example:
         for file in sorted(self.other_files):
             content += f'??? abstract "{file.relative_to(self.path)}"\n'
             if file.suffix != ".md":
-                content += f"    ```{file.suffix[1:]}\n"
+                content += f"    {code_fence}{file.suffix[1:]}\n"
             content += f'    --8<-- "{file}"\n'
             if file.suffix != ".md":
-                content += "    ```\n"
+                content += f"    {code_fence}\n"
 
         return content
 
