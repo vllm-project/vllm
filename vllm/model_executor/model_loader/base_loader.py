@@ -18,6 +18,7 @@ class BaseModelLoader(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_model(self, *, vllm_config: VllmConfig) -> nn.Module:
+    def load_model(self, *, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> nn.Module:
         """Load a model with the given configurations."""
         raise NotImplementedError

@@ -1228,9 +1228,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> None:
-        weights = ((name, data) for name, data in weights
-                   if "lora" not in name)
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, skip_substrs=["lora"])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

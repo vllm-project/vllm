@@ -289,9 +289,8 @@ class BaseMultiModalField(ABC):
 @dataclass(frozen=True)
 class MultiModalBatchedField(BaseMultiModalField):
     """
-    :::{seealso}
-    {func}`MultiModalFieldConfig.batched`
-    :::
+    Info:
+        [MultiModalFieldConfig.batched][]
     """
 
     def build_elems(
@@ -320,10 +319,9 @@ class MultiModalBatchedField(BaseMultiModalField):
 @dataclass(frozen=True)
 class MultiModalFlatField(BaseMultiModalField):
     """
-    :::{seealso}
-    {func}`MultiModalFieldConfig.flat`
-    {func}`MultiModalFieldConfig.flat_from_sizes`
-    :::
+    Info:
+        [MultiModalFieldConfig.flat][]
+        [MultiModalFieldConfig.flat_from_sizes][]
     """
     slices: Union[Sequence[slice], Sequence[Sequence[slice]]]
     dim: int = 0
@@ -363,9 +361,8 @@ class MultiModalFlatField(BaseMultiModalField):
 @dataclass(frozen=True)
 class MultiModalSharedField(BaseMultiModalField):
     """
-    :::{seealso}
-    {func}`MultiModalFieldConfig.shared`
-    :::
+    Info:
+        [MultiModalFieldConfig.shared][]
     """
     batch_size: int
 
@@ -510,9 +507,8 @@ class MultiModalFieldConfig:
             Element 3: [[C],[C]]
         ```
 
-        :::{seealso}
-        {func}`MultiModalFieldConfig.flat`
-        :::
+        Info:
+            [MultiModalFieldConfig.flat][]
         """
 
         if size_per_item.ndim != 1:

@@ -93,10 +93,9 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
         Then, it calculate the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
 
-        :::{tip}
-        You may limit the usage of GPU memory
-        by adjusting the `gpu_memory_utilization` parameter.
-        :::
+        Tip:
+            You may limit the usage of GPU memory
+            by adjusting the `gpu_memory_utilization` parameter.
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
@@ -176,8 +175,7 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size,
-            parallel_config.enable_expert_parallel)
+            parallel_config.pipeline_parallel_size)
         # global all_reduce needed for overall oneccl warm up
         torch.distributed.all_reduce(torch.zeros(1).xpu())
 

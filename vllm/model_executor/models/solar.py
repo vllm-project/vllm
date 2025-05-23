@@ -126,8 +126,9 @@ class SolarAttention(nn.Module):
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         # MistralConfig has an optional head_dim introduced by Mistral-Nemo
-        self.head_dim = getattr(config, "head_dim",
-                                self.hidden_size // self.total_num_heads)
+        self.head_dim = getattr(config, "head_dim", None)
+        if self.head_dim is None:
+            self.head_dim = self.hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -500,14 +501,5 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=([
-                "rotary_emb.inv_freq",
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                "rotary_emb.cos_cached",
-                "rotary_emb.sin_cached"
-            ]),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

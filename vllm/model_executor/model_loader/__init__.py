@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import Optional
+
 from torch import nn
 
-from vllm.config import LoadConfig, LoadFormat, VllmConfig
+from vllm.config import LoadConfig, LoadFormat, ModelConfig, VllmConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.bitsandbytes_loader import (
     BitsAndBytesModelLoader)
@@ -47,9 +49,14 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     return DefaultModelLoader(load_config)
 
 
-def get_model(*, vllm_config: VllmConfig) -> nn.Module:
+def get_model(*,
+              vllm_config: VllmConfig,
+              model_config: Optional[ModelConfig] = None) -> nn.Module:
     loader = get_model_loader(vllm_config.load_config)
-    return loader.load_model(vllm_config=vllm_config)
+    if model_config is None:
+        model_config = vllm_config.model_config
+    return loader.load_model(vllm_config=vllm_config,
+                             model_config=model_config)
 
 
 __all__ = [

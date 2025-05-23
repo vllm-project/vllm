@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import Platform, PlatformEnum
 
@@ -51,11 +52,20 @@ class NeuronPlatform(Platform):
         assert (vllm_config.lora_config
                 is None), "LoRA is not supported for Neuron backend."
 
-        cache_config = vllm_config.cache_config
-        if cache_config:
+        if vllm_config.cache_config and vllm_config.model_config:
             # neuron needs block_size = max_model_len
             vllm_config.cache_config.block_size = \
                 vllm_config.model_config.max_model_len  # type: ignore
+
+        if vllm_config.model_config and vllm_config.model_config.use_mla:
+            logger.info(
+                "MLA is enabled on a non-GPU platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            vllm_config.scheduler_config.max_num_batched_tokens = max(
+                vllm_config.scheduler_config.max_model_len,
+                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
