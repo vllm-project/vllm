@@ -346,16 +346,8 @@ class Scheduler(SchedulerInterface):
                 num_new_external_computed_tokens = 0
                 load_kv_async = False
 
-                # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                # after async KV recvs are completed.
-                if request.num_computed_tokens > 0:
-                    assert request.kv_transfer_params is not None
-                    new_computed_blocks = KVCacheBlocks.create_empty()
-                    num_native_computed_tokens = 0
-                    num_computed_tokens = request.num_computed_tokens
-
-                # Otherwise, get already-cached tokens.
-                else:
+                # Get already-cached tokens.
+                if request.num_computed_tokens == 0:
                     # Get locally-cache tokens.
                     new_computed_blocks, num_new_native_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
@@ -365,20 +357,26 @@ class Scheduler(SchedulerInterface):
                     if self.connector is not None:
                         num_new_external_computed_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
-                                request, num_native_computed_tokens))
+                                request, num_new_native_computed_tokens))
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_new_native_computed_tokens +
                                            num_new_external_computed_tokens)
+                # KVTransfer: WAITING reqs have num_computed_tokens > 0
+                # after async KV recvs are completed.
+                else:
+                    assert request.kv_transfer_params is not None
+                    new_computed_blocks = KVCacheBlocks.create_empty()
+                    num_native_computed_tokens = 0
+                    num_computed_tokens = request.num_computed_tokens
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
+                # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
-                    # If loading async, allocate memory and put request
-                    # into the WAITING_FOR_REMOTE_KV state.
                     assert num_new_external_computed_tokens > 0
                     num_new_tokens = 0
-                # Otherwise, compute the number of tokens to be scheduled.
+                # Number of tokens to be scheduled.
                 else:
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
