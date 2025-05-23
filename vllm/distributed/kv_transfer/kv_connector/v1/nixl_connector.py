@@ -238,9 +238,14 @@ class NixlConnectorScheduler:
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
                                              "remote_port")):
+                    # If remote_blocks and num_external_tokens = 0, we have
+                    # a full prefix cache hit on the D worker. We need to call
+                    # send_notif in _read_blocks to free the memory on the P.
+                    local_block_ids = (blocks.get_unhashed_block_ids()
+                                       if num_external_tokens > 0 else [])
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (
-                        request, blocks.get_unhashed_block_ids())
+                        request, local_block_ids)
                 else:
                     logger.warning(
                         "Got invalid KVTransferParams: %s. This "
@@ -259,15 +264,6 @@ class NixlConnectorScheduler:
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
-            # For the case where there are no remote blocks to pull
-            # (block_ids is empty), we don't need to schedule
-            # an async read on the worker side.
-            if not block_ids:
-                logger.debug(
-                    "Skipping adding request %s to NixlConnectorMetadata, "
-                    "as there are no remote blocks to pull", req_id)
-                continue
-
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
