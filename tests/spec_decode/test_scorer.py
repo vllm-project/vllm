@@ -62,9 +62,8 @@ def test_scorer(model_name: str, batch_size: int, max_propose_len: int,
     scorer_worker = create_worker(Worker, model_name, block_size,
                                   num_gpu_blocks, seed)
     scorer_worker.model_runner.disable_logprobs = True  # accessed by mqa_scorer
-    scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor = True
-    scorer_worker.model_runner.model.sampler.\
-        should_modify_greedy_probs_inplace = True
+    scorer_worker.model_runner.sampler.include_gpu_probs_tensor = True
+    scorer_worker.model_runner.sampler.should_modify_greedy_probs_inplace = True
 
     vocab_size = scorer_worker.vocab_size
 

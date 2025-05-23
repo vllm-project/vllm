@@ -436,6 +436,36 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+# Ovis
+def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "AIDC-AI/Ovis2-1B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        dtype="half",
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_pixtral_hf(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "mistral-community/pixtral-12b"
 
@@ -685,6 +715,7 @@ model_example_map = {
     "mistral3": load_mistral3,
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
+    "ovis": load_ovis,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
     "pixtral_hf": load_pixtral_hf,
@@ -791,7 +822,9 @@ def parse_args():
     parser.add_argument(
         "--num-images",
         "-n",
-        choices=list(range(1, 13)),  # 12 is the max number of images
+        type=int,
+        choices=list(range(1,
+                           len(IMAGE_URLS) + 1)),  # the max number of images
         default=2,
         help="Number of images to use for the demo.")
     return parser.parse_args()

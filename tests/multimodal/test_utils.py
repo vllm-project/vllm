@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageChops
 
+from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (MediaConnector,
                                    merge_and_sort_multimodal_metadata)
@@ -24,6 +25,11 @@ TEST_IMAGE_URLS = [
     "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
     "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
     "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+]
+
+TEST_VIDEO_URLS = [
+    "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4",
+    "https://filesamples.com/samples/video/avi/sample_640x360.avi",
 ]
 
 
@@ -48,7 +54,7 @@ def get_supported_suffixes() -> tuple[str, ...]:
 
 
 def _image_equals(a: Image.Image, b: Image.Image) -> bool:
-    return (np.asarray(a) == np.asarray(b.convert(a.mode))).all()
+    return (np.asarray(a) == np.asarray(convert_image_mode(b, a.mode))).all()
 
 
 @pytest.mark.asyncio
@@ -132,6 +138,18 @@ async def test_fetch_image_local_files(image_url: str):
         with pytest.raises(RuntimeError, match="Cannot load local files"):
             connector.fetch_image(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
+@pytest.mark.parametrize("num_frames", [-1, 32, 1800])
+async def test_fetch_video_http(video_url: str, num_frames: int):
+    connector = MediaConnector()
+
+    video_sync = connector.fetch_video(video_url, num_frames=num_frames)
+    video_async = await connector.fetch_video_async(video_url,
+                                                    num_frames=num_frames)
+    assert np.array_equal(video_sync, video_async)
 
 
 # Used for the next two tests related to `merge_and_sort_multimodal_metadata`.
