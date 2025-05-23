@@ -153,18 +153,20 @@ class CoordinatorProc:
             poller = zmq.Poller()
             poller.register(publish_front, zmq.POLLIN)
             poller.register(output_back, zmq.POLLIN)
-            last_publish = 0
+            last_publish_time = 0
             while True:
-                elapsed = int(time.time() * 1000) - last_publish
+                elapsed = int(time.time() * 1000) - last_publish_time
+                # Send at 100 ms interval if the stats have changed,
+                # or otherwise every 3 seconds.
                 wait_for = 100 if self.stats_changed else 3000
                 events = poller.poll(timeout=max(0, wait_for - elapsed))
                 if not events:
-                    engine_list = self._get_engine_counts()
-                    to_publish = (engine_list, self.current_wave,
+                    # Poller timeout - publish current stats to front-ends.
+                    engine_req_counts_list = self._get_engine_counts()
+                    to_publish = (engine_req_counts_list, self.current_wave,
                                   self.engines_running)
-                    msg = msgspec.msgpack.encode(to_publish)
-                    publish_front.send(msg)
-                    last_publish = int(time.time() * 1000)
+                    publish_front.send(msgspec.msgpack.encode(to_publish))
+                    last_publish_time = int(time.time() * 1000)
                     self.stats_changed = False
                     continue
 
@@ -175,16 +177,25 @@ class CoordinatorProc:
                     if buffer == b'\x01':
                         # Ignore subscription messages.
                         continue
-                    engine_index, wave = msgspec.msgpack.decode(buffer)
+
+                    # We received a message on the front-end XPUB socket,
+                    # from an API server sending a new request while the
+                    # engines are paused, so that we can wake the other
+                    # engines.
+                    engine_to_exclude, wave = msgspec.msgpack.decode(buffer)
                     if wave < self.current_wave:
-                        engine_index = None
+                        # If the wave number is stale, ensure the message is
+                        # handled by all the engines.
+                        engine_to_exclude = None
                     if not self.engines_running:
                         self.engines_running = True
                         self.stats_changed = True
                         self._send_start_wave(publish_back, self.current_wave,
-                                              engine_index)
+                                              engine_to_exclude)
 
                 if output_back in events:
+                    # We received a message from one of the engines.
+
                     buffer = output_back.recv()
                     outputs: EngineCoreOutputs = decoder.decode(buffer)
 
@@ -193,12 +204,17 @@ class CoordinatorProc:
 
                     eng_index = outputs.engine_index
                     if outputs.scheduler_stats:
+                        # 1. Updated request load stats - update our local
+                        # state with these.
                         stats = self.engines[eng_index].request_counts
                         stats[0] = outputs.scheduler_stats.num_waiting_reqs
                         stats[1] = outputs.scheduler_stats.num_running_reqs
                         self.stats_changed = True
 
                     if outputs.wave_complete is not None:
+                        # 2. Notification from rank 0 engine that we've
+                        # moved into the global paused state
+                        # (engines_running==False)
                         if self.current_wave <= wave:
                             self.current_wave = wave + 1
                             self.engines_running = False
@@ -207,9 +223,9 @@ class CoordinatorProc:
                             wave > self.current_wave or
                         (wave == self.current_wave
                          and not self.engines_running)):
-                        # Engine received request for a non-current wave so
-                        # we must ensure that other engines progress to the
-                        # next wave.
+                        # 3. The engine received request for a non-current wave
+                        # so we must ensure that other engines progress to the
+                        # next wave (race condition handling).
                         self.current_wave = wave
                         self.engines_running = True
                         self.stats_changed = True
@@ -218,20 +234,15 @@ class CoordinatorProc:
     @staticmethod
     def _send_start_wave(socket: zmq.Socket, wave: int,
                          exclude_engine_index: Optional[int]):
+        """Broadcast the START_DP_WAVE message to all the engines.
+        It includes the current wave number and index of engine which
+        has already received a request with this wave number and so doesn't
+        require additional notification.
+        """
         wave_encoded = msgspec.msgpack.encode((wave, exclude_engine_index))
         socket.send_multipart(
             (EngineCoreRequestType.START_DP_WAVE.value, wave_encoded))
 
     def _get_engine_counts(self) -> list[list[int]]:
+        """Return list of [waiting, running] count lists for each engine."""
         return [e.request_counts for e in self.engines]
-
-    # def _get_engine_list(self) -> Optional[list[int]]:
-    #     shortlist: list[int] = []
-    #     min_counts = [sys.maxsize, sys.maxsize]
-    #     for i, e in enumerate(self.engines):
-    #         if e.request_counts <= min_counts:
-    #             if e.request_counts < min_counts:
-    #                 min_counts = e.request_counts
-    #                 shortlist.clear()
-    #             shortlist.append(i)
-    #     return None if len(shortlist) == len(self.engines) else shortlist

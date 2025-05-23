@@ -980,15 +980,15 @@ class DPAsyncMPClient(AsyncMPClient):
         min_counts = [sys.maxsize, sys.maxsize]
         eng_index = 0
         for i in range(num_engines):
-            # Start from client_index for to help with balancing when
-            # engines are empty.
+            # Start from client_index to help with balancing when engines
+            # are empty.
             idx = (self.client_index + i) % num_engines
             counts = self.lb_engines[idx]
             if counts < min_counts:
                 min_counts = counts
                 eng_index = idx
         # Adjust local counts for better balancing between stats updates
-        # from the coordinator (these are overwritten 10x per second).
+        # from the coordinator (which happen every 100ms).
         if min_counts[0]:
             min_counts[0] += 1
         else:

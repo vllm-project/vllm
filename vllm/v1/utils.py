@@ -264,14 +264,22 @@ class CoreEngine:
 
 @dataclass
 class EngineZmqAddresses:
+    # ZMQ input socket addresses for each front-end client (requests)
     inputs: list[str]
+    # ZMQ output socket addresses for each front-end client (responses)
     outputs: list[str]
+    # ZMQ input socket address of DP coordinator if applicable
     coordinator_input: Optional[str] = None
+    # ZMQ output socket address of DP coordinator if applicable
     coordinator_output: Optional[str] = None
 
 
 @dataclass
 class EngineHandshakeMetadata:
+    """Metadata sent to each engine process during startup handshake,
+    including addresses of the front-end ZMQ queues that they should
+    connect to.
+    """
     addresses: EngineZmqAddresses
     parallel_config: dict[str, Union[int, str]]
 
