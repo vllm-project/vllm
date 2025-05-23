@@ -8,6 +8,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -74,7 +75,7 @@ class AutoRoundConfig(QuantizationConfig):
                 f"group_size={self.group_size}, sym={self.sym})")
 
     @classmethod
-    def get_name(cls):  ## use str will trigger preci issue
+    def get_name(cls) -> QuantizationMethods :  ## use str will trigger preci issue
         return "auto-round"
 
     @classmethod
@@ -145,7 +146,6 @@ class AutoRoundConfig(QuantizationConfig):
             if isinstance(layer, FusedMoE):
                 use_marlin = check_moe_marlin_supports_layer(layer, group_size)
             else:
-
                 AWQ_TYPE_MAP = {
                     4: scalar_types.uint4,
                     8: scalar_types.uint8,
@@ -180,10 +180,11 @@ class AutoRoundConfig(QuantizationConfig):
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
             config = {
-                "linear_quant_method": "awq",
-                "weight_bits": weight_bits,
+                "quant_method": "awq",
+                "bits": weight_bits,
                 "group_size": group_size,
-                "zero_point": not sym,
+                "sym": sym,
+                "lm_head": False,
             }
             return MoeWNA16Config.from_config(config).get_quant_method(
                 layer, prefix)
@@ -251,11 +252,11 @@ class AutoRoundConfig(QuantizationConfig):
                 from vllm.model_executor.layers.quantization.moe_wna16 import (
                     MoeWNA16Config)
                 config = {
-                    "linear_quant_method": "gptq",
-                    "weight_bits": weight_bits,
+                    "quant_method": "gptq",
+                    "bits": weight_bits,
                     "group_size": group_size,
                     "sym": sym,
-                    "lm_head_quantized": False,
+                    "lm_head": False,
                 }
                 return MoeWNA16Config.from_config(config).get_quant_method(
                     layer, prefix)
