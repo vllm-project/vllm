@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
-import re
 from copy import deepcopy
 from unittest.mock import MagicMock
 
 import pytest
+import regex as re
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,

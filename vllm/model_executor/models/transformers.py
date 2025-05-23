@@ -14,11 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Wrapper around `transformers` models"""
-import re
 from collections.abc import Iterable
 from contextlib import nullcontext
 from typing import Literal, Optional, Union
 
+import regex as re
 import torch
 from torch import nn
 from transformers import AutoModel, PretrainedConfig, PreTrainedModel

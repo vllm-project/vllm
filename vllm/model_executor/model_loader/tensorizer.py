@@ -7,7 +7,6 @@ import dataclasses
 import io
 import json
 import os
-import re
 import threading
 import time
 from collections.abc import Generator
@@ -15,6 +14,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, BinaryIO, Optional, Union
 
+import regex as re
 import torch
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode

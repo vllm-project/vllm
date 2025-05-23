@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import re
 from collections.abc import Sequence
 from json import JSONDecoder
 from typing import Union
 
 import partial_json_parser
+import regex as re
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import random_tool_call_id

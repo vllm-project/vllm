@@ -14,10 +14,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal, Optional, TypedDict, Union
 
+import regex as re
 import torch
 import torch.nn as nn
 from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,

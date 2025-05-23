@@ -2,13 +2,13 @@
 
 # imports for guided decoding tests
 import json
-import re
 from typing import Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import regex as re
 import requests
 import torch
 from openai import BadRequestError, OpenAI

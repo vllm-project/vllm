@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
+import regex as re
 
 
 def has_xgrammar_unsupported_json_features(schema: dict) -> bool:

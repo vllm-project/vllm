@@ -7,12 +7,12 @@
 
 import copy
 import math
-import re
 import unicodedata
 from collections.abc import Collection, Mapping, Sequence, Set
 from functools import lru_cache, partial
 from typing import Callable, Literal, Optional, TypedDict, Union
 
+import regex as re
 import torch
 from torch import nn
 from torchvision import transforms

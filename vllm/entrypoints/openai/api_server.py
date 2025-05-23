@@ -7,7 +7,6 @@ import importlib
 import inspect
 import multiprocessing
 import os
-import re
 import signal
 import socket
 import tempfile
@@ -21,6 +20,7 @@ from json import JSONDecodeError
 from typing import Annotated, Optional, Union
 
 import prometheus_client
+import regex as re
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError

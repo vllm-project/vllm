@@ -6,7 +6,6 @@ import enum
 import hashlib
 import inspect
 import json
-import re
 import textwrap
 import uuid
 import warnings
@@ -20,6 +19,7 @@ from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args, get_origin)
 
+import regex as re
 import torch
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig

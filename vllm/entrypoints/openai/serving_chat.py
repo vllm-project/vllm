@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import re
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -10,6 +9,7 @@ from typing import Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
+import regex as re
 from fastapi import Request
 from pydantic import TypeAdapter
 
