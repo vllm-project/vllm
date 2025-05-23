@@ -690,7 +690,7 @@ class LLM:
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
-              If not provided, the model's default chat template will be used.
+                If not provided, the model's default chat template will be used.
             chat_template_content_format: The format to render message content.
 
                 - "string" will render the content as a string.
