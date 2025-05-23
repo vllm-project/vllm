@@ -427,8 +427,9 @@ class Scheduler(SchedulerInterface):
                     )
 
                 self.waiting.popleft()
-                # KVTransfer: wait until remote KVs have arrived.
                 if load_kv_async:
+                    # If loading async, allocate memory and put request
+                    # into the WAITING_FOR_REMOTE_KV state.
                     skipped_waiting_requests.appendleft(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
