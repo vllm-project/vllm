@@ -40,11 +40,11 @@ def main():
               max_model_len=1024,
               #load_format="dummy",
               ###############
-              tensor_parallel_size=1,
-              #data_parallel_size=2,
-              enable_expert_parallel=False,
+              #tensor_parallel_size=1,
+              data_parallel_size=2,
+              enable_expert_parallel=True,
               ###############
-              enable_microbatching=True, 
+              #enable_microbatching=True, 
     )
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects

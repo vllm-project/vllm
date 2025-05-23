@@ -4332,7 +4332,7 @@ class VllmConfig:
                 logger.warning_once(
                     "Piecewise compilation is not supported with "
                     "microbatching. Disabling piecewiseching compilation.")
-                self.compilation_config.level = CompilationLevel.DYNAMO_ONCE
+                self.compilation_config.level = CompilationLevel.NO_COMPILATION
              
 
         if self.model_config and self.model_config.use_mla and \

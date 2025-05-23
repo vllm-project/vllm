@@ -7,6 +7,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
+from vllm.v1.worker.ubatching import get_current_ubatch_context, yield_impl
 
 
 # Note use: layer.get_all_to_all() to get an AllToAll instance
@@ -117,7 +118,11 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_send=send,
                 do_recv=not send,
             )
+        
+        # if ubatch_ctx is not None:
+        #     ubatch_ctx.gpu_stream_wait()
         dispatch(True) # Send
+        yield_impl(gpu_wait=False)
         dispatch(False) # Recv
 
         return expert_x, expert_x_scale, expert_num_tokens
@@ -155,5 +160,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_send=send,
                 do_recv=not send,
             )
+        # if ubatch_ctx is not None:
+        #     ubatch_ctx.gpu_stream_wait()
         combine(True)
+        yield_impl(gpu_wait=False)
         combine(False)
