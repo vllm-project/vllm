@@ -77,6 +77,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# This value is chosen to have a balance between ITL and TTFT. Note it is
+# not optimized for throughput.
+DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
+
 # Exception strings for non-implemented encoder/decoder scenarios
 
 # Reminder: Please update docs/source/features/compatibility_matrix.md
