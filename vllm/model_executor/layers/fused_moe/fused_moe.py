@@ -1135,7 +1135,6 @@ def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
         return torch_vllm_inplace_fused_experts
     return torch_vllm_outplace_fused_experts
 
-
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
                   w2: torch.Tensor,

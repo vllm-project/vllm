@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
+    VLLM_USE_EXP_TRITON_KERNEL: bool = False
 
 
 def get_default_cache_root():
@@ -814,6 +815,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "pplx": use pplx kernels
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
+    # If set, use exp_triton
+    "VLLM_USE_EXP_TRITON_KERNEL":
+    lambda: bool(int(os.getenv("VLLM_USE_EXP_MOE", "1"))),
 }
 
 # --8<-- [end:env-vars-definition]
