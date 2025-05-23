@@ -900,11 +900,21 @@ def graph_capture(device: torch.device):
 logger = init_logger(__name__)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
+_ENABLE_QUICK_ALL_REDUCE = True
 
 
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
     _ENABLE_CUSTOM_ALL_REDUCE = enable
+
+
+def set_quick_all_reduce(enable: bool):
+    '''
+    qr brings acceleration through quantization,
+    but may reduce accuracy.
+    '''
+    global _ENABLE_QUICK_ALL_REDUCE
+    _ENABLE_QUICK_ALL_REDUCE = enable
 
 
 def init_distributed_environment(

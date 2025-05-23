@@ -37,7 +37,8 @@ Here is an example as of v0.4.0:
   "enable_lora": false,
   "enable_prefix_caching": false,
   "enforce_eager": false,
-  "disable_custom_all_reduce": true
+  "disable_custom_all_reduce": true,
+  "disable_quick_all_reduce": true,
 }
 ```
 

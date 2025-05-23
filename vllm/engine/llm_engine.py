@@ -302,6 +302,8 @@ class LLMEngine:
                     self.model_config.enforce_eager,
                     "disable_custom_all_reduce":
                     self.parallel_config.disable_custom_all_reduce,
+                    "disable_quick_all_reduce":
+                    self.parallel_config.disable_quick_all_reduce,
                 })
 
         self.cached_scheduler_outputs = [

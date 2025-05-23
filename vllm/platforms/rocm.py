@@ -375,6 +375,13 @@ class RocmPlatform(Platform):
         return any(gfx in gcn_arch for gfx in supported_archs)
 
     @classmethod
+    def use_quick_allreduce(cls) -> bool:
+        # We only enable quick allreduce for MI300 series
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        supported_archs = ['gfx94', 'gfx95']
+        return any(gfx in gcn_arch for gfx in supported_archs)
+
+    @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(
             device_id).multi_processor_count

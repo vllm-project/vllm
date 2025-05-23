@@ -201,6 +201,7 @@ def test_tensorizer_with_tp_path_without_template(vllm_runner, capfd):
             ),
             tensor_parallel_size=2,
             disable_custom_all_reduce=True,
+            disable_quick_all_reduce=True,
         )
     except RuntimeError:
         out, err = capfd.readouterr()
@@ -219,6 +220,7 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
     with vllm_runner(
             model_ref,
             disable_custom_all_reduce=True,
+            disable_quick_all_reduce=True,
             enforce_eager=True,
     ) as base_model:
         outputs = base_model.generate(prompts, sampling_params)
@@ -237,6 +239,7 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
             model=model_ref,
             tensor_parallel_size=2,
             disable_custom_all_reduce=True,
+            disable_quick_all_reduce=True,
             enforce_eager=True,
         ),
         tensorizer_config=tensorizer_config,
@@ -249,6 +252,7 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
             tensor_parallel_size=2,
             load_format="tensorizer",
             disable_custom_all_reduce=True,
+            disable_quick_all_reduce=True,
             enforce_eager=True,
             model_loader_extra_config=tensorizer_config) as loaded_vllm_model:
         deserialized_outputs = loaded_vllm_model.generate(

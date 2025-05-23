@@ -1669,6 +1669,38 @@ def free_shared_buffer(ptr: int) -> None:
     torch.ops._C_custom_ar.free_shared_buffer(ptr)
 
 
+# quick ar
+def init_quick_ar(world_size: int, rank: int) -> int:
+    """Initialize the QuickReduce environment and return a Device Comms Handle api."""
+    return torch.ops._C_quick_ar.init_quick_ar(world_size, rank)
+
+
+def qr_get_comm_handle(fa: int) -> torch.Tensor:
+    """Return a Tensor handle"""
+    return torch.ops._C_quick_ar.qr_get_comm_handle(fa)
+
+
+def qr_set_comm_handles(fa: int, handles: list[torch.Tensor]) -> None:
+    """Set the communication handle list."""
+    torch.ops._C_quick_ar.qr_set_comm_handles(fa, handles)
+
+
+def qr_all_reduce(fa: int, profile: int, inp: torch.Tensor,
+                  out: torch.Tensor) -> None:
+    """Perform all-reduce across devices with optional profile."""
+    torch.ops._C_quick_ar.qr_all_reduce(fa, profile, inp, out)
+
+
+def qr_destroy(fa: int) -> None:
+    """Clean up and destroy the Device Comms Handle."""
+    torch.ops._C_quick_ar.qr_destroy(fa)
+
+
+def is_quickreduce_available() -> None:
+    """Only used to test whether module was properly imported."""
+    torch.ops._C_quick_ar.is_quickreduce_available()
+
+
 def get_flash_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_heads_per_head_k: int,

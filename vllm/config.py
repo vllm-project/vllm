@@ -1702,6 +1702,12 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
+    disable_quick_all_reduce: bool = False
+    """Enable quick_allreduce to replace custom_allduce or nccl.
+    Supports fp8, Q8, Q6, Q4 quantization of bf16 and fp16.
+    Refer to envs.VLLM_QUICK_ALLREDUCE to control the quantization level.
+    Only supported on AMD.
+    """
 
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
     """This parameter is deprecated and will be removed in a future release.
@@ -1902,6 +1908,11 @@ class ParallelConfig:
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
+                "supported on current platform.")
+        if not current_platform.use_quick_allreduce():
+            self.disable_quick_all_reduce = True
+            logger.info(
+                "Disabled the quick all-reduce kernel because it is not "
                 "supported on current platform.")
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
@@ -2678,6 +2689,8 @@ class SpeculativeConfig:
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
             disable_custom_all_reduce,
+            disable_quick_all_reduce=target_parallel_config.
+            disable_quick_all_reduce,
             ray_workers_use_nsight=target_parallel_config.
             ray_workers_use_nsight,
             placement_group=target_parallel_config.placement_group,
@@ -4479,6 +4492,7 @@ class VllmConfig:
             f"tensor_parallel_size={self.parallel_config.tensor_parallel_size},"
             f" pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
+            f"disable_quick_all_reduce={self.parallel_config.disable_quick_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
@@ -4544,7 +4558,7 @@ def get_current_vllm_config() -> VllmConfig:
         # in ci, usually when we test custom ops/modules directly,
         # we don't set the vllm config. In that case, we set a default
         # config.
-        logger.warning("Current vLLM config is not set.")
+        # logger.warning("Current vLLM config is not set.")
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config
