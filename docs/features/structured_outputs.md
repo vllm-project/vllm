@@ -58,8 +58,8 @@ completion = client.chat.completions.create(
     model=model,
     messages=[
         {
-          "role": "user",
-          "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
+            "role": "user",
+            "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
         }
     ],
     extra_body={"guided_regex": r"\w+@\w+\.com\n", "stop": ["\n"]},
