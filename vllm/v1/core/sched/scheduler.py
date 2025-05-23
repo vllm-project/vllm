@@ -949,6 +949,13 @@ class Scheduler(SchedulerInterface):
         """
         if self.connector is None:
             return False, None
+        assert len(self.kv_cache_config.kv_cache_groups
+                   ) == 1, "KV connector only supports one KV cache group now"
+        if (request.status == RequestStatus.FINISHED_ABORTED and \
+            request.request_id not in
+            self.kv_cache_manager.single_type_manager.req_to_blocks):
+            return False, None
+
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
         return self.connector.request_finished(request, block_ids)
 
