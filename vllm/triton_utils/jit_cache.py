@@ -167,6 +167,7 @@ class JitCache(KernelInterface):
         fn,
         arg_names,
         check_keys,
+        check_specialization,
         cache_lock,
         cache_launch_grid=False,
         assume_const=None,
@@ -199,6 +200,7 @@ class JitCache(KernelInterface):
         if self.cache_lock is None:
             self.run = self._run_dynamic
         self.check_keys = check_keys
+        self.check_specialization = check_specialization
         self.assume_const = assume_const
         self.kernel_cache: dict[str, PreparedKernel] = {}
 
@@ -206,10 +208,19 @@ class JitCache(KernelInterface):
             cache_key = ""
             for c_arg_name in check_keys:
                 cache_key += str(kwargs[c_arg_name])
+            for c_arg_name in check_specialization:
+                if kwargs[c_arg_name] == 1:
+                    cache_key += f"__{c_arg_name} == 1__"
+                elif kwargs[c_arg_name] % 16:
+                    cache_key += (f"__({c_arg_name} > 1) && "
+                                  f"({c_arg_name} % 16 == 0)__")
+                else:
+                    cache_key += (f"__({c_arg_name} > 1) && "
+                                  f"({c_arg_name} % 16 != 0)__")
             return cache_key
 
         self.cache_index_func = calc_cache_index
-        if len(check_keys) == 0:
+        if len(check_keys) == 0 and len(check_specialization) == 0:
             self.cache_index_func = lambda ignore: "_default_"
 
     def _get_prepared_kernel(self, *args, **kwargs) -> PreparedKernel:
@@ -235,6 +246,10 @@ class JitCache(KernelInterface):
                 f"[{__print_name__}] ERROR: check_keys must only contain"
                 "parameters marked as tl.constexpr (non-constants will be "
                 "updated in all cases).")
+        if any(x in self.check_specialization for x in const_arg_names):
+            raise RuntimeError(
+                f"[{__print_name__}] ERROR: check_specialization must only"
+                " contain integer parameters NOT marked as tl.constexpr.")
         if self.assume_const:
             if any(x in self.assume_const for x in const_arg_names):
                 raise RuntimeError(
@@ -311,6 +326,13 @@ class JitCache(KernelInterface):
                         f"[{__print_name__}] type of check_key {key} "
                         f"{type(kwargs[key])} is not one of supported types: "
                         f"int, bool float.")
+            # check_specialization must be int
+            for key in self.check_specialization:
+                if type(kwargs[key]) not in [int, type(None)]:
+                    raise RuntimeError(
+                        f"[{__print_name__}] type of check_specialization "
+                        f"{key} {type(kwargs[key])} is not one of "
+                        f"supported types: int.")
             prepared_kernel = self._get_prepared_kernel(*args, **kwargs)
             if prepared_kernel.get_key() in self.kernel_cache:
                 logger.debug(
@@ -357,6 +379,13 @@ class JitCache(KernelInterface):
                         f"[{__print_name__}] type of check_key {key} "
                         f"{type(kwargs[key])} is not one of supported types: "
                         f"int, bool float.") from None
+            # check_specialization must be int
+            for key in self.check_specialization:
+                if type(kwargs[key]) not in [int, type(None)]:
+                    raise RuntimeError(
+                        f"[{__print_name__}] type of check_specialization "
+                        f"{key} {type(kwargs[key])} is not one of "
+                        f"supported types: int.") from None
             kernel_variant = self._get_prepared_kernel(*args, **kwargs)
             self.kernel_cache[kernel_variant.get_key()] = kernel_variant
 
@@ -365,29 +394,30 @@ class JitCache(KernelInterface):
 
 def jitcache(
     check_keys: list[str],
+    check_specialization: list[str],
     cache_lock: CacheLock | None = None,
     cache_launch_grid: bool = False,
     assume_const: list[str] | None = None,
 ):
     """
     Decorator for caching a :code:`triton.jit`'d function.
-    Basically, the :code:`JitCache` trades safety in all scenarios and high 
-    launch overhead of the original triton launcher against a low launch 
+    Basically, the :code:`JitCache` trades safety in all scenarios and high
+    launch overhead of the original triton launcher against a low launch
     overhead but reduced/relaxed safety checks applicable only to applications-
-    specific use. It is then the job of the developers to ensure that the 
+    specific use. It is then the job of the developers to ensure that the
     relaxed safety checks still hold for the particular application.
 
-    The :code:`JitCache` checks which compiled version of a kernel to use 
-    based on the mandatory :code:`check_keys` list. The developer needs to 
+    The :code:`JitCache` checks which compiled version of a kernel to use
+    based on the mandatory :code:`check_keys` list. The developer needs to
     select these arguments based on her/his knowledge of the application.
 
-    If a :code:`CacheLock` is provided, then the :code:`JitCache` adds new 
-    entries to the cache as long es the lock is unlocked. Once the CacheLock 
-    is locked and a kernel version is required that is not cached, it will 
-    throw an error. 
+    If a :code:`CacheLock` is provided, then the :code:`JitCache` adds new
+    entries to the cache as long es the lock is unlocked. Once the CacheLock
+    is locked and a kernel version is required that is not cached, it will
+    throw an error.
 
-    If no :code:`CacheLock` is provided, the :code:`JitCache` runs in the 
-    "dynamic" mode and creates new kernel variants if they are needed. This 
+    If no :code:`CacheLock` is provided, the :code:`JitCache` runs in the
+    "dynamic" mode and creates new kernel variants if they are needed. This
     simplifies the application design but could add unexpected latency jitters.
 
     :param check_keys: The list of tl.constexpr that are used to index
@@ -409,6 +439,7 @@ def jitcache(
             fn,
             fn.arg_names,
             check_keys,
+            check_specialization,
             cache_lock,
             cache_launch_grid,
             assume_const,

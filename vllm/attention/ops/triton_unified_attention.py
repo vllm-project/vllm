@@ -30,6 +30,7 @@ def apply_softcap(S, x):
 
 @jitcache(
     check_keys=[],
+    check_specialization=["num_seqs"],
     assume_const=[
         "scale",
         "k_scale",
