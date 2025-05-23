@@ -126,12 +126,12 @@ class AsyncMetricsCollector:
         """Copy rejection/typical-acceptance sampling metrics
         (number of accepted tokens, etc) to CPU asynchronously.
 
-        Returns a CUDA event recording when the copy is complete.
+        Returns a device event recording when the copy is complete.
         """
         assert self._copy_stream is not None
-        self._copy_stream.wait_stream(torch.cuda.current_stream())
+        self._copy_stream.wait_stream(current_platform.current_stream())
 
-        with torch.cuda.stream(self._copy_stream):
+        with current_platform.stream(self._copy_stream):
             self._aggregate_num_accepted_tokens.copy_(
                 self.spec_decode_sampler.num_accepted_tokens,
                 non_blocking=True)
@@ -142,7 +142,7 @@ class AsyncMetricsCollector:
             self._aggregate_num_draft_tokens = (
                 self.spec_decode_sampler.num_draft_tokens)
 
-        aggregate_metrics_ready = torch.cuda.Event()
+        aggregate_metrics_ready = current_platform.Event()
         aggregate_metrics_ready.record(self._copy_stream)
 
         return aggregate_metrics_ready
