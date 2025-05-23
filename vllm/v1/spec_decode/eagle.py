@@ -4,17 +4,17 @@ import torch.nn as nn
 
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
-                         get_layers_from_vllm_config, set_current_vllm_config)
+                         get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
-from vllm.model_executor.models import ModelRegistry
+from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flash_attn import (CommonAttentionMetadata,
+                                                   FlashAttentionMetadata)
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.utils import (advance_state_kernel,
+                                       prepare_eagle_input_kernel)
 
 logger = init_logger(__name__)
 
@@ -27,11 +27,14 @@ class EagleProposer:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        runner=None,
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
+
+        self.runner = runner
 
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -108,24 +111,46 @@ class EagleProposer:
         # FA requires seq_len to have dtype int32.
         seq_lens = (target_positions[last_token_indices] + 1).int()
 
-        # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        max_seq_len = seq_lens.max().item()
-        max_num_tokens = (cu_num_tokens[1:] - cu_num_tokens[:-1]).max().item()
-        attn_metadata = FlashAttentionMetadata(
-            num_actual_tokens=num_tokens,
-            max_query_len=max_num_tokens,
-            query_start_loc=cu_num_tokens,
-            max_seq_len=max_seq_len,
-            seq_lens=seq_lens,
-            block_table=block_table,
-            slot_mapping=target_slot_mapping,
-            # TODO(woosuk): Support cascade attention.
-            use_cascade=False,
-            common_prefix_len=0,
-            cu_prefix_query_lens=None,
-            prefix_kv_lens=None,
-            suffix_kv_lens=None,
-        )
+        if self.method in ["eagle", "eagle3"]:
+            # FIXME(woosuk): The below two ops cause synchronization. Optimize.
+            max_seq_len = seq_lens.max().item()
+            max_num_tokens = (cu_num_tokens[1:] -
+                              cu_num_tokens[:-1]).max().item()
+            attn_metadata = FlashAttentionMetadata(
+                num_actual_tokens=num_tokens,
+                max_query_len=max_num_tokens,
+                query_start_loc=cu_num_tokens,
+                max_seq_len=max_seq_len,
+                seq_lens=seq_lens,
+                block_table=block_table,
+                slot_mapping=target_slot_mapping,
+                # TODO(woosuk): Support cascade attention.
+                use_cascade=False,
+                common_prefix_len=0,
+                cu_prefix_query_lens=None,
+                prefix_kv_lens=None,
+                suffix_kv_lens=None,
+            )
+        elif self.method == "deepseek_mtp":
+            query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
+            max_query_len = query_lens.max().item()
+
+            common_attn_metadata = CommonAttentionMetadata(
+                query_start_loc=cu_num_tokens, seq_lens=seq_lens)
+
+            assert self.runner is not None
+
+            # FIXME: need to consider multiple kv_cache_groups
+            attn_metadata = self.runner.attn_metadata_builder.build(
+                num_reqs=batch_size,
+                num_actual_tokens=num_tokens,
+                max_query_len=max_query_len,
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+        else:
+            raise ValueError(f"Unsupported method: {self.method}")
+
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -138,11 +163,15 @@ class EagleProposer:
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
-            last_hidden_states, hidden_states = self.model(
-                input_ids=self.input_ids[:num_input_tokens],
-                positions=self.positions[:num_input_tokens],
-                hidden_states=self.hidden_states[:num_input_tokens],
+            ret_hidden_states = self.model(
+                self.input_ids[:num_input_tokens],
+                self.positions[:num_input_tokens],
+                self.hidden_states[:num_input_tokens],
             )
+            if self.method == "deepseek_mtp":
+                last_hidden_states = ret_hidden_states
+            else:
+                last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
@@ -151,6 +180,10 @@ class EagleProposer:
         if self.num_speculative_tokens == 1:
             # [batch_size, 1]
             return draft_token_ids.view(-1, 1)
+
+        # TODO: Currently, MTP module released by deepseek only has
+        # one layer. Adapt this code to support multiple layers once
+        # there's a multi-layer MTP module.
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
@@ -177,9 +210,9 @@ class EagleProposer:
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
                 last_hidden_states, hidden_states = self.model(
-                    input_ids=self.input_ids[:input_batch_size],
-                    positions=self.positions[:input_batch_size],
-                    hidden_states=self.hidden_states[:input_batch_size],
+                    self.input_ids[:input_batch_size],
+                    self.positions[:input_batch_size],
+                    self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
@@ -198,7 +231,8 @@ class EagleProposer:
                                   hidden_states: torch.Tensor,
                                   attn_metadata: FlashAttentionMetadata,
                                   batch_size: int):
-        grid = lambda meta: (triton.cdiv(batch_size, meta['BLOCK_SIZE']), )
+        grid = lambda meta: (
+            (batch_size + meta['BLOCK_SIZE']) // meta['BLOCK_SIZE'], )
         attn_metadata.slot_mapping = torch.empty_like(positions)
         advance_state_kernel[grid](
             # === Input tensors ===
@@ -269,7 +303,7 @@ class EagleProposer:
 
         batch_size = num_rejected_tokens.shape[0]
         BLOCK_SIZE = 1024
-        prepare_input_kernel[(batch_size, )](
+        prepare_eagle_input_kernel[(batch_size, )](
             token_indices,
             cu_target_query_lens,
             cu_num_tokens,
@@ -278,48 +312,28 @@ class EagleProposer:
         return cu_num_tokens, token_indices
 
     def load_model(self, target_model: nn.Module) -> None:
-        loader = get_model_loader(self.vllm_config.load_config)
-        target_layer_num = self.vllm_config.model_config.get_num_layers(
-            self.vllm_config.parallel_config)
+        draft_model_config = \
+            self.vllm_config.speculative_config.draft_model_config
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
-        draft_model_config = \
-            self.vllm_config.speculative_config.draft_model_config
-        # FIXME(lily): This does not handle with distributed inference.
-        target_device = self.vllm_config.device_config.device
-        # We need to set the vllm_config here to register attention
-        # layers in the forward context.
-        with set_default_torch_dtype(
-                draft_model_config.dtype), set_current_vllm_config(
-                    self.vllm_config):
-            draft_model_cls, arch = ModelRegistry.resolve_model_cls(
-                draft_model_config.architectures)
-            self.model = draft_model_cls(
-                vllm_config=self.vllm_config,
-                start_layer_id=target_layer_num).to(target_device)
+        self.model = get_model(vllm_config=self.vllm_config,
+                               model_config=draft_model_config)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
         assert len(draft_attn_layer_names) == 1
         self.attn_layer_name = next(iter(draft_attn_layer_names))
-        loaded_weights = self.model.load_weights(
-            loader.get_all_weights(draft_model_config, self.model))
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
-            assert "model.embed_tokens.weight" not in loaded_weights, \
-            "For PP = 1, Eagle draft should share embed with target model"
             logger.info(
                 "The EAGLE head shares the same vocab embedding" \
                 " with the target model."
             )
             self.model.model.embed_tokens = target_model.model.embed_tokens
         else:
-            assert "model.embed_tokens.weight" in loaded_weights, \
-            "For PP > 1, Eagle draft checkpoint should its own copy of "
-            " the model.embed_tokens.weight"
             logger.info(
                 "Since PP > 1, the EAGLE head loaded its own vocab embedding" \
                 " weights instead of sharing them with the target model."
@@ -341,9 +355,9 @@ class EagleProposer:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
             self.model(
-                input_ids=self.input_ids[:num_tokens],
-                positions=self.positions[:num_tokens],
-                hidden_states=self.hidden_states[:num_tokens],
+                self.input_ids[:num_tokens],
+                self.positions[:num_tokens],
+                self.hidden_states[:num_tokens],
             )
 
 
@@ -388,106 +402,3 @@ def compute_probs_and_sample_next_token(
             next_token_ids,
         )
     return next_token_ids, probs
-
-
-@triton.jit
-def prepare_input_kernel(
-    out_ptr,
-    cu_query_lens_ptr,
-    cu_num_tokens_ptr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    # [start_pos, end_pos)
-    start_pos = tl.load(cu_num_tokens_ptr + pid)
-    end_pos = tl.load(cu_num_tokens_ptr + pid + 1)
-    num_tokens = end_pos - start_pos
-
-    index_start = tl.load(cu_query_lens_ptr + pid)
-
-    num_blocks = tl.cdiv(num_tokens, BLOCK_SIZE)
-    for i in tl.range(num_blocks):
-        offset = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        tl.store(
-            out_ptr + start_pos + offset,
-            index_start + offset,
-            mask=offset < num_tokens,
-        )
-
-
-@triton.jit
-def advance_state_kernel(
-    draft_token_ids_ptr,
-    positions_ptr,
-
-    # === Model input buffers to be updated ===
-    model_input_ids_ptr,
-    model_positions_ptr,
-
-    # === Metadata tensors ===
-    seq_lens_ptr,
-    block_table_ptr,
-    slot_mapping_ptr,
-
-    # === Scalar configuration ===
-    model_max_len: int,
-    model_block_size: int,
-    model_block_stride: int,
-
-    # === Execution control ===
-    n_elements: int,
-    BLOCK_SIZE: tl.constexpr,
-    PADDING_SLOT_ID: tl.constexpr,
-):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE
-    offsets = block_start + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    draft_token_list_last = tl.load(draft_token_ids_ptr + offsets, mask=mask)
-    position = tl.load(positions_ptr + offsets, mask=mask)
-    seq_lens = tl.load(seq_lens_ptr + offsets, mask=mask)
-
-    # Update the inputs.
-    # cast to int32 is crucial when eagle model is compiled.
-    # tensor.argmax() returns int64 by default.
-    input_id = draft_token_list_last.cast(tl.int32)
-    position = position + 1
-
-    # NOTE(woosuk): We should handle the case where the draft model
-    # generates tokens beyond the max model length. Since it is complex
-    # to remove such requests from the batch, we keep them in the batch
-    # but adjust the position ids and slot mappings to avoid the
-    # out-of-range access during the model execution. The draft tokens
-    # generated with this adjustment should be ignored.
-    exceeds_max_model_len = position >= model_max_len
-    # Mask out the position ids that exceed the max model length.
-    # Otherwise, we may get out-of-range error in RoPE.
-    clamped_position = tl.where(exceeds_max_model_len, 0, position)
-
-    # For the requests that exceed the max model length, we set the
-    # sequence length to 1 to minimize their overheads in attention.
-    seq_lens += 1
-    seq_lens = tl.where(exceeds_max_model_len, 1, seq_lens)
-
-    block_numbers = clamped_position // model_block_size
-    block_offsets = clamped_position % model_block_size
-
-    block_ids = tl.load(block_table_ptr + model_block_stride * offsets +
-                        block_numbers,
-                        mask=mask)
-
-    # Compute slot mapping
-    slot_mapping = block_ids * model_block_size + block_offsets
-
-    # Mask out the slot mappings that exceed the max model length.
-    # Otherwise, the KV cache will be inadvertently updated with the
-    # padding tokens.
-    slot_mapping = tl.where(exceeds_max_model_len, PADDING_SLOT_ID,
-                            slot_mapping)
-
-    tl.store(model_input_ids_ptr + offsets, input_id, mask=mask)
-    tl.store(positions_ptr + offsets, position, mask=mask)
-    tl.store(model_positions_ptr + offsets, clamped_position, mask=mask)
-    tl.store(seq_lens_ptr + offsets, seq_lens, mask=mask)
-    tl.store(slot_mapping_ptr + offsets, slot_mapping, mask=mask)
