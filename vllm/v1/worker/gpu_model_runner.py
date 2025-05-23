@@ -25,7 +25,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader import TensorizerLoader, get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -60,6 +60,7 @@ from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
 if TYPE_CHECKING:
     import xgrammar as xgr
 
+    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
@@ -1533,6 +1534,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
+
+    def save_tensorized_model(
+        self,
+        tensorizer_config: "TensorizerConfig",
+    ) -> None:
+        TensorizerLoader.save_model(
+            self.model,
+            tensorizer_config=tensorizer_config,
+        )
 
     def _get_prompt_logprobs_dict(
         self,
