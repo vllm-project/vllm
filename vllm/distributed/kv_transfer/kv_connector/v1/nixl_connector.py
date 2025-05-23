@@ -259,6 +259,15 @@ class NixlConnectorScheduler:
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
+            # For the case where there are no remote blocks to pull
+            # (block_ids is empty), we don't need to schedule
+            # an async read on the worker side.
+            if not block_ids:
+                logger.debug(
+                    "Skipping adding request %s to NixlConnectorMetadata, "
+                    "as there are no remote blocks to pull", req_id)
+                continue
+
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
@@ -528,6 +537,7 @@ class NixlConnectorWorker:
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
         engine_id = nixl_agent_meta.engine_id
+        assert engine_id != self.engine_id, "Conflict engine id found!"
         if engine_id in self._remote_agents:
             return
 
