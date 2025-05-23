@@ -29,6 +29,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
+from vllm.v1.worker.ubatching import get_current_ubatch_context
 
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 
@@ -442,7 +443,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         if isinstance(prepare_finalize,
                       (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
-            logger.debug("BatchedTritonExperts %s", self.moe)
+            print("BatchedTritonExperts %s", self.moe)
+            
             experts = BatchedTritonExperts(
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
                 world_size=world_size,
@@ -454,7 +456,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 block_shape=None,
             )
         else:
-            logger.debug("TritonExperts %s", self.moe)
+            print("TritonExperts %s", self.moe)
             experts = TritonExperts(
                 use_fp8_w8a8=False,
                 use_int8_w8a8=False,
@@ -1298,6 +1300,9 @@ class FusedMoE(torch.nn.Module):
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = MOE_DP_CHUNK_SIZE
 
+        if (ubatch_ctdx := get_current_ubatch_context()) is not None:
+            print("in fused moe, ubatch:", ubatch_ctdx.id, "chunk size:", max_tokens_across_dp, "moe_dp_chunk_size_per_rank", moe_dp_chunk_size_per_rank)
+
         num_tokens = full_hidden_states.size(0)
         for chunk_start_ in range(0, max_tokens_across_dp,
                                   moe_dp_chunk_size_per_rank):
@@ -1396,6 +1401,8 @@ def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.quant_method is not None
+    if (ubatch_ctx := get_current_ubatch_context()) is not None:
+        print("in fused moe, ubatch:", ubatch_ctx.id, self)
 
     return self.forward_impl(hidden_states, router_logits)
 

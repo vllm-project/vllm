@@ -1287,10 +1287,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                    scheduler_output: Optional["SchedulerOutput"] = None,
                    is_dummy_run: bool = False):
         
+        num_dummy_tokens = num_scheduled_tokens if is_dummy_run else 1
+        
         def model_inputs(tokens_slice: slice, use_dummy_input: bool) -> tuple:
             if use_dummy_input:
-                num_tokens = num_scheduled_tokens or 1
-                return self._get_dummy_model_inputs(num_tokens)
+                return self._get_dummy_model_inputs(num_dummy_tokens)
             else:
                 assert scheduler_output is not None
                 return self._get_model_inputs(tokens_slice, scheduler_output)
@@ -1301,7 +1302,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 model_inputs(token_slice, use_dummy_input)
             with context:
                 if isinstance(context, UBatchContext):
-                    print(f"Running ubatch {context.id} with input_ids {input_ids.shape} and positions {positions.shape}")
+                    print(f"Running ubatch {context.id} with input_ids {input_ids.shape} and positions {positions.shape} use_dummy_input {use_dummy_input} token_slice {token_slice}")
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -1333,18 +1334,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if not hasattr(self, "ubatch_streams"):
                 # Create the ubatch streams
                 self.ubatch_streams = [torch.cuda.Stream(self.device)  for _ in range(len(ubatch_slices))]
-                            
-            ubatch_fwd_ctxs = [create_forward_context(
-                    attn_metadata[i] if attn_metadata is not None else None,
-                    self.vllm_config, num_tokens=(tokens_slice.stop - tokens_slice.start)
-                ) for i, (_, tokens_slice) in enumerate(ubatch_slices)]
+        
+            
+            # We have to be careful creating the forward contexts here otherwise we can end
+            #  up with the dummy contexts have num_tokens set to 0 
+            # ubatch_fwd_ctxs = [create_forward_context(
+            #         attn_metadata[i] if attn_metadata is not None else None,
+            #         self.vllm_config, num_tokens=(tokens_slice.stop - tokens_slice.start)
+            #     ) for i, (_, tokens_slice) in enumerate(ubatch_slices)]
             ubatch_ctxs, start_hook = make_ubatch_context_chain(
                 len(ubatch_slices),
-                fwd_ctxs=ubatch_fwd_ctxs,
+                #fwd_ctxs=ubatch_fwd_ctxs,
                 streams=self.ubatch_streams, #stream=root_stream, # Only works currently if everything is run on the same stream
                 device=self.device)
             setup_done = threading.Event()
             ubatch_threads = []
+            
+            # Initialize Events? not sure if this helps
+            for ubatch_ctx in ubatch_ctxs:
+                ubatch_ctx.gpu_wait_event.record(ubatch_ctx.stream)
+                ubatch_ctx.stream.wait_event(ubatch_ctx.gpu_wait_event)
             
             # Ubatches will manually manage the forward context, so we override
             # it to None here so we can have it restored correctly later
@@ -1353,6 +1362,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for i, (_, tokens_slice) in enumerate(ubatch_slices):
                     is_dummy_ubatch = tokens_slice.stop <= tokens_slice.start
                     assert not is_dummy_ubatch or i == len(ubatch_slices) - 1 or is_dummy_run
+                    
+                    print("ubatch", i, "tokens slice", tokens_slice, "is dummy ubatch", is_dummy_ubatch, "is dummy run", is_dummy_run)
+                    
+                    num_tokens = num_dummy_tokens if is_dummy_ubatch or is_dummy_run else (tokens_slice.stop - tokens_slice.start)
+                    ubatch_ctxs[i].forward_context = create_forward_context(
+                        attn_metadata[i] if attn_metadata is not None else None,
+                        self.vllm_config, num_tokens=num_tokens)
                     
                     thread = threading.Thread(target=_ubatch_thread, args=(
                         ubatch_ctxs[i],

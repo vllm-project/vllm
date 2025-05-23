@@ -17,7 +17,7 @@ class UBatchContext:
     def __init__(self,
                  id: int,
                  stream: torch.cuda.Stream,
-                 fwd_ctx: forward_context.ForwardContext,
+                 #fwd_ctx: forward_context.ForwardContext,
                  cpu_wait_event: threading.Event, 
                  cpu_signal_event: threading.Event,
                  gpu_wait_event: torch.cuda.Event,
@@ -27,7 +27,7 @@ class UBatchContext:
         self.id = id
         self.stream = stream
         self.original_stream = current_stream()
-        self.forward_context = fwd_ctx
+        self.forward_context = None #fwd_ctx
         self.cpu_wait_event = cpu_wait_event
         self.cpu_signal_event = cpu_signal_event
         self.gpu_wait_event = gpu_wait_event
@@ -80,6 +80,7 @@ class UBatchContext:
     #  until ubatch0-dispatch is done avoiding overlapping dispatches that
     #  might share underlying buffers
     def gpu_stream_wait(self):
+        print("Waiting ubatch %d on %s in stream %s" % (self.id, self.gpu_wait_event, self.stream))
         self.stream.wait_event(self.gpu_wait_event)
 
     def _yield(self, gpu_wait: bool = True):
@@ -92,6 +93,7 @@ class UBatchContext:
 
     def _signal(self):
         # Wait for the next batch to signal back
+        print(f"signaling ubatch {self.id} to {self.gpu_signal_event} on {self.stream}")
         self.gpu_signal_event.record(self.stream)
         # Signal that this batch reached the barrier
         self.cpu_signal_event.set()
@@ -134,7 +136,7 @@ def yield_(x: torch.Tensor, schedule: str="default") -> None:
 """
 def make_ubatch_context_chain(
     num_micro_batches: int,
-    fwd_ctxs: forward_context.ForwardContext,
+    #fwd_ctxs: forward_context.ForwardContext,
     streams: Optional[list[torch.Stream]] = None,
     device: Optional[torch.device] = None
 ) -> list[UBatchContext]:
@@ -152,7 +154,7 @@ def make_ubatch_context_chain(
         stream = (streams[i] if streams else None) or torch.cuda.Stream(device)
         ctx = UBatchContext(id=i,
                             stream=stream, 
-                            fwd_ctx=fwd_ctxs[i],
+                            #fwd_ctx=fwd_ctxs[i],
                             cpu_wait_event=cpu_events[i],
                             cpu_signal_event=cpu_events[(i + 1) % num_micro_batches],
                             gpu_wait_event=gpu_events[i],
@@ -163,6 +165,7 @@ def make_ubatch_context_chain(
         
     def start_hook(from_stream: torch.cuda.Stream):
         ctxs[0].gpu_wait_event.record(from_stream)
+        print('singal to ubatch %d event %s from stream %s' % (ctxs[0].id, ctxs[0].gpu_wait_event, from_stream))
         ctxs[0].cpu_wait_event.set()        
 
     return ctxs, start_hook

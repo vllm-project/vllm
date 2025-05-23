@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 import torch
+from vllm.v1.worker.ubatching import get_current_ubatch_context
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -335,9 +336,19 @@ class FusedMoEModularKernel(torch.nn.Module):
                                  device=a1.device,
                                  dtype=workspace_dtype)
 
+        if (ubatch_ctx := get_current_ubatch_context()) is not None:
+            print("in modular moe, ubatch:", ubatch_ctx.id)
+
         a1q, a1q_scale, expert_num_tokens = self.prepare_finalize.prepare(
             a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
             expert_map, apply_router_weight_on_input)
+
+        if (ubatch_ctx := get_current_ubatch_context()) is not None:
+            print("in modular moe2, ubatch:", ubatch_ctx.id, self.fused_experts)
+
+        print("pre synchronize")
+        torch.cuda.synchronize(a1.device)
+        print("post synchronize")
 
         fused_out = self.fused_experts.apply(
             a1q,
@@ -357,6 +368,9 @@ class FusedMoEModularKernel(torch.nn.Module):
             workspace2=workspace2,
             expert_num_tokens=expert_num_tokens,
         )
+
+        if (ubatch_ctx := get_current_ubatch_context()) is not None:
+            print("in modular moe3, ubatch:", ubatch_ctx.id, self.fused_experts)
 
         self.prepare_finalize.finalize(output, fused_out, topk_weights,
                                        topk_ids, apply_router_weight_on_input)
