@@ -367,7 +367,7 @@ class Scheduler(SchedulerInterface):
                 else:
                     assert request.kv_transfer_params is not None
                     new_computed_blocks = KVCacheBlocks.create_empty()
-                    num_native_computed_tokens = 0
+                    num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
                 encoder_inputs_to_schedule = None
@@ -403,7 +403,7 @@ class Scheduler(SchedulerInterface):
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_new_external_computed_tokens,
-                    num_native_computed_tokens,
+                    num_new_local_computed_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
