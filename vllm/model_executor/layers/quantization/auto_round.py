@@ -147,12 +147,13 @@ class AutoRoundConfig(QuantizationConfig):
                 4: scalar_types.uint4,
                 8: scalar_types.uint8,
             }
-            use_marlin = (weight_bits in AWQ_TYPE_MAP) and check_marlin_supported(
-                AWQ_TYPE_MAP[weight_bits], group_size,
-                not sym)
+            use_marlin = (weight_bits
+                          in AWQ_TYPE_MAP) and check_marlin_supported(
+                              AWQ_TYPE_MAP[weight_bits], group_size, not sym)
 
             if isinstance(layer, FusedMoE):
-                use_marlin = use_marlin and check_moe_marlin_supports_layer(layer, group_size)
+                use_marlin = use_marlin and check_moe_marlin_supports_layer(
+                    layer, group_size)
 
         else:
             use_marlin = False
@@ -224,7 +225,8 @@ class AutoRoundConfig(QuantizationConfig):
                               group_size,
                               has_zp=not sym))
             if isinstance(layer, FusedMoE):
-                use_marlin = use_marlin and check_moe_marlin_supports_layer(layer, group_size)
+                use_marlin = use_marlin and check_moe_marlin_supports_layer(
+                    layer, group_size)
         else:
             use_marlin = False
         if use_marlin:
