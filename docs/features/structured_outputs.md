@@ -111,11 +111,10 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-:::{tip}
-While not strictly necessary, normally it´s better to indicate in the prompt the
-JSON schema and how the fields should be populated. This can improve the
-results notably in most cases.
-:::
+!!! tip
+    While not strictly necessary, normally it´s better to indicate in the prompt the
+    JSON schema and how the fields should be populated. This can improve the
+    results notably in most cases.
 
 Finally we have the `guided_grammar` option, which is probably the most
 difficult to use, but it´s really powerful. It allows us to define complete

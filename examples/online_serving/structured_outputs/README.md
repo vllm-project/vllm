@@ -24,9 +24,8 @@ uvx --from git+https://github.com/vllm-project/vllm#subdirectory=examples/online
 
 See <project:#structured-outputs> feature docs for more information.
 
-:::{tip}
-If vLLM is running remotely, then set `OPENAI_BASE_URL=<remote_url>` before running the script.
-:::
+!!! tip
+    If vLLM is running remotely, then set `OPENAI_BASE_URL=<remote_url>` before running the script.
 
 ## Usage
 
