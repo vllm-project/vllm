@@ -196,7 +196,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
                 elif self.speculative_config.use_eagle():
-                    self.drafter = EagleProposer(self.vllm_config, self.device, 
+                    self.drafter = EagleProposer(self.vllm_config, self.device,
                                                  self)  # type: ignore
                     if self.speculative_config.method == "eagle3":
                         self.use_aux_hidden_state_outputs = True
@@ -1304,7 +1304,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampled_token_ids = sampler_output.sampled_token_ids
         max_gen_len = sampled_token_ids.shape[-1]
         if max_gen_len == 1:
-            # GPU tensor to CPU list? sync point?
             # No spec decode tokens.
             valid_sampled_token_ids = sampled_token_ids.tolist()
         else:
@@ -1729,9 +1728,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 hidden_states = outputs
 
-            if self.use_spec_decode and \
-                self.speculative_config.method in (
-                    'eagle', 'eagle3', "deepseek_mtp"):
+            if self.use_spec_decode and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
                 self.drafter.dummy_run(num_tokens)
 

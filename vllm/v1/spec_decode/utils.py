@@ -20,7 +20,7 @@ def is_spec_decode_supported(req_id: str, input_batch: InputBatch) -> bool:
 
 
 @triton.jit
-def prepare_input_kernel(
+def prepare_eagle_input_kernel(
     out_ptr,
     cu_query_lens_ptr,
     cu_num_tokens_ptr,
