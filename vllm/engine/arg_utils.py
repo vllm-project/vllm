@@ -4,7 +4,6 @@
 import argparse
 import dataclasses
 import json
-import re
 import sys
 import threading
 import warnings
@@ -13,6 +12,7 @@ from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
 
+import regex as re
 import torch
 from typing_extensions import TypeIs, deprecated
 
