@@ -177,7 +177,8 @@ class KVCacheManager:
             self.prefix_cache_stats.queries += len(request.all_token_ids)
             self.prefix_cache_stats.hits += num_new_computed_tokens
 
-        return KVCacheBlocks(computed_blocks), num_new_computed_tokens
+        return KVCacheBlocks(self.coordinator.to_group_format(
+            computed_blocks)), num_new_computed_tokens
 
     def allocate_slots(
         self,
@@ -275,7 +276,7 @@ class KVCacheManager:
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
-            return KVCacheBlocks(new_blocks)
+            return KVCacheBlocks(self.coordinator.to_group_format(new_blocks))
 
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
@@ -284,7 +285,7 @@ class KVCacheManager:
             request, self.req_to_block_hashes[request.request_id],
             num_computed_tokens + num_new_tokens - len(request.spec_token_ids))
 
-        return KVCacheBlocks(new_blocks)
+        return KVCacheBlocks(self.coordinator.to_group_format(new_blocks))
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -374,4 +375,5 @@ class KVCacheManager:
     def get_block_ids(self, request_id: str) -> list[list[int]]:
         """Get the block ids of a request."""
         return KVCacheBlocks(
-            self.coordinator.get_blocks(request_id)).get_block_ids()
+            self.coordinator.to_group_format(
+                self.coordinator.get_blocks(request_id))).get_block_ids()

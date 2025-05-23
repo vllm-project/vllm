@@ -91,7 +91,7 @@ class KVCacheCoordinator:
                                              new_computed_blocks[i])
 
     def allocate_new_blocks(self, request_id: str,
-                            num_tokens: int) -> list[list[KVCacheBlock]]:
+                            num_tokens: int) -> list[list[KVCacheBlockBundle]]:
         """
         Allocate new blocks for the request to give it at least `num_tokens` 
         token slots.
@@ -108,7 +108,7 @@ class KVCacheCoordinator:
         for manager in self.single_type_managers:
             new_blocks.append(
                 manager.allocate_new_blocks(request_id, num_tokens))
-        return self.to_groups(new_blocks)
+        return new_blocks
 
     def cache_blocks(self, request: Request,
                      block_hashes: dict[int, list[BlockHashType]],
@@ -175,21 +175,21 @@ class KVCacheCoordinator:
         for manager in self.single_type_managers:
             manager.remove_skipped_blocks(request_id, num_computed_tokens)
 
-    def get_blocks(self, request_id: str) -> list[list[KVCacheBlock]]:
+    def get_blocks(self, request_id: str) -> list[list[KVCacheBlockBundle]]:
         """
         Get the blocks for the request.
         """
-        return self.to_groups([
+        return [
             manager.req_to_blocks[request_id]
             for manager in self.single_type_managers
-        ])
+        ]
 
     def find_longest_cache_hit(
         self,
         request_id: str,
         block_hashes_dict: dict[int, list[BlockHashType]],
         max_cache_hit_length: int,
-    ) -> tuple[list[list[KVCacheBlock]], int]:
+    ) -> tuple[list[list[KVCacheBlockBundle]], int]:
         """
         Find the longest cache hit for the request.
 
@@ -211,7 +211,7 @@ class KVCacheCoordinator:
                 block_hashes_dict[block_size], max_length=max_cache_hit_length)
             if len(hit_blocks) > 0:
                 self.computed_blocks[request_id] = [hit_blocks]
-            return self.to_groups([hit_blocks]), len(hit_blocks) * block_size
+            return [hit_blocks], len(hit_blocks) * block_size
 
         elif len(self.single_type_managers) == 2:
             # For simplicity, we assume the first manager is for full
@@ -243,7 +243,7 @@ class KVCacheCoordinator:
             hit_blocks_two_mgr = [hit_blocks_full_attn, hit_blocks_other_attn]
             if hit_length > 0:
                 self.computed_blocks[request_id] = hit_blocks_two_mgr
-            return self.to_groups(hit_blocks_two_mgr), hit_length
+            return hit_blocks_two_mgr, hit_length
 
         else:
             raise NotImplementedError(
@@ -326,9 +326,14 @@ class KVCacheCoordinator:
                 "KVCacheCoordinator does not support more than 2 different "
                 "types of layers yet.")
 
-    def to_groups(
+    def to_group_format(
         self, block_bundles: list[list[KVCacheBlockBundle]]
     ) -> list[list[KVCacheBlock]]:
+        """
+        Convert the blocks from `list[list[KVCacheBlockBundle]` 
+        (`list[KVCacheBlockBundle]` for each manager) to 
+        `list[list[KVCacheBlock]]`(`list[KVCacheBlock]` for each group).
+        """
         blocks = []
         for manager_id, group_id_in_manager in self.group_to_manager:
             blocks.append([
