@@ -271,8 +271,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, True)
             remote_address = ip + ":" + str(port + self._rank)
-            kv_cache = extract_kv_from_layer(kv_layer,
-                                             request.slot_mapping)
+            kv_cache = extract_kv_from_layer(kv_layer, request.slot_mapping)
             self.p2p_nccl_engine.send_tensor(request_id + "#" + layer_name,
                                              kv_cache, remote_address)
 
@@ -356,7 +355,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
 
         logger.info("🐞build_connector_meta, scheduler_output:%s",
-                     scheduler_output)
+                    scheduler_output)
 
         meta = P2pNcclConnectorMetadata()
 
@@ -369,12 +368,14 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # the request's prompt is chunked prefill
                 if num_tokens < len(new_req.prompt_token_ids):
                     # 'CachedRequestData' has no attribute 'prompt_token_ids'
-                    self.chunked_prefill[new_req.req_id] = (new_req.block_ids, new_req.prompt_token_ids)
+                    self.chunked_prefill[new_req.req_id] = (
+                        new_req.block_ids, new_req.prompt_token_ids)
                     logger.info(
-                        "🐞build_connector_meta, chunked prefill, request_id:%s,"
-                        "num_scheduled_tokens:%d, num_prompt_tokens:%d, "
-                        "num_computed_tokens:%d, num_tokens:%d", new_req.req_id,
-                        num_scheduled_tokens, len(new_req.prompt_token_ids),
+                        "🐞build_connector_meta, chunked prefill, "
+                        "request_id:%s, num_scheduled_tokens:%d, "
+                        "num_prompt_tokens:%d, num_computed_tokens:%d, "
+                        "num_tokens:%d", new_req.req_id, num_scheduled_tokens,
+                        len(new_req.prompt_token_ids),
                         new_req.num_computed_tokens, num_tokens)
                     continue
                 # the request's prompt is not chunked prefill
@@ -399,11 +400,15 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 block_ids = (self.chunked_prefill[cached_req.req_id][0] +
                              cached_req.new_block_ids)
                 prompt_token_ids = self.chunked_prefill[cached_req.req_id][1]
-                logger.info("🐞build_connector_meta, cached_req, request_id:%s, num_scheduled_tokens:%d, num_prompt_tokens:%d",
-                             cached_req.req_id, num_scheduled_tokens, len(prompt_token_ids))
+                logger.info(
+                    "🐞build_connector_meta, cached_req, request_id:%s, "
+                    "num_scheduled_tokens:%d, num_prompt_tokens:%d",
+                    cached_req.req_id, num_scheduled_tokens,
+                    len(prompt_token_ids))
                 # the request's prompt is chunked prefill again
                 if num_tokens < len(prompt_token_ids):
-                    self.chunked_prefill[cached_req.req_id] = (block_ids, prompt_token_ids)
+                    self.chunked_prefill[cached_req.req_id] = (
+                        block_ids, prompt_token_ids)
                     continue
                 # the request's prompt is all prefilled finally
                 meta.add_request(request_id=cached_req.req_id,
@@ -457,7 +462,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
 
         logger.info("🐞request_finished, request_id:%s, block_ids:%s",
-                     request.request_id, block_ids)
+                    request.request_id, block_ids)
 
         return False, None
 
