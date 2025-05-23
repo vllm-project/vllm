@@ -33,6 +33,8 @@ from transformers.processing_utils import (ProcessingKwargs, ProcessorMixin,
                                            Unpack)
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
+from vllm.multimodal.image import convert_image_mode
+
 __all__ = ['OvisProcessor']
 IGNORE_ID = -100
 
@@ -361,8 +363,8 @@ class OvisProcessor(ProcessorMixin):
                 # pick the partition with maximum covering_ratio and break the tie using #sub_images
                 return sorted(all_grids, key=lambda x: (-x[1], x[0][0] * x[0][1]))[0][0]
 
-        if convert_to_rgb and image.mode != 'RGB':
-            image = image.convert('RGB')
+        if convert_to_rgb:
+            image = convert_image_mode(image, 'RGB')
 
 
         sides = self.get_image_size()

@@ -174,7 +174,7 @@ class Scheduler(SchedulerInterface):
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
 
-        req_to_new_block_ids: dict[str, list[list[int]]] = {}
+        req_to_new_block_ids: dict[str, list[int]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -346,32 +346,38 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.appendleft(request)
                     continue
 
+                num_external_computed_tokens = 0
+                load_kv_async = False
+
                 # Get already-cached tokens.
                 if num_prealloc_computed_tokens == 0:
                     new_computed_blocks, num_native_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
                             request)
+
+                    # Get externally-cached tokens if using a KVConnector.
+                    if self.connector is not None:
+                        num_external_computed_tokens, load_kv_async = (
+                            self.connector.get_num_new_matched_tokens(
+                                request, num_native_computed_tokens))
+
+                    # Total computed tokens (local + external).
+                    num_computed_tokens = (num_native_computed_tokens +
+                                           num_external_computed_tokens)
                 else:
                     # P/D: skip checking prefix cache if loaded from remote kvs.
                     new_computed_blocks = KVCacheBlocks.create_empty()
                     num_native_computed_tokens = 0
 
-                # Get externally-cached tokens if using a KVConnector.
-                num_external_computed_tokens, load_kv_async = (
-                    (0, False) if self.connector is None else
-                    self.connector.get_num_new_matched_tokens(
-                        request, num_native_computed_tokens))
-
-                # Total computed tokens (local + external).
-                num_computed_tokens = (num_native_computed_tokens +
-                                       num_external_computed_tokens +
-                                       num_prealloc_computed_tokens)
+                    # Total computed tokens (allocated in prior step).
+                    num_computed_tokens = num_prealloc_computed_tokens
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
 
                 # P/D: loading remote KV, do not allocate for new work.
                 if load_kv_async:
+                    assert num_external_computed_tokens > 0
                     num_new_tokens = 0
                 # Number of tokens to be scheduled.
                 else:
@@ -412,7 +418,8 @@ class Scheduler(SchedulerInterface):
                 # KVConnector: update internal state after allocation.
                 # This information is used to determine if a load is
                 # needed for this request.
-                if self.connector is not None:
+                if num_external_computed_tokens:
+                    assert self.connector is not None
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
@@ -451,7 +458,9 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-
+                # Count the number of prifix cached tokens.
+                if request.num_cached_tokens < 0:
+                    request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = (
@@ -478,8 +487,7 @@ class Scheduler(SchedulerInterface):
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(
-            self.kv_cache_config.kv_cache_groups)
+        num_common_prefix_blocks = 0
         if self.running:
             any_request = self.running[0]
             num_common_prefix_blocks = (
@@ -566,7 +574,7 @@ class Scheduler(SchedulerInterface):
         request: Request,
         num_scheduled_tokens: int,
         num_scheduled_spec_tokens: int,
-        new_block_ids: list[list[int]],
+        new_block_ids: list[int],
         resumed_from_preemption: bool,
     ) -> CachedRequestData:
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
@@ -793,6 +801,7 @@ class Scheduler(SchedulerInterface):
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,
+                        num_cached_tokens=request.num_cached_tokens,
                     ))
 
             else:
@@ -962,9 +971,7 @@ class Scheduler(SchedulerInterface):
         """
         if self.connector is None:
             return False, None
-        assert len(self.kv_cache_config.kv_cache_groups
-                   ) == 1, "KV connector only supports one KV cache group now"
-        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
+        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
         return self.connector.request_finished(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
@@ -981,10 +988,9 @@ class Scheduler(SchedulerInterface):
         """
         if request.request_id not in self.finished_recving_kv_req_ids:
             return False
-        assert len(self.kv_cache_config.kv_cache_groups
-                   ) == 1, "KV connector only supports one KV cache group now"
+
         # Now that the blocks are ready, actually cache them.
-        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
+        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
         num_computed_tokens = len(block_ids) * self.block_size
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1
