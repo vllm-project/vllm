@@ -310,15 +310,16 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = self.waiting[0]
-                num_prealloc_computed_tokens = 0
-                # P/D: skip request if still waiting for remote kvs.
+
+                # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
                         request.status = RequestStatus.WAITING
-                        num_prealloc_computed_tokens = (
-                            request.num_computed_tokens)
                     else:
+                        logger.debug(
+                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                            request.request_id)
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
@@ -349,8 +350,9 @@ class Scheduler(SchedulerInterface):
                 load_kv_async = False
 
                 # Get already-cached tokens.
-                if num_prealloc_computed_tokens == 0:
-                    new_computed_blocks, num_native_computed_tokens = \
+                if request.num_computed_tokens == 0:
+                    # Get locally-cached tokens.
+                    new_computed_blocks, num_new_local_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
                             request)
 
@@ -358,23 +360,22 @@ class Scheduler(SchedulerInterface):
                     if self.connector is not None:
                         num_external_computed_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
-                                request, num_native_computed_tokens))
+                                request, num_new_local_computed_tokens))
 
                     # Total computed tokens (local + external).
-                    num_computed_tokens = (num_native_computed_tokens +
+                    num_computed_tokens = (num_new_local_computed_tokens +
                                            num_external_computed_tokens)
+                # KVTransfer: WAITING reqs have num_computed_tokens > 0
+                # after async KV recvs are completed.
                 else:
-                    # P/D: skip checking prefix cache if loaded from remote kvs.
                     new_computed_blocks = KVCacheBlocks.create_empty()
-                    num_native_computed_tokens = 0
-
-                    # Total computed tokens (allocated in prior step).
-                    num_computed_tokens = num_prealloc_computed_tokens
+                    num_new_local_computed_tokens = 0
+                    num_computed_tokens = request.num_computed_tokens
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
 
-                # P/D: loading remote KV, do not allocate for new work.
+                # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
@@ -405,7 +406,7 @@ class Scheduler(SchedulerInterface):
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
-                    num_native_computed_tokens,
+                    num_new_local_computed_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
