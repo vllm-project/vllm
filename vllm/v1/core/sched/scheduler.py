@@ -368,7 +368,6 @@ class Scheduler(SchedulerInterface):
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
                 else:
-                    assert request.kv_transfer_params is not None
                     new_computed_blocks = KVCacheBlocks.create_empty()
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
@@ -426,7 +425,7 @@ class Scheduler(SchedulerInterface):
                     )
 
                 self.waiting.popleft()
-                # KVTransfer: wait until remove KVs have arrived.
+                # KVTransfer: wait until remote KVs have arrived.
                 if load_kv_async:
                     skipped_waiting_requests.appendleft(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
