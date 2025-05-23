@@ -79,7 +79,6 @@ class SupportsMultiModal(Protocol):
     ) -> Tensor:
         ...
 
-    @overload
     def get_input_embeddings(
         self,
         input_ids: Tensor,
