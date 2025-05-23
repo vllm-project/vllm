@@ -41,9 +41,6 @@ theme:
     - toc.follow
   custom_dir: docs/mkdocs/overrides
 
-extra_css:
-  - docs/stylesheets/extra.css
-
 hooks:
   - docs/mkdocs/hooks/remove_announcement.py
   - docs/mkdocs/hooks/generate_examples.py
@@ -115,6 +112,9 @@ markdown_extensions:
   # For math rendering
   - mdx_math:
       enable_dollar_delimiter: true
+
+extra_css:
+  - mkdocs/stylesheets/extra.css
 
 extra_javascript:
   - mkdocs/javascript/run_llm_widget.js
