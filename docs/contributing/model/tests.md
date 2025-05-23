@@ -40,7 +40,7 @@ For [generative models](../../models/generative_models.md), there are two levels
 
 #### Pooling models
 
-For [pooling models](../../models/pooling_models.md), we simply check the cosine similarity, as defined in <gh-file:tests/models/embedding/utils.py>.
+For [pooling models](../../models/pooling_models.md), we simply check the cosine similarity, as defined in <gh-file:tests/models/utils.py>.
 
 [](){ #mm-processing-tests }
 
