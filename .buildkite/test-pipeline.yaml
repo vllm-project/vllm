@@ -128,6 +128,7 @@ steps:
   - VLLM_USE_V1=0 pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py  --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/correctness/
   - pytest -v -s entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 - label: Distributed Tests (4 GPUs) # 10min
