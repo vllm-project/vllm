@@ -149,7 +149,7 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-Full example: <gh-file:examples/online_serving/structured_outputs>
+See also: [full example](../../examples/online_serving/structured_outputs)
 
 ## Reasoning Outputs
 
@@ -190,7 +190,7 @@ print("reasoning_content: ", completion.choices[0].message.reasoning_content)
 print("content: ", completion.choices[0].message.content)
 ```
 
-Full example: <gh-file:examples/online_serving/structured_outputs>
+See also: [full example](../../examples/online_serving/structured_outputs)
 
 ## Experimental Automatic Parsing (OpenAI API)
 
@@ -311,4 +311,4 @@ outputs = llm.generate(
 print(outputs[0].outputs[0].text)
 ```
 
-Full example: <gh-file:examples/offline_inference/structured_outputs.py>
+See also: [full example](../../examples/online_serving/structured_outputs)
