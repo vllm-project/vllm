@@ -157,14 +157,10 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
 
-        if omp_cpuids == "all":
-            self.local_omp_cpuid = "all"
-        else:
+        if omp_cpuids != "all" or omp_cpuids != "auto":
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
-
-        # Setup OpenMP thread affinity based on NUMA nodes automatically if no THREAD_BIND setting
-        auto_omp_numa_bind = envs.VLLM_CPU_AUTO_OMP_THREAD_NUMA_BIND
-        if auto_omp_numa_bind and self.local_omp_cpuid == "all":
+        else:
+            # Setup OpenMP thread affinity based on NUMA nodes automatically
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
             pp_size = self.vllm_config.parallel_config.pipeline_parallel_size
             world_size = self.vllm_config.parallel_config.world_size
@@ -179,7 +175,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                 cpus_allow_list = psutil.Process().cpu_affinity()
                 numa_size = info.get_num_configured_nodes()
                 cpu_count_per_numa = cpu_count // numa_size
-                num_of_no_bind_cpu = envs.VLLM_CPU_NUM_OF_NO_BIND_CPU if envs.VLLM_CPU_NUM_OF_NO_BIND_CPU < (cpu_count_per_numa//2) else (cpu_count_per_numa//2)
+                num_of_reserved_cpu = envs.VLLM_CPU_NUM_OF_RESERVED_CPU if envs.VLLM_CPU_NUM_OF_RESERVED_CPU < (cpu_count_per_numa//2) else (cpu_count_per_numa//2)
 
                 # check allow node_to_cpus list
                 node_to_cpus= []
@@ -192,9 +188,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                     logger.info("[ERROR] NO AUTO OMP Bind support because request world size: %d is more than allowed numa_size: %d",
                             world_size, len(node_to_cpus))
                 else:
-                    rank_to_cpus=str(node_to_cpus[self.rank][0]) + '-' + str(node_to_cpus[self.rank][cpu_count_per_numa - 1 - num_of_no_bind_cpu])
-                    logger.info("omp_cpuids: %s, rank: %d, world_size:%d, tp_size: %d, pp_size: %d",
-                        omp_cpuids,self.rank, world_size, tp_size, pp_size)
+                    rank_to_cpus=str(node_to_cpus[self.rank][0]) + '-' + str(node_to_cpus[self.rank][cpu_count_per_numa - 1 - num_of_reserved_cpu])
                     self.local_omp_cpuid = rank_to_cpus
                     logger.info("local_omp_cpuid: %s",
                         self.local_omp_cpuid)
