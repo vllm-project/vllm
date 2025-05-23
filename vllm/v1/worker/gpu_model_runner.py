@@ -2024,7 +2024,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert isinstance(self.drafter, EagleProposer)
             # validate all draft model layers belong to the same kv cache
             # group
-            self.drafter.validate_kv_cache_group(kv_cache_config)
+            self.drafter.validate_same_kv_cache_group(kv_cache_config)
 
         bind_kv_cache(
             kv_caches,

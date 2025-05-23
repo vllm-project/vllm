@@ -151,6 +151,11 @@ class EagleProposer:
         else:
             raise ValueError(f"Unsupported method: {self.method}")
 
+        # At this moment, we assume all eagle layers belong to the same KV
+        # cache group, thus using the same attention metadata.
+        per_layer_attn_metadata = {}
+        for layer_name in self.attn_layer_names:
+            per_layer_attn_metadata[layer_name] = attn_metadata
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -356,7 +361,8 @@ class EagleProposer:
                 self.hidden_states[:num_tokens],
             )
 
-    def validate_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
+    def validate_same_kv_cache_group(self,
+                                     kv_cache_config: KVCacheConfig) -> None:
         """
         Validate that all eagle layers belong to the same KVCacheGroup.
         Need this assumption to ensure all eagle layers can use the
