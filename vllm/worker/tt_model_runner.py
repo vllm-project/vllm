@@ -3,19 +3,17 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from transformers import TopPLogitsWarper
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig,
-                         ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tt_loader import TTModelLoader
 from vllm.model_executor.models import supports_multimodal
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata, Logprob, SequenceOutput, CompletionSequenceGroupOutput, SequenceGroup
 from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
-from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import make_tensor_with_pad
 
 logger = init_logger(__name__)
@@ -96,28 +94,18 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
+        vllm_config: VllmConfig,
         trace_mode: bool = True,
     ):
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
+        ModelRunnerBase.__init__(self, vllm_config=vllm_config)
+        
         # Currently, TT worker doesn't support chunked prefill.
         assert self.scheduler_config.chunked_prefill_enabled is False
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.load_config = load_config
-
-        self.sliding_window = model_config.get_sliding_window()
-        self.block_size = cache_config.block_size
+        
+        self.block_size = self.cache_config.block_size
 
         self.trace_mode = trace_mode  # whether to use ttnn tracing for model execution
-        override_tt_config = model_config.override_tt_config
+        override_tt_config = self.model_config.override_tt_config
         if override_tt_config is not None and "sample_on_device_mode" in override_tt_config:
             self.sample_on_device_mode = override_tt_config["sample_on_device_mode"]
             assert self.sample_on_device_mode in ["all", "decode_only"], f"Invalid sample_on_device_mode: {self.sample_on_device_mode}"
@@ -127,17 +115,13 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         self.cached_step_outputs: List[torch.Tensor] = []  # Only used for multi-step execution
         
-        if self.model_config.is_encoder_decoder_model:
+        if self.model_config.is_encoder_decoder:
             self.cached_enc_dec_data: Optional[Dict[int, Dict[str, Any]]] = None  # seq_id -> enc_dec_data
 
-        if self.model_is_mrope:
+        # Detect if the model has "mrope" rope_scaling type.
+        # mrope requires keep "rope_deltas" between prompt and decoding phases.
+        if self.model_config.uses_mrope:
             assert "TTModelRunner does not currently support models with mrope rope_scaling"
-        
-    @property
-    def model_is_mrope(self) -> bool:
-        """Detect if the model has "mrope" rope_scaling type.
-        mrope requires keep "rope_deltas" between prompt and decoding phases."""
-        return uses_mrope(self.model_config.hf_config)
 
     def load_model(self) -> None:
         # Note: using custom TT loader instead of selecting from default vllm loaders
@@ -148,8 +132,11 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             scheduler_config=self.scheduler_config,
             cache_config=self.cache_config
         )
-        if self.model_config.is_encoder_decoder_model:
+        if self.model_config.is_encoder_decoder:
             self.max_cross_blocks = self.model.max_cross_attn_tokens // self.cache_config.block_size
+            
+    def get_model(self) -> nn.Module:
+        return self.model
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
@@ -244,7 +231,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     multi_modal_kwargs["images"].append(None)
             
             # Encoder-decoder data (currently only supporting cross attention metadata and not additional encoder data)
-            if self.model_config.is_encoder_decoder_model:
+            if self.model_config.is_encoder_decoder:
                 cross_block_table = seq_group_metadata.cross_block_table
                 cross_block_tables.append(cross_block_table)
             
@@ -270,7 +257,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         )
         
         # Remove cached encoder-decoder data for any seq ids that are not in the current batch (assume they were either finished or preempted)
-        if self.model_config.is_encoder_decoder_model and not is_prompt and self.cached_enc_dec_data:
+        if self.model_config.is_encoder_decoder and not is_prompt and self.cached_enc_dec_data:
             seq_ids_to_del = []
             for seq_id in self.cached_enc_dec_data:
                 if seq_id not in seq_groups:
@@ -286,7 +273,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             device="cpu",
             pad=0
         )
-        if self.model_config.is_encoder_decoder_model:
+        if self.model_config.is_encoder_decoder:
             cross_block_tables = make_tensor_with_pad(
                 cross_block_tables,
                 dtype=torch.int32,
@@ -329,7 +316,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     block_tables,
                     torch.zeros(batch_pad_len, block_tables.shape[1], dtype=torch.int32, device="cpu")
                 ])
-                if self.model_config.is_encoder_decoder_model:
+                if self.model_config.is_encoder_decoder:
                     cross_block_tables = torch.cat([
                         cross_block_tables,
                         torch.zeros(batch_pad_len, cross_block_tables.shape[1], dtype=torch.int32, device="cpu")
@@ -341,7 +328,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     block_tables,
                     torch.zeros(block_tables.shape[0], self.cache_config.num_gpu_blocks - block_tables.shape[1], dtype=torch.int32, device="cpu")
                 ], dim=1)
-                if self.model_config.is_encoder_decoder_model:
+                if self.model_config.is_encoder_decoder:
                     # Note for vision models: the number of cross blocks may change if the number of image tiles changes or if prompts are text-only
                     cross_block_tables = torch.cat([
                         cross_block_tables,
@@ -479,7 +466,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if not is_decode:
             outputs = self.model.prefill_forward(**execute_model_kwargs)
             
-            if self.model_config.is_encoder_decoder_model:
+            if self.model_config.is_encoder_decoder:
                 # Save encoder-decoder data for use in subsequent decode steps (may need to be updated for future models)
                 tt_out, cross_attention_masks, full_text_row_masked_out_mask = outputs
                 if self.cached_enc_dec_data is None:
@@ -491,7 +478,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             else:
                 tt_out = outputs  # [batch_size, seq_len, vocab_size]
         else:
-            if self.model_config.is_encoder_decoder_model:
+            if self.model_config.is_encoder_decoder:
                 # Use encoder-decoder data from prefill step
                 cross_attention_masks = [self.cached_enc_dec_data[seq_id]["cross_attention_masks"] for seq_id in model_input.seq_groups]
                 full_text_row_masked_out_mask = [self.cached_enc_dec_data[seq_id]["full_text_row_masked_out_mask"] for seq_id in model_input.seq_groups]

@@ -429,7 +429,7 @@ def signal_handler(*_) -> None:
 
 
 def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
-                  ipc_path: str, disable_log_stats: bool,
+                  ipc_path: str, disable_log_stats: bool, log_global_stats: bool,
                   disable_log_requests: bool, engine_alive):
     try:
         # Ensure we can serialize transformer config before spawning
@@ -439,6 +439,7 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
             vllm_config=vllm_config,
             usage_context=usage_context,
             disable_log_stats=disable_log_stats,
+            log_global_stats=log_global_stats,
             disable_log_requests=disable_log_requests,
             ipc_path=ipc_path)
 

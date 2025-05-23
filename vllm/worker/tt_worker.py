@@ -3,23 +3,20 @@ import os
 from typing import List, Optional, Tuple
 import time
 import math
-from tqdm import tqdm
 
 import torch
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig, ParallelConfig, VllmConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+from vllm.sequence import ExecuteModelRequest, SequenceGroup
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size, LayerBlockType
 from vllm.worker.worker import raise_if_cache_size_invalid
 from vllm.worker.tt_model_runner import TTModelRunner, TTModelInput
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase, WorkerInput)
+                                     LoRANotSupportedWorkerBase, WorkerBase, WorkerInput)
 
 import ttnn
-from ttnn import ReplicateTensorToMesh
 
 logger = init_logger(__name__)
 
@@ -46,8 +43,9 @@ class TTCacheEngine:
 
         self.head_size = model_config.get_head_size()
         # Models like Jamba, have mixed typed layers, E.g Mamba
-        self.num_attention_layers = model_config.get_num_attention_layers(
-            parallel_config)
+        self.num_attention_layers = model_config.get_num_layers_by_block_type(
+            parallel_config, LayerBlockType.attention
+        )
 
         self.num_kv_heads = TTCacheEngine.get_num_kv_heads(
             model_config, parallel_config, device_config
@@ -130,8 +128,9 @@ class TTCacheEngine:
     ) -> int:
         head_size = model_config.get_head_size()
         num_heads = TTCacheEngine.get_num_kv_heads(model_config, parallel_config)
-        num_attention_layers = model_config.get_num_attention_layers(
-            parallel_config)
+        num_attention_layers = model_config.get_num_layers_by_block_type(
+            parallel_config, LayerBlockType.attention
+        )
 
         key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block
@@ -144,23 +143,16 @@ class TTCacheEngine:
         return dtype_size * total
 
 
-class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
+class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        is_driver_worker: bool,
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        is_driver_worker: bool = True,
     ) -> None:
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.load_config = load_config
+        WorkerBase.__init__(self, vllm_config=vllm_config)
         self.is_driver_worker = is_driver_worker
 
         assert self.device_config.device_type == "tt"
@@ -173,12 +165,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.trace_mode = True  # whether to use ttnn tracing for model execution, TODO: make this configurable
 
         self.model_runner: TTModelRunner = TTModelRunner(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            cache_config,
-            load_config,
+            vllm_config=vllm_config,
             trace_mode=self.trace_mode,
         )
         
@@ -375,6 +362,12 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         # output is List[SamplerOutput]
         return output
+    
+    def validate_seq_group(self, seq_group: SequenceGroup) -> None:
+         '''
+         Validate the sequence group before it is scheduled for execution in LLMEngine::_add_processed_request.
+         '''
+         self.model_runner.validate_seq_group(seq_group)
     
     # TT-NN utilities
     

@@ -4,6 +4,9 @@ Git-checkout the following branches in each repo separately:
 - vLLM branch: [dev](https://github.com/tenstorrent/vllm/tree/dev) (last verified commit: [f1cb301](https://github.com/tenstorrent/vllm/tree/f1cb30141b662650353d40a330366c50b83b5a98))
 - tt-metal branch: [main](https://github.com/tenstorrent/tt-metal) (last verified commit: [v0.57.0-rc44](https://github.com/tenstorrent/tt-metal/tree/v0.57.0-rc44))
 
+## System Requirements
+vLLM requires Python 3.9+ (Python 3.10.12 is the default `python3` on Ubuntu 22.04).
+
 ## Environment Creation
 
 **To create the vLLM+tt-metal environment (first time):**

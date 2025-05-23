@@ -17,29 +17,30 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import merge_async_iterators
 from vllm.inputs.data import TokensPrompt
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
-from vllm.model_executor.models.mllama import MLLAMA_IMAGE_TOKEN, MLLAMA_IMAGE_TOKEN_ID
+
 
 def register_tt_models():
     llama_text_version = os.getenv("TT_LLAMA_TEXT_VER", "tt_transformers")
     if llama_text_version == "tt_transformers":
-        from models.tt_transformers.tt.generator_vllm import LlamaForCausalLM
+        path_llama_text = "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM"
     elif llama_text_version == "llama3_subdevices":
-        from models.demos.llama3_subdevices.tt.generator_vllm import LlamaForCausalLM
+        path_llama_text = "models.demos.llama3_subdevices.tt.generator_vllm:LlamaForCausalLM"
     elif llama_text_version == "llama2_70b":
-        from models.demos.t3000.llama2_70b.tt.generator_vllm import TtLlamaForCausalLM as LlamaForCausalLM
+        path_llama_text = "models.demos.t3000.llama2_70b.tt.generator_vllm:TtLlamaForCausalLM"
     else:
         raise ValueError(f"Unsupported TT Llama version: {llama_text_version}, pick one of [tt_transformers, llama3_subdevices, llama2_70b]")
 
-    ModelRegistry.register_model("TTLlamaForCausalLM", LlamaForCausalLM)
+    # Llama3.1/3.2 - Text
+    ModelRegistry.register_model("TTLlamaForCausalLM", path_llama_text)
 
-    from models.tt_transformers.tt.generator_vllm import MllamaForConditionalGeneration
-    ModelRegistry.register_model("TTMllamaForConditionalGeneration", MllamaForConditionalGeneration)
+    # Llama3.2 - Vision
+    ModelRegistry.register_model("TTMllamaForConditionalGeneration", "models.tt_transformers.tt.generator_vllm:MllamaForConditionalGeneration")
 
-    from models.tt_transformers.tt.generator_vllm import Qwen2ForCausalLM
-    ModelRegistry.register_model("TTQwen2ForCausalLM", Qwen2ForCausalLM)
+    # Qwen2.5 - Text
+    ModelRegistry.register_model("TTQwen2ForCausalLM", "models.tt_transformers.tt.generator_vllm:Qwen2ForCausalLM")
 
-    from models.tt_transformers.tt.generator_vllm import MistralForCausalLM
-    ModelRegistry.register_model("TTMistralForCausalLM", MistralForCausalLM)
+    # Mistral
+    ModelRegistry.register_model("TTMistralForCausalLM", "models.tt_transformers.tt.generator_vllm:MistralForCausalLM")
 
 register_tt_models()  # Import and register models from tt-metal
 
@@ -48,6 +49,7 @@ def get_sample_multi_modal_llama_inputs():
     '''
     Prepare 4 sample multi-modal prompts for Llama3.2-11B
     '''
+    MLLAMA_IMAGE_TOKEN = "<|image|>"
     IMG_PATH = Path(resource_filename("llama_models", "scripts/resources/"))
     relative_img_paths = [None, "pasta.jpeg", "ocr_image.jpeg", "clutter.jpeg"]
     questions = [
@@ -141,6 +143,9 @@ def run_inference(
 ):
     check_tt_model_supported(model)
     
+    if multi_modal:
+        assert "Llama-3.2" in model, "The multi-modal inference test currently only supports Llama-3.2 models"
+    
     # LLM args
     engine_kw_args = {
         "model": model,
@@ -198,6 +203,7 @@ def run_inference(
         if not multi_modal:
             prompts = [{"prompt_token_ids": prompt_token_ids_user} for _ in range(max_seqs_in_batch)]
         else:
+            MLLAMA_IMAGE_TOKEN_ID = 128256  # Specific to multi-modal llama
             prompt_token_ids_user.insert(0, MLLAMA_IMAGE_TOKEN_ID)
             random_pixels = np.random.randint(0, 256, (512, 512, 3), dtype=np.uint8)
             rand_img = PIL_Image.fromarray(random_pixels, 'RGB')  # Create a PIL Image from the random pixel data
