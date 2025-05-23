@@ -340,7 +340,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
                                                       extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
-                                                      trust_remote_code=True),
+                                                      trust_remote_code=True,
+                                                      v0_only=True),
     "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
                                                       min_transformers_version="4.51",
                                                       max_model_len=10240),
@@ -386,7 +387,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
-                                                       tokenizer_mode="mistral"),
+                                                       tokenizer_mode="mistral",
+                                                       v0_only=True),
     "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",
                                                       extras={"chat": "Qwen/Qwen-VL-Chat"},  # noqa: E501
                                                       trust_remote_code=True,
