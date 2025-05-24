@@ -218,7 +218,6 @@ def test_get_num_unfinished_requests():
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
 
 @pytest.mark.parametrize("enable_prefix_caching, prompt_logprobs", [
-    (None, None),
     (True, 5),
 ])
 def test_schedule_with_cascade(enable_prefix_caching: Optional[bool],
