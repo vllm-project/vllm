@@ -271,6 +271,7 @@ class EagleProposer:
         cu_target_query_lens: torch.Tensor,
         # [batch_size]
         num_rejected_tokens: torch.Tensor,
+        num_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # cu_target_query_lens: [0, a, a + b, a + b + c]
         # num_rejected_tokens: [n1, n2, n3]
@@ -288,18 +289,13 @@ class EagleProposer:
 
         # [a - n1, b - n2, c - n3] ->
         # [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
-        cu_num_tokens = torch.empty_like(cu_target_query_lens)
+        cu_num_tokens = torch.zeros_like(cu_target_query_lens)
         torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
-        cu_num_tokens[0] = 0
-
-        # FIXME(woosuk): Avoid synchronization.
-        num_tokens = cu_num_tokens[-1].item()
         token_indices = torch.empty(
             num_tokens,
             dtype=torch.int32,
-            device=cu_num_tokens.device,
+            device=cu_target_query_lens.device,
         )
-
         batch_size = num_rejected_tokens.shape[0]
         BLOCK_SIZE = 1024
         prepare_eagle_input_kernel[(batch_size, )](
