@@ -168,8 +168,6 @@ class TensorMemoryPool:
             ops.load_tensor(cpu_tensor, cuda_tensor)
         self.load_stream.synchronize()
 
-        self.free(addr)
-
         return cuda_tensor
 
     def cleanup(self):

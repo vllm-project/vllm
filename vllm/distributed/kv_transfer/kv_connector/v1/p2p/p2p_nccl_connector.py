@@ -294,6 +294,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
             call to this method (this call or a prior one).
         """
 
+        assert self.p2p_nccl_engine is not None
+
         return self.p2p_nccl_engine.get_finished(finished_req_ids)
 
     # ==============================

@@ -208,6 +208,7 @@ class P2pNcclEngine:
                     addr, dtype, shape = tensor
                     tensor = self.pool.load_tensor(addr, dtype, shape,
                                                    self.device)
+                    self.pool.free(addr)
                 else:
                     addr = 0
                     self.buffer_size -= (tensor.element_size() *
