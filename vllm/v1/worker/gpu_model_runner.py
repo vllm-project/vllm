@@ -34,8 +34,8 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LazyLoader, cdiv, check_use_alibi,
-                        is_pin_memory_available)
+                        GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
+                        check_use_alibi, is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
@@ -281,7 +281,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
         """
         Update the order of requests in the batch based on the attention
-        backend's needs. For example, some attention backends (namely MLA) may 
+        backend's needs. For example, some attention backends (namely MLA) may
         want to separate requests based on if the attention computation will be
         compute-bound or memory-bound.
 
@@ -1360,9 +1360,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                scheduler_output.num_scheduled_tokens[req_id])
                     next_token_id = req_state.get_token_id(seq_len)
                 next_token_ids.append(next_token_id)
-            next_token_ids = torch.tensor(next_token_ids,
-                                          dtype=torch.int32,
-                                          device=self.device)
+            next_token_ids = async_tensor_h2d(next_token_ids,
+                                              dtype=torch.int32,
+                                              target_device=self.device,
+                                              pin_memory=True)
             eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
 
             # NOTE: deepseek_mtp uses MLA which does not have `block_table`
@@ -1390,14 +1391,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
                     for i, n in enumerate(num_draft_tokens)
                 ]
-                num_rejected_tokens = torch.tensor(
+                num_rejected_tokens_tensor = async_tensor_h2d(
                     num_rejected_tokens,
                     dtype=torch.int32,
-                    device=self.device,
-                )
+                    target_device=self.device,
+                    pin_memory=True)
+                num_tokens = num_scheduled_tokens - sum(num_rejected_tokens)
                 cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                     eagle_attn_metadata.query_start_loc,
-                    num_rejected_tokens,
+                    num_rejected_tokens_tensor,
+                    num_tokens,
                 )
                 target_token_ids = self.input_ids[token_indices]
                 target_positions = positions[token_indices]
@@ -1408,7 +1411,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     target_hidden_states = hidden_states[token_indices]
                 target_slot_mapping = eagle_attn_metadata.slot_mapping[
                     token_indices]
-
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,

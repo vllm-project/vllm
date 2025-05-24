@@ -100,8 +100,12 @@ def test_prepare_inputs():
         dtype=torch.int32,
         device=device)
 
+    # n1 + n2 + n3 - a - b -c
+    num_tokens = cu_target_query_lens[-1].item() - num_rejected_tokens.sum(
+    ).item()
+
     cu_num_tokens, token_indices = EagleProposer.prepare_inputs(
-        cu_target_query_lens, num_rejected_tokens)
+        cu_target_query_lens, num_rejected_tokens, num_tokens)
 
     assert torch.equal(cu_num_tokens, expected_cu_num_tokens)
     assert token_indices.shape[0] == expected_cu_num_tokens[-1].item()
