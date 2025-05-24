@@ -26,6 +26,8 @@ See <gh-file:LICENSE>.
 
 ## Developing
 
+--8<-- "docs/getting_started/installation/python_env_setup.inc.md"
+
 Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation.
 Check out the [building from source][build-from-source] documentation for details.
 
@@ -34,7 +36,7 @@ Check out the [building from source][build-from-source] documentation for detail
 Install the dependencies:
 
 ```bash
-pip install -r requirements/docs.txt
+uv pip install -r requirements/docs.txt
 ```
 
 Start the autoreloading MkDocs server:
@@ -45,22 +47,29 @@ mkdocs serve
 
 ## Testing
 
-```bash
-pip install -r requirements/dev.txt
+=== "NVIDIA CUDA"
 
-# Linting, formatting and static type checking
-pre-commit install --hook-type pre-commit --hook-type commit-msg
+    ```bash
+    sudo apt install python3-dev
 
-# You can manually run pre-commit with
-pre-commit run --all-files
+    # work around for https://github.com/state-spaces/mamba/issues/720 that's also done in docker/Dockerfile
+    uv pip install --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 
-# To manually run something from CI that does not run
-# locally by default, you can run:
-pre-commit run mypy-3.9 --hook-stage manual --all-files
+    uv pip install -r requirements/dev.txt --torch-backend=auto
 
-# Unit tests
-pytest tests/
-```
+    # Linting, formatting and static type checking
+    pre-commit install --hook-type pre-commit --hook-type commit-msg
+
+    # You can manually run pre-commit with
+    pre-commit run --all-files --show-diff-on-failure
+
+    # To manually run something from CI that does not run
+    # locally by default, you can run:
+    pre-commit run mypy-3.9 --hook-stage manual --all-files
+
+    # Unit tests
+    pytest tests/
+    ```
 
 !!! tip
     Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
