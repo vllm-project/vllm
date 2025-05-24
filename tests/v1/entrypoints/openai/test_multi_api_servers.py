@@ -6,12 +6,128 @@ import os
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import requests
 
 from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "ibm-research/PowerMoE-3b"
 
 DP_SIZE = os.getenv("DP_SIZE", "1")
+
+
+def get_prometheus_metrics(
+        server: RemoteOpenAIServer) -> dict[str, dict[str, float]]:
+    """Fetch and parse Prometheus metrics from the /metrics endpoint.
+    
+    Returns:
+        Dict mapping metric names to their values grouped by labels.
+        For example: {"vllm:request_success": {
+            "engine=0": 5.0, "engine=1": 3.0}
+        }
+    """
+    try:
+        response = requests.get(server.url_for("metrics"), timeout=10)
+        response.raise_for_status()
+
+        metrics = {}
+        for line in response.text.split('\n'):
+            line = line.strip()
+            # Skip comments and empty lines
+            if not line or line.startswith('#'):
+                continue
+
+            # Parse metric lines (format: metric_name{labels} value)
+            if '{' in line and '}' in line:
+                # Extract metric name, labels, and value
+                metric_part, value_part = line.rsplit(' ', 1)
+                metric_name = metric_part.split('{')[0]
+                labels_part = metric_part[metric_part.
+                                          find('{'):metric_part.rfind('}') + 1]
+                try:
+                    value = float(value_part)
+                except ValueError:
+                    continue
+
+                if metric_name not in metrics:
+                    metrics[metric_name] = {}
+                metrics[metric_name][labels_part] = value
+            elif ' ' in line:
+                # Simple metric without labels
+                parts = line.rsplit(' ', 1)
+                if len(parts) == 2:
+                    metric_name, value_part = parts
+                    try:
+                        value = float(value_part)
+                        if metric_name not in metrics:
+                            metrics[metric_name] = {}
+                        metrics[metric_name][''] = value
+                    except ValueError:
+                        continue
+
+        return metrics
+    except Exception as e:
+        pytest.fail(f"Failed to fetch Prometheus metrics: {e}")
+
+
+def get_engine_request_counts(
+        metrics: dict[str, dict[str, float]]) -> dict[str, float]:
+    """Extract request counts per engine from Prometheus metrics.
+    
+    Returns:
+        Dict mapping engine indices to request counts.
+        For example: {"0": 15.0, "1": 12.0}
+    """
+    engine_counts = {}
+
+    # Look for request success metrics with engine labels
+    success_metrics = metrics.get("vllm:request_success_total", {})
+    for labels, count in success_metrics.items():
+        # Parse engine index from labels like
+        # {model_name="...", engine="0", finished_reason="..."}
+        if 'engine=' in labels:
+            # Extract engine value from labels
+            for part in labels.replace('{', '').replace('}', '').split(','):
+                part = part.strip()
+                if part.startswith('engine='):
+                    engine_id = part.split('=')[1].strip('"')
+                    if engine_id not in engine_counts:
+                        engine_counts[engine_id] = 0
+                    engine_counts[engine_id] += count
+
+    return engine_counts
+
+
+def check_request_balancing(server: RemoteOpenAIServer):
+    """Check request balancing via Prometheus metrics if DP_SIZE > 1.
+    
+    Args:
+        server: The RemoteOpenAIServer instance
+        test_name: Optional name for the test (used in print statements)
+    """
+    dp_size = int(DP_SIZE)
+    if dp_size <= 1:
+        return
+
+    # Get metrics after all requests are completed
+    metrics = get_prometheus_metrics(server)
+    engine_counts = get_engine_request_counts(metrics)
+
+    # Check that multiple engines received requests
+    engines_with_requests = [
+        engine for engine, count in engine_counts.items() if count > 0
+    ]
+    assert len(engines_with_requests) == dp_size, (
+        f"Expected requests to be distributed across multiple engines,"
+        f" but only engine(s) {engines_with_requests} received "
+        f"requests. Engine counts: {engine_counts}")
+
+    # Verify that the load is reasonably balanced
+    # (no engine should handle all requests)
+    total_requests = sum(engine_counts.values())
+
+    for count in engine_counts.values():
+        assert count > total_requests // (dp_size + 1), (
+            f"requests are imbalanced: {engine_counts}")
 
 
 @pytest.fixture(scope="module")
@@ -50,6 +166,7 @@ async def client(server):
     [MODEL_NAME],
 )
 async def test_single_completion(client: openai.AsyncOpenAI,
+                                 server: RemoteOpenAIServer,
                                  model_name: str) -> None:
 
     async def make_request():
@@ -97,6 +214,9 @@ async def test_single_completion(client: openai.AsyncOpenAI,
     assert len(results) == num_requests
     assert all(completion is not None for completion in results)
 
+    # Check request balancing via Prometheus metrics if DP_SIZE > 1
+    check_request_balancing(server)
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -104,6 +224,7 @@ async def test_single_completion(client: openai.AsyncOpenAI,
     [MODEL_NAME],
 )
 async def test_completion_streaming(client: openai.AsyncOpenAI,
+                                    server: RemoteOpenAIServer,
                                     model_name: str) -> None:
     prompt = "What is an LLM?"
 
@@ -170,3 +291,6 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
         results
     ) == num_requests, f"Expected {num_requests} results, got {len(results)}"
     assert all(results), "Not all streaming requests completed successfully."
+
+    # Check request balancing via Prometheus metrics if DP_SIZE > 1
+    check_request_balancing(server)
