@@ -369,7 +369,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 if num_tokens < len(new_req.prompt_token_ids):
                     # 'CachedRequestData' has no attribute 'prompt_token_ids'
                     self.chunked_prefill[new_req.req_id] = (
-                        new_req.block_ids, new_req.prompt_token_ids)
+                        new_req.block_ids[0], new_req.prompt_token_ids)
                     logger.debug(
                         "🐞build_connector_meta, chunked prefill, "
                         "request_id:%s, num_scheduled_tokens:%d, "
@@ -381,13 +381,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # the request's prompt is not chunked prefill
                 meta.add_request(request_id=new_req.req_id,
                                  token_ids=new_req.prompt_token_ids,
-                                 block_ids=new_req.block_ids,
+                                 block_ids=new_req.block_ids[0],
                                  block_size=self._block_size)
                 continue
             if new_req.req_id in self._requests_need_load:
                 meta.add_request(request_id=new_req.req_id,
                                  token_ids=new_req.prompt_token_ids,
-                                 block_ids=new_req.block_ids,
+                                 block_ids=new_req.block_ids[0],
                                  block_size=self._block_size)
                 total_need_load += 1
 
@@ -399,7 +399,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                               cached_req.num_computed_tokens)
                 assert cached_req.req_id in self.chunked_prefill
                 block_ids = (self.chunked_prefill[cached_req.req_id][0] +
-                             cached_req.new_block_ids)
+                             cached_req.new_block_ids[0])
                 prompt_token_ids = self.chunked_prefill[cached_req.req_id][1]
                 logger.debug(
                     "🐞build_connector_meta, cached_req, request_id:%s, "
@@ -434,7 +434,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
-                block_ids = cached_req.new_block_ids
+                block_ids = cached_req.new_block_ids[0]
 
                 meta.add_request(request_id=cached_req.req_id,
                                  token_ids=token_ids,
