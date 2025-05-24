@@ -1,6 +1,4 @@
-[](){ #reducing-memory-usage }
-
-# Reducing memory usage
+# Conserving Memory
 
 Large models might cause your machine to run out of memory (OOM). Here are some options that help alleviate this problem.
 

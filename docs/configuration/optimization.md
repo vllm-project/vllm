@@ -1,7 +1,4 @@
----
-title: Optimization and tuning
----
-[](){ #optimization-and-tuning }
+# Optimization and Tuning
 
 This guide covers optimization strategies and performance tuning for vLLM V1.
 

@@ -1,6 +1,4 @@
-[](){ #model-resolution }
-
-# Model resolution
+# Model Resolution
 
 vLLM loads HuggingFace-compatible models by inspecting the `architectures` field in `config.json` of the model repository
 and finding the corresponding implementation that is registered to vLLM.
