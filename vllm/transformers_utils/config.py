@@ -51,7 +51,6 @@ else:
     from transformers import AutoConfig
 
 MISTRAL_CONFIG_NAME = "params.json"
-HF_TOKEN = os.getenv('HF_TOKEN', None)
 
 logger = init_logger(__name__)
 
@@ -185,7 +184,7 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
     return file_exists(str(model),
                        config_name,
                        revision=revision,
-                       token=HF_TOKEN)
+                       token=os.getenv('HF_TOKEN', None))
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
@@ -312,7 +311,7 @@ def get_config(
             model,
             revision=revision,
             code_revision=code_revision,
-            token=HF_TOKEN,
+            token=os.getenv('HF_TOKEN', None),
             **kwargs,
         )
 
@@ -324,7 +323,7 @@ def get_config(
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=HF_TOKEN,
+                token=os.getenv('HF_TOKEN', None),
                 **kwargs,
             )
         else:
@@ -334,7 +333,7 @@ def get_config(
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=HF_TOKEN,
+                    token=os.getenv('HF_TOKEN', None),
                     **kwargs,
                 )
             except ValueError as e:
@@ -352,7 +351,7 @@ def get_config(
                     raise e
 
     elif config_format == ConfigFormat.MISTRAL:
-        config = load_params_config(model, revision, token=HF_TOKEN, **kwargs)
+        config = load_params_config(model, revision, **kwargs)
     else:
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
@@ -561,7 +560,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
                                          revision=revision,
-                                         token=HF_TOKEN)
+                                         token=os.getenv('HF_TOKEN', None))
         except Exception:
             repo_files = []
 
