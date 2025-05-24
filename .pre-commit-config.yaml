@@ -128,6 +128,12 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/update-dockerfile-graph.sh
     language: script
+  - id: enforce-import-regex-instead-of-re
+    name: Enforce import regex as re
+    entry: python tools/enforce_regex_import.py
+    language: python
+    types: [python]
+    pass_filenames: false
   # forbid directly import triton
   - id: forbid-direct-triton-import
     name: "Forbid direct 'import triton'"
