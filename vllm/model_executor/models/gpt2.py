@@ -315,7 +315,8 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         loader = AutoWeightsLoader(self)
         weights = _add_transformer_prefix(weights)
         return loader.load_weights(weights)
-    
+
+
 def _add_transformer_prefix(
     weights: Iterable[tuple[str, torch.Tensor]]
 ) -> Iterable[tuple[str, torch.Tensor]]:
