@@ -398,8 +398,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 num_tokens = (num_scheduled_tokens +
                               cached_req.num_computed_tokens)
                 assert cached_req.req_id in self.chunked_prefill
-                block_ids = (self.chunked_prefill[cached_req.req_id][0] +
-                             cached_req.new_block_ids[0])
+                block_ids = cached_req.new_block_ids[0]
+                if not cached_req.resumed_from_preemption:
+                    block_ids = (self.chunked_prefill[cached_req.req_id][0] +
+                                 block_ids)
                 prompt_token_ids = self.chunked_prefill[cached_req.req_id][1]
                 logger.debug(
                     "🐞build_connector_meta, cached_req, request_id:%s, "
@@ -464,6 +466,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         logger.debug("🐞request_finished, request_id:%s, block_ids:%s",
                      request.request_id, block_ids)
+
+        self.chunked_prefill.pop(request.request_id, None)
 
         return False, None
 
