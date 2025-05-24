@@ -11,6 +11,7 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
+from vllm.multimodal.image import convert_image_mode
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -45,7 +46,8 @@ def get_mixed_modalities_query() -> QueryResult:
                 "audio":
                 AudioAsset("mary_had_lamb").audio_and_sample_rate,
                 "image":
-                ImageAsset("cherry_blossom").pil_image.convert("RGB"),
+                convert_image_mode(
+                    ImageAsset("cherry_blossom").pil_image, "RGB"),
                 "video":
                 VideoAsset(name="baby_reading", num_frames=16).np_ndarrays,
             },

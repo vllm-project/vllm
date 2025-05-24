@@ -2,11 +2,11 @@
 
 import math
 import pickle
-import re
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import regex as re
 import seaborn as sns
 from torch.utils.benchmark import Measurement as TMeasurement
 

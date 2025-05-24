@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Any, Optional
+
+import regex as re
 
 
 def deep_compare(dict1: Any, dict2: Any) -> bool:

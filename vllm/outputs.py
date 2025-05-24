@@ -9,11 +9,14 @@ from typing import Any, Generic, Optional, Union
 import torch
 from typing_extensions import TypeVar, deprecated
 
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceGroupBase, SequenceStatus)
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -122,7 +125,13 @@ class RequestOutput:
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
         kv_transfer_params: Optional[dict[str, Any]] = None,
+        # Forward compatibility, code that uses args added in new release can
+        # still run with older versions of vLLM without breaking.
+        **kwargs: Any,
     ) -> None:
+        if kwargs:
+            logger.warning_once("RequestOutput: Ignoring extra arguments: %s",
+                                str(kwargs))
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
@@ -382,15 +391,6 @@ class PoolingRequestOutput(Generic[_O]):
                                     prompt_token_ids, finished)
 
     def __repr__(self):
-        """
-        Returns a string representation of an PoolingRequestOutput instance.
-
-        The representation includes the request_id and the number of outputs,
-        providing a quick overview of the pooling request's results.
-
-        Returns:
-            str: A string representation of the PoolingRequestOutput instance.
-        """
         return (f"{type(self).__name__}(request_id={self.request_id!r}, "
                 f"outputs={self.outputs!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "

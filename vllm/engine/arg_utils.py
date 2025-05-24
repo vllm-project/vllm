@@ -4,7 +4,6 @@
 import argparse
 import dataclasses
 import json
-import re
 import sys
 import threading
 import warnings
@@ -13,6 +12,7 @@ from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
 
+import regex as re
 import torch
 from typing_extensions import TypeIs, deprecated
 
@@ -1084,7 +1084,7 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
         )
 
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:
@@ -1195,8 +1195,7 @@ class EngineArgs:
         #############################################################
         # Unsupported Feature Flags on V1.
 
-        if (self.load_format == LoadFormat.TENSORIZER.value
-                or self.load_format == LoadFormat.SHARDED_STATE.value):
+        if self.load_format == LoadFormat.SHARDED_STATE.value:
             _raise_or_fallback(
                 feature_name=f"--load_format {self.load_format}",
                 recommend_to_remove=False)
@@ -1339,7 +1338,7 @@ class EngineArgs:
                     is_ngram_enabled = True
                 elif speculative_method == "medusa":
                     is_medusa_enabled = True
-                elif speculative_method in ("eagle", "eagle3"):
+                elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
                     is_eagle_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")

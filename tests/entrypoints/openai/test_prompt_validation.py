@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # imports for guided decoding tests
-import re
-
 import openai
 import pytest
+import regex as re
 
 from ...utils import RemoteOpenAIServer
 
@@ -32,7 +31,7 @@ async def test_out_of_vocab_token_ids():
         client = remote_server.get_async_client()
 
         with pytest.raises(openai.BadRequestError,
-                           match=re.compile('.*out of vocabulary.*')):
+                           match=re.compile('.*out of vocabulary.*').pattern):
             await client.completions.create(model=model_name,
                                             prompt=[999999],
                                             max_tokens=5,
@@ -46,9 +45,10 @@ async def test_reject_multistep_with_guided_decoding():
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
-        with pytest.raises(openai.BadRequestError,
-                           match=re.compile(
-                               '.*Guided decoding .* multi-step decoding.*')):
+        with pytest.raises(
+                openai.BadRequestError,
+                match=re.compile(
+                    '.*Guided decoding .* multi-step decoding.*').pattern):
             await client.completions.create(
                 model=model_name,
                 prompt="Hello",

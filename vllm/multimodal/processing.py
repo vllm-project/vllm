@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
-import re
 import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -12,6 +11,7 @@ from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
+import regex as re
 import torch
 from typing_extensions import assert_never
 
@@ -387,7 +387,7 @@ _M = TypeVar("_M", bound=Union[_HasModalityAttr, _HasModalityProp])
 
 
 def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
-    """Convenience function to apply {func}`full_groupby` based on modality."""
+    """Convenience function to apply [full_groupby][] based on modality."""
     return full_groupby(values, key=lambda x: x.modality)
 
 

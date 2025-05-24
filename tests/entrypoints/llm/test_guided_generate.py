@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import re
 import weakref
 from enum import Enum
 
 import jsonschema
 import pytest
+import regex as re
 from pydantic import BaseModel
 
 from vllm.distributed import cleanup_dist_env_and_memory

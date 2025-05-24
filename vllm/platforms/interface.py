@@ -157,7 +157,7 @@ class Platform:
         return self._enum == PlatformEnum.OOT
 
     def is_cuda_alike(self) -> bool:
-        """Stateless version of {func}`torch.cuda.is_available`."""
+        """Stateless version of [torch.cuda.is_available][]."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     def is_sleep_mode_available(self) -> bool:
@@ -194,7 +194,7 @@ class Platform:
         cls,
         device_id: int = 0,
     ) -> Optional[DeviceCapability]:
-        """Stateless version of {func}`torch.cuda.get_device_capability`."""
+        """Stateless version of [torch.cuda.get_device_capability][]."""
         return None
 
     @classmethod
@@ -477,6 +477,13 @@ class Platform:
         Returns the total number of compute units (CU) on single GPU.
         """
         raise NotImplementedError
+
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        """
+        Get piecewise backend class for piecewise graph.
+        """
+        return "vllm.compilation.base_piecewise_backend.AbstractPiecewiseBackend"  # noqa
 
 
 class UnspecifiedPlatform(Platform):

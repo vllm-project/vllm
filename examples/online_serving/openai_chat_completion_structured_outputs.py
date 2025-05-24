@@ -12,6 +12,9 @@ from enum import Enum
 from openai import BadRequestError, OpenAI
 from pydantic import BaseModel
 
+openai_api_key = "EMPTY"
+openai_api_base = "http://localhost:8000/v1"
+
 
 # Guided decoding by Choice (list of possible options)
 def guided_choice_completion(client: OpenAI, model: str):
@@ -134,8 +137,8 @@ def extra_backend_options_completion(client: OpenAI, model: str):
 
 def main():
     client: OpenAI = OpenAI(
-        base_url="http://localhost:8000/v1",
-        api_key="-",
+        base_url=openai_api_base,
+        api_key=openai_api_key,
     )
 
     model = client.models.list().data[0].id

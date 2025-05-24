@@ -26,7 +26,7 @@ class NewRequestData:
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams
-    block_ids: list[int]
+    block_ids: list[list[int]]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
 
@@ -34,7 +34,7 @@ class NewRequestData:
     def from_request(
         cls,
         request: Request,
-        block_ids: list[int],
+        block_ids: list[list[int]],
     ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
@@ -85,7 +85,7 @@ class CachedRequestData:
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
     new_token_ids: list[int]
-    new_block_ids: list[int]
+    new_block_ids: list[list[int]]
     num_computed_tokens: int
 
     @classmethod
@@ -94,7 +94,7 @@ class CachedRequestData:
         request: Request,
         resumed_from_preemption: bool,
         new_token_ids: list[int],
-        new_block_ids: list[int],
+        new_block_ids: list[list[int]],
     ) -> CachedRequestData:
         return cls(
             req_id=request.request_id,
@@ -131,9 +131,9 @@ class SchedulerOutput:
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
     scheduled_encoder_inputs: dict[str, list[int]]
-    # Number of common prefix blocks for all requests.
+    # Number of common prefix blocks for all requests in each KV cache group.
     # This can be used for cascade attention.
-    num_common_prefix_blocks: int
+    num_common_prefix_blocks: list[int]
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests

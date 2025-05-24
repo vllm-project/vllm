@@ -9,7 +9,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
 
-# Note use: layer.get_all_to_all() to get an AllToAll instance
 # The max_num_tokens, world_size and dp_size must be the same
 # as the ones used to create the AllToAll.
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
