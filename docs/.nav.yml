@@ -53,4 +53,6 @@ nav:
       preserve_directory_names: true
   - Community:
     - community/*
-    - vLLM Blog: https://blog.vllm.ai
+    - Blog: https://blog.vllm.ai
+    - Forum: https://discuss.vllm.ai
+    - Slack: https://slack.vllm.ai
