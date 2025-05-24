@@ -11,14 +11,14 @@ nav:
         - LMCache: getting_started/examples/lmcache
         - getting_started/examples/other
     - Quick Links:
-      - User Guide: usage/overview.md
-      - Developer Guide: contributing/overview.md
+      - User Guide: usage/README.md
+      - Developer Guide: contributing/README.md
       - API Reference: api/README.md
     - Timeline:
       - Roadmap: https://roadmap.vllm.ai
       - Releases: https://github.com/vllm-project/vllm/releases
   - User Guide:
-    - usage/overview.md
+    - usage/README.md
     - General:
       - usage/*
     - Inference and Serving:
@@ -44,7 +44,7 @@ nav:
       - features/*
       - features/quantization
   - Developer Guide:
-    - contributing/overview.md
+    - contributing/README.md
     - General:
       - glob: contributing/*
         flatten_single_child_sections: true
