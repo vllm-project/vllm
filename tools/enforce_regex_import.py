@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import re
 import subprocess
 from pathlib import Path
+
+import regex as re
 
 FORBIDDEN_PATTERNS = re.compile(
     r'^\s*(?:import\s+re(?:$|\s|,)|from\s+re\s+import)')
@@ -29,8 +30,9 @@ def get_staged_python_files() -> list[str]:
 
 def is_forbidden_import(line: str) -> bool:
     line = line.strip()
-    return FORBIDDEN_PATTERNS.match(line) and not any(
-        pattern.match(line) for pattern in ALLOWED_PATTERNS)
+    return bool(
+        FORBIDDEN_PATTERNS.match(line)
+        and not any(pattern.match(line) for pattern in ALLOWED_PATTERNS))
 
 
 def check_file(filepath: str) -> list[tuple[int, str]]:

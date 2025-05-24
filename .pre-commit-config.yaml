@@ -134,6 +134,7 @@ repos:
     language: python
     types: [python]
     pass_filenames: false
+    additional_dependencies: [regex]
   # forbid directly import triton
   - id: forbid-direct-triton-import
     name: "Forbid direct 'import triton'"
