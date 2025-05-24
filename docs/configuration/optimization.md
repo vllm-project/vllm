@@ -1,5 +1,5 @@
 ---
-title: Optimization and Tuning
+title: Optimization and tuning
 ---
 [](){ #optimization-and-tuning }
 

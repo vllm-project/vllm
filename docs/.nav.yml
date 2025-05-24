@@ -5,10 +5,11 @@ nav:
       - getting_started/quickstart.md
       - getting_started/installation
     - Examples:
-      - LMCache: getting_started/examples/lmcache
-      - getting_started/examples/offline_inference
-      - getting_started/examples/online_serving
-      - getting_started/examples/other
+      - Offline Inference: getting_started/examples/offline_inference
+      - Online Serving: getting_started/examples/online_serving
+      - Others:
+        - LMCache: getting_started/examples/lmcache
+        - getting_started/examples/other
     - Quick Links:
       - User Guide: usage/overview.md
       - Developer Guide: contributing/overview.md
@@ -17,8 +18,9 @@ nav:
       - Roadmap: https://roadmap.vllm.ai
       - Releases: https://github.com/vllm-project/vllm/releases
   - User Guide:
-    - Using vLLM: usage/overview.md
-    - usage/*
+    - usage/overview.md
+    - General:
+      - usage/*
     - Inference and Serving:
       - serving/offline_inference.md
       - serving/openai_compatible_server.md
@@ -29,7 +31,9 @@ nav:
       - deployment/frameworks
       - deployment/integrations
     - Training: training
-    - Configuration: configuration
+    - Configuration:
+      - Summary: configuration/README.md
+      - configuration/*
     - Models:
       - models/supported_models.md
       - models/generative_models.md
@@ -40,7 +44,7 @@ nav:
       - features/*
       - features/quantization
   - Developer Guide:
-    - Contributing to vLLM: contributing/overview.md
+    - contributing/overview.md
     - General:
       - glob: contributing/*
         flatten_single_child_sections: true
