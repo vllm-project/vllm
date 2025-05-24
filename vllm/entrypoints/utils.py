@@ -13,6 +13,13 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+VLLM_SERVE_PARSER_EPILOG = (
+    "Tip: Use `vllm serve --help=<keyword>` to explore arguments from help.\n"
+    "   - To view a argument group:     --help=ModelConfig\n"
+    "   - To view a single argument:    --help=max-num-seqs\n"
+    "   - To search by keyword:         --help=max\n"
+    "   - To list all groups:           --help=listgroup")
+
 
 async def listen_for_disconnect(request: Request) -> None:
     """Returns if a disconnect message is received"""
@@ -158,3 +165,55 @@ def _validate_truncation_size(
             tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
     return truncate_prompt_tokens
+
+
+def show_filtered_argument_or_group_from_help(parser):
+    import sys
+    for arg in sys.argv:
+        if arg.startswith('--help='):
+            search_keyword = arg.split('=', 1)[1]
+
+            # List available groups
+            if search_keyword == 'listgroup':
+                print("\nAvailable argument groups:")
+                for group in parser._action_groups:
+                    if group.title and not group.title.startswith(
+                            "positional arguments"):
+                        print(f"  - {group.title}")
+                        if group.description:
+                            print("    " + group.description.strip())
+                        print()
+                sys.exit(0)
+
+            # For group search
+            formatter = parser._get_formatter()
+            for group in parser._action_groups:
+                if group.title and group.title.lower() == search_keyword.lower(
+                ):
+                    formatter.start_section(group.title)
+                    formatter.add_text(group.description)
+                    formatter.add_arguments(group._group_actions)
+                    formatter.end_section()
+                    print(formatter.format_help())
+                    sys.exit(0)
+
+            # For single arg
+            matched_actions = []
+
+            for group in parser._action_groups:
+                for action in group._group_actions:
+                    # search option name
+                    if any(search_keyword.lower() in opt.lower()
+                           for opt in action.option_strings):
+                        matched_actions.append(action)
+
+            if matched_actions:
+                print(f"\nParameters matching '{search_keyword}':\n")
+                formatter = parser._get_formatter()
+                formatter.add_arguments(matched_actions)
+                print(formatter.format_help())
+                sys.exit(0)
+
+            print(f"\nNo group or parameter matching '{search_keyword}'")
+            print("Tip: use `--help=listgroup` to view all groups.")
+            sys.exit(1)
