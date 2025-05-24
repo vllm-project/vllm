@@ -189,6 +189,7 @@ class SingleTypeKVCacheManager(ABC):
             if not new_forested_cascade_trie:
                 new_forested_cascade_trie = KVCacheBlockPrefixTrie(
                     self.req_to_depth[request.request_id], absorption_threshold_ratio)
+                self.depth_to_prefix_trie[req_depth] = new_forested_cascade_trie
             new_forested_cascade_trie.insert(
                 request, self.req_to_blocks[req_id][num_cached_blocks: num_full_blocks])
 
