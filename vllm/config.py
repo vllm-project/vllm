@@ -3063,7 +3063,7 @@ class ForestedCascadeConfig:
     Specifies the method used to allocate groups of requests
     for forested cascade attention.
     """
-    class GroupAllocationMethod(enum.Enum, str):
+    class GroupAllocationMethod(str, enum.Enum):
         LEAF_PASS = "leaf_pass"
         FULL_PASS = "full_pass"
 
