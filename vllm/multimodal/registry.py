@@ -214,9 +214,8 @@ class MultiModalRegistry:
         When the model receives multi-modal data, the provided function is
         invoked to transform the data into a dictionary of model inputs.
 
-        :::{seealso}
-        {ref}`mm-processing`
-        :::
+        Info:
+            [mm-processing][]
         """
 
         def wrapper(model_cls: N) -> N:
@@ -260,9 +259,8 @@ class MultiModalRegistry:
         """
         Create a multi-modal processor for a specific model and tokenizer.
 
-        :::{seealso}
-        {ref}`mm-processing`
-        :::
+        Info:
+            [mm-processing][]
         """
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")

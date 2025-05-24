@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import regex as re
 import torch
 
 import vllm.envs
@@ -302,8 +302,9 @@ class XGrammarLogitsProcessor:
     prefilled: bool = field(default=False)
 
     def __post_init__(self):
-        self.tokenizer_info = self.config.tokenizer_info(
-            self.config.tokenizer_data)
+        if self.tokenizer_info is None:
+            self.tokenizer_info = self.config.tokenizer_info(
+                self.config.tokenizer_data)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config, 'reasoner': self.reasoner}
@@ -400,7 +401,8 @@ class XGrammarLogitsProcessor:
     def clone(self) -> XGrammarLogitsProcessor:
         """Create a new instance with shared compiled grammar
           but separate state"""
-        new_processor = XGrammarLogitsProcessor(self.config, self.reasoner)
+        new_processor = XGrammarLogitsProcessor(self.config, self.reasoner,
+                                                None, self.tokenizer_info)
 
         # Share the compiled grammar context (immutable after compilation)
         new_processor.ctx = self.ctx

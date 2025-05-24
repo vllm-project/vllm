@@ -340,6 +340,13 @@ class EngineCore:
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
 
+    def save_tensorized_model(
+        self,
+        tensorizer_config,
+    ) -> None:
+        self.model_executor.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
@@ -701,7 +708,7 @@ class DPEngineCoreProc(EngineCoreProc):
             for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
                            world_size))
 
-        self.local_dp_rank = local_dp_rank
+        self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
         self.current_wave = 0
 
@@ -774,7 +781,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 local_unfinished_reqs)
 
             if not self.engines_running:
-                if self.local_dp_rank == 0:
+                if self.dp_rank == 0:
                     # Notify client that we are pausing the loop.
                     logger.debug("Wave %d finished, pausing engine loop.",
                                  self.current_wave)

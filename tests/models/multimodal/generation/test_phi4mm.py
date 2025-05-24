@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import re
 from collections.abc import Sequence
 from typing import Optional
 
 import librosa
 import pytest
+import regex as re
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.image import rescale_image_size
+from vllm.multimodal.image import convert_image_mode, rescale_image_size
 from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
 
@@ -267,7 +267,7 @@ def test_vision_speech_models(hf_runner, vllm_runner, model, dtype: str,
 
     # use the example speech question so that the model outputs are reasonable
     audio = librosa.load(speech_question, sr=None)
-    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+    image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
     inputs_vision_speech = [
         (

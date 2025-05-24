@@ -158,6 +158,7 @@ class CudaPlatformBase(Platform):
                 "currently not supported with CUDA Graphs.")
             vllm_config.model_config.enforce_eager = True
             compilation_config.use_cudagraph = False
+            # FIXME: inductor breaks cudagraph (from @bnell)
             compilation_config.use_inductor = False
 
     @classmethod
@@ -310,6 +311,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def use_custom_allreduce(cls) -> bool:
         return True
+
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
 
 
 # NVML utils
