@@ -23,7 +23,7 @@ It'd be better to store the model in a local disk. Additionally, have a look at 
 
 ## Out of memory
 
-If the model is too large to fit in a single GPU, you will get an out-of-memory (OOM) error. Consider adopting [these options][reducing-memory-usage] to reduce the memory consumption.
+If the model is too large to fit in a single GPU, you will get an out-of-memory (OOM) error. Consider adopting [these options](../configuration/conserving_memory.md) to reduce the memory consumption.
 
 ## Generation quality changed
 
@@ -159,7 +159,7 @@ If you have seen a warning in your logs like this:
 WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
     initialized. We must use the `spawn` multiprocessing start method. Setting
     VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
-    https://docs.vllm.ai/en/latest/getting_started/troubleshooting.html#python-multiprocessing
+    https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing
     for more information.
 ```
 
@@ -258,7 +258,7 @@ or:
 ValueError: Model architectures ['<arch>'] are not supported for now. Supported architectures: [...]
 ```
 
-But you are sure that the model is in the [list of supported models][supported-models], there may be some issue with vLLM's model resolution. In that case, please follow [these steps][model-resolution] to explicitly specify the vLLM implementation for the model.
+But you are sure that the model is in the [list of supported models][supported-models], there may be some issue with vLLM's model resolution. In that case, please follow [these steps](../configuration/model_resolution.md) to explicitly specify the vLLM implementation for the model.
 
 ## Failed to infer device type
 

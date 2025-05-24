@@ -57,7 +57,7 @@ In v0, the following metrics are exposed via a Prometheus-compatible `/metrics` 
 - `vllm:spec_decode_num_draft_tokens_total` (Counter)
 - `vllm:spec_decode_num_emitted_tokens_total` (Counter)
 
-These are documented under [Inferencing and Serving -> Production Metrics](../../serving/metrics.md).
+These are documented under [Inferencing and Serving -> Production Metrics](../../usage/metrics.md).
 
 ### Grafana Dashboard
 

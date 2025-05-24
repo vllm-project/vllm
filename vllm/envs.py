@@ -164,7 +164,7 @@ def get_vllm_port() -> Optional[int]:
                 raise ValueError(
                     f"VLLM_PORT '{port}' appears to be a URI. "
                     "This may be caused by a Kubernetes service discovery issue"
-                    "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+                    "check the warning in: https://docs.vllm.ai/en/stable/usage/env_vars.html"
                 )
         except Exception:
             pass
