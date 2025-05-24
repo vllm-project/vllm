@@ -1,5 +1,5 @@
 ---
-title: vLLM Meetups
+title: Meetups
 ---
 [](){ #meetups }
 
