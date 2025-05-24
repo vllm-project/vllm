@@ -24,7 +24,7 @@ from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
-from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm import envs
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -45,7 +45,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
 
-if VLLM_USE_MODELSCOPE:
+if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
 else:
     from transformers import AutoConfig
@@ -130,7 +130,7 @@ def list_repo_files(
             ]
         # if model is remote, use hf_hub api to list files
         try:
-            if VLLM_USE_MODELSCOPE:
+            if envs.VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import (
                     modelscope_list_repo_files)
                 return modelscope_list_repo_files(repo_id,
@@ -768,7 +768,7 @@ def get_hf_image_processor_config(
     **kwargs,
 ) -> dict[str, Any]:
     # ModelScope does not provide an interface for image_processor
-    if VLLM_USE_MODELSCOPE:
+    if envs.VLLM_USE_MODELSCOPE:
         return dict()
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
