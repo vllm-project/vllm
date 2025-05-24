@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -61,7 +62,7 @@ class GGUFConfig(QuantizationConfig):
         return None
 
 
-UNQUANTIZED_TYPES = {WeightType.F32, WeightType.F16, WeightType.BF16}
+UNQUANTIZED_TYPES = list({WeightType.F32, WeightType.F16, WeightType.BF16})
 STANDARD_QUANT_TYPES = {
     WeightType.Q4_0,
     WeightType.Q4_1,
@@ -91,12 +92,12 @@ IMATRIX_QUANT_TYPES = {
 # TODO(Isotr0py): Currently, we don't have MMQ kernel for I-Matrix quantization.
 # Consolidate DEQUANT_TYPES, MMVQ_QUANT_TYPES and MMQ_QUANT_TYPES after we add
 # MMQ kernel for I-Matrix quantization.
-DEQUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
-MMVQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
-MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
+DEQUANT_TYPES = list(STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES)
+MMVQ_QUANT_TYPES = list(STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES)
+MMQ_QUANT_TYPES = list(STANDARD_QUANT_TYPES | KQUANT_TYPES)
 
 
-def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
+def _fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor,
                   qweight_type: int) -> torch.Tensor:
     # HACK: when doing chunked prefill we don't generate output tokens
     # so input to logits generator is empty which causes invalid parameter
@@ -128,6 +129,30 @@ def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
         raise NotImplementedError(
             f"Unsupported GGUF quantization type: {qweight_type}")
     return y
+
+
+def _fused_mul_mat_gguf_fake(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    qweight_type: int,
+) -> torch.Tensor:
+    return torch.empty(x.shape[0],
+                       qweight.shape[0],
+                       dtype=x.dtype,
+                       device=x.device)
+
+
+try:
+    direct_register_custom_op(
+        op_name="_fused_mul_mat_gguf",
+        op_func=_fused_mul_mat_gguf,
+        mutates_args=[],
+        fake_impl=_fused_mul_mat_gguf_fake,
+    )
+    fused_mul_mat_gguf = torch.ops.vllm._fused_mul_mat_gguf
+
+except AttributeError as error:
+    raise error
 
 
 def _fused_moe_gguf(
@@ -249,26 +274,63 @@ class GGUFLinearMethod(LinearMethodBase):
         set_weight_attrs(qweight_type, extra_weight_attrs)
         layer.register_parameter("qweight_type", qweight_type)
 
+    def process_weights_after_loading(self, layer):
+        qweight = layer.qweight
+        if len(data_container := qweight.data_container) > 1:
+            dtype = {data.dtype for data in data_container}
+            assert len(dtype) == 1, ValueError(
+                f"Data container has mixed dtypes: {dtype}")
+            dtype = next(iter(dtype))
+            # create the map of padded tensor sizes
+            shard_id_map = qweight.shard_id_map
+            shard_id = qweight.shard_id
+            # (dim0_start, dim0_end, dim1_size)
+            shard_offset_map = dict[str, tuple[int, int, int]]()
+            for idx in shard_id:
+                id_in_container = shard_id_map[idx]
+                start = sum(x.size(0) for x in data_container[:id_in_container])
+                end = start + data_container[id_in_container].size(0)
+                size = data_container[id_in_container].size(1)
+                shard_offset_map[idx] = (start, end, size)
+            padded_side = max(x.size(1) for x in data_container)
+            concat_side = sum(x.size(0) for x in data_container)
+            # Pad the quantized weights to dense tensor.
+            padded_data = torch.zeros(
+                (concat_side, padded_side), dtype=dtype, device=qweight.device)
+            i = 0
+            for data in data_container:
+                padded_data[i:i + data.size(0), :data.size(1)] = data
+                i += data.size(0)
+            qweight.data_container.clear()
+            # Convert to nested tensor.
+            padded_param = Parameter(padded_data, requires_grad=False)
+            set_weight_attrs(padded_param, vars(qweight))
+            set_weight_attrs(padded_param, {"shard_offset_map": shard_offset_map})
+            layer.register_parameter("qweight", padded_param)
+
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        shard_id = getattr(layer.qweight, "shard_id", None)
+        shard_id = layer.qweight.shard_id
 
         if shard_id:
             # dequantize shard weights respectively
             shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
-            qweight = layer.qweight.unbind(0)
+            qweight = layer.qweight
             result = []
             for idx in shard_id:
-                q_idx = layer.qweight.shard_id_map[idx]
+                start, end, offset = layer.qweight.shard_offset_map[idx]
                 qweight_type = layer.qweight_type.shard_weight_type[idx]
-                result.append(_fuse_mul_mat(x, qweight[q_idx], qweight_type))
+                result.append(fused_mul_mat_gguf(x, qweight[start:end, :offset].contiguous(), qweight_type))
             out = torch.cat(result, axis=1)
+            # if not torch.compiler.is_compiling():
+            #     print(out)
         else:
             qweight = layer.qweight
             qweight_type = layer.qweight_type.weight_type
-            out = _fuse_mul_mat(x, qweight, qweight_type)
+            out = fused_mul_mat_gguf(x, qweight, qweight_type)
         if bias is not None:
             out.add_(bias)
         return out
@@ -392,16 +454,9 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
                   x: torch.Tensor) -> torch.Tensor:
         qweight = layer.qweight
         qweight_type = layer.qweight_type.weight_type
+        hidden_size = qweight.tensor_shape[1]
 
-        block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
-        hidden_size = qweight.shape[1] // type_size * block_size
-        if qweight_type < 2:
-            return torch.embedding(qweight, x)
-        x_flat = x.flatten()
-        quant = torch.index_select(qweight, dim=0, index=x_flat)
-        dequant = ops.ggml_dequantize(quant, qweight_type, hidden_size,
-                                      x_flat.shape[0], self.params_dtype)
-        return dequant.view(*x.shape, hidden_size)
+        return apply_gguf_embedding(x, qweight, qweight_type, hidden_size, dtype=self.params_dtype)
 
 
 class GGUFUninitializedParameter(UninitializedParameter):
@@ -414,6 +469,7 @@ class GGUFUninitializedParameter(UninitializedParameter):
             f"Data container has mixed dtypes: {dtype}")
         dtype = next(iter(dtype))
         nested_data = torch.nested.nested_tensor(self.data_container,
+                                                 layout=torch.jagged,
                                                  device=self.device,
                                                  dtype=dtype)
         self.data_container.clear()
@@ -423,3 +479,45 @@ class GGUFUninitializedParameter(UninitializedParameter):
         for k, v in self.__dict__.items():
             setattr(param, k, v)
         return param
+
+
+def _apply_gguf_embedding(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    qweight_type: int,
+    hidden_size: int,
+    dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
+    if qweight_type in UNQUANTIZED_TYPES:
+        return torch.embedding(qweight, x)
+    elif qweight_type in DEQUANT_TYPES and qweight_type in gguf.GGML_QUANT_SIZES:
+        block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+        x_flat = x.flatten()
+        assert (hidden_size == qweight.shape[1] // type_size * block_size)
+        quant = torch.index_select(qweight, dim=0, index=x_flat)
+        dequant = ops.ggml_dequantize(quant, qweight_type, hidden_size,
+                                      x_flat.shape[0], dtype)
+        return dequant.view(*x.shape, hidden_size)
+
+
+def _apply_gguf_embedding_fake(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    qweight_type: int,
+    hidden_size: int,
+    dtype: Optional[torch.dtype] = None,
+) -> torch.Tensor:
+    return torch.empty(x.shape[0], hidden_size, dtype=dtype, device=x.device)
+
+
+try:
+    direct_register_custom_op(
+        op_name="_apply_gguf_embedding",
+        op_func=_apply_gguf_embedding,
+        mutates_args=[],
+        fake_impl=_apply_gguf_embedding_fake,
+    )
+    apply_gguf_embedding = torch.ops.vllm._apply_gguf_embedding
+
+except AttributeError as error:
+    raise error
