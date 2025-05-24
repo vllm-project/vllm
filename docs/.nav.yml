@@ -9,7 +9,7 @@ nav:
       - Online Serving: getting_started/examples/online_serving
       - Others:
         - LMCache: getting_started/examples/lmcache
-        - getting_started/examples/other
+        - getting_started/examples/other/*
     - Quick Links:
       - User Guide: usage/README.md
       - Developer Guide: contributing/README.md
