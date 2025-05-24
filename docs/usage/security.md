@@ -1,4 +1,4 @@
-# Security Guide
+# Security
 
 ## Inter-Node Communication
 
