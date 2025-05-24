@@ -300,7 +300,10 @@ def get_config(
                 "   - For Hugging Face models: ensure the presence of a "
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
-                "'params.json'.\n").format(model=model)
+                "'params.json'.\n"
+                "3. For GGUF: pass the local path of the GGUF checkpoint.\n"
+                "   Loading GGUF from a remote repo directly is not yet "
+                "supported.\n").format(model=model)
 
             raise ValueError(error_message) from e
 
