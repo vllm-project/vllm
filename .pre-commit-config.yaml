@@ -128,6 +128,13 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/update-dockerfile-graph.sh
     language: script
+  # forbid directly import triton
+  - id: forbid-direct-triton-import
+    name: "Forbid direct 'import triton'"
+    entry: python tools/check_triton_import.py
+    language: python
+    types: [python]
+    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
