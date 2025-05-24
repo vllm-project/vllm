@@ -159,7 +159,7 @@ If you have seen a warning in your logs like this:
 WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
     initialized. We must use the `spawn` multiprocessing start method. Setting
     VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See
-    https://docs.vllm.ai/en/latest/getting_started/troubleshooting.html#python-multiprocessing
+    https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing
     for more information.
 ```
 
