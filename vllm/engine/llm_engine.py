@@ -1661,6 +1661,13 @@ class LLMEngine:
             0].get_prefix_cache_hit_rate(Device.CPU)
         gpu_prefix_cache_hit_rate = self.scheduler[
             0].get_prefix_cache_hit_rate(Device.GPU)
+        
+        # Swap the usage and cache hit stats of between gpu and cpu when running on cpu environment because cpu worker intentionally counts cpu blockers as gpu blockers.
+        # https://github.com/vllm-project/vllm/blob/ec82c3e388b962a30a02fa376c222cef787b3c14/vllm/worker/cpu_worker.py#L253-L256
+        if self.device_config.device_type == "cpu":
+            num_total_gpu, num_total_cpu = num_total_cpu, num_total_gpu
+            gpu_cache_usage_sys, cpu_cache_usage_sys = cpu_cache_usage_sys, gpu_cache_usage_sys
+            gpu_prefix_cache_hit_rate, cpu_prefix_cache_hit_rate = cpu_prefix_cache_hit_rate, gpu_prefix_cache_hit_rate
 
         # Iteration stats
         num_prompt_tokens_iter = 0
