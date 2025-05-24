@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
-                         SchedulerConfig, SpeculativeConfig, VllmConfig)
+                         SchedulerConfig, SpeculativeConfig, VllmConfig, ForestedCascadeConfig)
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -56,6 +56,7 @@ def create_scheduler(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
     )
+    forested_cascade_config = ForestedCascadeConfig()
     model_config = ModelConfig(
         model=model,
         task="auto",
@@ -102,6 +103,7 @@ def create_scheduler(
                              FullAttentionSpec(block_size, 1, 1, torch.float32,
                                                False))
         ],
+        forested_cascade_config=model_config.forested_cascade_config
     )
     cache_config.num_gpu_blocks = num_blocks
     return Scheduler(
@@ -143,6 +145,43 @@ def create_requests(num_requests: int,
         requests.append(request)
     return requests
 
+import random
+def create_cascade_requests(num_requests: int,
+                            num_groups: int,
+                            lower_prefix_block_cnt: int,
+                            upper_prefix_block_cnt: int,
+                            block_size: int = 16) \
+    -> list[Request]:
+    prefix_cnts = [random.randint(lower_prefix_block_cnt, upper_prefix_block_cnt)
+                    for _ in range(num_groups)] * block_size
+    cuts = sorted(random.sample(range(1, num_requests), num_groups - 1))
+    cum_group_indices = [0] + cuts + [num_requests]
+
+    max_tokens = 128
+
+    sampling_params = SamplingParams(ignore_eos=False,
+                                     max_tokens=max_tokens,
+                                     stop_token_ids=None,
+                                     prompt_logprobs=None)
+    requests = []
+    for i in range(len(cum_group_indices) - 1):
+        start_index = cum_group_indices[i]
+        end_index = cum_group_indices[i + 1]
+        for j in range(start_index, end_index + 1):
+            request = Request(
+                request_id=f"{j}",
+                prompt_token_ids=[i] * prefix_cnts[i] +
+                                 [len(cum_group_indices) + j] *
+                                 (max_tokens - prefix_cnts[i]),
+                sampling_params=sampling_params,
+                multi_modal_inputs=None,
+                multi_modal_placeholders=None,
+                multi_modal_hashes=None,
+                eos_token_id=EOS_TOKEN_ID,
+                arrival_time=0,
+            )
+            requests.append(request)
+    return requests
 
 def test_add_requests():
     scheduler = create_scheduler()
@@ -178,6 +217,34 @@ def test_get_num_unfinished_requests():
                                   RequestStatus.FINISHED_STOPPED)
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
 
+@pytest.mark.parametrize("enable_prefix_caching, prompt_logprobs", [
+    (None, None),
+    (True, 5),
+])
+def test_schedule_with_cascade(enable_prefix_caching: Optional[bool],
+                  prompt_logprobs: Optional[int]):
+    scheduler = create_scheduler(enable_prefix_caching=enable_prefix_caching)
+    requests = create_cascade_requests(num_requests=12,
+                                       num_groups=4,
+                                       lower_prefix_block_cnt=2,
+                                       upper_prefix_block_cnt=4)
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Test initial scheduling
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == len(requests)
+    assert len(output.scheduled_cached_reqs) == 0
+    assert len(output.finished_req_ids) == 0
+    # Verify all requests are scheduled.
+    for req_id, num_tokens in output.num_scheduled_tokens.items():
+        assert num_tokens == len(requests[int(req_id)].prompt_token_ids)
+
+    # Verify requests moved from waiting to running
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == len(requests)
+    for i, request in enumerate(requests):
+        assert scheduler.running[i] == request
 
 @pytest.mark.parametrize("enable_prefix_caching, prompt_logprobs", [
     (None, None),

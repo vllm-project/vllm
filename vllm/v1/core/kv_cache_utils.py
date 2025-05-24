@@ -191,12 +191,14 @@ def get_scheduled_requests(request_list: list[tuple[str, bool]],
                            groups_list: list[tuple[int, int, int]]) \
         -> CommonPrefixGroups:
 
-    # Post-process request and group list to remove non-scheduled running requests
+    # Post-process request and group list to remove
+    # non-scheduled running requests
     actual_request_list = []
     actual_groups_list = []
 
     for group_num_common_blocks, start_id, end_id in groups_list:
-        scheduled = [req_id for req_id, is_scheduled in request_list[start_id:end_id + 1] if
+        scheduled = [req_id for req_id, is_scheduled in
+                     request_list[start_id:end_id + 1] if
                      is_scheduled]
 
         actual_start_id = len(actual_request_list)
@@ -237,8 +239,8 @@ class KVCacheBlockPrefixTrie:
 
     def insert(self, request: Request, blocks: list[KVCacheBlock]):
         """
-        Inserts blocks corresponding to the given request into the trie. If request
-        already exists in trie, update path to request.
+        Inserts blocks corresponding to the given request into the trie.
+        If request already exists in trie, update path to request.
         Args:
             request: Request whose blocks we parse.
             blocks: Blocks which we add to the trie.

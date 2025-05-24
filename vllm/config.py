@@ -327,7 +327,7 @@ class ModelConfig:
     preventing potential numerical issues. Note that even if this is set to
     False, cascade attention will be only used when the heuristic tells that
     it's beneficial."""
-    disable_forested_cascade_attn = False,
+    disable_forested_cascade_attn: bool = False,
     """Disable forested cascade attention for V1. While forested cascade attention
     is beneficial when requests can be split into several groups with large
     common prefixes, it can lead to high overhead when this is not the case. Like
@@ -4535,7 +4535,6 @@ class VllmConfig:
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
-            #TODO: FIX THIS
             f"forested_cascade_config={self.model_config.forested_cascade_config!r}, "
             f"compilation_config={self.compilation_config!r}")
 
