@@ -730,6 +730,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             seq_group_metadata,
             range(positions[0], positions[0] + len(positions)))
 
+        # M-RoPE requires mrope_positions even for plain text; return early
+        # when mm_kwargs is empty only if inter_data.is_prompt is False.
+        if not mm_kwargs and not inter_data.is_prompt:
+            return
+
         inter_data.multi_modal_kwargs = mm_kwargs
         inter_data.multi_modal_placeholder_maps = placeholder_maps
 
