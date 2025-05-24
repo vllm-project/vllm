@@ -312,11 +312,15 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        patched_weights = []
-        for name, loaded_weight in weights:
-            if not name.startswith("transformer.") and not name.startswith(
-                    "lm_head"):
-                name = "transformer." + name
-            patched_weights.append((name, loaded_weight))
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(patched_weights)
+        weights = _add_transformer_prefix(weights)
+        return loader.load_weights(weights)
+    
+def _add_transformer_prefix(
+    weights: Iterable[tuple[str, torch.Tensor]]
+) -> Iterable[tuple[str, torch.Tensor]]:
+    for name, tensor in weights:
+        if not name.startswith('transformer.') and not name.startswith(
+                "lm_head"):
+            name = 'transformer.' + name
+        yield name, tensor
