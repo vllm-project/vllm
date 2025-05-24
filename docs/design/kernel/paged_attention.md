@@ -482,7 +482,7 @@ scalar_t* out_ptr = out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE
 ```
 
 First, we need to define the `out_ptr` variable, which points to
-  the start address of the assigned sequence and assigned head.
+the start address of the assigned sequence and assigned head.
 
 ```cpp
 for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
