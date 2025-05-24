@@ -167,7 +167,7 @@ def create_cascade_requests(num_requests: int,
     for i in range(len(cum_group_indices) - 1):
         start_index = cum_group_indices[i]
         end_index = cum_group_indices[i + 1]
-        for j in range(start_index, end_index + 1):
+        for j in range(start_index, end_index):
             request = Request(
                 request_id=f"{j}",
                 prompt_token_ids=[i] * prefix_cnts[i] +
