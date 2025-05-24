@@ -317,7 +317,7 @@ def test_get_num_unfinished_requests():
 ])
 def test_schedule_with_cascade(enable_prefix_caching: Optional[bool],
                   prompt_logprobs: Optional[int]):
-    scheduler = create_scheduler(enable_prefix_caching=enable_prefix_caching)
+    scheduler = create_cascade_scheduler(enable_prefix_caching=enable_prefix_caching)
     requests = create_cascade_requests(num_requests=12,
                                        num_groups=4,
                                        lower_prefix_block_cnt=2,
