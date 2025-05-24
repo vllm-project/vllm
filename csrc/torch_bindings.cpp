@@ -702,5 +702,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
 
   custom_ar.def("free_shared_buffer", &free_shared_buffer);
 }
-
+#ifdef USE_ROCM
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _quick_ar), quick_ar) {
+  // quick all reduce kernels
+  quick_ar.def("init_quick_ar(int world_size, int rank) -> int");
+  quick_ar.def("qr_get_comm_handle(int _fa) -> Tensor");
+  quick_ar.def("qr_set_comm_handles(int _fa, Tensor[] handles) -> ()");
+  quick_ar.def(
+      "qr_all_reduce(int _fa, int profile, Tensor inp, Tensor out) -> ()");
+  quick_ar.def("qr_destroy(int _fa) -> ()");
+  quick_ar.def("is_quickreduce_available() -> ()");
+  quick_ar.impl("init_quick_ar", &init_quick_ar);
+  quick_ar.impl("qr_get_comm_handle", &qr_get_comm_handle);
+  quick_ar.impl("qr_set_comm_handles", &qr_set_comm_handles);
+  quick_ar.impl("qr_all_reduce", torch::kCUDA, &qr_all_reduce);
+  quick_ar.impl("qr_destroy", &qr_destroy);
+  quick_ar.impl("is_quickreduce_available", &is_quickreduce_available);
+}
+#endif
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

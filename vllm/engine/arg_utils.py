@@ -324,6 +324,7 @@ class EngineArgs:
     enforce_eager: bool = ModelConfig.enforce_eager
     max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
+    disable_quick_all_reduce: bool = ParallelConfig.disable_quick_all_reduce
     # The following three fields are deprecated and will be removed in a future
     # release. Setting them will have no effect. Please remove them from your
     # configurations.
@@ -630,6 +631,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--disable-custom-all-reduce",
             **parallel_kwargs["disable_custom_all_reduce"])
+        parallel_group.add_argument(
+            "--disable-quick-all-reduce",
+            **parallel_kwargs["disable_quick_all_reduce"])
         parallel_group.add_argument("--worker-cls",
                                     **parallel_kwargs["worker_cls"])
         parallel_group.add_argument("--worker-extension-cls",
@@ -1070,6 +1074,7 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
+            disable_quick_all_reduce=self.disable_quick_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             placement_group=placement_group,
             distributed_executor_backend=self.distributed_executor_backend,
