@@ -633,6 +633,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = num_tokens / vllm_config.model_config.max_model_len
+    # TODO: fix for hybrid allocator
     logger.info("Maximum concurrency for %s tokens per request: %.2fx",
                 max_model_len_str, max_concurrency)
 
