@@ -416,6 +416,24 @@ class P2pNcclEngine:
                     self.zmq_address, remote_address, rank, data, tensor.shape)
         return True
 
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        """
+        Notifies worker-side connector ids of requests that have
+        finished generating tokens.
+
+        Returns:
+            ids of requests that have finished asynchronous transfer,
+            tuple of (sending/saving ids, recving/loading ids).
+            The finished saves/sends req ids must belong to a set provided in a
+            call to this method (this call or a prior one).
+        """
+
+        logger.debug("🐞get_finished, finished_req_ids:%s", finished_req_ids)
+
+        return None, None
+
     def _ping(self):
         sock = self.context.socket(zmq.DEALER)
         sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)

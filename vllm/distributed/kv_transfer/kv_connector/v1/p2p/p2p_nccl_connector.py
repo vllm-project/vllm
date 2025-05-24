@@ -294,9 +294,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             call to this method (this call or a prior one).
         """
 
-        logger.debug("🐞get_finished, finished_req_ids:%s", finished_req_ids)
-
-        return None, None
+        return self.p2p_nccl_engine.get_finished(finished_req_ids)
 
     # ==============================
     # Scheduler-side methods
