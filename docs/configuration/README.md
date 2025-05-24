@@ -1,5 +1,3 @@
-[](){ #configuration-options }
-
 # Configuration Options
 
 This section lists the most common options for running the vLLM engine.
