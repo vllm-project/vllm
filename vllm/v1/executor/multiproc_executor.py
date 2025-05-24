@@ -38,7 +38,7 @@ logger = init_logger(__name__)
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
-EXECUTE_MODEL_TIMEOUT_S = 40
+EXECUTE_MODEL_TIMEOUT_S = 300
 
 
 class MultiprocExecutor(Executor):

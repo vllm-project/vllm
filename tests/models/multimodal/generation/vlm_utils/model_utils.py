@@ -3,11 +3,11 @@
 for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
 """
-import re
 import types
 from pathlib import PosixPath
 from typing import Optional, Union
 
+import regex as re
 import torch
 from PIL.Image import Image
 from transformers import (AutoConfig, AutoTokenizer, BatchFeature,

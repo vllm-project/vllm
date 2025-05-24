@@ -27,7 +27,7 @@ VLLM_INVALID_TOKEN_ID = -1
 
 
 def array_full(token_id: int, count: int):
-    """{class}`array` equivalent of {func}`numpy.full`."""
+    """{class}`array` equivalent of [numpy.full][]."""
     return array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
 
 
@@ -1494,7 +1494,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         for i in range(original_params.n):
             request_id_i = f"{request_id}_parallel_sample_{i}"
             group.seq_id_to_index[request_id_i] = i
-            params = copy.deepcopy(original_params)
+            params = params.clone()
             params.n = 1
             if params.seed is not None:
                 params.seed += i
