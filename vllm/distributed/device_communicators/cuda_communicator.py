@@ -81,7 +81,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             else:
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
-
     def all_reduce(self, input_):
         # always try custom allreduce first,
         # and then pynccl.
