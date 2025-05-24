@@ -841,7 +841,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
     @property
     def supports_video(self):
-        return getattr(self.get_hf_processor(), "supports_video", False)
+        return self.get_hf_processor().supports_video
 
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
@@ -953,13 +953,13 @@ class InternVLMultiModalProcessor(
         hf_inputs: Mapping[str, NestedTensors],
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        image_field = super()._get_mm_fields_config(hf_inputs,
-                                                    hf_processor_mm_kwargs)
+        image_fields = super()._get_mm_fields_config(hf_inputs,
+                                                     hf_processor_mm_kwargs)
         if self.info.supports_video:
             video_num_patches = hf_inputs.get("video_num_patches",
                                               torch.empty(0))
             num_videos = len(video_num_patches)
-            video_field = dict(
+            video_fields = dict(
                 pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
                     "video", video_num_patches),
                 video_num_patches=MultiModalFieldConfig.batched("video"),
@@ -967,9 +967,9 @@ class InternVLMultiModalProcessor(
                     "video", num_videos),
             )
         else:
-            video_field = {}
+            video_fields = {}
 
-        return image_field | video_field
+        return image_fields | video_fields
 
     def _get_prompt_updates(
         self,
