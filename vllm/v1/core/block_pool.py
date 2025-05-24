@@ -7,7 +7,7 @@ from vllm.distributed.kv_events import (AllBlocksCleared, BlockRemoved,
                                         BlockStored, KVCacheEvent)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock,
+                                         KVCacheBlock, KVCacheNullBlock,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
 from vllm.v1.request import Request
@@ -37,9 +37,12 @@ class BlockPool:
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
-        # All kv-cache blocks.
+
+        # A special placeholder block with block_id=0 and is never freed.
+        self.null_block = KVCacheNullBlock(0)
+        # All other kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
-            KVCacheBlock(idx) for idx in range(num_gpu_blocks)
+            KVCacheBlock(idx) for idx in range(1, num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
@@ -57,11 +60,6 @@ class BlockPool:
         # block tables are append-only.
         self.cached_block_hash_to_block: dict[BlockHashType, dict[
             int, KVCacheBlock]] = defaultdict(dict)
-
-        # To represent a placeholder block with block_id=0.
-        # The ref_cnt of null_block is not maintained, needs special care to
-        # avoid freeing it.
-        self.null_block = self.free_block_queue.popleft()
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
@@ -251,7 +249,7 @@ class BlockPool:
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
-            if block.ref_cnt == 0 and block != self.null_block:
+            if block.ref_cnt == 0:
                 self.free_block_queue.remove(block)
             block.incr_ref()
 
@@ -265,8 +263,7 @@ class BlockPool:
         """
         for block in ordered_blocks:
             block.decr_ref()
-            # null_block should not be added to the free list.
-            if block.ref_cnt == 0 and block != self.null_block:
+            if block.ref_cnt == 0:
                 self.free_block_queue.append(block)
 
     def reset_prefix_cache(self) -> bool:

@@ -288,7 +288,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // self.block_size
-        computed_blocks = [self._null_block] * max_num_blocks
+        computed_blocks: list[KVCacheBlock] = [self._null_block
+                                               ] * max_num_blocks
         num_contiguous_blocks = 0
 
         match_found = False

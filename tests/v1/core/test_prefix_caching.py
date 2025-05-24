@@ -92,14 +92,14 @@ def test_prefill(hash_algo):
         block_tokens = tuple(all_token_ids[(block_id - 1) * 16:block_id * 16])
         block_hash = hash_block_tokens(hash_fn, parent_block_hash,
                                        block_tokens)
-        assert manager.block_pool.blocks[block_id].block_hash == block_hash
-        assert manager.block_pool.blocks[block_id].ref_cnt == 1
+        assert manager.block_pool.blocks[block_id - 1].block_hash == block_hash
+        assert manager.block_pool.blocks[block_id - 1].ref_cnt == 1
         parent_block_hash = block_hash.hash_value
 
     # Check partial block metadata
     for block_id in (4, ):
-        assert manager.block_pool.blocks[block_id].block_hash is None
-        assert manager.block_pool.blocks[block_id].ref_cnt == 1
+        assert manager.block_pool.blocks[block_id - 1].block_hash is None
+        assert manager.block_pool.blocks[block_id - 1].ref_cnt == 1
 
     # Cache hit in the common prefix when the original block is still in use.
     # Incomplete 1 block (5 tokens)
@@ -217,14 +217,14 @@ def test_prefill_plp():
         block_tokens = tuple(all_token_ids[(block_id - 1) * 16:block_id * 16])
         block_hash = hash_block_tokens(hash_fn, parent_block_hash,
                                        block_tokens)
-        assert manager.block_pool.blocks[block_id].block_hash == block_hash
-        assert manager.block_pool.blocks[block_id].ref_cnt == 1
+        assert manager.block_pool.blocks[block_id - 1].block_hash == block_hash
+        assert manager.block_pool.blocks[block_id - 1].ref_cnt == 1
         parent_block_hash = block_hash.hash_value
 
     # Check partial block metadata
     for block_id in (4, ):
-        assert manager.block_pool.blocks[block_id].block_hash is None
-        assert manager.block_pool.blocks[block_id].ref_cnt == 1
+        assert manager.block_pool.blocks[block_id - 1].block_hash is None
+        assert manager.block_pool.blocks[block_id - 1].ref_cnt == 1
 
     # Request #1 is a non-prompt-logprobs request:
     # Cache hit in the common prefix when the original block is still in use.
@@ -282,7 +282,7 @@ def test_prefill_plp():
     # Request #2 block hashes are valid since request #0 hashes are.
     # Check block reference counts.
     for block_id in block_ids[0]:
-        assert manager.block_pool.blocks[block_id].ref_cnt == 1
+        assert manager.block_pool.blocks[block_id - 1].ref_cnt == 1
 
     manager.free(req2)
 
@@ -425,8 +425,8 @@ def test_hash_block_correct_reuse():
                                     computed_blocks)
     assert len(blocks.blocks) == 1
 
-    assert manager.block_pool.blocks[
-        blocks.blocks[0].block_id].block_hash is None
+    assert manager.block_pool.blocks[blocks.blocks[0].block_id -
+                                     1].block_hash is None
 
 
 def test_computed_blocks_not_evicted():

@@ -158,6 +158,28 @@ class KVCacheBlock:
                 f"next_free_block={next_block_id})")
 
 
+class KVCacheNullBlock(KVCacheBlock):
+    """A special KVCacheBlock with ref_cnt always equals 1 and thus will never 
+    be freed."""
+
+    def __init__(self, block_id: int):
+        super().__init__(block_id, ref_cnt=1)
+
+    def incr_ref(self):
+        pass
+
+    def decr_ref(self):
+        pass
+
+    @property
+    def block_hash(self) -> Optional[BlockHashType]:
+        return None
+
+    @block_hash.setter
+    def block_hash(self, block_hash: BlockHashType):
+        raise ValueError("Should not set block_hash for null block.")
+
+
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
     list of free blocks. We implement this class instead of using Python
