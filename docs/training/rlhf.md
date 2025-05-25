@@ -6,6 +6,6 @@ vLLM can be used to generate the completions for RLHF. The best way to do this i
 
 See the following basic examples to get started if you don't want to use an existing library:
 
-- [Training and inference processes are located on separate GPUs (inspired by OpenRLHF)](../../examples/offline_inference/rlhf.py)
-- [Training and inference processes are colocated on the same GPUs using Ray](../../examples/offline_inference/rlhf_colocate.py)
-- [Utilities for performing RLHF with vLLM](../../examples/offline_inference/rlhf_utils.py)
+- [Training and inference processes are located on separate GPUs (inspired by OpenRLHF)](../examples/offline_inference/rlhf.md)
+- [Training and inference processes are colocated on the same GPUs using Ray](../examples/offline_inference/rlhf_colocate.md)
+- [Utilities for performing RLHF with vLLM](../examples/offline_inference/rlhf_utils.md)
