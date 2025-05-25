@@ -1682,6 +1682,8 @@ class ParallelConfig:
     the product of the tensor parallel size and data parallel size."""
     data_parallel_size_local: int = 1
     """Number of local data parallel groups."""
+    data_parallel_size_per_node: int = 1
+    """Number of data parallel groups per node."""
     data_parallel_rank: int = 0
     """Rank of the data parallel group."""
     data_parallel_rank_local: Optional[int] = None
@@ -1691,8 +1693,12 @@ class ParallelConfig:
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = 29550
     """Port for data parallel messaging."""
+    data_parallel_worker_ips: list[str] = field(default_factory=list)
+    """List of worker IPs for data parallel."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
+    data_parallel_backend: str = "mp"
+    """Backend to use for data parallel, either "mp" or "ray"."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     max_parallel_loading_workers: Optional[int] = None
@@ -1855,6 +1861,10 @@ class ParallelConfig:
                                      "required for multi-node inference, "
                                      "please install Ray with `pip install "
                                      "ray`.") from ray_utils.ray_import_err
+                backend = "ray"
+            elif self.data_parallel_backend == "ray":
+                logger.info("Using ray distributed inference because "
+                            "data_parallel_backend is ray")
                 backend = "ray"
             elif ray_found:
                 if self.placement_group:

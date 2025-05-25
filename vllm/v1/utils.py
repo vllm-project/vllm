@@ -164,6 +164,148 @@ class CoreEngineProcManager:
         }
 
 
+class CoreEngineActorManager:
+    """
+    Utility class to handle creation, readiness, and shutdown
+    of core engine Ray actors used by the AsyncLLM and LLMEngine.
+
+    Different from CoreEngineProcManager, this class manages
+    core engines for both local and remote nodes.
+    """
+
+    def __init__(
+        self,
+        local_engine_count: int,
+        vllm_config: VllmConfig,
+        input_address: str,
+        output_address: str,
+        executor_class: type[Executor],
+        log_stats: bool,
+        placement_groups=None,
+        local_dp_ranks: Optional[list[int]] = None,
+    ):
+        import copy
+
+        import ray
+        from ray._private.state import available_resources_per_node
+        from ray.util.scheduling_strategies import (
+            PlacementGroupSchedulingStrategy)
+        from ray.util.state import list_nodes
+
+        from vllm.v1.engine.core import DPEngineCoreActor
+
+        self.local_engine_actors: list[ray.ActorHandle] = []
+        self.remote_engine_actors: list[ray.ActorHandle] = []
+
+        dp_size = vllm_config.parallel_config.data_parallel_size
+
+        if ray.is_initialized():
+            logger.info(
+                "Ray is already initialized. Skipping Ray initialization.")
+        else:
+            ray.init()
+
+        head_node_ip = \
+            vllm_config.parallel_config.data_parallel_master_ip
+
+        if placement_groups is not None:
+            assert local_dp_ranks is not None, (
+                "local_dp_ranks must be provided if "
+                "placement_groups is provided")
+            assert len(placement_groups) == len(local_dp_ranks), (
+                "placement_groups and local_dp_ranks must "
+                "have the same length")
+            logger.info("Using provided placement groups")
+            # TODO(rui): validate passed-in placement groups
+        else:
+            logger.info("Creating placement groups")
+            nodes = list_nodes()
+            nodes = sorted(list_nodes(),
+                           key=lambda node: node.node_ip != head_node_ip)
+            assert nodes[0].node_ip == head_node_ip, (
+                "The first node must be the head node")
+            assert len(nodes) == 1 or nodes[1].node_ip != head_node_ip, (
+                "There can only be one head node")
+
+            available_resources = available_resources_per_node()
+            world_size = vllm_config.parallel_config.world_size
+            placement_groups = []
+            local_dp_ranks = []
+
+            for node in nodes:
+                node_ip = node.node_ip
+                node_resources = available_resources[node.node_id]
+                # For now, each DP rank can only be assigned to one node
+                # TODO(rui): support allocating a single DP rank
+                # to multiple nodes
+                available_engine_count = node_resources["GPU"] // world_size
+                if node_ip == head_node_ip:
+                    assert available_engine_count >= local_engine_count, (
+                        "Not enough resources to allocate DP ranks "
+                        f"on DP master node {node_ip}")
+                    for i in range(local_engine_count):
+                        bundles = [{
+                            "GPU": 1.0,
+                            "node:" + head_node_ip: 0.001
+                        }] * world_size + [{
+                            "CPU": 1.0
+                        }]
+                        pg = ray.util.placement_group(
+                            name=f"dp_rank_{len(placement_groups)}",
+                            strategy="STRICT_PACK",
+                            bundles=bundles,
+                        )
+                        placement_groups.append(pg)
+                        local_dp_ranks.append(i)
+                else:
+                    for i in range(available_engine_count):
+                        if len(placement_groups) == dp_size:
+                            break
+                        bundles = [{"GPU": 1.0}] * world_size + [{"CPU": 1.0}]
+                        pg = ray.util.placement_group(
+                            name=f"dp_rank_{len(placement_groups)}",
+                            strategy="STRICT_PACK",
+                            bundles=bundles,
+                        )
+                        placement_groups.append(pg)
+                        local_dp_ranks.append(i)
+        assert len(placement_groups) == dp_size, (
+            "Number of placement groups must match data parallel size")
+
+        refs = []
+        for index in range(dp_size):
+            local_index = local_dp_ranks[index]
+            dp_vllm_config = copy.deepcopy(vllm_config)
+            pg = placement_groups[index]
+            dp_vllm_config.parallel_config.placement_group = pg
+            actor = ray.remote(DPEngineCoreActor).options(
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=world_size,
+                )).remote(vllm_config=dp_vllm_config,
+                          executor_class=executor_class,
+                          log_stats=log_stats,
+                          input_address=input_address,
+                          output_address=output_address,
+                          engine_index=index,
+                          dp_rank=index,
+                          local_dp_rank=local_index)
+            if index < local_engine_count:
+                self.local_engine_actors.append(actor)
+            else:
+                self.remote_engine_actors.append(actor)
+            refs.append(actor.wait_for_init.remote())
+
+        ray.get(refs)
+        for actor in self.local_engine_actors + self.remote_engine_actors:
+            actor.run.remote()
+
+    def close(self):
+        import ray
+        for actor in self.local_engine_actors + self.remote_engine_actors:
+            ray.kill(actor)
+
+
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the objedecoupct.
 def shutdown(procs: list[Process], input_address: str):
