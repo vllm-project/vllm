@@ -292,6 +292,8 @@ class Worker(WorkerBase):
             self.profiler.start()
         else:
             self.profiler.stop()
+            print(self.profiler.key_averages().table(
+                sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)
