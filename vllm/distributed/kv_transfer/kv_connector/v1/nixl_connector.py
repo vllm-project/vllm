@@ -669,10 +669,8 @@ class NixlConnectorWorker:
             for handle in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
-                    # TODO ptarasiewicz: why abort is throwing errors?
-                    # self.nixl_wrapper.release_xfer_handle(handle)
-                    continue
-                if xfer_state == "PROC":
+                    self.nixl_wrapper.release_xfer_handle(handle)
+                elif xfer_state == "PROC":
                     running_reqs.append(handle)
                 else:
                     raise RuntimeError("Transfer failed with state %s",
