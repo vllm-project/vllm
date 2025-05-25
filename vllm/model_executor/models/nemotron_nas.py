@@ -29,12 +29,14 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
+from vllm.attention import AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -60,6 +62,41 @@ def _find_multiple(n: int, k: int) -> int:
     if n % k == 0:
         return n
     return n + k - (n % k)
+
+
+class DeciLMAttention(LlamaAttention):
+
+    def __init__(self,
+                 config,
+                 hidden_size,
+                 num_heads,
+                 num_kv_heads,
+                 rope_theta=10000,
+                 rope_scaling=None,
+                 max_position_embeddings=8192,
+                 quant_config=None,
+                 bias=False,
+                 bias_o_proj=False,
+                 cache_config=None,
+                 prefix="",
+                 attn_type=AttentionType.DECODER):
+        super().__init__(config, hidden_size, num_heads, num_kv_heads,
+                         rope_theta, rope_scaling, max_position_embeddings,
+                         quant_config, bias, bias_o_proj, cache_config, prefix,
+                         attn_type)
+
+        # Enable YARN by overriding rope
+        interleaved_rope = config.position_embedding_type in [
+            "mistral_yarn", "rope_llama4"
+        ]
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=self.max_position_embeddings,
+            base=self.rope_theta,
+            rope_scaling=rope_scaling,
+            is_neox_style=not interleaved_rope,
+            partial_rotary_factor=self.partial_rotary_factor)
 
 
 class DeciLMDecoderLayer(nn.Module):
@@ -98,7 +135,7 @@ class DeciLMDecoderLayer(nn.Module):
         if not self._is_no_op_attention:
             num_kv_heads = (config.num_attention_heads //
                             block_config.attention.n_heads_in_group)
-            self.self_attn = LlamaAttention(
+            self.self_attn = DeciLMAttention(
                 config=config,
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
