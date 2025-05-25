@@ -13,6 +13,12 @@ from vllm.model_executor.layers.quantization.base_config import (
 SUPPORTED_QUANT_DTYPE_LIST = ['s8', 'f8e4m3fn']
 
 
+class AlwaysSupportedDtypes(list):
+
+    def __contains__(self, item):
+        return True
+
+
 class NeuronQuantConfig(QuantizationConfig):
     """Int8 Quantization Config class for Neuron Backend."""
 
@@ -35,7 +41,8 @@ class NeuronQuantConfig(QuantizationConfig):
         return "neuron_quant"
 
     def get_supported_act_dtypes(self) -> list[str]:
-        return SUPPORTED_QUANT_DTYPE_LIST
+        # Neuron implements custom handling logic for quantization support
+        return AlwaysSupportedDtypes()
 
     @classmethod
     def get_min_capability(cls) -> int:

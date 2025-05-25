@@ -28,7 +28,7 @@ class NeuronPlatform(Platform):
     device_name: str = "neuron"
     device_type: str = "neuron"
     ray_device_key: str = "neuron_cores"
-    supported_quantization: list[str] = ["neuron_quant"]
+    supported_quantization: list[str] = ["neuron_quant", "fbgemm_fp8"]
     device_control_env_var: str = "NEURON_RT_VISIBLE_CORES"
 
     @classmethod
