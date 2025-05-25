@@ -41,7 +41,10 @@ If your model imports modules that initialize CUDA, consider lazy-importing it t
 ```python
 from vllm import ModelRegistry
 
-ModelRegistry.register_model("YourModelForCausalLM", "your_code:YourModelForCausalLM")
+ModelRegistry.register_model(
+    "YourModelForCausalLM",
+    "your_code:YourModelForCausalLM"
+)
 ```
 
 !!! warning

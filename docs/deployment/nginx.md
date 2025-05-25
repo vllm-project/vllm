@@ -77,7 +77,11 @@ If you are behind proxy, you can pass the proxy settings to the docker build com
 
 ```console
 cd $vllm_root
-docker build -f docker/Dockerfile . --tag vllm --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy
+docker build \
+    -f docker/Dockerfile . \
+    --tag vllm \
+    --build-arg http_proxy=$http_proxy \
+    --build-arg https_proxy=$https_proxy
 ```
 
 [](){ #nginxloadbalancer-nginx-docker-network }
@@ -102,8 +106,26 @@ Notes:
 ```console
 mkdir -p ~/.cache/huggingface/hub/
 hf_cache_dir=~/.cache/huggingface/
-docker run -itd --ipc host --network vllm_nginx --gpus device=0 --shm-size=10.24gb -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm --model meta-llama/Llama-2-7b-chat-hf
-docker run -itd --ipc host --network vllm_nginx --gpus device=1 --shm-size=10.24gb -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm --model meta-llama/Llama-2-7b-chat-hf
+docker run \
+    -itd \
+    --ipc host \
+    --network vllm_nginx \
+    --gpus device=0 \
+    --shm-size=10.24gb \
+    -v $hf_cache_dir:/root/.cache/huggingface/ \
+    -p 8081:8000 \
+    --name vllm0 vllm \
+    --model meta-llama/Llama-2-7b-chat-hf
+docker run \
+    -itd \
+    --ipc host \
+    --network vllm_nginx \
+    --gpus device=1 \
+    --shm-size=10.24gb \
+    -v $hf_cache_dir:/root/.cache/huggingface/ \
+    -p 8082:8000 \
+    --name vllm1 vllm \
+    --model meta-llama/Llama-2-7b-chat-hf
 ```
 
 !!! note
@@ -114,7 +136,12 @@ docker run -itd --ipc host --network vllm_nginx --gpus device=1 --shm-size=10.24
 ## Launch Nginx
 
 ```console
-docker run -itd -p 8000:80 --network vllm_nginx -v ./nginx_conf/:/etc/nginx/conf.d/ --name nginx-lb nginx-lb:latest
+docker run \
+    -itd \
+    -p 8000:80 \
+    --network vllm_nginx \
+    -v ./nginx_conf/:/etc/nginx/conf.d/ \
+    --name nginx-lb nginx-lb:latest
 ```
 
 [](){ #nginxloadbalancer-nginx-verify-nginx }

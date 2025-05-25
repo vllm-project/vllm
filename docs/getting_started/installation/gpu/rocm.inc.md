@@ -91,19 +91,22 @@ Currently, there are no pre-built ROCm wheels.
 4. Build vLLM. For example, vLLM on ROCM 6.3 can be built with the following steps:
 
     ```bash
-    $ pip install --upgrade pip
+    pip install --upgrade pip
 
     # Build & install AMD SMI
-    $ pip install /opt/rocm/share/amd_smi
+    pip install /opt/rocm/share/amd_smi
 
     # Install dependencies
-    $ pip install --upgrade numba scipy huggingface-hub[cli,hf_transfer] setuptools_scm
-    $ pip install "numpy<2"
-    $ pip install -r requirements/rocm.txt
+    pip install --upgrade numba \
+        scipy \
+        huggingface-hub[cli,hf_transfer] \
+        setuptools_scm
+    pip install "numpy<2"
+    pip install -r requirements/rocm.txt
 
     # Build vLLM for MI210/MI250/MI300.
-    $ export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-    $ python3 setup.py develop
+    export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+    python3 setup.py develop
     ```
 
     This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
@@ -154,7 +157,9 @@ It is important that the user kicks off the docker build using buildkit. Either 
 To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
 
 ```console
-DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm_base -t rocm/vllm-dev:base .
+DOCKER_BUILDKIT=1 docker build \
+    -f docker/Dockerfile.rocm_base \
+    -t rocm/vllm-dev:base .
 ```
 
 #### Build an image with vLLM
@@ -189,7 +194,11 @@ DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm-rocm .
 To build vllm on ROCm 6.3 for Radeon RX7900 series (gfx1100), you should pick the alternative base image:
 
 ```console
-DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE="rocm/vllm-dev:navi_base" -f docker/Dockerfile.rocm -t vllm-rocm .
+DOCKER_BUILDKIT=1 docker build \
+    --build-arg BASE_IMAGE="rocm/vllm-dev:navi_base" \
+    -f docker/Dockerfile.rocm \
+    -t vllm-rocm \
+    .
 ```
 
 To run the above docker image `vllm-rocm`, use the below command:

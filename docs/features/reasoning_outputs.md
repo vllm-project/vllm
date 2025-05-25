@@ -27,7 +27,8 @@ vLLM currently supports the following reasoning models:
 To use reasoning models, you need to specify the `--reasoning-parser` flags when making a request to the chat completion endpoint. The `--reasoning-parser` flag specifies the reasoning parser to use for extracting reasoning content from the model output.
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --reasoning-parser deepseek_r1
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
+    --reasoning-parser deepseek_r1
 ```
 
 Next, make a request to the model that should return the reasoning content in the response.

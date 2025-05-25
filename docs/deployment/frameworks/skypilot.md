@@ -82,7 +82,11 @@ Check the output of the command. There will be a shareable gradio link (like the
 **Optional**: Serve the 70B model instead of the default 8B and use more GPU:
 
 ```console
-HF_TOKEN="your-huggingface-token" sky launch serving.yaml --gpus A100:8 --env HF_TOKEN --env MODEL_NAME=meta-llama/Meta-Llama-3-70B-Instruct
+HF_TOKEN="your-huggingface-token" \
+  sky launch serving.yaml \
+  --gpus A100:8 \
+  --env HF_TOKEN \
+  --env MODEL_NAME=meta-llama/Meta-Llama-3-70B-Instruct
 ```
 
 ## Scale up to multiple replicas
@@ -155,7 +159,9 @@ run: |
 Start the serving the Llama-3 8B model on multiple replicas:
 
 ```console
-HF_TOKEN="your-huggingface-token" sky serve up -n vllm serving.yaml --env HF_TOKEN
+HF_TOKEN="your-huggingface-token" \
+  sky serve up -n vllm serving.yaml \
+  --env HF_TOKEN
 ```
 
 Wait until the service is ready:
@@ -318,7 +324,9 @@ run: |
 1. Start the chat web UI:
 
     ```console
-    sky launch -c gui ./gui.yaml --env ENDPOINT=$(sky serve status --endpoint vllm)
+    sky launch \
+      -c gui ./gui.yaml \
+      --env ENDPOINT=$(sky serve status --endpoint vllm)
     ```
 
 2. Then, we can access the GUI at the returned gradio link:
