@@ -1093,15 +1093,15 @@ class AsyncLLMEngine(EngineClient):
             for the request.
 
         Details:
-        - If the engine is not running, start the background loop,
-            which iteratively invokes
-            {meth}`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
-            to process the waiting requests.
-        - Add the request to the engine's `RequestTracker`.
-            On the next background loop, this request will be sent to
-            the underlying engine.
-            Also, a corresponding `AsyncStream` will be created.
-        - Wait for the request outputs from `AsyncStream` and yield them.
+            - If the engine is not running, start the background loop,
+                which iteratively invokes
+                [`vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`][]
+                to process the waiting requests.
+            - Add the request to the engine's `RequestTracker`.
+                On the next background loop, this request will be sent to
+                the underlying engine.
+                Also, a corresponding `AsyncStream` will be created.
+            - Wait for the request outputs from `AsyncStream` and yield them.
 
         Example:
         ```
