@@ -17,6 +17,7 @@ nav:
       - Releases: https://github.com/vllm-project/vllm/releases
   - User Guide:
     - usage/README.md
+    - usage/v1_guide.md
     - General:
       - usage/*
     - Inference and Serving:
