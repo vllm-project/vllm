@@ -10,6 +10,7 @@ import math
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.jit_cache import jitcache
 
 
 @triton.autotune(
@@ -89,6 +90,13 @@ from vllm.triton_utils import tl, triton
     ],
     key=['chunk_size', 'K', 'IS_CAUSAL'],
 )
+@jitcache(
+    # check_keys should include constexpr args that may change across invocations
+    check_keys=["HAS_SEQ_IDX", "BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K"],
+    # for variables that cannot be labeled constexpr because range > 32 bit
+    assume_const=[],
+    # cache_launch_grid=True,
+)
 @triton.jit
 def _bmm_chunk_fwd_kernel(
     # Pointers to matrices
@@ -97,25 +105,25 @@ def _bmm_chunk_fwd_kernel(
     out_ptr,
     seq_idx_ptr,
     # Matrix dimensions
-    seqlen,
-    chunk_size,
-    K,
-    ngroups,
-    stride_a_batch,
-    stride_a_seqlen,
-    stride_a_head,
-    stride_ak,
-    stride_b_batch,
-    stride_b_seqlen,
-    stride_b_head,
-    stride_bk,
-    stride_out_batch,
-    stride_out_chunk,
-    stride_out_head,
-    stride_outm,
-    stride_outn,
-    stride_seq_idx_batch,
-    stride_seq_idx_seqlen,
+    seqlen: tl.int64,
+    chunk_size: tl.constexpr,
+    K: tl.constexpr,
+    ngroups: tl.constexpr,
+    stride_a_batch: tl.constexpr,
+    stride_a_seqlen: tl.constexpr,
+    stride_a_head: tl.constexpr,
+    stride_ak: tl.constexpr,
+    stride_b_batch: tl.constexpr,
+    stride_b_seqlen: tl.constexpr,
+    stride_b_head: tl.constexpr,
+    stride_bk: tl.constexpr,
+    stride_out_batch: tl.constexpr,
+    stride_out_chunk: tl.constexpr,
+    stride_out_head: tl.constexpr,
+    stride_outm: tl.constexpr,
+    stride_outn: tl.constexpr,
+    stride_seq_idx_batch: tl.constexpr,
+    stride_seq_idx_seqlen: tl.constexpr,
     # Meta-parameters
     IS_CAUSAL: tl.constexpr,
     dot_dtype: tl.constexpr,
@@ -225,37 +233,39 @@ def _bmm_chunk_fwd(a,
                  if a.dtype == torch.bfloat16 or b.dtype == torch.bfloat16 else
                  (tl.float16 if a.dtype == torch.float16
                   or b.dtype == torch.float16 else tl.float32))
+    seq_idx_strides = ((seq_idx.stride(0),
+                        seq_idx.stride(1)) if seq_idx is not None else (0, 0))
     grid = lambda META: (triton.cdiv(
         chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(
             chunk_size, META['BLOCK_SIZE_N']), batch, nchunks
                          if not has_groups else nchunks * ngroups)
     with torch.cuda.device(a.device.index):
         _bmm_chunk_fwd_kernel[grid](
-            a,
-            b,
-            out,
-            seq_idx,
-            seqlen,
-            chunk_size,
-            k,
-            ngroups if has_groups else 1,
-            a.stride(0),
-            a.stride(1),
-            0 if not has_groups else a.stride(2),
-            a.stride(-1),
-            b.stride(0),
-            b.stride(1),
-            0 if not has_groups else b.stride(2),
-            b.stride(-1),
-            out.stride(0),
-            out.stride(1),
-            0 if not has_groups else out.stride(2),
-            out.stride(-2),
-            out.stride(-1),
-            *((seq_idx.stride(0),
-               seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
-            causal,
-            dot_dtype,
+            a_ptr=a,
+            b_ptr=b,
+            out_ptr=out,
+            seq_idx_ptr=seq_idx,
+            seqlen=seqlen,
+            chunk_size=chunk_size,
+            K=k,
+            ngroups=ngroups if has_groups else 1,
+            stride_a_batch=a.stride(0),
+            stride_a_seqlen=a.stride(1),
+            stride_a_head=0 if not has_groups else a.stride(2),
+            stride_ak=a.stride(-1),
+            stride_b_batch=b.stride(0),
+            stride_b_seqlen=b.stride(1),
+            stride_b_head=0 if not has_groups else b.stride(2),
+            stride_bk=b.stride(-1),
+            stride_out_batch=out.stride(0),
+            stride_out_chunk=out.stride(1),
+            stride_out_head=0 if not has_groups else out.stride(2),
+            stride_outm=out.stride(-2),
+            stride_outn=out.stride(-1),
+            stride_seq_idx_batch=seq_idx_strides[0],
+            stride_seq_idx_seqlen=seq_idx_strides[1],
+            IS_CAUSAL=causal,
+            dot_dtype=dot_dtype,
             HAS_SEQ_IDX=seq_idx is not None,
         )
     return out
