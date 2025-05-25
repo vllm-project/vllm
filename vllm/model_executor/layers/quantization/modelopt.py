@@ -245,7 +245,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
             return ModelOptNvFp4LinearMethod(self)
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, FusedMoE) and layer.activation == "silu":
             return ModelOptNvFp4FusedMoE(self)
         return None
 
@@ -692,12 +692,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map)
 
         assert activation == "silu", "Only SiLU activation is supported."
-        assert not apply_router_weight_on_input, (
-            "Router weight on input is not "
-            "supported for ModelOptNvFp4FusedMoE.")
-        assert expert_map is None, ("Expert Parallelism / expert_map "
-                                    "is currently not supported for "
-                                    "ModelOptNvFp4FusedMoE.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -716,19 +710,22 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         # Cutlass moe takes in activations in BF16/Half precision
         # and fp4 quantized weights loaded from the checkpoint
-        return cutlass_moe_fp4(a=x,
-                               w1_fp4=layer.w13_weight,
-                               w1_blockscale=layer.w13_blockscale_swizzled,
-                               w1_alphas=layer.g1_alphas,
-                               w2_fp4=layer.w2_weight,
-                               w2_blockscale=layer.w2_blockscale_swizzled,
-                               w2_alphas=layer.g2_alphas,
-                               topk_weights=topk_weights,
-                               topk_ids=topk_ids,
-                               m=x.shape[0],
-                               n=layer.w2_weight.shape[2] * 2,
-                               k=x.shape[1],
-                               e=layer.w13_weight.shape[0],
-                               a1_gscale=layer.w13_input_scale_quant,
-                               a2_gscale=layer.w2_input_scale_quant,
-                               device=x.device).to(x.dtype)
+        return cutlass_moe_fp4(
+                a=x,
+                w1_fp4=layer.w13_weight,
+                w1_blockscale=layer.w13_blockscale_swizzled,
+                w1_alphas=layer.g1_alphas,
+                w2_fp4=layer.w2_weight,
+                w2_blockscale=layer.w2_blockscale_swizzled,
+                w2_alphas=layer.g2_alphas,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                m=x.shape[0],
+                n=layer.w2_weight.shape[2] * 2,
+                k=x.shape[1],
+                e=layer.w13_weight.shape[0],
+                a1_gscale=layer.w13_input_scale_quant,
+                a2_gscale=layer.w2_input_scale_quant,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                device=x.device).to(x.dtype)
