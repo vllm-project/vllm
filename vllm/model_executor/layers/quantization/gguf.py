@@ -9,7 +9,6 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
@@ -163,8 +162,21 @@ def _fused_moe_gguf(
     topk_ids: torch.Tensor,
     qweight_type: int,
     qweight_type2: int,
-    act,
+    activation: str,
 ) -> torch.Tensor:
+
+    def act(x: torch.Tensor):
+        d = x.shape[-1] // 2
+        output_shape = (x.shape[:-1] + (d, ))
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        if activation == "silu":
+            torch.ops._C.silu_and_mul(out, x)
+        elif activation == "gelu":
+            torch.ops._C.gelu_and_mul(out, x)
+        else:
+            raise ValueError(f"Unsupported activation: {activation}")
+        return out
+
     # lazy import to avoid triggering triton import in CPU backend
     from vllm.model_executor.layers.fused_moe.fused_moe import (
         moe_align_block_size)
@@ -226,6 +238,32 @@ def _fused_moe_gguf(
                     current_hidden_state.add_(current_state)
             out_hidden_states[tok] = current_hidden_state
     return out_hidden_states
+
+
+def _fused_moe_gguf_fake(
+    x: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    qweight_type: int,
+    qweight_type2: int,
+    activation: str,
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+try:
+    direct_register_custom_op(
+        op_name="_fused_moe_gguf",
+        op_func=_fused_moe_gguf,
+        mutates_args=[],
+        fake_impl=_fused_moe_gguf_fake,
+    )
+    fused_moe_gguf = torch.ops.vllm._fused_moe_gguf
+
+except AttributeError as error:
+    raise error
 
 
 def _apply_gguf_embedding(
@@ -459,7 +497,6 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
         set_weight_attrs(w2_qweight_type, extra_weight_attrs)
         layer.register_parameter("w2_qweight_type", w2_qweight_type)
-        self.act = SiluAndMul()
 
     def apply(
         self,
@@ -496,10 +533,10 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
-        return _fused_moe_gguf(x, layer.w13_qweight, layer.w2_qweight,
-                               topk_weights, topk_ids,
-                               layer.w13_qweight_type.weight_type,
-                               layer.w2_qweight_type.weight_type, self.act)
+        return fused_moe_gguf(x, layer.w13_qweight, layer.w2_qweight,
+                              topk_weights, topk_ids,
+                              layer.w13_qweight_type.weight_type,
+                              layer.w2_qweight_type.weight_type, activation)
 
 
 class GGUFEmbeddingMethod(GGUFLinearMethod):
