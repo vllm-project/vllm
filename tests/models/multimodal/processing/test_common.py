@@ -102,7 +102,7 @@ def _test_processing_correctness(
         prompt = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
-        ).prompt_text
+        ).prompt
 
         # Drop unnecessary keys and test single -> multi conversion
         if rng.rand() < simplify_rate:

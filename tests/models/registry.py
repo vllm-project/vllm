@@ -388,8 +388,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
-                                                       tokenizer_mode="mistral",
-                                                       v0_only=True),
+                                                       tokenizer_mode="mistral"),
     "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",
                                                       extras={"chat": "Qwen/Qwen-VL-Chat"},  # noqa: E501
                                                       trust_remote_code=True,
@@ -400,7 +399,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B",
                                         min_transformers_version="4.52"),
     "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ",  # noqa: E501
-                                        min_transformers_version="4.52"),
+                                                           min_transformers_version="4.52"),
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct"),  # noqa: E501
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
