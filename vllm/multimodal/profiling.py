@@ -75,7 +75,12 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                             "in an upcoming release.")
 
         seq_len = self.info.ctx.model_config.max_model_len
-        return self.get_dummy_processor_inputs(seq_len, mm_counts).prompt
+
+        prompt = self.get_dummy_processor_inputs(seq_len, mm_counts).prompt
+        if not isinstance(prompt, str):
+            prompt = self.info.get_tokenizer().decode(prompt)
+
+        return prompt
 
     # TODO: @abstractmethod after transition
     def get_dummy_mm_data(
