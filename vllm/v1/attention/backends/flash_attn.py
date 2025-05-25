@@ -164,6 +164,7 @@ class FlashAttentionMetadata:
 #   cu_seqlens_q_local = [0, 4,  6, 10, 14, 18, 19, 23, 24]
 #   seqlens_k_local    = [   4,  2,  4,  4,  4,  1,  4,  1]
 #   block_table_local  : shape[local_virtual_batches, pages_per_local_batch]
+# TODO(ngl): factor out, it is also used by other backends?
 def make_local_attention_virtual_batches(
     attn_chunk_size: int,
     query_start_loc_np: np.ndarray,
@@ -278,6 +279,7 @@ def make_local_attention_virtual_batches(
         block_table_local
 
 
+# TODO(ngl): factor out, it is also used by other backends?
 def _get_sliding_window_configs(
         vllm_config: VllmConfig) -> set[Optional[tuple[int, int]]]:
     """Get the set of all sliding window configs used in the model."""

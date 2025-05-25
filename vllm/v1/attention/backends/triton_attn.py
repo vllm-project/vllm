@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
@@ -13,6 +13,8 @@ from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+# TODO(ngl): this should be completely independent from the flash_attn
+#  backend. Maybe use utilities
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata, FlashAttentionMetadataBuilder)
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -72,7 +74,31 @@ class TritonAttentionBackend(AttentionBackend):
         return TritonAttentionMetadataBuilder
 
 
-class TritonAttentionImpl(AttentionImpl):
+class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+    # TODO(ngl): this should be completely independent from the flash_attn
+    #  backend. Maybe use utilities
+
+    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
+        model_config = runner.model_config
+
+        self.runner = runner
+        self.num_heads_q = model_config.get_num_attention_heads(
+            runner.parallel_config)
+        self.num_heads_kv = model_config.get_num_kv_heads(
+            runner.parallel_config)
+        self.headdim = model_config.get_head_size()
+        self.block_size = kv_cache_spec.block_size
+        self.kv_cache_spec = kv_cache_spec
+        self.block_table = block_table
+
+        self.aot_schedule = False
+        # Sliding window size to be used with the AOT scheduler will be
+        # populated on first build() call.
+        self.aot_sliding_window: Optional[tuple[int, int]] = None
+
+
+class TritonAttentionImpl:
 
     def __init__(
         self,
