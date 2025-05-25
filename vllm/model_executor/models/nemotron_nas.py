@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only deci model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -66,36 +66,43 @@ def _find_multiple(n: int, k: int) -> int:
 
 class DeciLMAttention(LlamaAttention):
 
-    def __init__(self,
-                 config,
-                 hidden_size,
-                 num_heads,
-                 num_kv_heads,
-                 rope_theta=10000,
-                 rope_scaling=None,
-                 max_position_embeddings=8192,
-                 quant_config=None,
-                 bias=False,
-                 bias_o_proj=False,
-                 cache_config=None,
-                 prefix="",
-                 attn_type=AttentionType.DECODER):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        quant_config: Optional[QuantizationConfig] = None,
+        bias: bool = False,
+        bias_o_proj: bool = False,
+        cache_config: Optional[CacheConfig] = None,
+        prefix: str = "",
+        attn_type: str = AttentionType.DECODER,
+    ) -> None:
         super().__init__(config, hidden_size, num_heads, num_kv_heads,
                          rope_theta, rope_scaling, max_position_embeddings,
                          quant_config, bias, bias_o_proj, cache_config, prefix,
                          attn_type)
 
-        # Enable YARN by overriding rope
-        interleaved_rope = config.position_embedding_type in [
-            "mistral_yarn", "rope_llama4"
-        ]
+    def _init_rotary_emb(self, config, rope_scaling: Optional[dict[str, Any]],
+                         quant_config: Optional[QuantizationConfig]) -> None:
+        # Enables YARN for Mistral and LLaMA4 derivatives.
+        is_neox_style = True
+        if hasattr(config, "position_embedding_type"):
+            is_neox_style = config.position_embedding_type not in [
+                "mistral_yarn", "rope_llama4"
+            ]
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             base=self.rope_theta,
             rope_scaling=rope_scaling,
-            is_neox_style=not interleaved_rope,
+            is_neox_style=is_neox_style,
             partial_rotary_factor=self.partial_rotary_factor)
 
 
