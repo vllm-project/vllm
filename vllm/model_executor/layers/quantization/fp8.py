@@ -62,10 +62,9 @@ class Fp8Config(QuantizationConfig):
         weight_block_size: Optional[list[int]] = None,
     ) -> None:
         super().__init__()
+
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
-        if is_checkpoint_fp8_serialized:
-            logger.warning("Detected fp8 checkpoint. Please note that the "
-                           "format is experimental and subject to change.")
+
         if activation_scheme not in ACTIVATION_SCHEMES:
             raise ValueError(
                 f"Unsupported activation scheme {activation_scheme}")
