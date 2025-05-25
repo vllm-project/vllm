@@ -326,7 +326,7 @@ def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     orig_generate = hf_model.model.generate
 
     def _generate(self, *args, **kwargs):
-        # Workaround for https://github.com/huggingface/transformers/issues/38333
+        # FIXME: https://github.com/huggingface/transformers/issues/38333
         kwargs["disable_compile"] = True
 
         return orig_generate(*args, **kwargs)

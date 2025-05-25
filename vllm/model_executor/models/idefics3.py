@@ -198,7 +198,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
 
         return grid_w * grid_h + 1
 
-    # For back-compatibility. This is no longer needed since transformers 4.52
+    # TODO: Remove after requiring transformers>=4.52
     def _get_content(self, token: Union[AddedToken, str]) -> str:
         if isinstance(token, str):
             return token

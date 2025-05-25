@@ -278,7 +278,8 @@ def _test_processing_correctness_one(
     "Qwen/Qwen2-VL-2B-Instruct",
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
-    "Qwen/Qwen2.5-Omni-3B",
+    # FIXME: https://github.com/huggingface/transformers/issues/38352
+    # "Qwen/Qwen2.5-Omni-3B",
     "Skywork/Skywork-R1V-38B",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     "openai/whisper-large-v3",
