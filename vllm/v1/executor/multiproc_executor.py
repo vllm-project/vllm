@@ -78,15 +78,27 @@ class MultiprocExecutor(Executor):
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
-            for rank in range(self.world_size):
-                unready_workers.append(
-                    WorkerProc.make_worker_process(
-                        vllm_config=self.vllm_config,
-                        local_rank=rank,
-                        rank=rank,
-                        distributed_init_method=distributed_init_method,
-                        input_shm_handle=scheduler_output_handle,
-                    ))
+
+            def make_worker_process(rank: int) -> UnreadyWorkerProcHandle:
+                return WorkerProc.make_worker_process(
+                    vllm_config=self.vllm_config,
+                    local_rank=rank,
+                    rank=rank,
+                    distributed_init_method=distributed_init_method,
+                    input_shm_handle=scheduler_output_handle,
+                )
+
+            # Create and start all worker processes concurrently
+            with ThreadPoolExecutor(max_workers=self.world_size) as executor:
+                futures = [
+                    executor.submit(make_worker_process, rank)
+                    for rank in range(self.world_size)
+                ]
+                for future in futures:
+                    exc = future.exception()
+                    if exc is not None:
+                        raise exc
+                    unready_workers.append(future.result())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.

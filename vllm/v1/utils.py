@@ -5,6 +5,7 @@ import time
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import Process, connection
 from typing import (TYPE_CHECKING, Callable, Generic, Optional, TypeVar, Union,
                     overload)
@@ -138,8 +139,16 @@ class CoreEngineProcManager:
         self._finalizer = weakref.finalize(self, shutdown, self.processes,
                                            input_address)
         try:
-            for proc in self.processes:
-                proc.start()
+            # Start all processes in parallel and collect any exceptions.
+            with ThreadPoolExecutor(
+                    max_workers=local_engine_count) as executor:
+                futures = [
+                    executor.submit(proc.start) for proc in self.processes
+                ]
+                for future in futures:
+                    exc = future.exception()
+                    if exc is not None:
+                        raise exc
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
