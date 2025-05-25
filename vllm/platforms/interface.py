@@ -120,6 +120,9 @@ class Platform:
     # compilation strategy.
     simple_compile_backend: str = "inductor"
 
+    # The backend used for distributed communication.
+    dist_backend: str = ""
+
     supported_quantization: list[str] = []
 
     additional_env_vars: list[str] = []
