@@ -52,6 +52,16 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
+KEBAB_CASE_FUNCTION_OUTPUT = "wikipedia-api(query=\"2025 Superbowl final score\")"
+KEBAB_CASE_FUNCTION_CALL = FunctionCall(
+    name="wikipedia-api",
+    arguments='{"query": "2025 Superbowl final score"}',
+)
+LEADING_UNDERSCORE_FUNCTION_OUTPUT = "_calculator(math=\"(2025*19)\")"
+LEADING_UNDERSCORE_FUNCTION_CALL = FunctionCall(
+    name="_calculator",
+    arguments='{"math": "(2025*19)"}',
+)
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -118,6 +128,20 @@ TEST_CASES = [
                  f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
                  [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
                  id="parallel_calls_nonstreaming"),
+    pytest.param(True,
+                 f"[{KEBAB_CASE_FUNCTION_OUTPUT}]", [KEBAB_CASE_FUNCTION_CALL],
+                 id="kebab_case_streaming"),
+    pytest.param(False,
+                 f"[{KEBAB_CASE_FUNCTION_OUTPUT}]", [KEBAB_CASE_FUNCTION_CALL],
+                 id="kebab_case_nonstreaming"),
+    pytest.param(True,
+                 f"[{LEADING_UNDERSCORE_FUNCTION_OUTPUT}]",
+                 [LEADING_UNDERSCORE_FUNCTION_CALL],
+                 id="leading_underscore_streaming"),
+    pytest.param(False,
+                 f"[{LEADING_UNDERSCORE_FUNCTION_OUTPUT}]",
+                 [LEADING_UNDERSCORE_FUNCTION_CALL],
+                 id="leading_underscore_nonstreaming"),
 ]
 
 
