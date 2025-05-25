@@ -164,7 +164,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
             )
 
             return np.stack([
-                np.array(load_frame(frame_data))
+                np.asarray(load_frame(frame_data))
                 for frame_data in data.split(",")
             ])
 
