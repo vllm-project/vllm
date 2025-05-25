@@ -4,14 +4,16 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 else:
+    ModelConfig = None
     VllmConfig = None
 
 logger = init_logger(__name__)
@@ -34,8 +36,13 @@ class XPUPlatform(Platform):
                              use_mla: bool) -> str:
         if selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
-        logger.info("Using IPEX attention backend.")
-        return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
+        use_v1 = envs.VLLM_USE_V1
+        if use_v1:
+            logger.info("Using IPEX_V1 attention backend.")
+            return "vllm.v1.attention.backends.ipex_attn.IPEXAttentionBackend"
+        else:
+            logger.info("Using IPEX attention backend.")
+            return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
     @classmethod
     def get_device_capability(
@@ -66,25 +73,33 @@ class XPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
+        # in V1(or with ipex chunked prefill) block_size is 64
+        if cache_config and \
+            cache_config.block_size is None and \
+            envs.VLLM_USE_V1:
+            cache_config.block_size = 64
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
-        # check and update model config
-        model_config = vllm_config.model_config
-        if model_config.dtype == torch.bfloat16:
-            bf16_supported = cls.device_support_bf16()
-            if not bf16_supported:
+        # Instances created using VllmConfig() typically have model_config as
+        # None by default. The modification involves adding a check to prevent
+        # potential null exceptions check and update model config.
+        if vllm_config.model_config is not None:
+            model_config = vllm_config.model_config
+            if model_config.dtype == torch.bfloat16:
+                bf16_supported = cls.device_support_bf16()
+                if not bf16_supported:
+                    logger.warning(
+                        "bfloat16 is only supported on Intel Data Center GPU, "
+                        "Intel Arc GPU is not supported yet. Your device is %s,"
+                        " which is not supported. will fallback to float16",
+                        cls.get_device_name())
+                    model_config.dtype = torch.float16
+            if not model_config.enforce_eager:
                 logger.warning(
-                    "bfloat16 is only supported on Intel Data Center GPU, "
-                    "Intel Arc GPU is not supported yet. Your device is %s,"
-                    " which is not supported. will fallback to float16",
-                    cls.get_device_name())
-                model_config.dtype = torch.float16
-        if not model_config.enforce_eager:
-            logger.warning(
-                "CUDA graph is not supported on XPU, fallback to the eager "
-                "mode.")
-            model_config.enforce_eager = True
+                    "CUDA graph is not supported on XPU, fallback to the eager "
+                    "mode.")
+                model_config.enforce_eager = True
 
         if vllm_config.speculative_config is not None:
             raise NotImplementedError(
@@ -95,21 +110,25 @@ class XPUPlatform(Platform):
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
-        if parallel_config.worker_cls == "auto":
+        if envs.VLLM_USE_V1:
+            parallel_config.worker_cls =\
+                "vllm.v1.worker.xpu_worker.XPUWorker"
+        else:
             parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
 
         if parallel_config.distributed_executor_backend is None:
-            parallel_config.distributed_executor_backend = "ray"
+            if parallel_config.world_size > 1:
+                parallel_config.distributed_executor_backend = "ray"
+            else:
+                parallel_config.distributed_executor_backend = "uni"
         elif parallel_config.distributed_executor_backend == "mp":
             # FIXME(kunshang):
             # spawn needs calling `if __name__ == '__main__':``
             # fork is not supported for xpu start new process.
-            logger.error(
-                "Both start methods (spawn and fork) have issue "
-                "on XPU if you use mp backend, setting it to ray instead.")
-            parallel_config.distributed_executor_backend = "ray"
-
-        elif parallel_config.distributed_executor_backend != "ray":
+            logger.warning(
+                "Please use spawn as start method if you want to use mp.")
+        elif parallel_config.distributed_executor_backend != "ray" and \
+                parallel_config.distributed_executor_backend != "uni":
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",
@@ -141,9 +160,9 @@ class XPUPlatform(Platform):
     @classmethod
     def device_support_bf16(cls) -> bool:
         device_name = cls.get_device_name().lower()
-        if device_name.count("arc") > 0:
+        if cls.is_client_gpu():
             return False
-        elif device_name.count("data center gpu") > 0:
+        elif cls.is_data_center_gpu():
             return True
         else:
             logger.warning("Unknown device name %s, always use float16",
@@ -151,5 +170,23 @@ class XPUPlatform(Platform):
             return False
 
     @classmethod
+    def is_data_center_gpu(cls) -> bool:
+        device_name = cls.get_device_name().lower()
+        return device_name.count("data center gpu") > 0
+
+    @classmethod
+    def is_client_gpu(cls) -> bool:
+        device_name = cls.get_device_name().lower()
+        return device_name.count("arc") > 0
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        return True
+
+    @classmethod
+    def device_count(cls) -> int:
+        return torch.xpu.device_count()
