@@ -1080,7 +1080,10 @@ def build_app(args: Namespace) -> FastAPI:
                             status_code=HTTPStatus.BAD_REQUEST)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
-    if token := args.api_key or envs.VLLM_API_KEY:
+    if tokens := {
+            f"Bearer {key}"
+            for key in (args.api_key or [envs.VLLM_API_KEY]) if key
+    }:
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):
@@ -1091,7 +1094,7 @@ def build_app(args: Namespace) -> FastAPI:
                 url_path = url_path[len(app.root_path):]
             if not url_path.startswith("/v1"):
                 return await call_next(request)
-            if request.headers.get("Authorization") != "Bearer " + token:
+            if request.headers.get("Authorization") not in tokens:
                 return JSONResponse(content={"error": "Unauthorized"},
                                     status_code=401)
             return await call_next(request)
