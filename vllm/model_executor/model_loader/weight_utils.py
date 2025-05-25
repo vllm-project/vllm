@@ -634,7 +634,7 @@ def row_parallel_weight_loader(param: torch.Tensor,
     return default_weight_loader(param, loaded_weight)
 
 
-LoaderFunction = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+LoaderFunction = Callable[[torch.Tensor, torch.Tensor], None]
 
 
 def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
