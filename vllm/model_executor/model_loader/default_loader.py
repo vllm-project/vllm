@@ -11,8 +11,8 @@ import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
+from vllm import envs
 from vllm.config import LoadConfig, LoadFormat, ModelConfig, VllmConfig
-from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
@@ -64,7 +64,7 @@ class DefaultModelLoader(BaseModelLoader):
 
         Returns the path to the downloaded model, or None if the model is not
         downloaded from ModelScope."""
-        if VLLM_USE_MODELSCOPE:
+        if envs.VLLM_USE_MODELSCOPE:
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
             # pylint: disable=C.

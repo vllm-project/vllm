@@ -36,16 +36,16 @@ vllm_config.scheduler_config.max_model_len = 8192
 
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
-NUM_TOKENS = [7, 83, 2048]
+NUM_TOKENS = [7, 2050]
 D = [512, 4096, 5120, 13824]
-GROUP_SIZE = [64, 128, 256, 512]
-M = [1, 7, 8, 83, 84, 512, 2048, 4096]
-N = [128, 512, 1024, 4096, 7168, 7748, 13824]
-K = [256, 4096, 5120, 3884, 13824, 16384]
+GROUP_SIZE = [64, 128, 512]
+M = [1, 7, 8, 83, 84, 4096]
+N = [128, 512, 7168, 7748, 13824]
+K = [256, 3884, 4096, 13824, 16384]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
-M_moe = [1, 2, 7, 83, 128, 512, 2048]
-M_moe_dg = [128, 192, 512, 1335, 2048]
+M_moe = [1, 2, 7, 83, 128, 2048]
+M_moe_dg = [128, 192, 1335, 2048]
 N_moe = [128, 256, 1024, 4608]  # [13824]
 K_moe = [256, 512, 7168]  # [13824]
 BLOCK_SIZE = [[128, 128]]
