@@ -209,7 +209,8 @@ class Platform:
         The ``capability`` argument can either be:
 
         - A tuple ``(major, minor)``.
-        - An integer ``<major><minor>``. (See {meth}`DeviceCapability.to_int`)
+        - An integer ``<major><minor>``. (See
+        [`DeviceCapability.to_int`][vllm.platforms.interface.DeviceCapability.to_int])
         """
         current_capability = cls.get_device_capability(device_id=device_id)
         if current_capability is None:
