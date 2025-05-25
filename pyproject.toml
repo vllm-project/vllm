@@ -142,7 +142,7 @@ exclude = [
 ]
 
 [tool.codespell]
-ignore-words-list = "dout, te, indicies, subtile, ElementE"
+ignore-words-list = "dout, te, indicies, subtile, ElementE, pard, PARD"
 skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora/data/*,build/*,vllm/third_party/*"
 
 [tool.isort]
