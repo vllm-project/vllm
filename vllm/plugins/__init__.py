@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 plugins_loaded = False
 
 
-def load_plugins_by_group(group: str) -> dict[str, Callable[[], None]]:
+def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
     import sys
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
@@ -36,7 +36,7 @@ def load_plugins_by_group(group: str) -> dict[str, Callable[[], None]]:
         logger.info("All plugins in this group will be loaded. "
                     "Set `VLLM_PLUGINS` to control which plugins to load.")
 
-    plugins = dict[str, Callable[[], None]]()
+    plugins = dict[str, Callable[[], Any]]()
     for plugin in discovered_plugins:
         if allowed_plugins is None or plugin.name in allowed_plugins:
             if allowed_plugins is not None:
