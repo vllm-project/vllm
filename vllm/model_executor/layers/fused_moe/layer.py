@@ -422,7 +422,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # use 2stage ck moe layout
             shuffled_w13, shuffled_w2 = shuffle_weights(layer.w13_weight.data,
                                                         layer.w2_weight.data,
-                                                        layout=(32, 32))
+                                                        layout=(16, 16))
 
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
