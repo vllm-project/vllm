@@ -43,15 +43,13 @@ TWOSHOT_Q4 = 5,
 class QuickAllreduce:
 
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
-    _SUPPORTED_DTYPES = [torch.float16,
-                         torch.bfloat16]  # TODO: support torch.float32
     _SUPPORTED_LEVEL = [0, 1, 2, 3, 4, 5]
 
     def __init__(self,
                  group: ProcessGroup,
                  device: Union[int, str, torch.device],
-                 max_size=512 * 1024 * 1024,
-                 min_size=128 * 1024) -> None:
+                 max_size=1024 * 1024 * 512,
+                 min_size=1024 * 1024) -> None:
         """
         Args:
             group: the process group to work on. If None, it will use the
@@ -93,6 +91,7 @@ class QuickAllreduce:
         rank = dist.get_rank(group=self.group)
         self.rank = rank
         world_size = dist.get_world_size(group=self.group)
+        self.world_size = world_size
 
         if world_size not in QuickAllreduce._SUPPORTED_WORLD_SIZES:
             logger.warning(
@@ -140,7 +139,7 @@ class QuickAllreduce:
                 "specify disable_quick_all_reduce=0 explicitly.")
             return
 
-        self.max_size = max_size
+        self.max_size = max_size if envs.VLLM_QUICK_ALLREDUCE > 0 else max_size / self.world_size * 2
         self.min_size = min_size
         self._ptr = ops.init_quick_ar(world_size, rank)
         my_handle = ops.qr_get_comm_handle(self._ptr)
@@ -166,8 +165,11 @@ class QuickAllreduce:
             return False
         if not is_weak_contiguous(inp):
             return False
-        if inp.dtype in QuickAllreduce._SUPPORTED_DTYPES:
-            return inp_size < self.max_size and inp_size > self.min_size
+        if inp.dtype == torch.float16:
+            return inp_size <= self.max_size and inp_size > self.min_size
+        elif inp.dtype == torch.bfloat16:
+            return inp_size <= self.max_size and inp_size > 1024 * 1024 * 16 \
+                  and self.world_size == 2
         return False
 
     def all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
