@@ -73,6 +73,8 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
+        self.scheduler_config = vllm_config.scheduler_config
+
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
@@ -100,6 +102,9 @@ class LLMEngine:
         if not multiprocess_mode:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+            self.scheduler = [
+                self.engine_core.engine_core.scheduler  # type: ignore
+            ]  # type: ignore
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
