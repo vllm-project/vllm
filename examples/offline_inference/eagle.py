@@ -3,8 +3,6 @@ import argparse
 import json
 import os
 
-from transformers import AutoTokenizer
-
 from vllm import LLM, SamplingParams
 
 
@@ -67,18 +65,7 @@ def main():
 
     max_model_len = 2048
 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-
     prompts = load_prompts(args.dataset, args.num_prompts)
-
-    prompt_ids = [
-        tokenizer.apply_chat_template([{
-            "role": "user",
-            "content": prompt
-        }],
-                                      add_generation_prompt=True)
-        for prompt in prompts
-    ]
 
     llm = LLM(
         model=model_dir,
@@ -102,8 +89,7 @@ def main():
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
 
-    outputs = llm.generate(prompt_token_ids=prompt_ids,
-                           sampling_params=sampling_params)
+    outputs = llm.generate(prompts=prompts, sampling_params=sampling_params)
 
     # print the generated text
     for output in outputs:
