@@ -139,7 +139,8 @@ class QuickAllreduce:
                 "specify disable_quick_all_reduce=0 explicitly.")
             return
 
-        self.max_size = max_size if envs.VLLM_QUICK_ALLREDUCE > 0 else max_size / self.world_size * 2
+        self.max_size = (max_size if envs.VLLM_QUICK_ALLREDUCE > 0 else
+                         max_size / self.world_size * 2)
         self.min_size = min_size
         self._ptr = ops.init_quick_ar(world_size, rank)
         my_handle = ops.qr_get_comm_handle(self._ptr)
