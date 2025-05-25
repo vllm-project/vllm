@@ -8,6 +8,8 @@ import pytest
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
+from vllm.config import TokenizerMode
+
 
 @dataclass(frozen=True)
 class _HfExamplesInfo:
@@ -20,7 +22,7 @@ class _HfExamplesInfo:
     tokenizer: Optional[str] = None
     """Set the tokenizer to load for this architecture."""
 
-    tokenizer_mode: str = "auto"
+    tokenizer_mode: TokenizerMode = "auto"
     """Set the tokenizer type for this architecture."""
 
     speculative_model: Optional[str] = None
