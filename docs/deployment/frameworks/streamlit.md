@@ -33,7 +33,8 @@ pip install streamlit openai
 streamlit run streamlit_openai_chatbot_webserver.py
 
 # or specify the VLLM_API_BASE or VLLM_API_KEY
-VLLM_API_BASE="http://vllm-server-host:vllm-server-port/v1" streamlit run streamlit_openai_chatbot_webserver.py
+VLLM_API_BASE="http://vllm-server-host:vllm-server-port/v1" \
+    streamlit run streamlit_openai_chatbot_webserver.py
 
 # start with debug mode to view more details
 streamlit run streamlit_openai_chatbot_webserver.py --logger.level=debug
