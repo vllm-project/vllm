@@ -177,6 +177,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             # For layer skip, we use the target model config but attach layer skip config
             draft_worker_kwargs["vllm_config"].model_config.speculative_config = layer_skip_config
             proposer_worker = LayerSkipProposer(**draft_worker_kwargs)
+            logger.info("[Layer Skip] Using LayerSkipProposer with layer %d", 
+                       layer_skip_config.layer_skip if layer_skip_config else -1)
         elif ngram_prompt_lookup_max > 0:
             draft_worker_kwargs[
                 "device_type"] = scorer_worker.device_config.device.type
@@ -801,6 +803,12 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         execute_model_req.previous_hidden_states = None
 
+        # Debug logging
+        from vllm.logger import init_logger
+        logger = init_logger(__name__)
+        logger.info(f"[SPEC_DECODE_DEBUG] Starting verification: proposals.proposal_lens={proposals.proposal_lens}")
+        logger.info(f"[SPEC_DECODE_DEBUG] proposals.proposal_token_ids.shape={proposals.proposal_token_ids.shape}")
+
         with Timer() as scoring_timer:
             proposal_scores = self.scorer.score_proposals(
                 execute_model_req,
@@ -826,6 +834,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             # TODO avoid sampling here?
             self.proposer_worker.execute_model(prefill_req)
 
+        logger.info(f"[SPEC_DECODE_DEBUG] Starting _verify_tokens with max_proposal_len={execute_model_req.num_lookahead_slots}")
         with Timer() as verification_timer:
             accepted_token_ids, target_logprobs = self._verify_tokens(
                 execute_model_req.seq_group_metadata_list, proposal_scores,

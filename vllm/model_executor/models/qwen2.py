@@ -53,6 +53,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsLoRA, SupportsPP
+from .layer_skip import LayerSkipModelMixin
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     extract_layer_index, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -425,7 +426,7 @@ class Qwen2Model(nn.Module):
         return loaded_params
 
 
-class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class Qwen2ForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -440,6 +441,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        LayerSkipModelMixin.__init__(self)  # Initialize mixin
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config

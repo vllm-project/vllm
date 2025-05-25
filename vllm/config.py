@@ -2443,6 +2443,9 @@ class SpeculativeConfig:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method == "layer_skip":
+                # For layer skip, we use the target model itself
+                self.model = self.target_model_config.model
             else:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
@@ -2527,6 +2530,9 @@ class SpeculativeConfig:
                 elif (self.draft_model_config.hf_config.model_type ==
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
+                elif self.method == "layer_skip":
+                    # Preserve layer_skip method - don't override it
+                    pass
                 else:
                     self.method = "draft_model"
 

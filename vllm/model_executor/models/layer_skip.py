@@ -1,10 +1,9 @@
-"""Minimal layer skip support."""
+"""Minimal layer skip support for Qwen models."""
 import torch
-import torch.nn.functional as F
-from typing import Optional, Dict, Tuple
+from typing import Dict, Optional
 
 class LayerSkipModelMixin:
-    """Add early exit with LSQ heads to any model."""
+    """Add early exit with LSQ heads to Qwen models."""
     
     def __init__(self):
         super().__init__()
@@ -16,53 +15,30 @@ class LayerSkipModelMixin:
         import os
         head_file = os.path.join(path, f"h{layer}.pt")
         self.lsq_heads[layer] = torch.load(head_file, map_location="cpu")
-        
+        print(f"Loaded LSQ head for layer {layer} from {head_file}")
+    
     def forward_with_early_exit(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor, 
-        kv_caches: Optional[list],
-        attn_metadata,
-        stop_layer: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass stopping at layer N."""
-        # Use model.embed_tokens directly (works for Llama/OPT/Qwen)
-        hidden_states = self.model.embed_tokens(input_ids)
-        if hasattr(self.config, 'hidden_size'):
-            hidden_states = hidden_states * (self.config.hidden_size ** 0.5)
+            self,
+            input_ids:      torch.Tensor,
+            positions:      torch.Tensor,
+            stop_layer:     int,
+    ) -> torch.Tensor:
+        """Forward pass with early exit at specified layer for Qwen models."""
         
-        # Process layers with generic calling convention
+        # 1. Get embeddings
+        hidden_states = self.get_input_embeddings(input_ids)
+        residual = None
+        
+        # 2. Process layers up to early exit point 
         for i in range(stop_layer):
-            # FIXED: Use vLLM's generic layer calling pattern
-            hidden_states = self.model.layers[i](
+            hidden_states, residual = self.model.layers[i](
+                positions,
                 hidden_states,
-                position_ids=positions,
-                kv_cache=kv_caches[i] if kv_caches else None,
-                attn_metadata=attn_metadata,
+                residual,
             )
+        # 3. Apply final norm (only on last PP rank, like main Qwen2Model)
+        from vllm.distributed import get_pp_group
+        if get_pp_group().is_last_rank:
+            hidden_states, _ = self.model.norm(hidden_states, residual)
         
-        # Apply final norm
-        hidden_states = self.model.norm(hidden_states)
-        
-        # Use LSQ head
-        if stop_layer not in self.lsq_heads:
-            raise ValueError(f"No LSQ head for layer {stop_layer}")
-        
-        # FIXED: Cache GPU copy for performance
-        if stop_layer not in self._lsq_heads_gpu:
-            self._lsq_heads_gpu[stop_layer] = self.lsq_heads[stop_layer].to(
-                device=hidden_states.device, 
-                dtype=hidden_states.dtype
-            )
-        head = self._lsq_heads_gpu[stop_layer]
-        
-        # Proper reshape for matmul
-        B, S, D = hidden_states.shape
-        logits = (hidden_states.reshape(-1, D) @ head.T).reshape(B, S, -1)
-        
-        # Numerically stable entropy
-        probs = F.softmax(logits, dim=-1)
-        log_probs = F.log_softmax(logits, dim=-1)
-        entropy = -(probs * log_probs).sum(-1)  # Shape: (B, S)
-        
-        return logits, entropy
+        return hidden_states

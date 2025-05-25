@@ -53,6 +53,13 @@ class Top1Proposer(SpeculativeProposer):
         """
         proposal_len = execute_model_req.num_lookahead_slots
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+        
+        from vllm.logger import init_logger
+        logger = init_logger(__name__)
+        logger.info(f"[TOP1_DEBUG] get_spec_proposals called: original proposal_len={proposal_len}, batch_size={len(seq_group_metadata_list)}")
+        
+        # Use original proposal_len (removing temporary override)
+        logger.info(f"[TOP1_DEBUG] Using original proposal_len={proposal_len}")
 
         # Split speculative- and non-speculative- sequences.
         (
@@ -60,6 +67,9 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
         ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
+        
+        logger.info(f"[TOP1_DEBUG] After split: proposal_lens={proposal_lens}, "
+                   f"nonzero_seqs={len(nonzero_proposal_len_seqs)}, nonzero_indices={nonzero_proposal_len_indices}")
 
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
@@ -76,12 +86,14 @@ class Top1Proposer(SpeculativeProposer):
                 num_lookahead_slots=proposal_len,
                 previous_hidden_states=hidden_states,
             )
+            logger.info(f"[TOP1_DEBUG] Calling worker.sampler_output with sample_len={proposal_len}")
             maybe_sampler_output, transposed = self._worker.sampler_output(
                 execute_model_req=nonzero_execute_model_req,
                 sample_len=proposal_len,
                 seq_ids_with_bonus_token_in_last_step=\
                     seq_ids_with_bonus_token_in_last_step,
             )
+            logger.info(f"[TOP1_DEBUG] Got {len(maybe_sampler_output) if maybe_sampler_output else 0} sampler outputs, transposed={transposed}")
             (
                 proposal_lens,
                 maybe_sampler_output,
@@ -97,6 +109,7 @@ class Top1Proposer(SpeculativeProposer):
 
         # Combine speculative- and non-speculative sequences into the same
         # representation.
+        logger.info(f"[TOP1_DEBUG] Calling _merge_outputs with batch_size={len(seq_group_metadata_list)}, proposal_len={proposal_len}")
         proposal_tokens, proposal_probs, proposal_lens = self._merge_outputs(
             batch_size=len(seq_group_metadata_list),
             proposal_len=proposal_len,
@@ -105,6 +118,8 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_proposal_len_indices=nonzero_proposal_len_indices,
             sampler_transposed=transposed,
         )
+        logger.info(f"[TOP1_DEBUG] After merge: tokens.shape={proposal_tokens.shape}, "
+                   f"probs.shape={proposal_probs.shape}, lens.shape={proposal_lens.shape}")
 
         proposals = SpeculativeProposals(proposal_token_ids=proposal_tokens,
                                          proposal_probs=proposal_probs,
@@ -212,6 +227,41 @@ class Top1Proposer(SpeculativeProposer):
         assert new_maybe_sampler_output
         return (new_proposal_lens, new_maybe_sampler_output,
                 new_nonzero_proposal_len_indices)
+
+    def sampler_output_from_logits(
+        self,
+        logits: torch.Tensor,
+        sample_len: int,
+        entropy_threshold: float,
+    ) -> Tuple[List[SamplerOutput], bool]:
+        """Convert logits to SamplerOutput objects.
+        
+        This wraps the existing logic but skips the full model call.
+        """
+        # TODO: Implement proper logits to SamplerOutput conversion
+        # For now, create a simple greedy sampling version
+        batch_size, seq_len, vocab_size = logits.shape
+        
+        sampler_outputs = []
+        for step in range(min(sample_len, seq_len)):
+            step_logits = logits[:, step, :]  # [B, vocab_size]
+            probs = torch.softmax(step_logits, dim=-1)
+            
+            # Greedy sampling
+            sampled_token_ids = torch.argmax(step_logits, dim=-1)  # [B]
+            sampled_token_probs = probs.gather(-1, sampled_token_ids.unsqueeze(-1)).squeeze(-1)
+            
+            step_logprobs = torch.log_softmax(step_logits, dim=-1)
+            sampled_logprobs = step_logprobs.gather(-1, sampled_token_ids.unsqueeze(-1)).squeeze(-1)
+            
+            sampler_outputs.append(SamplerOutput(
+                outputs=None,  # Will be filled later
+                sampled_token_ids=sampled_token_ids,
+                sampled_token_probs=sampled_token_probs,
+                logprobs=sampled_logprobs,
+            ))
+        
+        return sampler_outputs, False
 
     def _merge_outputs(
         self,
