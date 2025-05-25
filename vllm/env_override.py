@@ -31,4 +31,4 @@ os.environ['PYTORCH_NVML_BASED_CUDA_CHECK'] = '1'
 # see https://github.com/vllm-project/vllm/issues/10480
 os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
 # see https://github.com/vllm-project/vllm/issues/10619
-torch._inductor.config.compile_threads = 1
+# torch._inductor.config.compile_threads = 1  # Commented out for PyTorch 2.4.0 compatibility

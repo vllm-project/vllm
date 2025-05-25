@@ -173,12 +173,15 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             'vllm_config'].parallel_config
         
         if layer_skip_method:
-            from vllm.spec_decode.layer_skip_worker import LayerSkipProposer
-            # For layer skip, we use the target model config but attach layer skip config
-            draft_worker_kwargs["vllm_config"].model_config.speculative_config = layer_skip_config
-            proposer_worker = LayerSkipProposer(**draft_worker_kwargs)
-            logger.info("[Layer Skip] Using LayerSkipProposer with layer %d", 
-                       layer_skip_config.layer_skip if layer_skip_config else -1)
+            from vllm.spec_decode.layer_skip_proposer import LayerSkipProposer
+            # For layer skip, we create a proposer that shares weights with target model
+            layer_skip = layer_skip_config.layer_skip if layer_skip_config else 4
+            proposer_worker = LayerSkipProposer(
+                target_worker=scorer_worker,
+                layer_skip=layer_skip,
+                **draft_worker_kwargs
+            )
+            logger.info("[Layer Skip] Using LayerSkipProposer with layer %d", layer_skip)
         elif ngram_prompt_lookup_max > 0:
             draft_worker_kwargs[
                 "device_type"] = scorer_worker.device_config.device.type
