@@ -298,7 +298,7 @@ class FlashInferState(AttentionState):
                 self.runner.kv_cache_dtype)
         else:
             kv_cache_dtype = get_kv_cache_torch_dtype(
-                self.runner.kv_cache_dtype, self.runner.model_config.dtype)
+                self.runner.kv_cache_dtype, self.runner.model_config.attn_dtype)
 
         paged_kv_indptr_tensor_host = torch.arange(0,
                                                    batch_size + 1,
@@ -336,7 +336,7 @@ class FlashInferState(AttentionState):
             query_start_loc=query_start_loc_host,
             device=self.runner.device,
             data_type=kv_cache_dtype,
-            q_data_type=self.runner.model_config.dtype,
+            q_data_type=self.runner.model_config.attn_dtype,
             use_cuda_graph=True,
             decode_wrapper=self._graph_decode_wrapper,
             prefill_wrapper=None,
@@ -885,7 +885,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.runner.kv_cache_dtype)
         else:
             kv_cache_dtype = get_kv_cache_torch_dtype(
-                self.runner.kv_cache_dtype, self.runner.model_config.dtype)
+                self.runner.kv_cache_dtype, self.runner.model_config.attn_dtype)
 
         return FlashInferMetadata(
             decode_query_len=decode_query_len,
@@ -912,7 +912,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             query_start_loc=query_start_loc,
             device=device,
             data_type=kv_cache_dtype,
-            q_data_type=self.runner.model_config.dtype,
+            q_data_type=self.runner.model_config.attn_dtype,
             use_cuda_graph=use_captured_graph,
             is_profile_run=self.is_profile_run,
             window_left=self.window_left,

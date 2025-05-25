@@ -219,8 +219,9 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
-ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
-
+ModelDType = Literal["auto", "hybrid", "half", "float16", "bfloat16", "float",
+                     "float32"]
+AttnDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 @config
 @dataclass
@@ -252,11 +253,20 @@ class ModelConfig:
     """Data type for model weights and activations:\n
     - "auto" will use FP16 precision for FP32 and FP16 models, and BF16
     precision for BF16 models.\n
+    - "hybrid" will use FP32 for weights and activation 
+    and float16 for attention.\n
     - "half" for FP16. Recommended for AWQ quantization.\n
     - "float16" is the same as "half".\n
     - "bfloat16" for a balance between precision and range.\n
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
+    attn_dtype: Union[AttnDType, torch.dtype] = "auto"
+    """
+    Data type for attention:
+    - "auto" attn_dtype is the same as model dtype. \n
+    - Manually set attn_dtype, supporting 
+    "half", "float16", "bfloat16", "float", "float32". \n
+    """
     seed: Optional[int] = None
     """Random seed for reproducibility. Initialized to None in V0, but
     initialized to 0 in V1."""
@@ -420,6 +430,7 @@ class ModelConfig:
         factors: list[Any] = []
         factors.append(self.model)
         factors.append(self.dtype)
+        factors.append(self.attn_dtype)
         factors.append(self.quantization)
         factors.append(self.revision)
         factors.append(self.code_revision)
@@ -531,7 +542,8 @@ class ModelConfig:
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
-        self.dtype = _get_and_verify_dtype(self.hf_config, self.dtype)
+
+        self._init_dtype()
 
         # Workaround for Gemma 2 which uses interleaved sliding window
         # attention, but it's not specified in its config. TODO: remove this
@@ -641,6 +653,17 @@ class ModelConfig:
             s3_tokenizer.pull_files(
                 model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
             self.tokenizer = s3_tokenizer.dir
+
+    def _init_dtype(self):
+        if self.dtype == "hybrid":
+            self.dtype = torch.float32
+            self.attn_dtype = torch.float16
+            return
+
+        self.dtype = _get_and_verify_dtype(self.hf_config, self.dtype)
+        self.attn_dtype = (self.dtype if self.attn_dtype == "auto"
+                           else _get_and_verify_dtype(
+                               self.hf_config, self.attn_dtype))
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
@@ -2201,11 +2224,7 @@ class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
     device: Union[Device, torch.device] = "auto"
-    """Device type for vLLM execution.
-    This parameter is deprecated and will be 
-    removed in a future release. 
-    It will now be set automatically based 
-    on the current platform."""
+    """Device type for vLLM execution."""
     device_type: str = field(init=False)
     """Device type from the current platform. This is set in
     `__post_init__`."""
@@ -4473,6 +4492,7 @@ class VllmConfig:
             f" tokenizer_revision={self.model_config.tokenizer_revision}, "
             f"trust_remote_code={self.model_config.trust_remote_code}, "
             f"dtype={self.model_config.dtype}, "
+            f"attn_dtype={self.model_config.attn_dtype}, "
             f"max_seq_len={self.model_config.max_model_len},"
             f" download_dir={self.load_config.download_dir!r}, "
             f"load_format={self.load_config.load_format}, "

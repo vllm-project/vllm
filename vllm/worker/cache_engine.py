@@ -48,13 +48,13 @@ class CacheEngine:
             self.num_cpu_blocks //= parallel_config.pipeline_parallel_size
 
         if cache_config.cache_dtype == "auto":
-            self.dtype = model_config.dtype
+            self.dtype = model_config.attn_dtype
         else:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # Get attention backend.
         self.attn_backend = get_attn_backend(self.head_size,
-                                             model_config.dtype,
+                                             model_config.attn_dtype,
                                              cache_config.cache_dtype,
                                              self.block_size,
                                              model_config.is_attention_free,
@@ -128,7 +128,7 @@ class CacheEngine:
             parallel_config, LayerBlockType.attention)
 
         if cache_config.cache_dtype == "auto":
-            dtype = model_config.dtype
+            dtype = model_config.attn_dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 

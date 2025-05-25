@@ -1,43 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import pytest
 
 from .embed_utils import EmbedModelInfo, correctness_test_embed_models
 from .mteb_utils import mteb_test_embed_models
 
 MODELS = [
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-xs",
-                   is_matryoshka=False,
+    ########## BertModel
+    EmbedModelInfo("intfloat/e5-small",
                    architecture="BertModel",
+                   dtype="hybrid",
                    enable_test=True),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-s",
-                   is_matryoshka=False,
+    EmbedModelInfo("intfloat/e5-base",
                    architecture="BertModel",
+                   dtype="hybrid",
                    enable_test=False),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-m",
-                   is_matryoshka=False,
+    EmbedModelInfo("intfloat/e5-small",
                    architecture="BertModel",
+                   dtype="hybrid",
                    enable_test=False),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-long",
-                   is_matryoshka=False,
-                   architecture="NomicBertModel",
-                   enable_test=True),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-l",
-                   is_matryoshka=False,
+    EmbedModelInfo("intfloat/multilingual-e5-small",
                    architecture="BertModel",
+                   dtype="hybrid",
                    enable_test=False),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-v1.5",
-                   is_matryoshka=True,
-                   architecture="BertModel",
-                   enable_test=True),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-l-v2.0",
-                   is_matryoshka=True,
+    ########## XLMRobertaModel
+    EmbedModelInfo("intfloat/multilingual-e5-base",
                    architecture="XLMRobertaModel",
+                   dtype="hybrid",
                    enable_test=True),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
-                   is_matryoshka=True,
-                   architecture="GteModel",
-                   enable_test=True),
+    EmbedModelInfo("intfloat/multilingual-e5-large",
+                   architecture="XLMRobertaModel",
+                   dtype="hybrid",
+                   enable_test=False),
+    EmbedModelInfo("intfloat/multilingual-e5-large-instruct",
+                   architecture="XLMRobertaModel",
+                   dtype="hybrid",
+                   enable_test=False),
 ]
 
 

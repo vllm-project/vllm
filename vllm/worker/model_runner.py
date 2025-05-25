@@ -1123,7 +1123,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
-            self.model_config.dtype,
+            self.model_config.attn_dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
