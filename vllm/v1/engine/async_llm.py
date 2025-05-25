@@ -20,6 +20,8 @@ from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
@@ -79,6 +81,9 @@ class AsyncLLM(EngineClient):
                 "This should not happen. As a workaround, try using "
                 "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
                 "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+
+        # Ensure we can serialize custom transformer configs
+        maybe_register_config_serialize_by_value()
 
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
