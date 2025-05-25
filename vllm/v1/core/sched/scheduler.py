@@ -99,6 +99,8 @@ class Scheduler(SchedulerInterface):
 
         # P/D: requests in process of recving KV transfers
         self.finished_recving_kv_req_ids: set[str] = set()
+        # P/D: completed requests with unfreed KV blocks
+        self.pending_kv_free_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
@@ -241,7 +243,7 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
-                    self.kv_cache_manager.free(preempted_req)
+                    self.kv_cache_manager.free(preempted_req.request_id)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
@@ -862,13 +864,24 @@ class Scheduler(SchedulerInterface):
             request_ids = set(request_ids)
 
         for req_id in request_ids:
+            # Connector needs to handle abort.
+            if self.connector is not None:
+                self.connector.abort_request(req_id)
+
+            # TODO: delay freeing blocks until the KV transfer is sends.
             request = self.requests.get(req_id)
             if request is None:
-                # Invalid request ID.
+                # Invalid request.
                 continue
 
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
+            elif request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                # TODO: handle this - need to wait for the connector
+                # to ack that the abort is done in a future step before
+                # we free. Since we have not yet cached the blocks in
+                # this state, we should be okay.
+                pass
             else:
                 self.waiting.remove(request)
             request.status = finished_status
@@ -883,17 +896,21 @@ class Scheduler(SchedulerInterface):
         self._cached_reqs_data.pop(request.request_id, None)
         self.finished_req_ids.add(request.request_id)
 
+        # Free blocks or add to pending_kv_free_req_ids.
         if not delay_free_blocks:
-            self._free_blocks(request)
+            self._free_blocks(request.request_id)
+        else:
+            self.pending_kv_free_req_ids.add(request.request_id)
+
+        # Free the request.
+        del self.requests[request.request_id]
 
         return kv_xfer_params
 
-    def _free_blocks(self, request: Request):
-        assert request.is_finished()
-        assert request.request_id not in self._cached_reqs_data
-        self.kv_cache_manager.free(request)
-        self.kv_cache_manager.free_block_hashes(request)
-        del self.requests[request.request_id]
+    def _free_blocks(self, request_id: str):
+        """Free the KV blocks."""
+        self.kv_cache_manager.free(request_id)
+        self.kv_cache_manager.free_block_hashes(request_id)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
@@ -1012,4 +1029,6 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
+            if req_id in self.pending_kv_free_req_ids:
+                self.pending_kv_free_req_ids.remove(req_id)
+                self._free_blocks(req_id)
