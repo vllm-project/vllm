@@ -10,9 +10,11 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from vllm.logger import init_logger
+import logging
 
-logger = init_logger(__name__)
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 @asynccontextmanager
