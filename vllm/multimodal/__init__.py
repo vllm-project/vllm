@@ -8,11 +8,9 @@ from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
 """
-The global {class}`~MultiModalRegistry` is used by model runners to
-dispatch data processing according to the target model.
-
-Info:
-    [mm-processing][]
+The global [`MultiModalRegistry`][vllm.multimodal.registry.MultiModalRegistry]
+is used by model runners to dispatch data processing according to the target
+model.
 """
 
 __all__ = [

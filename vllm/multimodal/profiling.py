@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 class ProcessorInputs:
     """
     Represents the keyword arguments to
-    {meth}`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
+    [`vllm.multimodal.processing.BaseMultiModalProcessor.apply`][].
     """
     prompt_text: str
     mm_data: MultiModalDataDict
