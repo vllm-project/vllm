@@ -223,13 +223,15 @@ class LLMEngine:
         outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
-        processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs)
+        if outputs is not None:
+            processed_outputs = self.output_processor.process_outputs(
+                outputs.outputs)
 
-        # 3) Abort any reqs that finished due to stop strings.
-        self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
+            # 3) Abort any reqs that finished due to stop strings.
+            self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
-        return processed_outputs.request_outputs
+            return processed_outputs.request_outputs
+        return []
 
     def get_vllm_config(self):
         return self.vllm_config
