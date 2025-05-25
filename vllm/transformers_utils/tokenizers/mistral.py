@@ -161,6 +161,13 @@ def make_mistral_chat_completion_request(
             if isinstance(content, list):
                 content = "\n".join(chunk.get("text") for chunk in content)
                 message["content"] = content
+            if "reasoning_content" in message:
+                del message["reasoning_content"]
+        if message.get("role") == "tool":
+            content = message.get("content")
+            if isinstance(content, list):
+                content = "\n".join(chunk.get("text") for chunk in content)
+                message["content"] = content
 
     # The Mistral client, in comparison to the OpenAI client, requires the
     # "parameters" dict to be present, even if it's empty.
