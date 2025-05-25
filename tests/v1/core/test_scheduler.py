@@ -154,8 +154,8 @@ def create_cascade_requests(num_requests: int,
                             upper_prefix_block_cnt: int,
                             block_size: int = 16) \
     -> list[Request]:
-    prefix_cnts = [random.randint(lower_prefix_block_cnt, upper_prefix_block_cnt)
-                    for _ in range(num_groups)] * block_size
+    prefix_cnts = [random.randint(lower_prefix_block_cnt, upper_prefix_block_cnt) * block_size
+                    for _ in range(num_groups)]
     cuts = sorted(random.sample(range(1, num_requests), num_groups - 1))
     cum_group_indices = [0] + cuts + [num_requests]
 
