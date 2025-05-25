@@ -1663,9 +1663,8 @@ class LLMEngine:
             0].get_prefix_cache_hit_rate(Device.GPU)
 
         # Exchange the uasge and cache hit stats between gpu and cpu when
-        # running on cpu because the cpu worker intentionally reports the
+        # running on cpu because the cpu_work.py intentionally reports the
         # number of cpu blocks as gpu blockers in favor of cache management.
-        # See https://github.com/vllm-project/vllm/blob/b554ab736e7c725bf7ddebb80b814e6c53232b46/vllm/worker/cpu_worker.py#L253-L257
         if self.device_config.device_type == "cpu":
             num_total_gpu, num_total_cpu = num_total_cpu, num_total_gpu
             gpu_cache_usage_sys, cpu_cache_usage_sys = (
