@@ -293,6 +293,7 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
+    sleep_on_idle: bool = ParallelConfig.sleep_on_idle
     block_size: Optional[BlockSize] = CacheConfig.block_size
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = \
@@ -634,6 +635,8 @@ class EngineArgs:
                                     **parallel_kwargs["worker_cls"])
         parallel_group.add_argument("--worker-extension-cls",
                                     **parallel_kwargs["worker_extension_cls"])
+        parallel_group.add_argument("--sleep-on-idle",
+                                    **parallel_kwargs["sleep_on_idle"])
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -1075,6 +1078,7 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
+            sleep_on_idle=self.sleep_on_idle,
         )
 
         speculative_config = self.create_speculative_config(
