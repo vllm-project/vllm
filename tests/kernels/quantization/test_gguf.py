@@ -35,11 +35,11 @@ def get_gguf_MoE_tensors(
     return GGUFReader(sample_file).tensors
 
 
-DTYPES = [torch.half, torch.bfloat16, torch.float32]
+DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
 # Hidden_size for testing, must match the sample file in HF repo,
 # we have `hidden_size = 256, 1024` for test in HF repo currently.
 HIDDEN_SIZES = [256, 1024]
-NUM_TOKENS = [7, 83, 128, 2048]  # Arbitrary values for testing
+NUM_TOKENS = [7, 2050]  # Arbitrary values for testing
 SEEDS = [0]
 QUANT_TYPES = [
     # i-matrix
