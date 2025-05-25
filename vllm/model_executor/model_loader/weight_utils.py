@@ -319,6 +319,7 @@ def download_safetensors_index_file_from_hf(
 
     Args:
         model_name_or_path (str): The model name or path.
+        index_file (str): The safetensors index file name
         cache_dir (Optional[str]): The cache directory to store the model
             weights. If None, will use HF defaults.
         revision (Optional[str]): The revision of the model.
@@ -337,10 +338,10 @@ def download_safetensors_index_file_from_hf(
             )
         # If file not found on remote or locally, we should not fail since
         # only some models will have index_file.
-        except huggingface_hub.utils.EntryNotFoundError:
-            logger.info("No %s found in remote.", index_file)
         except huggingface_hub.utils.LocalEntryNotFoundError:
             logger.info("No %s found in local cache.", index_file)
+        except huggingface_hub.utils.EntryNotFoundError:
+            logger.info("No %s found in remote.", index_file)
 
 
 # For models like Mistral-7B-v0.3, there are both sharded
