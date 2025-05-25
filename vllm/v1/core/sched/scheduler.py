@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Any, Optional, Union
-
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -30,9 +29,9 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
-
 
 class Scheduler(SchedulerInterface):
 
@@ -53,6 +52,11 @@ class Scheduler(SchedulerInterface):
         self.kv_events_config = vllm_config.kv_events_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
+        self.enable_dynasor_abort = self.scheduler_config.early_exit_reasoning_model
+
+        self.tokenizer = get_tokenizer(self.vllm_config.model_config.tokenizer)
+        self.probe_answers={}
+        self.requests_to_abort=[]
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -159,6 +163,7 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+        
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -187,6 +192,7 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
@@ -310,6 +316,10 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
+            # Sort waiting queue to prioritize probes
+            self.waiting = deque(sorted(self.waiting,key=lambda r: (0 if "probe" in r.request_id else 1, getattr(r, "priority", 0))))
+
+
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
@@ -546,7 +556,7 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
-
+        
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object
@@ -689,6 +699,32 @@ class Scheduler(SchedulerInterface):
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
+    def _create_and_add_new_request(self, parent_request: Request,decode_count, early_exit=False) -> None:
+        """Create a new prefill Request using (original prompt + decoded outputs + custom string)."""
+        original_prompt_ids = list(parent_request.prompt_token_ids)
+        decoded_output_ids = list(parent_request.output_token_ids[:decode_count])
+        # probe msg  
+        custom_text = "... Oh, I suddenly got the answer to the whole problem, **Final Answer**\n\n\\[ \\boxed{"
+        custom_token_ids = list(self.tokenizer.encode(custom_text))
+        # new prefill
+        new_prompt_token_ids = original_prompt_ids + decoded_output_ids + custom_token_ids
+        # new unique request ID
+        new_request_id = parent_request.request_id + "_probe_after_" + str(decode_count) + "_token"
+        # new Request
+        new_request = Request(
+            request_id=new_request_id,
+            prompt_token_ids=new_prompt_token_ids,
+            sampling_params = SamplingParams(max_tokens= 10),
+            arrival_time=time.monotonic(),
+            lora_request=parent_request.lora_request,
+            multi_modal_inputs=getattr(parent_request, "multi_modal_inputs", []),
+            multi_modal_hashes=getattr(parent_request, "multi_modal_hashes", []),
+            multi_modal_placeholders=getattr(parent_request, "multi_modal_placeholders", []),
+            eos_token_id=getattr(parent_request, "eos_token_id", None),
+        )
+        if parent_request.status == RequestStatus.RUNNING:
+            self.add_request(new_request)
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -707,7 +743,14 @@ class Scheduler(SchedulerInterface):
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
         # expensive operations inside the loop.
+        # Prioritizing probe requests
+        self.running = deque(sorted(self.running, key=lambda r: (0 if "probe" in r.request_id else 1, getattr(r, "priority", 0))))
+
+       
         for request in self.running:
+            if self.enable_dynasor_abort:
+                if len(request.output_token_ids)%120==0 and "probe" not in request.request_id:
+                        self._create_and_add_new_request(request,len(request.output_token_ids))
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
             if num_tokens_scheduled == 0:
@@ -751,7 +794,13 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
-            new_token_ids = generated_token_ids
+            
+            if request.request_id in self.requests_to_abort:
+                new_token_ids = [self.tokenizer.encode("</think>", add_special_tokens=False)[0]]
+                self.requests_to_abort.remove(request.request_id)
+            else:
+                new_token_ids = generated_token_ids
+
             kv_transfer_params = None
 
             # Append generated tokens and check for stop. Note that if
@@ -764,6 +813,16 @@ class Scheduler(SchedulerInterface):
                 # This must be called before we make the EngineCoreOutput.
                 stopped = check_stop(request, self.max_model_len)
                 if stopped:
+                    if "probe" in request.request_id:
+                        main_id = request.request_id.split("_probe_after_")[0]
+                        decoded_text = self.tokenizer.decode(request.output_token_ids, skip_special_tokens=True)
+                        final_answer = extract_final_answer(decoded_text)
+                        self.probe_answers.setdefault(main_id, []).append(final_answer)
+                        answers = self.probe_answers[main_id]
+                        if len(answers) >= 2 and answers[-1] == answers[-2]:
+                            self.requests_to_abort.append(main_id)
+                            
+
                     kv_transfer_params = self._free_request(request)
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
                     break
@@ -816,6 +875,12 @@ class Scheduler(SchedulerInterface):
 
             if not stopped:
                 new_running.append(request)
+            
+
+
+
+            
+        
 
         # P/D: update state for finished KV Transfers.
         self._update_from_kv_xfer_finished(model_runner_output)
@@ -828,6 +893,11 @@ class Scheduler(SchedulerInterface):
                 self._cached_reqs_data[req_data.req_id].append(req_data)
 
         self.running = new_running
+
+
+        
+
+
         engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
             scheduler_stats=self.make_stats(spec_decoding_stats),
@@ -836,7 +906,7 @@ class Scheduler(SchedulerInterface):
             #TODO currently sending duplicates here, improve this
             engine_core_outputs.finished_requests = (
                 scheduler_output.finished_req_ids | self.finished_req_ids)
-
+        
         return engine_core_outputs
 
     def add_request(self, request: Request) -> None:
@@ -1013,3 +1083,11 @@ class Scheduler(SchedulerInterface):
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
+
+def extract_final_answer(text: str) -> Optional[str]:
+        import re
+        match = re.search(r"([^\s{}\\]+)}\s*\\\]", text)
+        if match:
+            return match.group(1).strip()
+
+        return None
