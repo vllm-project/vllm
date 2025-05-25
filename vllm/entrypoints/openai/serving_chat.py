@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.platforms import current_platform
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
@@ -211,8 +212,12 @@ class OpenAIServingChat(OpenAIServing):
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
+                prompt_len = len(engine_prompt["prompt_token_ids"])
+
+                default_max_tokens = current_platform.maybe_update_max_tokens(
+                    prompt_len=prompt_len,
+                    default_max_tokens=self.max_model_len - prompt_len)
+
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         default_max_tokens, self.default_sampling_params)

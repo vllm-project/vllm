@@ -156,6 +156,10 @@ class Platform:
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
+    def maybe_update_max_tokens(self, prompt_len: int,
+                                default_max_tokens: int) -> int:
+        return default_max_tokens
+
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
