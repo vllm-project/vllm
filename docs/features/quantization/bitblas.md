@@ -33,7 +33,12 @@ import torch
 
 # "hxbgsyxh/llama-13b-4bit-g-1-bitblas" is a pre-quantized checkpoint.
 model_id = "hxbgsyxh/llama-13b-4bit-g-1-bitblas"
-llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True, quantization="bitblas")
+llm = LLM(
+    model=model_id,
+    dtype=torch.bfloat16,
+    trust_remote_code=True,
+    quantization="bitblas"
+)
 ```
 
 ## Read gptq format checkpoint
@@ -44,5 +49,11 @@ import torch
 
 # "hxbgsyxh/llama-13b-4bit-g-1" is a pre-quantized checkpoint.
 model_id = "hxbgsyxh/llama-13b-4bit-g-1"
-llm = LLM(model=model_id, dtype=torch.float16, trust_remote_code=True, quantization="bitblas", max_model_len=1024)
+llm = LLM(
+    model=model_id,
+    dtype=torch.float16,
+    trust_remote_code=True,
+    quantization="bitblas",
+    max_model_len=1024
+)
 ```

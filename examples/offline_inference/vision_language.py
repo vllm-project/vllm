@@ -330,22 +330,26 @@ def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
 
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
 
-    model_name = "OpenGVLab/InternVL2-2B"
+    model_name = "OpenGVLab/InternVL3-2B"
 
     engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
-        max_model_len=4096,
+        max_model_len=8192,
         limit_mm_per_prompt={modality: 1},
     )
+
+    if modality == "image":
+        placeholder = "<image>"
+    elif modality == "video":
+        placeholder = "<video>"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
     messages = [[{
         'role': 'user',
-        'content': f"<image>\n{question}"
+        'content': f"{placeholder}\n{question}"
     }] for question in questions]
     prompts = tokenizer.apply_chat_template(messages,
                                             tokenize=False,
@@ -357,6 +361,9 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
     stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+    stop_token_ids = [
+        token_id for token_id in stop_token_ids if token_id is not None
+    ]
 
     return ModelRequestData(
         engine_args=engine_args,
