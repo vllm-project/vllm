@@ -22,6 +22,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import bind_kv_cache, report_usage_stats
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
@@ -36,6 +37,7 @@ class TPUWorker:
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        structured_output_manager: StructuredOutputManager,
         is_driver_worker: bool = False,
     ):
         self.is_driver_worker = is_driver_worker
@@ -55,6 +57,7 @@ class TPUWorker:
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
+        self.structured_output_manager = structured_output_manager
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -136,7 +139,8 @@ class TPUWorker:
             xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = TPUModelRunner(self.vllm_config, self.device)
+        self.model_runner = TPUModelRunner(self.vllm_config, self.device,
+                                           self.structured_output_manager)
 
         if rank == 0:
             # If usage stat is enabled, collect relevant info.
