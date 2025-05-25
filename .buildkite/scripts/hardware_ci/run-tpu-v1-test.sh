@@ -89,11 +89,15 @@ docker run --privileged --net host --shm-size=16G -it \
         python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py; \
         echo TEST_12_EXIT_CODE: \$?; \
     } & \
-    # Disable the TPU LoRA tests until the feature is activated
+    { \
+        echo TEST_13: Running test_lora.py; \
+        python3 -m pytest -s -v /workspace/vllm/tests/tpu/lora/test_lora.py; \
+        echo TEST_13_EXIT_CODE: \$?; \
+    } & \
     # & { \
-    #     echo TEST_13: Running test_moe_pallas.py; \
+    #     echo TEST_14: Running test_moe_pallas.py; \
     #     python3 -m pytest -s -v /workspace/vllm/tests/tpu/lora/; \
-    #     echo TEST_13_EXIT_CODE: \$?; \
+    #     echo TEST_14_EXIT_CODE: \$?; \
     # } & \
     wait \
     && echo 'All tests have attempted to run. Check logs for individual test statuses and exit codes.' \
