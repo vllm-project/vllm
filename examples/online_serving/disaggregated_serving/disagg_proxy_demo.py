@@ -13,6 +13,7 @@ launch this proxy demo through:
 Note: This demo will be removed once the PDController implemented in PR 15343
 (https://github.com/vllm-project/vllm/pull/15343) supports XpYd.
 """
+
 import argparse
 import ipaddress
 import itertools
@@ -26,8 +27,7 @@ from typing import Callable, Optional
 import aiohttp
 import requests
 import uvicorn
-from fastapi import (APIRouter, Depends, FastAPI, Header, HTTPException,
-                     Request, status)
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
@@ -36,24 +36,24 @@ logging.basicConfig(level=logging.INFO)
 
 
 class SchedulingPolicy(ABC):
-
     @abstractmethod
     def schedule(self, cycler: itertools.cycle):
         raise NotImplementedError("Scheduling Proxy is not set.")
 
 
 class Proxy:
-
     def __init__(
         self,
         prefill_instances: list[str],
         decode_instances: list[str],
         model: str,
         scheduling_policy: SchedulingPolicy,
-        custom_create_completion: Optional[Callable[[Request],
-                                                    StreamingResponse]] = None,
-        custom_create_chat_completion: Optional[Callable[
-            [Request], StreamingResponse]] = None,
+        custom_create_completion: Optional[
+            Callable[[Request], StreamingResponse]
+        ] = None,
+        custom_create_chat_completion: Optional[
+            Callable[[Request], StreamingResponse]
+        ] = None,
     ):
         self.prefill_instances = prefill_instances
         self.decode_instances = decode_instances
@@ -68,30 +68,30 @@ class Proxy:
 
     def setup_routes(self):
         self.router.post(
-            "/v1/completions",
-            dependencies=[
-                Depends(self.validate_json_request)
-            ])(self.custom_create_completion if self.
-               custom_create_completion else self.create_completion)
+            "/v1/completions", dependencies=[Depends(self.validate_json_request)]
+        )(
+            self.custom_create_completion
+            if self.custom_create_completion
+            else self.create_completion
+        )
         self.router.post(
-            "/v1/chat/completions",
-            dependencies=[
-                Depends(self.validate_json_request)
-            ])(self.custom_create_chat_completion if self.
-               custom_create_chat_completion else self.create_chat_completion)
-        self.router.get("/status",
-                        response_class=JSONResponse)(self.get_status)
-        self.router.post("/instances/add",
-                         dependencies=[Depends(self.api_key_authenticate)
-                                       ])(self.add_instance_endpoint)
+            "/v1/chat/completions", dependencies=[Depends(self.validate_json_request)]
+        )(
+            self.custom_create_chat_completion
+            if self.custom_create_chat_completion
+            else self.create_chat_completion
+        )
+        self.router.get("/status", response_class=JSONResponse)(self.get_status)
+        self.router.post(
+            "/instances/add", dependencies=[Depends(self.api_key_authenticate)]
+        )(self.add_instance_endpoint)
 
     async def validate_json_request(self, raw_request: Request):
         content_type = raw_request.headers.get("content-type", "").lower()
         if content_type != "application/json":
             raise HTTPException(
                 status_code=415,
-                detail=
-                "Unsupported Media Type: Only 'application/json' is allowed",
+                detail="Unsupported Media Type: Only 'application/json' is allowed",
             )
 
     def api_key_authenticate(self, x_api_key: str = Header(...)):
@@ -103,8 +103,7 @@ class Proxy:
                 detail="Server configuration error.",
             )
         if x_api_key != expected_api_key:
-            logger.warning("Unauthorized access attempt with API Key: %s",
-                           x_api_key)
+            logger.warning("Unauthorized access attempt with API Key: %s", x_api_key)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Forbidden: Invalid API Key.",
@@ -113,8 +112,7 @@ class Proxy:
     async def validate_instance(self, instance: str) -> bool:
         url = f"http://{instance}/v1/models"
         try:
-            async with aiohttp.ClientSession(
-                    timeout=AIOHTTP_TIMEOUT) as client:
+            async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as client:
                 logger.info("Verifying %s ...", instance)
                 async with client.get(url) as response:
                     if response.status == 200:
@@ -122,12 +120,15 @@ class Proxy:
                         if "data" in data and len(data["data"]) > 0:
                             model_cur = data["data"][0].get("id", "")
                             if model_cur == self.model:
-                                logger.info("Instance: %s could be added.",
-                                            instance)
+                                logger.info("Instance: %s could be added.", instance)
                                 return True
                             else:
-                                logger.warning("Mismatch model %s : %s != %s",
-                                               instance, model_cur, self.model)
+                                logger.warning(
+                                    "Mismatch model %s : %s != %s",
+                                    instance,
+                                    model_cur,
+                                    self.model,
+                                )
                                 return False
                         else:
                             return False
@@ -147,48 +148,47 @@ class Proxy:
             instance_type = data.get("type")
             instance = data.get("instance")
             if instance_type not in ["prefill", "decode"]:
-                raise HTTPException(status_code=400,
-                                    detail="Invalid instance type.")
+                raise HTTPException(status_code=400, detail="Invalid instance type.")
             if not instance or ":" not in instance:
-                raise HTTPException(status_code=400,
-                                    detail="Invalid instance format.")
+                raise HTTPException(status_code=400, detail="Invalid instance format.")
             host, port_str = instance.split(":")
             try:
                 if host != "localhost":
                     ipaddress.ip_address(host)
                 port = int(port_str)
                 if not (0 < port < 65536):
-                    raise HTTPException(status_code=400,
-                                        detail="Invalid port number.")
+                    raise HTTPException(status_code=400, detail="Invalid port number.")
             except Exception as e:
-                raise HTTPException(status_code=400,
-                                    detail="Invalid instance address.") from e
+                raise HTTPException(
+                    status_code=400, detail="Invalid instance address."
+                ) from e
 
             is_valid = await self.validate_instance(instance)
             if not is_valid:
-                raise HTTPException(status_code=400,
-                                    detail="Instance validation failed.")
+                raise HTTPException(
+                    status_code=400, detail="Instance validation failed."
+                )
 
             if instance_type == "prefill":
                 if instance not in self.prefill_instances:
                     self.prefill_instances.append(instance)
-                    self.prefill_cycler = itertools.cycle(
-                        self.prefill_instances)
+                    self.prefill_cycler = itertools.cycle(self.prefill_instances)
                 else:
-                    raise HTTPException(status_code=400,
-                                        detail="Instance already exists.")
+                    raise HTTPException(
+                        status_code=400, detail="Instance already exists."
+                    )
             else:
                 if instance not in self.decode_instances:
                     self.decode_instances.append(instance)
                     self.decode_cycler = itertools.cycle(self.decode_instances)
                 else:
-                    raise HTTPException(status_code=400,
-                                        detail="Instance already exists.")
+                    raise HTTPException(
+                        status_code=400, detail="Instance already exists."
+                    )
 
-            return JSONResponse(content={
-                "message":
-                f"Added {instance} to {instance_type}_instances."
-            })
+            return JSONResponse(
+                content={"message": f"Added {instance} to {instance_type}_instances."}
+            )
         except HTTPException as http_exc:
             raise http_exc
         except Exception as e:
@@ -197,16 +197,16 @@ class Proxy:
 
     async def forward_request(self, url, data, use_chunked=True):
         async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-            headers = {
-                "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
-            }
+            headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
             try:
-                async with session.post(url=url, json=data,
-                                        headers=headers) as response:
+                async with session.post(
+                    url=url, json=data, headers=headers
+                ) as response:
                     if 200 <= response.status < 300 or 400 <= response.status < 500:  # noqa: E501
                         if use_chunked:
                             async for chunk_bytes in response.content.iter_chunked(  # noqa: E501
-                                    1024):
+                                1024
+                            ):
                                 yield chunk_bytes
                         else:
                             content = await response.read()
@@ -217,20 +217,21 @@ class Proxy:
                             error_content = json.loads(error_content)
                         except json.JSONDecodeError:
                             error_content = error_content
-                        logger.error("Request failed with status %s: %s",
-                                     response.status, error_content)
+                        logger.error(
+                            "Request failed with status %s: %s",
+                            response.status,
+                            error_content,
+                        )
                         raise HTTPException(
                             status_code=response.status,
-                            detail=
-                            f"Request failed with status {response.status}: "
+                            detail=f"Request failed with status {response.status}: "
                             f"{error_content}",
                         )
             except aiohttp.ClientError as e:
                 logger.error("ClientError occurred: %s", str(e))
                 raise HTTPException(
                     status_code=502,
-                    detail=
-                    "Bad Gateway: Error communicating with upstream server.",
+                    detail="Bad Gateway: Error communicating with upstream server.",
                 ) from e
             except Exception as e:
                 logger.error("Unexpected error: %s", str(e))
@@ -258,8 +259,8 @@ class Proxy:
             prefill_instance = self.schedule(self.prefill_cycler)
             try:
                 async for _ in self.forward_request(
-                        f"http://{prefill_instance}/v1/completions",
-                        kv_prepare_request):
+                    f"http://{prefill_instance}/v1/completions", kv_prepare_request
+                ):
                     continue
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("prefill", prefill_instance)
@@ -270,7 +271,8 @@ class Proxy:
 
             try:
                 generator = self.forward_request(
-                    f"http://{decode_instance}/v1/completions", request)
+                    f"http://{decode_instance}/v1/completions", request
+                )
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("decode", decode_instance)
                 raise http_exc
@@ -295,8 +297,8 @@ class Proxy:
             prefill_instance = self.schedule(self.prefill_cycler)
             try:
                 async for _ in self.forward_request(
-                        f"http://{prefill_instance}/v1/chat/completions",
-                        kv_prepare_request):
+                    f"http://{prefill_instance}/v1/chat/completions", kv_prepare_request
+                ):
                     continue
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("prefill", prefill_instance)
@@ -306,8 +308,8 @@ class Proxy:
 
             try:
                 generator = self.forward_request(
-                    "http://" + decode_instance + "/v1/chat/completions",
-                    request)
+                    "http://" + decode_instance + "/v1/chat/completions", request
+                )
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("decode", decode_instance)
                 raise http_exc
@@ -318,20 +320,20 @@ class Proxy:
             error_messages = [str(e) for e in exc_info if e]
             print("Error occurred in disagg proxy server")
             print(error_messages)
-            return StreamingResponse(content=iter(error_messages),
-                                     media_type="text/event-stream")
+            return StreamingResponse(
+                content=iter(error_messages), media_type="text/event-stream"
+            )
 
     def remove_instance_endpoint(self, instance_type, instance):
-        if (instance_type == "decode" and instance in self.decode_instances):
+        if instance_type == "decode" and instance in self.decode_instances:
             self.decode_instances.remove(instance)
             self.decode_cycler = itertools.cycle(self.decode_instances)
-        if (instance_type == "prefill" and instance in self.decode_instances):
+        if instance_type == "prefill" and instance in self.decode_instances:
             self.prefill_instances.remove(instance)
             self.prefill_cycler = itertools.cycle(self.decode_instances)
 
 
 class RoundRobinSchedulingPolicy(SchedulingPolicy):
-
     def __init__(self):
         super().__init__()
 
@@ -340,15 +342,12 @@ class RoundRobinSchedulingPolicy(SchedulingPolicy):
 
 
 class ProxyServer:
-
     def __init__(
         self,
         args: argparse.Namespace,
         scheduling_policy: Optional[SchedulingPolicy] = None,
-        create_completion: Optional[Callable[[Request],
-                                             StreamingResponse]] = None,
-        create_chat_completion: Optional[Callable[[Request],
-                                                  StreamingResponse]] = None,
+        create_completion: Optional[Callable[[Request], StreamingResponse]] = None,
+        create_chat_completion: Optional[Callable[[Request], StreamingResponse]] = None,
     ):
         self.validate_parsed_serve_args(args)
         self.port = args.port
@@ -356,8 +355,11 @@ class ProxyServer:
             prefill_instances=[] if args.prefill is None else args.prefill,
             decode_instances=[] if args.decode is None else args.decode,
             model=args.model,
-            scheduling_policy=(scheduling_policy if scheduling_policy
-                               is not None else RoundRobinSchedulingPolicy()),
+            scheduling_policy=(
+                scheduling_policy
+                if scheduling_policy is not None
+                else RoundRobinSchedulingPolicy()
+            ),
             custom_create_completion=create_completion,
             custom_create_chat_completion=create_chat_completion,
         )
@@ -382,11 +384,9 @@ class ProxyServer:
                     ipaddress.ip_address(host)
                 port = int(port)
                 if not (0 < port < 65536):
-                    raise ValueError(
-                        f"Invalid port number in instance: {instance}")
+                    raise ValueError(f"Invalid port number in instance: {instance}")
             except Exception as e:
-                raise ValueError(
-                    f"Invalid instance {instance}: {str(e)}") from e
+                raise ValueError(f"Invalid instance {instance}: {str(e)}") from e
 
     def verify_model_config(self, instances: list, model: str) -> None:
         model_suffix = model.split("/")[-1]
@@ -399,12 +399,14 @@ class ProxyServer:
                     if model_cur_suffix != model_suffix:
                         raise ValueError(
                             f"{instance} serves a different model: "
-                            f"{model_cur} != {model}")
+                            f"{model_cur} != {model}"
+                        )
                 else:
                     raise ValueError(f"Cannot get model id from {instance}!")
             except requests.RequestException as e:
                 raise ValueError(
-                    f"Error communicating with {instance}: {str(e)}") from e
+                    f"Error communicating with {instance}: {str(e)}"
+                ) from e
 
     def run_server(self):
         app = FastAPI()
@@ -417,11 +419,7 @@ class ProxyServer:
 def parse_args():
     # Todo: allow more config
     parser = argparse.ArgumentParser("vLLM disaggregated proxy server.")
-    parser.add_argument("--model",
-                        "-m",
-                        type=str,
-                        required=True,
-                        help="Model name")
+    parser.add_argument("--model", "-m", type=str, required=True, help="Model name")
 
     parser.add_argument(
         "--prefill",

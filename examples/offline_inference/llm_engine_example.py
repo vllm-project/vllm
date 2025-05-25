@@ -3,6 +3,7 @@
 This file demonstrates using the `LLMEngine`
 for processing prompts with various sampling parameters.
 """
+
 import argparse
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
@@ -12,24 +13,26 @@ from vllm.utils import FlexibleArgumentParser
 def create_test_prompts() -> list[tuple[str, SamplingParams]]:
     """Create a list of test prompts with their sampling parameters."""
     return [
-        ("A robot may not injure a human being",
-         SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1)),
-        ("To be or not to be,",
-         SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2)),
-        ("What is the meaning of life?",
-         SamplingParams(n=2,
-                        temperature=0.8,
-                        top_p=0.95,
-                        frequency_penalty=0.1)),
+        (
+            "A robot may not injure a human being",
+            SamplingParams(temperature=0.0, logprobs=1, prompt_logprobs=1),
+        ),
+        (
+            "To be or not to be,",
+            SamplingParams(temperature=0.8, top_k=5, presence_penalty=0.2),
+        ),
+        (
+            "What is the meaning of life?",
+            SamplingParams(n=2, temperature=0.8, top_p=0.95, frequency_penalty=0.1),
+        ),
     ]
 
 
-def process_requests(engine: LLMEngine,
-                     test_prompts: list[tuple[str, SamplingParams]]):
+def process_requests(engine: LLMEngine, test_prompts: list[tuple[str, SamplingParams]]):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
 
-    print('-' * 50)
+    print("-" * 50)
     while test_prompts or engine.has_unfinished_requests():
         if test_prompts:
             prompt, sampling_params = test_prompts.pop(0)
@@ -41,7 +44,7 @@ def process_requests(engine: LLMEngine,
         for request_output in request_outputs:
             if request_output.finished:
                 print(request_output)
-                print('-' * 50)
+                print("-" * 50)
 
 
 def initialize_engine(args: argparse.Namespace) -> LLMEngine:
@@ -52,7 +55,8 @@ def initialize_engine(args: argparse.Namespace) -> LLMEngine:
 
 def parse_args():
     parser = FlexibleArgumentParser(
-        description='Demo on using the LLMEngine class directly')
+        description="Demo on using the LLMEngine class directly"
+    )
     parser = EngineArgs.add_cli_args(parser)
     return parser.parse_args()
 
@@ -64,6 +68,6 @@ def main(args: argparse.Namespace):
     process_requests(engine, test_prompts)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = parse_args()
     main(args)

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-This example shows how to run offline inference with an EAGLE speculative 
+This example shows how to run offline inference with an EAGLE speculative
 decoding model on neuron. To use EAGLE speculative decoding, you must use
 a draft model that is specifically fine-tuned for EAGLE speculation.
 Additionally, to use EAGLE with NxD Inference, the draft model must include
@@ -24,7 +24,7 @@ llm = LLM(
     speculative_config={
         "model": "/home/ubuntu/model_hf/Llama-3.1-70B-Instruct-EAGLE-Draft",
         "num_speculative_tokens": 5,
-        "max_model_len": 2048
+        "max_model_len": 2048,
     },
     max_num_seqs=4,
     # The max_model_len and block_size arguments are required to be same as
@@ -40,7 +40,7 @@ llm = LLM(
     tensor_parallel_size=32,
     override_neuron_config={
         "enable_eagle_speculation": True,
-        "enable_fused_speculation": True
+        "enable_fused_speculation": True,
     },
 )
 
