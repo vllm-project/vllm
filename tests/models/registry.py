@@ -8,6 +8,8 @@ import pytest
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
+from vllm.config import TokenizerMode
+
 
 @dataclass(frozen=True)
 class _HfExamplesInfo:
@@ -20,7 +22,7 @@ class _HfExamplesInfo:
     tokenizer: Optional[str] = None
     """Set the tokenizer to load for this architecture."""
 
-    tokenizer_mode: str = "auto"
+    tokenizer_mode: TokenizerMode = "auto"
     """Set the tokenizer type for this architecture."""
 
     speculative_model: Optional[str] = None
@@ -373,8 +375,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
-                                                       tokenizer_mode="mistral",
-                                                       v0_only=True),
+                                                       tokenizer_mode="mistral"),
     "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",
                                                       extras={"chat": "Qwen/Qwen-VL-Chat"},  # noqa: E501
                                                       trust_remote_code=True,
