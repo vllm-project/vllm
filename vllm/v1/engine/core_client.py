@@ -138,6 +138,9 @@ class EngineCoreClient(ABC):
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         raise NotImplementedError
 
+    def get_kv_cache_token_capacity(self) -> int:
+        raise NotImplementedError
+
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
@@ -263,6 +266,10 @@ class InprocClient(EngineCoreClient):
                        args: tuple = (),
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
+
+    def get_kv_cache_token_capacity(self) -> int:
+        return self.engine_core.vllm_config.cache_config.num_gpu_blocks \
+            * self.engine_core.vllm_config.cache_config.block_size
 
 
 class CoreEngineState(Enum):
@@ -725,6 +732,10 @@ class SyncMPClient(MPClient):
                            max_size: Optional[int] = None) -> None:
         self.call_utility("save_sharded_state", path, pattern, max_size)
 
+    def get_kv_cache_token_capacity(self) -> int:
+        return self.vllm_config.cache_config.num_gpu_blocks \
+            * self.vllm_config.cache_config.block_size
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -915,6 +926,10 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async("collective_rpc", method, timeout,
                                              args, kwargs)
 
+    async def get_kv_cache_token_capacity(self) -> int:  # type: ignore
+        return self.vllm_config.cache_config.num_gpu_blocks \
+            * self.vllm_config.cache_config.block_size
+
 
 class DPAsyncMPClient(AsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
@@ -1018,3 +1033,7 @@ class DPAsyncMPClient(AsyncMPClient):
         if not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids,
                                    engine)
+
+    async def get_kv_cache_token_capacity(self) -> int:  # type: ignore
+        return self.vllm_config.cache_config.num_gpu_blocks \
+            * self.vllm_config.cache_config.block_size
