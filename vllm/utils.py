@@ -898,7 +898,9 @@ class DeviceMemoryProfiler:
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
+        gc.collect()
         from vllm.platforms import current_platform
+        current_platform.empty_cache()
         return current_platform.get_current_memory_usage(self.device)
 
     def __enter__(self):
@@ -909,9 +911,6 @@ class DeviceMemoryProfiler:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.final_memory = self.current_memory_usage()
         self.consumed_memory = self.final_memory - self.initial_memory
-
-        # Force garbage collection
-        gc.collect()
 
 
 def make_ndarray_with_pad(
