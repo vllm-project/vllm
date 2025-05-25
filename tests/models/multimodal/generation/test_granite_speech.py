@@ -11,6 +11,7 @@ from vllm.sequence import SampleLogprobs
 
 from ....conftest import (AudioTestAssets, HfRunner, PromptAudioInput,
                           VllmRunner)
+from ....utils import large_gpu_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
@@ -112,6 +113,7 @@ def run_test(
         )
 
 
+@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_model_len", [2048])

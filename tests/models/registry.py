@@ -234,7 +234,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
-    "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),  # noqa: E501
+    "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b",  # noqa: E501
+                                                v0_only=True),
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t",
                                            v0_only=True),
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),
@@ -244,6 +245,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "TeleFLMForCausalLM": _HfExamplesInfo("CofeAI/FLM-2-52B-Instruct-2407",
                                             trust_remote_code=True),
     "XverseForCausalLM": _HfExamplesInfo("xverse/XVERSE-7B-Chat",
+                                         tokenizer="meta-llama/Llama-2-7b",
                                          trust_remote_code=True),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
@@ -284,9 +286,8 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
                                          trust_remote_code=True),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"), # noqa: E501
-    "PrithviGeoSpatialMAE": _HfExamplesInfo("ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL", # noqa: E501
-                                            trust_remote_code=True,
-                                            hf_overrides={"architectures": ["PrithviGeoSpatialMAE"]}),  # noqa: E501
+    "PrithviGeoSpatialMAE": _HfExamplesInfo("ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
+                                            is_available_online=False),  # noqa: E501
 }
 
 _CROSS_ENCODER_EXAMPLE_MODELS = {
@@ -391,8 +392,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
     # Therefore, we borrow the BartTokenizer from the original Bart model
     "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
-                                                         tokenizer="Isotr0py/Florence-2-tokenizer",
-                                                         trust_remote_code=True,),  # noqa: E501
+                                                         tokenizer="Isotr0py/Florence-2-tokenizer",  # noqa: E501
+                                                         trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 }
