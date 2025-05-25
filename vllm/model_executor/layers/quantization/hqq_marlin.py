@@ -97,7 +97,9 @@ class HQQEmptyParameter(BasevLLMParameter):
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         pass
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+    def load_row_parallel_weight(self,
+                                 loaded_weight: torch.Tensor,
+                                 use_presharded_weights: bool = False):
         pass
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
@@ -142,23 +144,29 @@ class HQQweightParameter(PackedvLLMParameter):
                                   loaded_weight.shape[1])
         super().load_merged_column_weight(loaded_weight, **kwargs)
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+    def load_row_parallel_weight(self,
+                                 loaded_weight: torch.Tensor,
+                                 use_presharded_weights: bool = False):
         loaded_weight = self.unpack_4bit_u8(loaded_weight)
         loaded_weight = loaded_weight.reshape(self.output_shape,
                                               -1).transpose(1, 0)
         loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
                                   loaded_weight.shape[0],
                                   loaded_weight.shape[1])
-        super().load_row_parallel_weight(loaded_weight)
+        super().load_row_parallel_weight(loaded_weight, use_presharded_weights)
 
-    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+    def load_qkv_weight(self,
+                        loaded_weight: torch.Tensor,
+                        use_presharded_weights: bool = False,
+                        **kwargs):
         loaded_weight = self.unpack_4bit_u8(loaded_weight)
         loaded_weight = loaded_weight.reshape(-1, self.input_shape).transpose(
             1, 0)
         loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
                                   loaded_weight.shape[0],
                                   loaded_weight.shape[1])
-        super().load_qkv_weight(loaded_weight, **kwargs)
+        super().load_qkv_weight(loaded_weight, use_presharded_weights,
+                                **kwargs)
 
 
 # Zero points and scales in HQQ must also be reshaped to correspond to W_q's
@@ -169,13 +177,19 @@ class HQQZeroScaleParameter(GroupQuantScaleParameter):
         loaded_weight = loaded_weight.reshape(-1, self.shape[1])
         super().load_merged_column_weight(loaded_weight, **kwargs)
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+    def load_row_parallel_weight(self,
+                                 loaded_weight: torch.Tensor,
+                                 use_presharded_weights: bool = False):
         loaded_weight = loaded_weight.reshape(self.shape[0], -1)
-        super().load_row_parallel_weight(loaded_weight)
+        super().load_row_parallel_weight(loaded_weight, use_presharded_weights)
 
-    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+    def load_qkv_weight(self,
+                        loaded_weight: torch.Tensor,
+                        use_presharded_weights: bool = False,
+                        **kwargs):
         loaded_weight = loaded_weight.reshape(-1, self.shape[1])
-        super().load_qkv_weight(loaded_weight, **kwargs)
+        super().load_qkv_weight(loaded_weight, use_presharded_weights,
+                                **kwargs)
 
 
 class HQQMarlinMethod(LinearMethodBase):
