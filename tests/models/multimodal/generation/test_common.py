@@ -349,6 +349,17 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
     ),
+    "intern_vl-video": VLMTestInfo(
+        models=[
+            "OpenGVLab/InternVL3-1B",
+        ],
+        test_type=VLMTestType.VIDEO,
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<video>",
+        max_model_len=8192,
+        use_tokenizer_eos=True,
+        patch_hf_runner=model_utils.internvl_patch_hf_runner,
+    ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),

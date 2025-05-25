@@ -258,6 +258,7 @@ def _test_processing_correctness_mistral(
     "ibm-granite/granite-speech-3.3-8b",
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
+    "OpenGVLab/InternVL3-1B",
     "HuggingFaceM4/Idefics3-8B-Llama3",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
     "moonshotai/Kimi-VL-A3B-Instruct",

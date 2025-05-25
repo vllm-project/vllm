@@ -334,7 +334,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                       max_transformers_version="4.48",  # noqa: E501
                                       transformers_version_reason="HF model is not compatible."),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
-                                         extras={"2B": "OpenGVLab/InternVL2-2B"},  # noqa: E501
+                                         extras={"2B": "OpenGVLab/InternVL2-2B",
+                                                 "3.0": "OpenGVLab/InternVL3-1B"},  # noqa: E501
                                          trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
