@@ -3,7 +3,7 @@
 from abc import ABC
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Generic, NamedTuple, Optional, TypeVar, cast
+from typing import Generic, NamedTuple, Optional, TypeVar, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -27,7 +27,7 @@ class ProcessorInputs:
     Represents the keyword arguments to
     {meth}`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
     """
-    prompt_text: str
+    prompt: Union[str, list[int]]
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
 
@@ -75,7 +75,12 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                             "in an upcoming release.")
 
         seq_len = self.info.ctx.model_config.max_model_len
-        return self.get_dummy_processor_inputs(seq_len, mm_counts).prompt_text
+
+        prompt = self.get_dummy_processor_inputs(seq_len, mm_counts).prompt
+        if not isinstance(prompt, str):
+            prompt = self.info.get_tokenizer().decode(prompt)
+
+        return prompt
 
     # TODO: @abstractmethod after transition
     def get_dummy_mm_data(
@@ -101,7 +106,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
 
-        return ProcessorInputs(prompt_text=dummy_text, mm_data=dummy_mm_data)
+        return ProcessorInputs(prompt=dummy_text, mm_data=dummy_mm_data)
 
     def _get_dummy_audios(
         self,
@@ -177,7 +182,7 @@ class MultiModalProfiler(Generic[_I]):
             seq_len, mm_counts)
 
         return self.processor.apply(
-            prompt=processor_inputs.prompt_text,
+            prompt=processor_inputs.prompt,
             mm_data=processor_inputs.mm_data,
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         )
