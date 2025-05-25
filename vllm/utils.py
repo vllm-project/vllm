@@ -33,7 +33,8 @@ import uuid
 import warnings
 import weakref
 from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError, _ArgumentGroup)
+                      ArgumentTypeError, RawDescriptionHelpFormatter,
+                      _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
@@ -1323,7 +1324,8 @@ class StoreBoolean(Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter,
+                          RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
@@ -2529,7 +2531,7 @@ def _maybe_force_spawn():
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-            "See https://docs.vllm.ai/en/latest/getting_started/"
+            "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
             "for more information. Reason: %s", reason)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
