@@ -59,7 +59,8 @@ model.save(quant_path)
 To run an GPTQModel quantized model with vLLM, you can use [DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2](https://huggingface.co/ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2) with the following command:
 
 ```console
-python examples/offline_inference/llm_engine_example.py --model ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2
+python examples/offline_inference/llm_engine_example.py \
+    --model ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2
 ```
 
 ## Using GPTQModel with vLLM's Python API

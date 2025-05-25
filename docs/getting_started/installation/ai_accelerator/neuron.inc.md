@@ -38,7 +38,8 @@ The installation of drivers and tools wouldn't be necessary, if [Deep Learning A
 sudo tee /etc/apt/sources.list.d/neuron.list > /dev/null <<EOF
 deb https://apt.repos.neuron.amazonaws.com ${VERSION_CODENAME} main
 EOF
-wget -qO - https://apt.repos.neuron.amazonaws.com/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB | sudo apt-key add -
+wget -qO - https://apt.repos.neuron.amazonaws.com/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB \
+    | sudo apt-key add -
 
 # Update OS packages
 sudo apt-get update -y
@@ -96,12 +97,17 @@ source aws_neuron_venv_pytorch/bin/activate
 
 # Install Jupyter notebook kernel
 pip install ipykernel
-python3.10 -m ipykernel install --user --name aws_neuron_venv_pytorch --display-name "Python (torch-neuronx)"
+python3.10 -m ipykernel install \
+    --user \
+    --name aws_neuron_venv_pytorch \
+    --display-name "Python (torch-neuronx)"
 pip install jupyter notebook
 pip install environment_kernels
 
 # Set pip repository pointing to the Neuron repository
-python -m pip config set global.extra-index-url https://pip.repos.neuron.amazonaws.com
+python -m pip config set \
+    global.extra-index-url \
+    https://pip.repos.neuron.amazonaws.com
 
 # Install wget, awscli
 python -m pip install wget

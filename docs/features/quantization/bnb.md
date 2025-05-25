@@ -27,7 +27,11 @@ from vllm import LLM
 import torch
 # unsloth/tinyllama-bnb-4bit is a pre-quantized checkpoint.
 model_id = "unsloth/tinyllama-bnb-4bit"
-llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True)
+llm = LLM(
+    model=model_id,
+    dtype=torch.bfloat16,
+    trust_remote_code=True
+)
 ```
 
 ## Inflight quantization: load as 4bit quantization
@@ -38,8 +42,12 @@ For inflight 4bit quantization with BitsAndBytes, you need to explicitly specify
 from vllm import LLM
 import torch
 model_id = "huggyllama/llama-7b"
-llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True, \
-quantization="bitsandbytes")
+llm = LLM(
+    model=model_id,
+    dtype=torch.bfloat16,
+    trust_remote_code=True,
+    quantization="bitsandbytes"
+)
 ```
 
 ## OpenAI Compatible Server

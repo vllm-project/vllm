@@ -16,19 +16,25 @@ pip3 install vllm[runai]
 To run it as an OpenAI-compatible server, add the `--load-format runai_streamer` flag:
 
 ```console
-vllm serve /home/meta-llama/Llama-3.2-3B-Instruct --load-format runai_streamer
+vllm serve /home/meta-llama/Llama-3.2-3B-Instruct \
+    --load-format runai_streamer
 ```
 
 To run model from AWS S3 object store run:
 
 ```console
-vllm serve s3://core-llm/Llama-3-8b --load-format runai_streamer
+vllm serve s3://core-llm/Llama-3-8b \
+    --load-format runai_streamer
 ```
 
 To run model from a S3 compatible object store run:
 
 ```console
-RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 AWS_EC2_METADATA_DISABLED=true AWS_ENDPOINT_URL=https://storage.googleapis.com vllm serve s3://core-llm/Llama-3-8b --load-format runai_streamer
+RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 \
+AWS_EC2_METADATA_DISABLED=true \
+AWS_ENDPOINT_URL=https://storage.googleapis.com \
+vllm serve s3://core-llm/Llama-3-8b \
+    --load-format runai_streamer
 ```
 
 ## Tunable parameters
@@ -39,14 +45,18 @@ You can tune `concurrency` that controls the level of concurrency and number of 
 For reading from S3, it will be the number of client instances the host is opening to the S3 server.
 
 ```console
-vllm serve /home/meta-llama/Llama-3.2-3B-Instruct --load-format runai_streamer --model-loader-extra-config '{"concurrency":16}'
+vllm serve /home/meta-llama/Llama-3.2-3B-Instruct \
+    --load-format runai_streamer \
+    --model-loader-extra-config '{"concurrency":16}'
 ```
 
 You can control the size of the CPU Memory buffer to which tensors are read from the file, and limit this size.
 You can read further about CPU buffer memory limiting [here](https://github.com/run-ai/runai-model-streamer/blob/master/docs/src/env-vars.md#runai_streamer_memory_limit).
 
 ```console
-vllm serve /home/meta-llama/Llama-3.2-3B-Instruct --load-format runai_streamer --model-loader-extra-config '{"memory_limit":5368709120}'
+vllm serve /home/meta-llama/Llama-3.2-3B-Instruct \
+    --load-format runai_streamer \
+    --model-loader-extra-config '{"memory_limit":5368709120}'
 ```
 
 !!! note
@@ -63,7 +73,9 @@ vllm serve /path/to/sharded/model --load-format runai_streamer_sharded
 The sharded loader expects model files to follow the same naming pattern as the regular sharded state loader: `model-rank-{rank}-part-{part}.safetensors`. You can customize this pattern using the `pattern` parameter in `--model-loader-extra-config`:
 
 ```console
-vllm serve /path/to/sharded/model --load-format runai_streamer_sharded --model-loader-extra-config '{"pattern":"custom-model-rank-{rank}-part-{part}.safetensors"}'
+vllm serve /path/to/sharded/model \
+    --load-format runai_streamer_sharded \
+    --model-loader-extra-config '{"pattern":"custom-model-rank-{rank}-part-{part}.safetensors"}'
 ```
 
 To create sharded model files, you can use the script provided in <gh-file:examples/offline_inference/save_sharded_state.py>. This script demonstrates how to save a model in the sharded format that is compatible with the Run:ai Model Streamer sharded loader.
@@ -71,7 +83,9 @@ To create sharded model files, you can use the script provided in <gh-file:examp
 The sharded loader supports all the same tunable parameters as the regular Run:ai Model Streamer, including `concurrency` and `memory_limit`. These can be configured in the same way:
 
 ```console
-vllm serve /path/to/sharded/model --load-format runai_streamer_sharded --model-loader-extra-config '{"concurrency":16, "memory_limit":5368709120}'
+vllm serve /path/to/sharded/model \
+    --load-format runai_streamer_sharded \
+    --model-loader-extra-config '{"concurrency":16, "memory_limit":5368709120}'
 ```
 
 !!! note

@@ -8,7 +8,9 @@ vLLM provides an HTTP server that implements OpenAI's [Completions API](https://
 In your terminal, you can [install](../getting_started/installation/README.md) vLLM, then start the server with the [`vllm serve`][serve-args] command. (You can also use our [Docker][deployment-docker] image.)
 
 ```bash
-vllm serve NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
+vllm serve NousResearch/Meta-Llama-3-8B-Instruct \
+  --dtype auto \
+  --api-key token-abc123
 ```
 
 To call the server, in your preferred text editor, create a script that uses an HTTP client. Include any messages that you want to send to the model. Then run that script. Below is an example script using the [official OpenAI Python client](https://github.com/openai/openai-python).
@@ -243,7 +245,9 @@ and passing a list of `messages` in the request. Refer to the examples below for
 
     ```bash
     vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
-      --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
+      --trust-remote-code \
+      --max-model-len 4096 \
+      --chat-template examples/template_vlm2vec.jinja
     ```
 
     !!! warning
@@ -285,7 +289,9 @@ and passing a list of `messages` in the request. Refer to the examples below for
 
     ```bash
     vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
-      --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
+      --trust-remote-code \
+      --max-model-len 8192 \
+      --chat-template examples/template_dse_qwen2_vl.jinja
     ```
 
     !!! warning
