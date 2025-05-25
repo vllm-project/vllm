@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import datetime
+import os
 import signal
+import subprocess
+import sys
 
 import uvloop
 
@@ -36,7 +40,9 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, 'model_tag') and args.model_tag is not None:
             args.model = args.model_tag
 
-        if args.headless:
+        if getattr(args, "detach", False):
+            run_detached()
+        elif args.headless:
             run_headless(args)
         else:
             uvloop.run(run_server(args))
@@ -78,6 +84,11 @@ class ServeSubcommand(CLISubcommand):
             "Must be a YAML with the following options:"
             "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference"
         )
+        serve_parser.add_argument(
+            "-d",
+            "--detach",
+            action="store_true",
+            help="Run the vLLM server in detached mode (background).")
 
         serve_parser = make_arg_parser(serve_parser)
         show_filtered_argument_or_group_from_help(serve_parser)
@@ -139,3 +150,30 @@ def run_headless(args: argparse.Namespace):
     finally:
         logger.info("Shutting down.")
         engine_manager.close()
+
+
+def run_detached():
+    """Re-launch serve as a background process."""
+    cmd = ["vllm", "serve"]
+
+    # Skip the `vllm serve` keyword and -d/--detach options
+    filtered_args = [
+        arg for arg in sys.argv[2:] if arg not in ("-d", "--detach")
+    ]
+    cmd += filtered_args
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_file = f"vllm_{timestamp}.log"
+
+    with open(log_file, "w") as log:
+        try:
+            process = subprocess.Popen(cmd,
+                                       stdout=log,
+                                       stderr=subprocess.STDOUT,
+                                       start_new_session=True)
+        except Exception as e:
+            print(f"\nAn unexcepted error occurred: {e}")
+            raise
+    pid: int = os.getpgid(process.pid)
+    print(f"Running detached: {' '.join(cmd)}")
+    print(f"vLLM server started in detached mode (pid: {pid})."
+          "\nThe frontend logs are in {log_file}.")
