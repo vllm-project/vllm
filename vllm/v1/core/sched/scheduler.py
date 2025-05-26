@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import heapq
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Any, Optional, Union
@@ -87,8 +88,13 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+        # Scheduling policy
+        self.policy = self.scheduler_config.policy
         # Priority queues for requests.
-        self.waiting: deque[Request] = deque()
+        if self.policy == "priority":
+            self.waiting: list = []  # Will be used as a min-heap
+        else:
+            self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -240,7 +246,16 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    preempted_req = self.running.pop()
+                    if not self.running:
+                        # No request to preempt.
+                        can_schedule = False
+                        break
+                    if self.policy == "priority":
+                        preempted_req = min(self.running, key=lambda r: (r.priority, r.arrival_time))
+                        self.running.remove(preempted_req)
+                    else:
+                        preempted_req = self.running.pop()
+                    
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
@@ -248,7 +263,10 @@ class Scheduler(SchedulerInterface):
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
 
-                    self.waiting.appendleft(preempted_req)
+                    if self.policy == "priority":
+                        heapq.heappush(self.waiting, (preempted_req.priority, preempted_req.arrival_time, preempted_req))
+                    else:
+                        self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt.
@@ -306,7 +324,10 @@ class Scheduler(SchedulerInterface):
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        skipped_waiting_requests: deque[Request] = deque()
+        if self.policy == "priority":
+            skipped_waiting_requests: list = []
+        else:
+            skipped_waiting_requests: deque[Request] = deque()
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -314,7 +335,13 @@ class Scheduler(SchedulerInterface):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                request = self.waiting[0]
+                if self.policy == "priority":
+                    if not self.waiting:  # Should not happen due to outer loop condition
+                        break
+                    priority_val, arrival_time_val, request = heapq.heappop(self.waiting)
+                else:
+                    request = self.waiting.popleft()
+
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -325,8 +352,10 @@ class Scheduler(SchedulerInterface):
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
                             request.request_id)
-                        self.waiting.popleft()
-                        skipped_waiting_requests.appendleft(request)
+                        if self.policy == "priority":
+                            heapq.heappush(skipped_waiting_requests, (priority_val, arrival_time_val, request))
+                        else:
+                            skipped_waiting_requests.appendleft(request)
                         continue
 
                 # Skip request if the structured output request is still waiting
@@ -336,8 +365,10 @@ class Scheduler(SchedulerInterface):
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
-                        self.waiting.popleft()
-                        skipped_waiting_requests.appendleft(request)
+                        if self.policy == "priority":
+                            heapq.heappush(skipped_waiting_requests, (priority_val, arrival_time_val, request))
+                        else:
+                            skipped_waiting_requests.appendleft(request)
                         continue
 
                 # Check that adding the request still respects the max_loras
@@ -347,8 +378,10 @@ class Scheduler(SchedulerInterface):
                         and request.lora_request.lora_int_id
                         not in scheduled_loras):
                     # Scheduling would exceed max_loras, skip.
-                    self.waiting.popleft()
-                    skipped_waiting_requests.appendleft(request)
+                    if self.policy == "priority":
+                        heapq.heappush(skipped_waiting_requests, (priority_val, arrival_time_val, request))
+                    else:
+                        skipped_waiting_requests.appendleft(request)
                     continue
 
                 num_external_computed_tokens = 0
@@ -418,6 +451,11 @@ class Scheduler(SchedulerInterface):
                 )
                 if new_blocks is None:
                     # The request cannot be scheduled.
+                    if self.policy == "priority":
+                        heapq.heappush(self.waiting, (priority_val, arrival_time_val, request)) # Push back if cannot allocate
+                    else:
+                        # For FCFS, push back to the front of the deque.
+                        self.waiting.appendleft(request)
                     break
 
                 # KVConnector: update internal state after allocation.
@@ -431,11 +469,15 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens,
                     )
 
-                self.waiting.popleft()
+                # Request was already popped from self.waiting (either via heapq.heappop or self.waiting.popleft())
+                # unless it was re-added above due to new_blocks being None.
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
-                    skipped_waiting_requests.appendleft(request)
+                    if self.policy == "priority":
+                        heapq.heappush(skipped_waiting_requests, (priority_val, arrival_time_val, request))
+                    else:
+                        skipped_waiting_requests.appendleft(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
@@ -477,7 +519,11 @@ class Scheduler(SchedulerInterface):
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
-            self.waiting.extendleft(skipped_waiting_requests)
+            if self.policy == "priority":
+                for item in skipped_waiting_requests: # iterate through list of tuples
+                    heapq.heappush(self.waiting, item)
+            else: # FCFS
+                self.waiting.extendleft(skipped_waiting_requests) # skipped_waiting_requests is a deque here
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -840,7 +886,10 @@ class Scheduler(SchedulerInterface):
         return engine_core_outputs
 
     def add_request(self, request: Request) -> None:
-        self.waiting.append(request)
+        if self.policy == "priority":
+            heapq.heappush(self.waiting, (request.priority, request.arrival_time, request))
+        else:
+            self.waiting.append(request)
         self.requests[request.request_id] = request
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
