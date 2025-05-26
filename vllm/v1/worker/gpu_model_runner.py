@@ -1105,6 +1105,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for k, v in self.intermediate_tensors.items()
         })
 
+    def get_dp_padding(self, num_tokens: int):
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+
+        # Gather num_tokens across dp rank
+        num_tokens_across_dp = [0] * dp_size
+        num_tokens_across_dp[dp_rank] = num_tokens
+        num_tokens_tensor = torch.tensor(num_tokens_across_dp,
+                                         device="cpu",
+                                         dtype=torch.int32)
+        from vllm.distributed.parallel_state import get_dp_group
+        torch.distributed.all_reduce(num_tokens_tensor,
+                                     group=get_dp_group().cpu_group)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_tensor).item()
+
+        # TODO (varun) : limit by cudagraphs
+        return max_tokens_across_dp_cpu - num_tokens
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1141,6 +1159,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_input_tokens = round_up(num_scheduled_tokens, tp_size)
             else:
                 num_input_tokens = num_scheduled_tokens
+
+        # Padding for DP
+        num_input_tokens += self.get_dp_padding(num_input_tokens)
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -1658,6 +1679,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         skip_attn: bool = True,
     ) -> torch.Tensor:
+
+        # Padding for DP
+        num_tokens += self.get_dp_padding(num_tokens)
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
