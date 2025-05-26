@@ -83,3 +83,8 @@ class MirroredProcessingCache:
             full_mm_inputs.append(mm_input)
 
         return full_mm_inputs
+
+    def reset(self) -> bool:
+        self.mm_cache.clear()
+
+        return True

@@ -22,6 +22,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCIsSleepingResponse,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
+                                         RPCResetMultiModalCacheRequest,
                                          RPCResetPrefixCacheRequest,
                                          RPCSleepRequest, RPCStartupRequest,
                                          RPCStartupResponse,
@@ -269,6 +270,8 @@ class MQLLMEngine:
                         self.stop_profile()
                 elif isinstance(request, RPCLoadAdapterRequest):
                     self._handle_load_adapter_request(request)
+                elif isinstance(request, RPCResetMultiModalCacheRequest):
+                    self.reset_mm_cache()
                 elif isinstance(request, RPCResetPrefixCacheRequest):
                     self.reset_prefix_cache()
                 elif isinstance(request, RPCSleepRequest):
@@ -408,6 +411,9 @@ class MQLLMEngine:
 
     def stop_profile(self) -> None:
         self.engine.stop_profile()
+
+    def reset_mm_cache(self) -> bool:
+        return self.engine.reset_mm_cache()
 
     def reset_prefix_cache(self) -> bool:
         return self.engine.reset_prefix_cache()

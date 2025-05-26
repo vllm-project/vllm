@@ -32,9 +32,10 @@ def run_prefill(prefill_done):
     # This instance is the prefill node (kv_producer, rank 0).
     # The number of parallel instances for KV cache transfer is set to 2,
     # as required for PyNcclConnector.
-    ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}'
-    )
+    ktc = KVTransferConfig(kv_connector="PyNcclConnector",
+                           kv_role="kv_producer",
+                           kv_rank=0,
+                           kv_parallel_size=2)
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
@@ -71,9 +72,10 @@ def run_decode(prefill_done):
     # This instance is the decode node (kv_consumer, rank 1).
     # The number of parallel instances for KV cache transfer is set to 2,
     # as required for PyNcclConnector.
-    ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}'
-    )
+    ktc = KVTransferConfig(kv_connector="PyNcclConnector",
+                           kv_role="kv_consumer",
+                           kv_rank=1,
+                           kv_parallel_size=2)
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.

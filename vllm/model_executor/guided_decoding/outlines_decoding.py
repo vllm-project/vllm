@@ -6,7 +6,7 @@ import os
 from enum import Enum
 from json import dumps as json_dumps
 from re import escape as regex_escape
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
@@ -111,7 +111,7 @@ def get_local_outlines_guided_decoding_logits_processor(
 
 def _get_guide_and_mode(
     guided_params: GuidedDecodingParams
-) -> Union[Tuple[str, GuidedDecodingMode], Tuple[None, None]]:
+) -> Union[tuple[str, GuidedDecodingMode], tuple[None, None]]:
     if guided_params.json:
         if isinstance(guided_params.json, dict):
             # turn dict into hashable string

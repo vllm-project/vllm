@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -18,6 +19,7 @@ from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import (DeepseekV2DecoderLayer,
                           get_spec_layer_idx_from_weight_name)
+from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 
@@ -144,7 +146,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         return logits
 
 
-class DeepSeekMTP(nn.Module):
+class DeepSeekMTP(nn.Module, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -176,8 +178,8 @@ class DeepSeekMTP(nn.Module):
         return self.model.compute_logits(hidden_states, sampling_metadata,
                                          spec_step_idx)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -190,7 +192,7 @@ class DeepSeekMTP(nn.Module):
             num_experts=self.config.n_routed_experts)
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue

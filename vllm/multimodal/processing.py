@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
-import re
 import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
@@ -12,8 +11,8 @@ from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
+import regex as re
 import torch
-from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
@@ -31,6 +30,10 @@ from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
 if TYPE_CHECKING:
+    from transformers.configuration_utils import PretrainedConfig
+    from transformers.feature_extraction_utils import BatchFeature
+    from transformers.processing_utils import ProcessorMixin
+
     from .profiling import BaseDummyInputsBuilder
 
 logger = init_logger(__name__)
@@ -384,7 +387,7 @@ _M = TypeVar("_M", bound=Union[_HasModalityAttr, _HasModalityProp])
 
 
 def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
-    """Convenience function to apply {func}`full_groupby` based on modality."""
+    """Convenience function to apply [full_groupby][] based on modality."""
     return full_groupby(values, key=lambda x: x.modality)
 
 
@@ -1026,6 +1029,11 @@ class ProcessingCache:
     def put_item(self, item: ProcessingCacheItem) -> None:
         self._cache[item.key] = item.value
 
+    def reset(self) -> bool:
+        self._cache.clear()
+
+        return True
+
 
 class BaseProcessingInfo:
     """Base class to provide the information necessary for data processing."""
@@ -1042,10 +1050,10 @@ class BaseProcessingInfo:
     def get_tokenizer(self) -> AnyTokenizer:
         return self.ctx.tokenizer
 
-    def get_hf_config(self) -> PretrainedConfig:
+    def get_hf_config(self) -> "PretrainedConfig":
         return self.ctx.get_hf_config()
 
-    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
+    def get_hf_processor(self, **kwargs: object) -> "ProcessorMixin":
         """
         Subclasses can override this method to handle
         specific kwargs from model config or user inputs.
@@ -1160,7 +1168,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     @abstractmethod
     def _get_mm_fields_config(
         self,
-        hf_inputs: BatchFeature,
+        hf_inputs: "BatchFeature",
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Given the HF-processed data, output the metadata of each field."""
@@ -1217,7 +1225,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # This refers to the data to be passed to HF processor.
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+    ) -> "BatchFeature":
         """
         Call the HF processor on the prompt text and
         associated multi-modal data.

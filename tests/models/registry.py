@@ -8,6 +8,8 @@ import pytest
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
+from vllm.config import TokenizerMode
+
 
 @dataclass(frozen=True)
 class _HfExamplesInfo:
@@ -20,7 +22,7 @@ class _HfExamplesInfo:
     tokenizer: Optional[str] = None
     """Set the tokenizer to load for this architecture."""
 
-    tokenizer_mode: str = "auto"
+    tokenizer_mode: TokenizerMode = "auto"
     """Set the tokenizer type for this architecture."""
 
     speculative_model: Optional[str] = None
@@ -55,8 +57,17 @@ class _HfExamplesInfo:
     trust_remote_code: bool = False
     """The ``trust_remote_code`` level required to load the model."""
 
+    v0_only: bool = False
+    """The model is only available with the vLLM V0 engine."""
+
     hf_overrides: dict[str, Any] = field(default_factory=dict)
     """The ``hf_overrides`` required to load the model."""
+
+    max_model_len: Optional[int] = None
+    """
+    The maximum model length to use for this model. Some models default to a
+    length that is too large to fit into memory in CI.
+    """
 
     def check_transformers_version(
         self,
@@ -124,7 +135,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
                                          trust_remote_code=True),
     "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B",
-                                        extras={"tiny": "hmellor/bamba-tiny-random"}),  # noqa: E501
+                                        extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"}),  # noqa: E501
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
                                         {"1b": "bigscience/bloomz-1b1"}),
     "ChatGLMModel": _HfExamplesInfo("THUDM/chatglm3-6b",
@@ -147,6 +158,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "ExaoneForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct"),  # noqa: E501
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),  # noqa: E501
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
+    "FalconH1ForCausalLM":_HfExamplesInfo("tiiuae/Falcon-H1-1.5B-Instruct",
+                                          is_available_online=False,
+                                          min_transformers_version="4.52.2"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
@@ -205,17 +219,18 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
-    "Olmo2ForCausalLM": _HfExamplesInfo("shanearora/OLMo-7B-1124-hf"),
+    "Olmo2ForCausalLM": _HfExamplesInfo("allenai/OLMo-2-0425-1B"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OPTForCausalLM": _HfExamplesInfo("facebook/opt-125m",
                                       {"1b": "facebook/opt-iml-max-1.3b"}),
     "OrionForCausalLM": _HfExamplesInfo("OrionStarAI/Orion-14B-Chat",
                                         trust_remote_code=True),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
-    "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
+    "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2", v0_only=True),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
     "Phi3SmallForCausalLM": _HfExamplesInfo("microsoft/Phi-3-small-8k-instruct",
-                                            trust_remote_code=True),
+                                            trust_remote_code=True,
+                                            v0_only=True),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
     "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",
@@ -231,7 +246,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                      is_available_online=False),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b",  # noqa: E501
                                                 is_available_online=False),
-    "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
+    "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t",
+                                           v0_only=True),
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),
     "SolarForCausalLM": _HfExamplesInfo("upstage/solar-pro-preview-instruct"),
     "TeleChat2ForCausalLM": _HfExamplesInfo("Tele-AI/TeleChat2-3B",
@@ -242,6 +258,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          is_available_online=False,
                                          trust_remote_code=True),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
+    "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
+                                        trust_remote_code=True),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
@@ -254,11 +272,17 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "GteModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
                                                trust_remote_code=True),
+    "GteNewModel": _HfExamplesInfo("Alibaba-NLP/gte-base-en-v1.5",
+                                   trust_remote_code=True,
+                                   hf_overrides={"architectures":
+                                                     ["GteNewModel"]}),
     "InternLM2ForRewardModel": _HfExamplesInfo("internlm/internlm2-1_8b-reward",
                                                trust_remote_code=True),
     "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),  # noqa: E501
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
+    "ModernBertModel": _HfExamplesInfo("Alibaba-NLP/gte-modernbert-base",
+                                trust_remote_code=True),
     "NomicBertModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-long",  # noqa: E501
                                                trust_remote_code=True),
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
@@ -292,7 +316,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b"), # noqa: E501
     "Blip2ForConditionalGeneration": _HfExamplesInfo("Salesforce/blip2-opt-2.7b",  # noqa: E501
-                                                     extras={"6b": "Salesforce/blip2-opt-6.7b"}),  # noqa: E501
+                                                     extras={"6b": "Salesforce/blip2-opt-6.7b"},  # noqa: E501
+                                                     v0_only=True),
     "ChameleonForConditionalGeneration": _HfExamplesInfo("facebook/chameleon-7b"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
                                                 extras={"fork": "Isotr0py/deepseek-vl2-tiny"},  # noqa: E501
@@ -311,15 +336,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                       max_transformers_version="4.48",  # noqa: E501
                                       transformers_version_reason="HF model is not compatible."),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
-                                         extras={"2B": "OpenGVLab/InternVL2-2B"},  # noqa: E501
+                                         extras={"2B": "OpenGVLab/InternVL2-2B",
+                                                 "3.0": "OpenGVLab/InternVL3-1B"},  # noqa: E501
                                          trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
                                                       extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
-                                                      trust_remote_code=True),
+                                                      trust_remote_code=True,
+                                                      v0_only=True),
     "Llama4ForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct",   # noqa: E501
-                                                      min_transformers_version="4.51"),
+                                                      min_transformers_version="4.51",
+                                                      max_model_len=10240),
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
                                                      extras={"mistral": "mistral-community/pixtral-12b", # noqa: E501
                                                              "mistral-fp8": "nm-testing/pixtral-12b-FP8-dynamic"}),  # noqa: E501
@@ -338,7 +366,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                 extras={"2.6": "openbmb/MiniCPM-V-2_6"},  # noqa: E501
                                 trust_remote_code=True),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo("MiniMaxAI/MiniMax-VL-01", # noqa: E501
-                                              trust_remote_code=True),
+                                              trust_remote_code=True,
+                                              v0_only=True),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo("mistralai/Mistral-Small-3.1-24B-Instruct-2503",  # noqa: E501
                                                         extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"}),  # noqa: E501
     "MolmoForCausalLM": _HfExamplesInfo("allenai/Molmo-7B-D-0924",
@@ -371,6 +400,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct"),  # noqa: E501
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B",
                                         min_transformers_version="4.52"),
+    "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ",  # noqa: E501
+                                                           min_transformers_version="4.52"),
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct"),  # noqa: E501
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
@@ -403,6 +434,9 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+    "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
+                                    trust_remote_code=True,
+                                    speculative_model="XiaomiMiMo/MiMo-7B-RL")
 }
 
 _TRANSFORMERS_MODELS = {

@@ -105,6 +105,10 @@ class EngineCoreOutput(
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
+    kv_transfer_params: Optional[dict[str, Any]] = None
+
+    # The number of tokens with prefix cache hits.
+    num_cached_tokens: int = 0
 
     @property
     def finished(self) -> bool:

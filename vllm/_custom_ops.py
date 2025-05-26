@@ -150,6 +150,101 @@ def merge_attn_states(output: torch.Tensor,
                                    prefix_lse, suffix_output, suffix_lse)
 
 
+def convert_vertical_slash_indexes(
+    q_seqlens: torch.Tensor,  # [BATCH, ]
+    kv_seqlens: torch.Tensor,  # [BATCH, ]
+    vertical_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
+    slash_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
+    context_size: int,
+    block_size_M: int,
+    block_size_N: int,
+    causal: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size = slash_indexes.size(0)
+    num_heads = slash_indexes.size(1)
+    nnz_slash = slash_indexes.size(2)
+    nnz_vertical = vertical_indexes.size(2)
+    num_rows = (context_size + block_size_M - 1) // block_size_M
+
+    block_count = torch.zeros(batch_size,
+                              num_heads,
+                              num_rows,
+                              dtype=q_seqlens.dtype,
+                              device=q_seqlens.device)
+    block_offset = torch.zeros(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_slash,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_count = torch.zeros(batch_size,
+                               num_heads,
+                               num_rows,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_index = torch.zeros(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_vertical,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+
+    torch.ops._C.convert_vertical_slash_indexes(
+        block_count, block_offset, column_count, column_index, q_seqlens,
+        kv_seqlens, vertical_indexes, slash_indexes, context_size,
+        block_size_M, block_size_N, causal)
+    return block_count, block_offset, column_count, column_index
+
+
+def convert_vertical_slash_indexes_mergehead(
+    q_seqlens: torch.Tensor,  # [BATCH, ]
+    kv_seqlens: torch.Tensor,  # [BATCH, ]
+    vertical_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
+    slash_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
+    # [N_HEADS] : different head use different number of indices
+    vertical_indices_count: torch.Tensor,
+    slash_indices_count: torch.Tensor,
+    context_size: int,
+    block_size_M: int,
+    block_size_N: int,
+    causal: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size = slash_indexes.size(0)
+    num_heads = slash_indexes.size(1)
+    nnz_slash = slash_indexes.size(2)
+    nnz_vertical = vertical_indexes.size(2)
+    num_rows = (context_size + block_size_M - 1) // block_size_M
+
+    block_count = torch.empty(batch_size,
+                              num_heads,
+                              num_rows,
+                              dtype=q_seqlens.dtype,
+                              device=q_seqlens.device)
+    block_offset = torch.empty(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_slash,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_count = torch.empty(batch_size,
+                               num_heads,
+                               num_rows,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_index = torch.empty(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_vertical,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+
+    torch.ops._C.convert_vertical_slash_indexes_mergehead(
+        block_count, block_offset, column_count, column_index, q_seqlens,
+        kv_seqlens, vertical_indexes, slash_indexes, vertical_indices_count,
+        slash_indices_count, context_size, block_size_M, block_size_N, causal)
+    return block_count, block_offset, column_count, column_index
+
+
 # pos encoding ops
 def rotary_embedding(
     positions: torch.Tensor,
@@ -159,14 +254,8 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
-    query_contiguous = query.contiguous()
-    key_contiguous = key.contiguous() if key is not None else None
-    torch.ops._C.rotary_embedding(positions, query_contiguous, key_contiguous,
-                                  head_size, cos_sin_cache, is_neox)
-    query.copy_(query_contiguous)
-    if key is not None:
-        key.copy_(key_contiguous)
+    torch.ops._C.rotary_embedding(positions, query, key, head_size,
+                                  cos_sin_cache, is_neox)
 
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
@@ -174,16 +263,9 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
                              cos_sin_cache: torch.Tensor, is_neox: bool,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
-    # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
-    query_contiguous = query.contiguous()
-    key_contiguous = key.contiguous() if key is not None else None
-    torch.ops._C.batched_rotary_embedding(positions, query_contiguous,
-                                          key_contiguous, head_size,
+    torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
                                           cos_sin_cache, is_neox, rot_dim,
                                           cos_sin_cache_offsets)
-    query.copy_(query_contiguous)
-    if key is not None:
-        key.copy_(key_contiguous)
 
 
 # layer norm ops
@@ -1003,7 +1085,6 @@ def scaled_fp4_experts_quant(
     blockscale_offsets: torch.Tensor,
     topk: int,
     expert_map: Optional[torch.Tensor] = None,
-    MAX_TOKENS_PER_EXPERT: int = 163840,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale, for
@@ -1025,9 +1106,16 @@ def scaled_fp4_experts_quant(
     input_tensor = input_tensor[
         expert_map] if expert_map is not None else input_tensor
     m_numtopk, k = input_tensor.shape
+    # Control the maximum number of tokens per expert supported by the
+    # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
+    # from running out of memory. This value can also be increased to support
+    # larger models.
+    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
     assert (m_numtopk <= MAX_TOKENS_PER_EXPERT * topk), (
-        f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT * topk for"
-        f" scaled_fp4_experts_quant kernel, observed m_numtopk = {m_numtopk}")
+        f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
+        f"{MAX_TOKENS_PER_EXPERT})"
+        f" for cutlass_moe_fp4, observed m_numtopk = {m_numtopk}. Use"
+        f" VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE to set this value.")
     scales_k = k // 16
     padded_k = (scales_k + (4 - 1)) // 4
 

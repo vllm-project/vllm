@@ -44,6 +44,7 @@ from vllm.transformers_utils.chat_templates import (
 # yapf: enable
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.utils import deprecate_kwargs, random_uuid
 
 logger = init_logger(__name__)
 
@@ -328,11 +329,17 @@ def resolve_mistral_chat_template(
             "so it will be ignored.")
     return None
 
+@deprecate_kwargs(
+    "trust_remote_code",
+    additional_message="Please use `model_config.trust_remote_code` instead.",
+)
 def resolve_hf_chat_template(
-    model_config: ModelConfig,
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
+    *,
+    model_config: ModelConfig,
+    trust_remote_code: Optional[bool] = None,
 ) -> Optional[str]:
     # 1st priority: The given chat template
     if chat_template is not None:
@@ -348,11 +355,11 @@ def resolve_hf_chat_template(
                 trust_remote_code=model_config.trust_remote_code,
             )
             if isinstance(processor, ProcessorMixin) and \
+                hasattr(processor, 'chat_template') and \
                 processor.chat_template is not None:
                 return processor.chat_template
         except Exception:
-            logger.debug("Failed to load AutoProcessor chat template for %s",
-                        tokenizer.name_or_path, exc_info=True)
+            logger.debug("Failed to load AutoProcessor chat template for %s", tokenizer.name_or_path, exc_info=True)  # noqa: E501
 
     # 3rd priority: AutoTokenizer chat template
     try:
@@ -378,18 +385,18 @@ def resolve_hf_chat_template(
 
 
 def _resolve_chat_template_content_format(
-    model_config: ModelConfig,
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
-    given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
+    *,
+    model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
         hf_chat_template = resolve_hf_chat_template(
-            model_config,
             tokenizer,
             chat_template=chat_template,
             tools=tools,
+            model_config=model_config,
         )
     else:
         hf_chat_template = None
@@ -400,7 +407,7 @@ def _resolve_chat_template_content_format(
     detected_format = ("string" if jinja_text is None else
                        _detect_content_format(jinja_text, default="string"))
 
-    return detected_format if given_format == "auto" else given_format
+    return detected_format
 
 
 @lru_cache
@@ -427,19 +434,24 @@ def _log_chat_template_content_format(
         )
 
 
+@deprecate_kwargs(
+    "trust_remote_code",
+    additional_message="Please use `model_config.trust_remote_code` instead.",
+)
 def resolve_chat_template_content_format(
-    model_config: ModelConfig,
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
+    *,
+    model_config: ModelConfig,
+    trust_remote_code: Optional[bool] = None,
 ) -> _ChatTemplateContentFormat:
     detected_format = _resolve_chat_template_content_format(
-        model_config,
         chat_template,
         tools,
-        given_format,
         tokenizer,
+        model_config=model_config,
     )
 
     _log_chat_template_content_format(
@@ -448,7 +460,8 @@ def resolve_chat_template_content_format(
         detected_format=detected_format,
     )
 
-    return detected_format
+    return detected_format if given_format == "auto" else given_format
+
 
 
 ModalityStr = Literal["image", "audio", "video", "image_embeds"]
@@ -543,6 +556,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "(<audio>./</audio>)"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
+            if model_type == "internvl_chat":
+                return "<video>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             if model_type == "qwen2_5_omni":
@@ -1190,21 +1205,27 @@ def parse_chat_messages_futures(
     return conversation, mm_tracker.all_mm_data()
 
 
+@deprecate_kwargs(
+    "trust_remote_code",
+    additional_message="Please use `model_config.trust_remote_code` instead.",
+)
 def apply_hf_chat_template(
-    model_config: ModelConfig,
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     conversation: list[ConversationMessage],
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
     *,
+    model_config: ModelConfig,
     tokenize: bool = False,  # Different from HF's default
+    # Deprecated, explicitly capture here so it doesn't slit into kwargs.
+    trust_remote_code: Optional[bool] = None,
     **kwargs: Any,
 ) -> str:
     hf_chat_template = resolve_hf_chat_template(
-        model_config,
         tokenizer,
         chat_template=chat_template,
         tools=tools,
+        model_config=model_config,
     )
 
     if hf_chat_template is None:
@@ -1272,3 +1293,6 @@ def apply_mistral_chat_template(
             "An error occurred in `mistral_common` while applying chat "
             "template")
         raise ValueError from e
+
+def random_tool_call_id() -> str:
+    return f"chatcmpl-tool-{random_uuid()}"

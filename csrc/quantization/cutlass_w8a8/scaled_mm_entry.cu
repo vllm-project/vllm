@@ -29,7 +29,8 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
                             std::optional<torch::Tensor> const& bias);
-
+#endif
+#if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
 void cutlass_moe_mm_sm90(
     torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
@@ -122,7 +123,7 @@ bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
 }
 
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
-  // CUTLASS groped FP8 kernels need at least CUDA 12.3
+  // CUTLASS grouped FP8 kernels need at least CUDA 12.3
   // and SM90 (Hopper)
 
 #if defined CUDA_VERSION

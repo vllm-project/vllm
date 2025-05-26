@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -53,7 +53,7 @@ class ModelOptFp8Config(QuantizationConfig):
         return "modelopt"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
 
     @classmethod
@@ -61,11 +61,11 @@ class ModelOptFp8Config(QuantizationConfig):
         return 89
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["hf_quant_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ModelOptFp8Config":
+    def from_config(cls, config: dict[str, Any]) -> "ModelOptFp8Config":
         quant_config = cls.get_from_keys(config, ["quantization"])
         quant_method = quant_config["quant_algo"]
         if quant_method not in QUANT_ALGOS:
@@ -107,7 +107,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -177,7 +177,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
         self,
         is_checkpoint_nvfp4_serialized: bool,
         kv_cache_quant_algo: str,
-        exclude_modules: List[str],
+        exclude_modules: list[str],
         group_size: int = 16,
     ) -> None:
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
@@ -192,10 +192,10 @@ class ModelOptNvFp4Config(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
-        return "nvfp4"
+        return "modelopt_fp4"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half, torch.float8_e4m3fn]
 
     @classmethod
@@ -203,11 +203,11 @@ class ModelOptNvFp4Config(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["hf_quant_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "ModelOptNvFp4Config":
+    def from_config(cls, config: dict[str, Any]) -> "ModelOptNvFp4Config":
         quant_config = cls.get_from_keys(config, ["quantization"])
         quant_method = quant_config["quant_algo"]
         if quant_method not in QUANT_ALGOS:
@@ -227,8 +227,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
                    exclude_modules, group_size)
 
-    def is_layer_excluded(self, prefix: str, exclude_modules: List):
-        import re
+    def is_layer_excluded(self, prefix: str, exclude_modules: list):
+        import regex as re
         for pattern in exclude_modules:
             regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
             if re.fullmatch(regex_str, prefix):
@@ -296,7 +296,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -401,6 +401,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
                                                 requires_grad=False)
+        layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
         if self.use_marlin:
             prepare_fp4_layer_for_marlin(layer)
@@ -426,11 +427,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 bias=bias)
 
         output_dtype = x.dtype
-
-        # for input only the contracting dimension has a constraint.
-        x_m, _ = x.shape
-        w_n, _ = layer.weight.shape
-        output_shape = [x_m, w_n]
+        output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         s_quant = 1 / layer.input_scale
@@ -586,11 +583,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # GEMM 1
 
+        # GEMM 1
         assert torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]), (
-                "Expected w1_weight_scale_2 to equal w3_weight_scale_2")
+                "w1_weight_scale_2 must match w3_weight_scale_2")
 
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
@@ -616,6 +613,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.w13_input_scale_quant = Parameter(
             (1 / w13_input_scale).to(torch.float32), requires_grad=False)
 
+        layer.w13_weight = Parameter(layer.w13_weight.data,
+                                     requires_grad=False)
+
         # GEMM 2
         layer.g2_alphas = Parameter(
             (layer.w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
@@ -633,6 +633,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         layer.w2_blockscale_swizzled = Parameter(w2_blockscale_swizzled,
                                                  requires_grad=False)
+        layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
 
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
@@ -694,7 +695,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         assert not apply_router_weight_on_input, (
             "Router weight on input is not "
             "supported for ModelOptNvFp4FusedMoE.")
-        assert expert_map is None, ("Expert Parallelism /expert_map "
+        assert expert_map is None, ("Expert Parallelism / expert_map "
                                     "is currently not supported for "
                                     "ModelOptNvFp4FusedMoE.")
 

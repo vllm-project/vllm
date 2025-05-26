@@ -49,9 +49,10 @@ def run_prefill(prefill_done, prompts):
 
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
-    ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"LMCacheConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}'
-    )
+    ktc = KVTransferConfig(kv_connector="LMCacheConnector",
+                           kv_role="kv_producer",
+                           kv_rank=0,
+                           kv_parallel_size=2)
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
     llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
@@ -78,9 +79,10 @@ def run_decode(prefill_done, prompts, timeout=1):
 
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
-    ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"LMCacheConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}'
-    )
+    ktc = KVTransferConfig(kv_connector="LMCacheConnector",
+                           kv_role="kv_consumer",
+                           kv_rank=1,
+                           kv_parallel_size=2)
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # of memory. Reduce the value if your GPU has less memory.
     llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
