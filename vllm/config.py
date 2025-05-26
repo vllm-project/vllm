@@ -2251,9 +2251,7 @@ class DeviceConfig:
         return hash_str
 
     def __post_init__(self):
-        if IS_IN_DOC_BUILD:
-            self.device_type = "cpu"
-        elif self.device == "auto":
+        if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
             self.device_type = current_platform.device_type
