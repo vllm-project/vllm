@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import math
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -45,7 +43,7 @@ def test_cross_encoder_1_to_1(vllm_runner, hf_runner, model_name):
     assert len(vllm_outputs) == 1
     assert len(hf_outputs) == 1
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
 
 
 def test_cross_encoder_1_to_N(vllm_runner, hf_runner, model_name):
@@ -64,8 +62,8 @@ def test_cross_encoder_1_to_N(vllm_runner, hf_runner, model_name):
     assert len(vllm_outputs) == 2
     assert len(hf_outputs) == 2
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
-    assert math.isclose(hf_outputs[1], vllm_outputs[1], rel_tol=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
+    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
 def test_cross_encoder_N_to_N(vllm_runner, hf_runner, model_name):
@@ -84,8 +82,8 @@ def test_cross_encoder_N_to_N(vllm_runner, hf_runner, model_name):
     assert len(vllm_outputs) == 2
     assert len(hf_outputs) == 2
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
-    assert math.isclose(hf_outputs[1], vllm_outputs[1], rel_tol=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
+    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
 @pytest.fixture(scope="module", params=EMBEDDING_MODELS)
@@ -112,7 +110,7 @@ def test_embedding_1_to_1(vllm_runner, hf_runner, emb_model_name):
     assert len(vllm_outputs) == 1
     assert len(hf_outputs) == 1
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
 
 
 def test_embedding_1_to_N(vllm_runner, hf_runner, emb_model_name):
@@ -140,8 +138,8 @@ def test_embedding_1_to_N(vllm_runner, hf_runner, emb_model_name):
     assert len(vllm_outputs) == 2
     assert len(hf_outputs) == 2
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
-    assert math.isclose(hf_outputs[1], vllm_outputs[1], rel_tol=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
+    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
 def test_embedding_N_to_N(vllm_runner, hf_runner, emb_model_name):
@@ -169,5 +167,5 @@ def test_embedding_N_to_N(vllm_runner, hf_runner, emb_model_name):
     assert len(vllm_outputs) == 2
     assert len(hf_outputs) == 2
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
-    assert math.isclose(hf_outputs[1], vllm_outputs[1], rel_tol=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
+    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
