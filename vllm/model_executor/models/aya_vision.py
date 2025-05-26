@@ -110,13 +110,7 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(AyaVisionConfig)
 
     def get_hf_processor(self, **kwargs: object) -> AyaVisionProcessor:
-        processor = self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
-
-        # Temporary workaround since this processor has multiple image tokens
-        # See https://github.com/huggingface/transformers/issues/38350
-        processor._check_special_mm_tokens = lambda *args, **kwargs: None
-
-        return processor
+        return self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
 
     def get_image_processor(self) -> GotOcr2ImageProcessor:
         return self.get_hf_processor().image_processor

@@ -115,10 +115,6 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
 
     use_prompt_embeds = os.getenv("VLLM_USE_V1") == "0"
 
-    if model == "facebook/opt-125m":
-        # FIXME: https://github.com/huggingface/transformers/pull/38290
-        pytest.skip("transformers implementation is broken in v4.52")
-
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)
