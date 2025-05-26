@@ -193,9 +193,7 @@ class AyaVisionMultiModalProcessor(
         image_processor = hf_processor.image_processor
 
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
-        if (images :=
-                mm_data.get("images")) is not None and '<image>' in prompt:
-            assert isinstance(images, list)
+        if (images := mm_data.get("images")) is not None:
             parsed_images = (self._get_data_parser().parse_mm_data({
                 "image":
                 images
