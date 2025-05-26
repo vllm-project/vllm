@@ -5,9 +5,11 @@ from collections import deque
 from unittest.mock import MagicMock, PropertyMock
 
 from vllm.config import VllmConfig, SchedulerConfig, KVCacheConfig
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.engine import EngineCoreEventType
+from vllm.v1.structured_output import StructuredOutputManager
 
 
 # Helper function to create a mock Request
