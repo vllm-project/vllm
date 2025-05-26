@@ -38,9 +38,9 @@ class ConformerEncoderLayer(nn.Module):
         ext_pw_out_channel: int
             if > 0, ext_pw_out_channel is a dim channel size
              for the last pointwise conv after swish activation.
-        depthwise_seperable_out_channel: int
+        depthwise_separable_out_channel: int
             if set different to 0, the number of 
-             depthwise_seperable_out_channel will be used as a 
+             depthwise_separable_out_channel will be used as a 
              channel_out of the second conv1d layer. 
              otherwise, it equal to 0, the second conv1d layer is skipped.
         depthwise_multiplier: int
@@ -125,14 +125,14 @@ class ConformerEncoderLayer(nn.Module):
             (Multi-Head Attention),
             1 = typical Multi-Head Attention,
             1 < attn_group_sizes < attention_heads = Grouped-Query Attention
-            attn_group_sizes = attenion_heads = Multi-Query Attention
+            attn_group_sizes = attention_heads = Multi-Query Attention
     """
 
     def __init__(
         self,
         d_model=512,
         ext_pw_out_channel=0,
-        depthwise_seperable_out_channel=256,
+        depthwise_separable_out_channel=256,
         depthwise_multiplier=1,
         n_head=4,
         d_ffn=2048,
@@ -179,7 +179,7 @@ class ConformerEncoderLayer(nn.Module):
         self.conv = ConvModule(
             d_model,
             ext_pw_out_channel,
-            depthwise_seperable_out_channel,
+            depthwise_separable_out_channel,
             ext_pw_kernel_size,
             kernel_size,
             depthwise_multiplier,
@@ -317,7 +317,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             1 = typical Multi-Head Attention,
             1 < attention_group_size < attention_heads = Grouped-Query 
             Attention
-            attention_group_size = attenion_heads = Multi-Query Attention
+            attention_group_size = attention_heads = Multi-Query Attention
     """
 
     def __init__(
@@ -640,19 +640,19 @@ class ConformerEncoder(TransformerEncoderBase):
             default False.
         ext_pw_out_channel: int, optional
             the number of channel for CNN
-            before depthwise_seperable_CNN.
+            before depthwise_separable_CNN.
             If 0 then use linear. default 0.
         ext_pw_kernel_size: int, optional
-            kernel size of N before depthwise_seperable_CNN.
+            kernel size of N before depthwise_separable_CNN.
             only work for ext_pw_out_channel > 0.
             default 1
-        depthwise_seperable_out_channel: int, optional
+        depthwise_separable_out_channel: int, optional
             the number of channel for
-            depthwise_seperable_CNN.
+            depthwise_separable_CNN.
             default 256.
         depthwise_multiplier: int, optional
             the number of multiplier for
-            depthwise_seperable_CNN.
+            depthwise_separable_CNN.
             default 1.
         chunk_se: int, optional
             0 for offline SE.
@@ -662,7 +662,7 @@ class ConformerEncoder(TransformerEncoderBase):
              by only the current chunk.
             default 0.
         kernel_size: int, optional
-            the number of kernels for depthwise_seperable_CNN.
+            the number of kernels for depthwise_separable_CNN.
             default 3.
         activation: str, optional
             FeedForward block activation.
@@ -672,7 +672,7 @@ class ConformerEncoder(TransformerEncoderBase):
             activation function used in ConvModule part
             of the conformer, default "relu".
         conv_glu_type: str, optional
-            activation used use glu in depthwise_seperable_CNN,
+            activation used use glu in depthwise_separable_CNN,
             default "sigmoid"
         bias_in_glu: bool, optional
             if set to True, use additive bias in the weight module
@@ -743,7 +743,7 @@ class ConformerEncoder(TransformerEncoderBase):
             1 = typical Multi-Head Attention,
             1 < attention_group_size < attention_heads = Grouped-Query
             Attention
-            attention_group_size = attenion_heads = Multi-Query Attention
+            attention_group_size = attention_heads = Multi-Query Attention
     """
 
     extra_multi_layer_output_idxs: list[int]
@@ -766,7 +766,7 @@ class ConformerEncoder(TransformerEncoderBase):
         cnn_layer_norm=False,
         ext_pw_out_channel=0,
         ext_pw_kernel_size=1,
-        depthwise_seperable_out_channel=256,
+        depthwise_separable_out_channel=256,
         depthwise_multiplier=1,
         chunk_se=0,
         kernel_size=3,
@@ -821,7 +821,7 @@ class ConformerEncoder(TransformerEncoderBase):
             ConformerEncoderLayer(
                 d_model=attention_dim,
                 ext_pw_out_channel=ext_pw_out_channel,
-                depthwise_seperable_out_channel=depthwise_seperable_out_channel,
+                depthwise_separable_out_channel=depthwise_separable_out_channel,
                 depthwise_multiplier=depthwise_multiplier,
                 n_head=attention_heads,
                 d_ffn=linear_units,
