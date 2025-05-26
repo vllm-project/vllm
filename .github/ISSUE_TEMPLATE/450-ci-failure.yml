@@ -12,7 +12,7 @@ body:
   attributes:
     label: Name of failing test
     description: |
-      Please provide the fully-qualified name of the failing test.
+      Paste in the fully-qualified name of the failing test from the logs.
     placeholder: |
       `path/to/test_file.py::test_name[params]`
   validations:
