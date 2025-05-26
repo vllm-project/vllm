@@ -100,8 +100,12 @@ def test_prepare_inputs():
         dtype=torch.int32,
         device=device)
 
+    # n1 + n2 + n3 - a - b -c
+    num_tokens = cu_target_query_lens[-1].item() - num_rejected_tokens.sum(
+    ).item()
+
     cu_num_tokens, token_indices = EagleProposer.prepare_inputs(
-        cu_target_query_lens, num_rejected_tokens)
+        cu_target_query_lens, num_rejected_tokens, num_tokens)
 
     assert torch.equal(cu_num_tokens, expected_cu_num_tokens)
     assert token_indices.shape[0] == expected_cu_num_tokens[-1].item()
@@ -241,6 +245,9 @@ def test_propose(num_speculative_tokens):
 
     # Assign the mock to the proposer
     proposer.model = model_mock
+
+    # Assign draft attn_layer_names since load_model is not invoked
+    proposer.attn_layer_names = ["layer.0"]
 
     # Create input tensors
     cu_num_tokens = torch.tensor([0, seq_len_1, total_tokens],

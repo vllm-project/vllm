@@ -19,7 +19,6 @@ import json
 import multiprocessing
 import os
 import pickle
-import re
 import signal
 import socket
 import subprocess
@@ -34,7 +33,8 @@ import uuid
 import warnings
 import weakref
 from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError, _ArgumentGroup)
+                      ArgumentTypeError, RawDescriptionHelpFormatter,
+                      _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
@@ -54,6 +54,7 @@ import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
+import regex as re
 import torch
 import torch.types
 import yaml
@@ -85,7 +86,7 @@ MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/features/compatibility_matrix.md
+# Reminder: Please update docs/features/compatibility_matrix.md
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
@@ -1323,7 +1324,8 @@ class StoreBoolean(Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter,
+                          RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
@@ -2529,7 +2531,7 @@ def _maybe_force_spawn():
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-            "See https://docs.vllm.ai/en/latest/getting_started/"
+            "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
             "for more information. Reason: %s", reason)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -2794,14 +2796,17 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
 
 # Only relevant for models using ALiBi (e.g, MPT)
 def check_use_alibi(model_config: ModelConfig) -> bool:
-    return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
+    cfg = model_config.hf_text_config
+    return (getattr(cfg, "alibi", False)  # Falcon
             or ("BloomForCausalLM" in getattr(model_config.hf_config,
                                               "architectures", []))  # Bloom
-            or getattr(model_config.hf_text_config, "position_encoding_type",
-                       "") == "alibi"  # codellm_1b_alibi
-            or
-            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
-             and model_config.hf_text_config.attn_config.get("alibi", False)))
+            or getattr(cfg, "position_encoding_type", "") ==
+            "alibi"  # codellm_1b_alibi
+            or (hasattr(cfg, "attn_config")  # MPT
+                and ((isinstance(cfg.attn_config, dict)
+                      and cfg.attn_config.get("alibi", False)) or
+                     (not isinstance(cfg.attn_config, dict)
+                      and getattr(cfg.attn_config, "alibi", False)))))
 
 
 def sha256(input) -> int:

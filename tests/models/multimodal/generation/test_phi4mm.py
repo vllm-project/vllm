@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import re
 from collections.abc import Sequence
 from typing import Optional
 
 import librosa
 import pytest
+import regex as re
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
