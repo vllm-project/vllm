@@ -246,17 +246,17 @@ class GLUPointWiseConv(nn.Module):
         return x
 
 
-class DepthWiseSeperableConv1d(nn.Module):
-    """DepthWiseSeperableConv1d module used in Convnet module
+class DepthWiseSeparableConv1d(nn.Module):
+    """DepthWiseSeparableConv1d module used in Convnet module
     for the conformer, for more details see:
     https://arxiv.org/pdf/2005.08100v1.pdf
 
     Args:
         input_dim: int
             input channel size.
-        depthwise_seperable_out_channel: int
+        depthwise_separable_out_channel: int
             if set different to 0, the number of 
-             depthwise_seperable_out_channel will be used as a channel_out
+             depthwise_separable_out_channel will be used as a channel_out
              of the second conv1d layer.
              otherwise, it equal to 0, the second conv1d layer is skipped.
         kernel_size: int
@@ -273,7 +273,7 @@ class DepthWiseSeperableConv1d(nn.Module):
     def __init__(
         self,
         input_dim,
-        depthwise_seperable_out_channel,
+        depthwise_separable_out_channel,
         kernel_size,
         depthwise_multiplier,
         padding=0,
@@ -289,17 +289,17 @@ class DepthWiseSeperableConv1d(nn.Module):
             groups=input_dim,
         )
 
-        if depthwise_seperable_out_channel != 0:
+        if depthwise_separable_out_channel != 0:
             self.pw_conv = nn.Conv1d(
                 input_dim * depthwise_multiplier,
-                depthwise_seperable_out_channel,
+                depthwise_separable_out_channel,
                 1,
                 1,
                 0,
             )
         else:
             self.pw_conv = nn.Identity()
-        self.depthwise_seperable_out_channel = depthwise_seperable_out_channel
+        self.depthwise_separable_out_channel = depthwise_separable_out_channel
 
     def forward(self, x):
         """
@@ -309,7 +309,7 @@ class DepthWiseSeperableConv1d(nn.Module):
                 input tensor
         """
         x = self.dw_conv(x)
-        if self.depthwise_seperable_out_channel != 0:
+        if self.depthwise_separable_out_channel != 0:
             x = self.pw_conv(x)
         return x
 
@@ -325,9 +325,9 @@ class ConvModule(nn.Module):
         ext_pw_out_channel: int
             if > 0, ext_pw_out_channel is a dim channel size
              for the last pointwise conv after swish activation.
-        depthwise_seperable_out_channel: int
+        depthwise_separable_out_channel: int
             if set different to 0, the number of 
-             depthwise_seperable_out_channel
+             depthwise_separable_out_channel
              will be used as a channel_out of the second conv1d layer.
              otherwise, it equal to 0, the second conv1d layer is skipped.
         ext_pw_kernel_size: int
@@ -377,7 +377,7 @@ class ConvModule(nn.Module):
         self,
         input_dim,
         ext_pw_out_channel,
-        depthwise_seperable_out_channel,
+        depthwise_separable_out_channel,
         ext_pw_kernel_size,
         kernel_size,
         depthwise_multiplier,
@@ -397,7 +397,7 @@ class ConvModule(nn.Module):
         self.input_dim = input_dim
         self.ext_pw_out_channel = ext_pw_out_channel
         self.ext_pw_kernel_size = ext_pw_kernel_size
-        self.depthwise_seperable_out_channel = depthwise_seperable_out_channel
+        self.depthwise_separable_out_channel = depthwise_separable_out_channel
         self.glu_type = glu_type
         self.bias_in_glu = bias_in_glu
         self.linear_glu_in_convm = linear_glu_in_convm
@@ -420,17 +420,17 @@ class ConvModule(nn.Module):
         else:
             padding = (kernel_size - 1) // 2
 
-        self.dw_sep_conv_1d = DepthWiseSeperableConv1d(
+        self.dw_sep_conv_1d = DepthWiseSeparableConv1d(
             input_dim,
-            depthwise_seperable_out_channel,
+            depthwise_separable_out_channel,
             kernel_size,
             depthwise_multiplier,
             padding=padding,
         )
 
-        if depthwise_seperable_out_channel != 0:
-            if input_dim != depthwise_seperable_out_channel:
-                self.ln2 = nn.Linear(depthwise_seperable_out_channel,
+        if depthwise_separable_out_channel != 0:
+            if input_dim != depthwise_separable_out_channel:
+                self.ln2 = nn.Linear(depthwise_separable_out_channel,
                                      input_dim)
         else:
             if depthwise_multiplier != 1:
