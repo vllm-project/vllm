@@ -45,9 +45,6 @@ MODELS = [
     EmbedModelInfo("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
                    architecture="Qwen2ForCausalLM",
                    enable_test=True),
-    EmbedModelInfo("Alibaba-NLP/gte-Qwen2-7B-instruct",
-                   architecture="Qwen2ForCausalLM",
-                   enable_test=False),
     ########## ModernBertModel
     EmbedModelInfo("Alibaba-NLP/gte-modernbert-base",
                    architecture="ModernBertModel",
