@@ -16,9 +16,9 @@ Finally, one of the most impactful ways to support us is by raising awareness ab
 Unsure on where to start? Check out the following links for tasks to work on:
 
 - [Good first issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
-  - [Selected onboarding tasks](gh-project:6)
+    - [Selected onboarding tasks](gh-project:6)
 - [New model requests](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22new-model%22)
-  - [Models with multi-modal capabilities](gh-project:10)
+    - [Models with multi-modal capabilities](gh-project:10)
 
 ## License
 
@@ -130,9 +130,8 @@ The PR needs to meet the following code quality standards:
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This
   includes both unit tests and integration tests.
-- Please add documentation to `docs/source/` if the PR modifies the
-  user-facing behaviors of vLLM. It helps vLLM users understand and utilize the
-  new features or changes.
+- Please add documentation to `docs/` if the PR modifies the user-facing behaviors of vLLM.
+  It helps vLLM users understand and utilize the new features or changes.
 
 ### Adding or Changing Kernels
 

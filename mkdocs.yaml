@@ -60,12 +60,17 @@ plugins:
   - api-autonav:
       modules: ["vllm"]
       api_root_uri: "api"
+      exclude:
+        - "re:vllm\\._.*"  # Internal modules
+        - "vllm.third_party"
+        - "vllm.vllm_flash_attn"
   - mkdocstrings:
       handlers:
         python:
           options:
             show_symbol_type_heading: true
             show_symbol_type_toc: true
+            filters: []
             summary:
               modules: true
             show_if_no_docstring: true
@@ -112,6 +117,14 @@ markdown_extensions:
   - mdx_math:
       enable_dollar_delimiter: true
 
+extra_css:
+  - mkdocs/stylesheets/extra.css
+
 extra_javascript:
   - mkdocs/javascript/run_llm_widget.js
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
+
+# Makes the url format end in .html rather than act as a dir
+# So index.md generates as index.html and is available under URL /index.html
+# https://www.mkdocs.org/user-guide/configuration/#use_directory_urls
+use_directory_urls: false

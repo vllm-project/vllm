@@ -135,7 +135,7 @@ async def handle_completions(request: Request):
                 yield chunk
 
         return StreamingResponse(generate_stream(),
-                                 media_type="application/json")
+                                 media_type="text/event-stream")
 
     except Exception as e:
         import sys
@@ -172,7 +172,7 @@ async def handle_chat_completions(request: Request):
                 yield chunk
 
         return StreamingResponse(generate_stream(),
-                                 media_type="application/json")
+                                 media_type="text/event-stream")
 
     except Exception as e:
         import sys
