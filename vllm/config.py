@@ -542,8 +542,10 @@ class ModelConfig:
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         sliding_window_pattern = getattr(self.hf_text_config,
                                          "sliding_window_pattern", None)
+        has_interleaved_attention = sliding_window_pattern is not None or (
+            isinstance(sliding_window, list))
 
-        if not (self.disable_sliding_window or sliding_window_pattern is None):
+        if not self.disable_sliding_window and has_interleaved_attention:
             if (backend :=
                     envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
@@ -563,7 +565,10 @@ class ModelConfig:
                 # only the attention layer itself is aware of the sliding
                 # window, and use the window size to compute the attention.
                 self.hf_text_config.interleaved_sliding_window = sliding_window
-                delattr(self.hf_text_config, "sliding_window")
+
+                if hasattr(self.hf_text_config, "sliding_window"):
+                    delattr(self.hf_text_config, "sliding_window")
+
                 sliding_window = None
 
         self.max_model_len = _get_and_verify_max_len(
@@ -1041,7 +1046,8 @@ class ModelConfig:
             if self.use_async_output_proc:
                 self.use_async_output_proc = False
 
-    def get_hf_config_sliding_window(self) -> Optional[int]:
+    def get_hf_config_sliding_window(
+            self) -> Union[Optional[int], list[Optional[int]]]:
         """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
@@ -1052,7 +1058,7 @@ class ModelConfig:
             return None
         return getattr(self.hf_text_config, "sliding_window", None)
 
-    def get_sliding_window(self) -> Optional[int]:
+    def get_sliding_window(self) -> Optional[Union[int, list[Optional[int]]]]:
         """Get the sliding window size, or None if disabled.
         """
         # If user disables sliding window, return None.
