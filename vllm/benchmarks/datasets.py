@@ -129,16 +129,17 @@ class BenchmarkDataset(ABC):
 
         Args:
             tokenizer (PreTrainedTokenizerBase): The base tokenizer to use if no
-            LoRA is selected.  max_loras (Optional[int]): The maximum number of
-            LoRAs available. If None, LoRA is not used.  lora_path
-            (Optional[str]): Path to the LoRA parameters on disk. If None, LoRA
-            is not used.
+                LoRA is selected.
+            max_loras (Optional[int]): The maximum number of LoRAs available.
+                If `None`, LoRA is not used.
+            lora_path (Optional[str]): Path to the LoRA parameters on disk.
+                If `None`, LoRA is not used.
 
         Returns:
-            tuple[Optional[LoRARequest], AnyTokenizer]: A tuple where the first
-            element is a LoRARequest (or None if not applicable) and the second
-            element is the tokenizer associated with the LoRA request (or the
-            base tokenizer).
+            A tuple with the following elements:
+                - A new [LoRARequest][] (or `None` if not applicable).
+                - The tokenizer associated with the LoRA request
+                  (or the base tokenizer).
         """
         if max_loras is None or lora_path is None:
             return None, tokenizer
@@ -167,7 +168,7 @@ class BenchmarkDataset(ABC):
 
         Args:
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
-             for processing the dataset's text.
+                for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
 
         Returns:
@@ -184,7 +185,8 @@ class BenchmarkDataset(ABC):
 
         Args:
             requests (List[SampleRequest]): The current list of sampled
-            requests.  num_requests (int): The target number of requests.
+                requests.
+            num_requests (int): The target number of requests.
         """
         if len(requests) < num_requests:
             random.seed(self.random_seed)

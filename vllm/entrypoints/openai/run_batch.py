@@ -365,8 +365,8 @@ async def main(args):
 
         # Determine the type of request and run it.
         if request.url == "/v1/chat/completions":
-            chat_handler_fn = (None if openai_serving_chat is None else
-                               openai_serving_chat.create_chat_completion)
+            chat_handler_fn = openai_serving_chat.create_chat_completion if \
+                openai_serving_chat is not None else None
             if chat_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
@@ -380,8 +380,8 @@ async def main(args):
                 run_request(chat_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/embeddings":
-            embed_handler_fn = (None if openai_serving_embedding is None else
-                                openai_serving_embedding.create_embedding)
+            embed_handler_fn = openai_serving_embedding.create_embedding if \
+                openai_serving_embedding is not None else None
             if embed_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
@@ -394,8 +394,8 @@ async def main(args):
                 run_request(embed_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/score":
-            score_handler_fn = (None if openai_serving_scores is None else
-                                openai_serving_scores.create_score)
+            score_handler_fn = openai_serving_scores.create_score if \
+                openai_serving_scores is not None else None
             if score_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
