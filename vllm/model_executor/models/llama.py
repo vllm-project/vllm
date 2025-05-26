@@ -162,20 +162,9 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        is_neox_style = True
-        is_gguf = quant_config and quant_config.get_name() == "gguf"
-        if is_gguf and config.model_type == "llama":
-            is_neox_style = False
-
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
-            is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
-        )
+        self._init_rotary_emb(config,
+                              rope_scaling=rope_scaling,
+                              quant_config=quant_config)
 
         if hasattr(config, "interleaved_sliding_window"):
             interleaved_sliding_window = config.interleaved_sliding_window
@@ -213,6 +202,24 @@ class LlamaAttention(nn.Module):
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
+
+    def _init_rotary_emb(self, config: LlamaConfig,
+                         rope_scaling: Optional[dict[str, Any]],
+                         quant_config: Optional[QuantizationConfig]) -> None:
+        is_neox_style = True
+        is_gguf = quant_config and quant_config.get_name() == "gguf"
+        if is_gguf and self.config.model_type == "llama":
+            is_neox_style = False
+
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=self.max_position_embeddings,
+            base=self.rope_theta,
+            rope_scaling=rope_scaling,
+            is_neox_style=is_neox_style,
+            partial_rotary_factor=self.partial_rotary_factor,
+        )
 
 
 class LlamaDecoderLayer(nn.Module):
