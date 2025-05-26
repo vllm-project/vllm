@@ -13,7 +13,7 @@ is used by model runners to dispatch data processing according to the target
 model.
 
 Info:
-    [mm_processing](/design/mm_processing.html)
+    [mm_processing](../../../design/mm_processing.html)
 """
 
 __all__ = [
