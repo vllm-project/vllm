@@ -11,7 +11,6 @@ from vllm.sequence import SampleLogprobs
 
 from ....conftest import (AudioTestAssets, HfRunner, PromptAudioInput,
                           VllmRunner)
-from ....utils import large_gpu_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
@@ -29,7 +28,7 @@ def vllm_to_hf_output(
     return output_ids, hf_output_str, out_logprobs
 
 
-MODEL_NAME = "ibm-granite/granite-speech-3.3-8b"
+MODEL_NAME = "ibm-granite/granite-speech-3.3-2b"
 # Audio lora co-exists directly in the model directory, but
 # currently still needs to be passed directly to vLLM.
 audio_lora_path = MODEL_NAME
@@ -113,7 +112,6 @@ def run_test(
         )
 
 
-@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_model_len", [2048])
