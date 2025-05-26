@@ -56,6 +56,11 @@ body:
       A link to the Buildkite analytics of the failing test (if available)
   validations:
     required: true
+- type: textarea
+  attributes:
+    label: CC List.
+    description: >
+      The list of people you want to CC. Usually, this includes those who worked on the PR that failed the test.
 - type: markdown
   attributes:
     value: >
