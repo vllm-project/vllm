@@ -486,7 +486,7 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m core_model
 
-- label: Language Models Test (Extended Generation)
+- label: Language Models Test (Extended Generation) # 1hr20min
   mirror_hardwares: [amdexperimental]
   optional: true
   source_file_dependencies:
@@ -497,7 +497,7 @@ steps:
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
     - pytest -v -s models/language/generation -m 'not core_model'
 
-- label: Language Models Test (Extended Pooling)
+- label: Language Models Test (Extended Pooling)  # 36min
   mirror_hardwares: [amdexperimental]
   optional: true
   source_file_dependencies:
