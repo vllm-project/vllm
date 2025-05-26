@@ -208,7 +208,7 @@ class LlamaAttention(nn.Module):
                          quant_config: Optional[QuantizationConfig]) -> None:
         is_neox_style = True
         is_gguf = quant_config and quant_config.get_name() == "gguf"
-        if is_gguf and self.config.model_type == "llama":
+        if is_gguf and config.model_type == "llama":
             is_neox_style = False
 
         self.rotary_emb = get_rope(
