@@ -9,17 +9,14 @@ from msgspec.msgpack import Decoder
 #
 # Types copied from vllm.distributed.kv_events
 #
-class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True,
-                 gc=False):
+class EventBatch(msgspec.Struct, array_like=True, omit_defaults=True, gc=False):
     ts: float
     events: list[Any]
 
 
-class KVCacheEvent(msgspec.Struct,
-                   array_like=True,
-                   omit_defaults=True,
-                   gc=False,
-                   tag=True):
+class KVCacheEvent(
+    msgspec.Struct, array_like=True, omit_defaults=True, gc=False, tag=True
+):
     """Base class for all KV cache-related events"""
 
 
@@ -77,8 +74,9 @@ def main():
 
                 if last_seq >= 0 and seq > last_seq + 1:
                     missed = seq - last_seq - 1
-                    print(f"Missed {missed} messages"
-                          f" (last: {last_seq}, current: {seq})")
+                    print(
+                        f"Missed {missed} messages (last: {last_seq}, current: {seq})"
+                    )
 
                     replay.send((last_seq + 1).to_bytes(8, "big"))
 

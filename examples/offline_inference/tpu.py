@@ -20,10 +20,12 @@ sampling_params = SamplingParams(temperature=0, top_p=1.0, n=N, max_tokens=16)
 def main():
     # Set `enforce_eager=True` to avoid ahead-of-time compilation.
     # In real workloads, `enforace_eager` should be `False`.
-    llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
-              max_num_batched_tokens=64,
-              max_num_seqs=4,
-              max_model_len=128)
+    llm = LLM(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+        max_model_len=128,
+    )
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)
     for output, answer in zip(outputs, answers):

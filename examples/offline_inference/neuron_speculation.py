@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-This example shows how to run offline inference with a speculative 
+This example shows how to run offline inference with a speculative
 decoding model on neuron.
 """
 
@@ -19,9 +19,9 @@ prompts = [
 def config_buckets():
     """Configure context length and token gen buckets."""
     # creates XLA hlo graphs for all the context length buckets.
-    os.environ['NEURON_CONTEXT_LENGTH_BUCKETS'] = "128,512,1024,2048"
+    os.environ["NEURON_CONTEXT_LENGTH_BUCKETS"] = "128,512,1024,2048"
     # creates XLA hlo graphs for all the token gen buckets.
-    os.environ['NEURON_TOKEN_GEN_BUCKETS'] = "128,512,1024,2048"
+    os.environ["NEURON_TOKEN_GEN_BUCKETS"] = "128,512,1024,2048"
 
 
 def initialize_model():
@@ -31,7 +31,7 @@ def initialize_model():
         speculative_config={
             "model": "openlm-research/open_llama_3b",
             "num_speculative_tokens": 4,
-            "max_model_len": 2048
+            "max_model_len": 2048,
         },
         max_num_seqs=4,
         max_model_len=2048,
@@ -60,5 +60,5 @@ def main():
     process_requests(model, sampling_params)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

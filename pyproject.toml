@@ -57,6 +57,7 @@ ignore_patterns = [
     ".buildkite/**",
     "benchmarks/**",
     "build/**",
+    "examples/**",
 ]
 
 [tool.ruff]
@@ -144,6 +145,7 @@ skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora
 skip_glob = [
     ".buildkite/*",
     "benchmarks/*",
+    "examples/*",
 ]
 use_parentheses = true
 skip_gitignore = true

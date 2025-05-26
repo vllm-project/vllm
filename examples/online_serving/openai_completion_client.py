@@ -11,9 +11,9 @@ openai_api_base = "http://localhost:8000/v1"
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Client for vLLM API server")
-    parser.add_argument("--stream",
-                        action="store_true",
-                        help="Enable streaming response")
+    parser.add_argument(
+        "--stream", action="store_true", help="Enable streaming response"
+    )
     return parser.parse_args()
 
 
@@ -34,7 +34,8 @@ def main(args):
         echo=False,
         n=2,
         stream=args.stream,
-        logprobs=3)
+        logprobs=3,
+    )
 
     print("-" * 50)
     print("Completion results:")
