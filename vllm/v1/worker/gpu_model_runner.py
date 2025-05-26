@@ -1119,8 +1119,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         torch.distributed.all_reduce(num_tokens_tensor,
                                      group=get_dp_group().cpu_group)
         max_tokens_across_dp_cpu = torch.max(num_tokens_tensor).item()
-
-        # TODO (varun) : limit by cudagraphs
         return max_tokens_across_dp_cpu - num_tokens
 
     @torch.inference_mode()

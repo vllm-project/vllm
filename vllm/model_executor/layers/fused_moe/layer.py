@@ -833,7 +833,7 @@ class FusedMoE(torch.nn.Module):
         # Chunked all2all staging tensor
         self.batched_hidden_states = None
         self.batched_router_logits = None
-        if self.moe_parallel_config.dp_size > 1:
+        if self.moe_parallel_config.use_pplx_kernels:
             self.batched_hidden_states = torch.zeros(
                 (MOE_DP_CHUNK_SIZE, self.hidden_size),
                 dtype=torch.bfloat16,
