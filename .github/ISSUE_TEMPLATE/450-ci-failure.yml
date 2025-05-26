@@ -49,7 +49,7 @@ body:
 
       - Run [`git bisect`](https://git-scm.com/docs/git-bisect) locally
 
-      - Manually unblock Buildkite steps for suspicious PRs on main (authorized users only)
+      - Manually unblock Buildkite steps for suspected PRs on main (authorized users only)
     placeholder: |
       Approximate timeline and/or problematic PRs
 
