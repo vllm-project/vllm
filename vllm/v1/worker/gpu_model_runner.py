@@ -1936,7 +1936,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with graph_capture(device=self.device):
             skip_attn = not self.vllm_config.compilation_config.full_cuda_graph
             for num_tokens in reversed(self.cudagraph_batch_sizes):
-                print(f"capturing graph for {num_tokens} ...")
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
                     self._dummy_run(num_tokens, skip_attn=skip_attn)
