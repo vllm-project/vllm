@@ -77,7 +77,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1.shape[0] == w2.shape[0], "Expert number mismatch"
         assert a1q_scale is None or a1q_scale.dim(
         ) == 0 or a1q_scale.shape[0] == 1 or a1q_scale.shape[0] == a1q.shape[
-            0], "Input scale shape mismatch" #TODO adjust
+            0], "Input scale shape mismatch"  #TODO adjust
         assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 or w1_scale.shape[
             1] == w1.shape[1], "W1 scale shape mismatch"
         assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 or w2_scale.shape[
@@ -88,7 +88,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1.shape[0] == w2_scale.shape[
             0], "w2 scales expert number mismatch"
         assert a2_scale is None or a2_scale.dim(
-            ) == 0 or a2_scale.shape[0] == 1 or a2_scale.shape[0] == a1q.shape[
+        ) == 0 or a2_scale.shape[0] == 1 or a2_scale.shape[0] == a1q.shape[
             0], "Intermediate scale shape mismatch"
         assert self.out_dtype in [torch.half,
                                   torch.bfloat16], "Invalid output dtype"
@@ -140,7 +140,8 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         for idx in range(local_E):
             if expert_num_tokens[idx] != 0:
                 if try_output_map:
-                    offset = 0 if masked_idx == 0 else prev_expert_num_tokens + expert_offsets[masked_idx - 1]
+                    offset = 0 if masked_idx == 0 else prev_expert_num_tokens + expert_offsets[
+                        masked_idx - 1]
                     expert_offsets[masked_idx] = offset
                 else:
                     expert_offsets[masked_idx] = idx * a1q.shape[1]
@@ -194,10 +195,12 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         if try_output_map:
             all_tokens = torch.sum(expert_num_tokens)
             if all_tokens == 0:
-                return torch.zeros(a1q.shape, device=a1q.device,
-                                    dtype=self.out_dtype)
-            output_map = torch.empty((all_tokens), dtype=torch.int32,
-                                        device=device)
+                return torch.zeros(a1q.shape,
+                                   device=a1q.device,
+                                   dtype=self.out_dtype)
+            output_map = torch.empty((all_tokens),
+                                     dtype=torch.int32,
+                                     device=device)
             cumul_idx = 0
             for idx in range(local_E):
                 e_tokens = expert_num_tokens[idx]
@@ -207,19 +210,22 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
         fp8_type = a1q.dtype
         if try_output_map:
-            a1q = a1q.reshape(-1, a1q.shape[2]).view(dtype=torch.uint8)[
-                output_map].contiguous().view(dtype=fp8_type)
+            a1q = a1q.reshape(-1, a1q.shape[2]).view(
+                dtype=torch.uint8)[output_map].contiguous().view(
+                    dtype=fp8_type)
         else:
             a1q = a1q.reshape(-1, a1q.shape[2])
 
         if self.per_act_token:
             if try_output_map:
-                a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2])[output_map]
+                a1q_scale = a1q_scale.reshape(-1,
+                                              a1q_scale.shape[2])[output_map]
             else:
                 a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2])
         else:
             if try_output_map:
-                a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2])[output_map][0]
+                a1q_scale = a1q_scale.reshape(
+                    -1, a1q_scale.shape[2])[output_map][0]
             else:
                 a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2])
 
@@ -255,13 +261,17 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
                            c_strides2, self.per_act_token, self.per_out_ch)
 
         if try_output_map:
-            out = torch.zeros((local_E * padded_M, K), device=hidden_states.device, dtype=self.out_dtype)
+            out = torch.zeros((local_E * padded_M, K),
+                              device=hidden_states.device,
+                              dtype=self.out_dtype)
             out[output_map] = c3
             # print("out:", out.reshape(local_E, padded_M, K))
             return out.reshape(local_E, padded_M, K)
         else:
             # print(expert_num_tokens.shape, local_E)
-            out = torch.zeros((local_E, padded_M, K), device=hidden_states.device, dtype=self.out_dtype)
+            out = torch.zeros((local_E, padded_M, K),
+                              device=hidden_states.device,
+                              dtype=self.out_dtype)
             out[non_zero_mask] = c3.reshape(masked_local_E, padded_M, K)
             return out
 
