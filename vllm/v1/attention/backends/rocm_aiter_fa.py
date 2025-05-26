@@ -34,6 +34,7 @@ if current_platform.is_rocm():
         v_buffer_ptr,
         k_values_ptr,
         v_values_ptr,
+        b_query_lens_loc,
         b_seq_lens_loc,
         block_table,
         block_table_stride_0,
@@ -46,6 +47,13 @@ if current_platform.is_rocm():
                                       tl.arange(0, 2))
         batch_token_start, batch_token_end = tl.split(batch_token_indexes)
         seq_len = batch_token_end - batch_token_start
+
+        batch_query_indexes = tl.load(b_query_lens_loc + batch_idx +
+                                      tl.arange(0, 2))
+        batch_query_start, batch_query_end = tl.split(batch_query_indexes)
+        query_len = batch_query_end - batch_query_start
+        if query_len <= 1:
+            return
         if block_idx * BLOCK_SIZE < seq_len:
             block_mask = (block_idx * BLOCK_SIZE +
                           tl.arange(0, BLOCK_SIZE)[:, None]) < seq_len
@@ -69,8 +77,8 @@ if current_platform.is_rocm():
             tl.store(k_values_ptr + kv_values_off, k_vals, mask=block_mask)
             tl.store(v_values_ptr + kv_values_off, v_vals, mask=block_mask)
 
-    def vllm_layout_trans(b_seq_lens_loc, block_table, k_buffer, v_buffer,
-                          max_seq_len, total_tokens):
+    def vllm_layout_trans(b_query_lens_loc, b_seq_lens_loc, block_table,
+                          k_buffer, v_buffer, max_seq_len, total_tokens):
         H_KV = v_buffer.shape[2]
         D = v_buffer.shape[3]
         BLOCK_SIZE = v_buffer.shape[1]
@@ -89,6 +97,7 @@ if current_platform.is_rocm():
                                         v_buffer,
                                         k_values,
                                         v_values,
+                                        b_query_lens_loc,
                                         b_seq_lens_loc,
                                         block_table,
                                         block_table.stride(0),
@@ -112,8 +121,8 @@ if current_platform.is_rocm():
         alibi_slopes: Optional[list[float]],
         block_table: torch.Tensor,
     ) -> torch.Tensor:
-        k, v = vllm_layout_trans(cu_seqlens_k, block_table, k_cache, v_cache,
-                                 max_seqlen_k, total_tokens)
+        k, v = vllm_layout_trans(cu_seqlens_q, cu_seqlens_k, block_table,
+                                 k_cache, v_cache, max_seqlen_k, total_tokens)
         output = aiter.flash_attn_varlen_func(
             q=q,
             k=k,
