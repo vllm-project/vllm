@@ -38,7 +38,7 @@ body:
       ```
   validations:
     required: true
-- type: textarea
+- type: input
   attributes:
     label: 📝 History of failing test
     description: |
