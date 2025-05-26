@@ -17,6 +17,14 @@ body:
       `path/to/test_file.py::test_name[params]`
   validations:
     required: true
+- type: checkboxes
+  attributes:
+    label: Basic information
+    description: Select all items that apply to the failing test.
+    options:
+      - label: Flaky test
+      - label: Can reproduce locally
+      - label: Caused by external libraries (e.g. HF model implementation)
 - type: textarea
   attributes:
     label: 🧪 Describe the failing test
