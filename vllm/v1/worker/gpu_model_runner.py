@@ -1108,6 +1108,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_dp_padding(self, num_tokens: int):
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        if dp_size == 1:
+            # Early exit.
+            return 0
 
         # Gather num_tokens across dp rank
         num_tokens_across_dp = [0] * dp_size

@@ -831,8 +831,8 @@ class FusedMoE(torch.nn.Module):
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         # Chunked all2all staging tensor
-        self.batched_hidden_states = None
-        self.batched_router_logits = None
+        self.batched_hidden_states: Optional[torch.Tensor] = None
+        self.batched_router_logits: Optional[torch.Tensor] = None
         if self.moe_parallel_config.use_pplx_kernels:
             self.batched_hidden_states = torch.zeros(
                 (MOE_DP_CHUNK_SIZE, self.hidden_size),
@@ -1233,7 +1233,6 @@ class FusedMoE(torch.nn.Module):
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):
-
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
 
