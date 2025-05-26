@@ -817,18 +817,18 @@ class FusedMoE(torch.nn.Module):
         # for heuristic purposes, so it must be initialized first.
         quant_method: Optional[QuantizeMethodBase] = None
 
-        # TODO merge leftover, remove when fixed
-        # if quant_config is None:
-        #     quant_method = UnquantizedFusedMoEMethod(moe)
-        # else:
-        #     quant_method = quant_config.get_quant_method(self, prefix)
-        #     if quant_method.supports_pplx():
-        #         prepare_finalize = _construct_prepare_finalize(
-        #             moe, quant_config)
-        #         quant_method.moe = moe
-        #     else:
-        #         # No pplx for other quantized types yet.
-        #         prepare_finalize = None
+        if quant_config is None:
+            quant_method = UnquantizedFusedMoEMethod(moe)
+        else:
+            quant_method = quant_config.get_quant_method(self, prefix)
+            # TODO merge leftover, remove when fixed
+            # if quant_method.supports_pplx():
+            #     prepare_finalize = _construct_prepare_finalize(
+            #         moe, quant_config)
+            #     quant_method.moe = moe
+            # else:
+            #     # No pplx for other quantized types yet.
+            #     prepare_finalize = None
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
