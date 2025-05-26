@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-MooncakeStore Connector for Distributed Machine Learning Inference
-The MooncakeStoreConnector transfers KV caches between prefill vLLM workers
+KVStore Connector for Distributed Machine Learning Inference
+The KVStoreConnector transfers KV caches between prefill vLLM workers
 (KV cache producer) and decode vLLM workers (KV cache consumer) using a
 database-style KVStore.
 """
@@ -14,6 +14,8 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     model_aware_kv_ops_helper as kv_helper)
+from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
+    KVStoreBufferBase)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class MooncakeStoreConnector(KVConnectorBase):
+class KVStoreConnector(KVConnectorBase):
 
     def __init__(
         self,
@@ -49,9 +51,18 @@ class MooncakeStoreConnector(KVConnectorBase):
                 from vllm.distributed.kv_transfer.kv_lookup_buffer.mooncake_store import (  # noqa: E501
                     MooncakeStore)
                 logger.info(
-                    "Initializing KVStoreConnector under kv_transfer_config %s",
-                    self.kv_transfer_config)
-                self.kv_store = MooncakeStore(config)
+                    "Initializing MooncakeStoreConnector "
+                    "under kv_transfer_config %s", self.kv_transfer_config)
+                self.kv_store: KVStoreBufferBase = MooncakeStore(config)
+        elif self.kv_transfer_config.kv_connector == "FileStoreConnector":
+            from vllm.distributed.kv_transfer.kv_lookup_buffer.file_store import (  # noqa: E501
+                FileStore)
+
+            # Init kv_store
+            self.kv_store = FileStore(config)
+            logger.info(
+                "Initializing FileStoreConnector under kv_transfer_config %s",
+                self.kv_transfer_config)
         else:
             logger.error("Can not find %s",
                          self.kv_transfer_config.kv_connector)
