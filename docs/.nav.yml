@@ -54,8 +54,9 @@ nav:
       - V1: design/v1
   - API Reference:
     - api/README.md
-    - glob: api/vllm/*
-      preserve_directory_names: true
+    - Contents:
+      - glob: api/vllm/*
+        preserve_directory_names: true
   - Community:
     - community/*
     - Blog: https://blog.vllm.ai
