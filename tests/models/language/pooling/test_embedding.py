@@ -43,6 +43,7 @@ def test_models(
 
     vllm_extra_kwargs = {}
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
+        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
         vllm_extra_kwargs["override_pooler_config"] = \
             PoolerConfig(pooling_type="MEAN")
 
