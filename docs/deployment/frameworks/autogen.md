@@ -40,16 +40,16 @@ from autogen_core.models import ModelFamily
 async def main() -> None:
     # Create a model client
     model_client = OpenAIChatCompletionClient(
-            model="mistralai/Mistral-7B-Instruct-v0.2",
-            base_url="http://{your-vllm-host-ip}:{your-vllm-host-port}/v1",
-            api_key="EMPTY",
-            model_info={
-                "vision": False,
-                "function_calling": False,
-                "json_output": False,
-                "family": ModelFamily.MISTRAL,
-                "structured_output": True,
-    },
+        model="mistralai/Mistral-7B-Instruct-v0.2",
+        base_url="http://{your-vllm-host-ip}:{your-vllm-host-port}/v1",
+        api_key="EMPTY",
+        model_info={
+            "vision": False,
+            "function_calling": False,
+            "json_output": False,
+            "family": ModelFamily.MISTRAL,
+            "structured_output": True,
+        },
     )
 
     messages = [UserMessage(content="Write a very short story about a dragon.", source="user")]
