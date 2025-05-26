@@ -19,7 +19,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if TYPE_CHECKING:
@@ -136,6 +136,16 @@ class XPUModelRunner(GPUModelRunner):
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_size=self.cache_config.block_size,
+        )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
