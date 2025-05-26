@@ -15,13 +15,12 @@ from ...utils import check_embeddings_close
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-small"),
-        pytest.param("Alibaba-NLP/gte-Qwen2-7B-instruct"),
+        pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
         # [Decoder-only]
         pytest.param("BAAI/bge-multilingual-gemma2",
                      marks=[pytest.mark.core_model]),
         pytest.param("intfloat/e5-mistral-7b-instruct",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
-        pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
         # [Cross-Encoder]
         pytest.param("sentence-transformers/stsb-roberta-base-v2"),
@@ -46,9 +45,6 @@ def test_models(
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
         vllm_extra_kwargs["override_pooler_config"] = \
             PoolerConfig(pooling_type="MEAN")
-
-    if model == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
-        vllm_extra_kwargs["hf_overrides"] = {"is_causal": True}
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"

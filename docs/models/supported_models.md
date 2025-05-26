@@ -404,10 +404,7 @@ Specified using `--task embed`.
     You should manually set mean pooling by passing `--override-pooler-config '{"pooling_type": "MEAN"}'`.
 
 !!! note
-    The HF implementation of `Alibaba-NLP/gte-Qwen2-1.5B-instruct` is hardcoded to use causal attention despite what is shown in `config.json`. To compare vLLM vs HF results,
-    you should set `--hf-overrides '{"is_causal": true}'` in vLLM so that the two implementations are consistent with each other.
-
-    For both the 1.5B and 7B variants, you also need to enable `--trust-remote-code` for the correct tokenizer to be loaded.
+    For `Alibaba-NLP/gte-Qwen2-*`, you need to enable `--trust-remote-code` for the correct tokenizer to be loaded.
     See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
 
 !!! note
