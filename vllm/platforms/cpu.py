@@ -155,8 +155,6 @@ class CpuPlatform(Platform):
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationLevel
         vllm_config.compilation_config.cudagraph_capture_sizes = []
-        vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION
-        vllm_config.compilation_config.custom_ops = []
 
         from vllm.config import CompilationLevel
         compilation_config = vllm_config.compilation_config
@@ -177,6 +175,7 @@ class CpuPlatform(Platform):
                     "epilogue_fusion": True,
                 }
             )
+
         assert vllm_config.device_config.device_type == "cpu"
 
         #
@@ -211,13 +210,6 @@ class CpuPlatform(Platform):
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size)
-        if sys.platform == "darwin" and \
-                envs.VLLM_WORKER_MULTIPROC_METHOD == "fork":
-            if os.environ.get('VLLM_WORKER_MULTIPROC_METHOD', None) is None:
-                logger.warning(
-                    "Default to spawn method on MacOS. If this is not desired,"
-                    " set VLLM_WORKER_MULTIPROC_METHOD to fork explicitly.")
-                os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
 
         if vllm_config.model_config and vllm_config.model_config.use_mla:
             logger.info(

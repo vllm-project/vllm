@@ -58,7 +58,7 @@ class CPUModelRunner(GPUModelRunner):
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
         with _set_global_compilation_settings():
-            self._dummy_run(self.max_num_tokens)
+            self._dummy_run(max(16, self.max_num_reqs))
         logger.info("Warming up done.")
 
     def _init_device_properties(self) -> None:

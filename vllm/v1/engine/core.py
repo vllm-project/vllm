@@ -380,9 +380,6 @@ class EngineCoreProc(EngineCore):
             output_address = self.startup_handshake(
                 input_socket, on_head_node, vllm_config.parallel_config)
 
-            # Update config which may have changed from the handshake.
-            vllm_config.__post_init__()
-
             # Set up data parallel environment.
             self._init_data_parallel(vllm_config)
 
