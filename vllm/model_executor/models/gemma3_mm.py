@@ -503,12 +503,20 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def _parse_and_validate_image_input(self,
-                                        pixel_values=None,
-                                        num_crops=None,
-                                        image_embeds=None,
-                                        **kwargs
-                                        ) -> Optional[Gemma3ImageInputs]:
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+        image_size = self.config.vision_config.image_size
+        expected_dims = (3, image_size, image_size)
+        if data.shape[1:] != expected_dims:
+            raise ValueError(
+                "The expected shape of pixel values per image per batch is "
+                f"{expected_dims}. You supplied {tuple(data.shape)}.")
+        return data
+
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Gemma3ImageInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        num_crops = kwargs.pop("num_crops", None)
+        image_embeds = kwargs.pop("image_embeds", None)
         assert image_embeds is None, "Gemma3 does not support image_embeds."
         if pixel_values is None:
             return None
@@ -524,16 +532,9 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         pixel_values = flatten_bn(pixel_values, concat=True)
         num_crops = flatten_bn(num_crops, concat=True)
 
-        image_size = self.config.vision_config.image_size
-        expected_dims = (3, image_size, image_size)
-        if pixel_values.shape[1:] != expected_dims:
-            raise ValueError(
-                "The expected shape of pixel values per image per batch is "
-                f"{expected_dims}. You supplied {tuple(pixel_values.shape)}.")
-
         return Gemma3ImagePixelInputs(
             type="pixel_values",
-            pixel_values=pixel_values,
+            pixel_values=self._validate_pixel_values(pixel_values),
             num_patches=num_crops + 1,
         )
 
