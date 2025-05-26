@@ -182,7 +182,7 @@ class KVConnectorBase_V1(ABC):
         pass
 
     def get_finished(
-        self, finished_req_ids: set[str]
+        self, finished_req_ids: set[str], **kwargs
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have

@@ -140,7 +140,8 @@ class NixlConnector(KVConnectorBase_V1):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def get_finished(self,
-                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+                     finished_req_ids: set[str],
+                     **kwargs) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()

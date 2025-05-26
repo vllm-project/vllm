@@ -281,7 +281,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             self.p2p_nccl_engine.wait_for_sent()
 
     def get_finished(
-        self, finished_req_ids: set[str]
+        self, finished_req_ids: set[str], **kwargs
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
@@ -296,7 +296,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
-        return self.p2p_nccl_engine.get_finished(finished_req_ids)
+        forward_context: "ForwardContext" = kwargs.get("forward_context")
+        return self.p2p_nccl_engine.get_finished(
+            finished_req_ids, forward_context)
 
     # ==============================
     # Scheduler-side methods
@@ -330,7 +332,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             "num_computed_tokens:%d", num_external_tokens,
             len(request.prompt_token_ids), num_computed_tokens)
 
-        return num_external_tokens, False
+        return num_external_tokens, self.load_kv_async
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
