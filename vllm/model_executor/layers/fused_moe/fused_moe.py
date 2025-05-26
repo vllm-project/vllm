@@ -1047,13 +1047,13 @@ def inplace_fused_experts_fake(
     pass
 
 
-direct_register_custom_op(
-    op_name="inplace_fused_experts",
-    op_func=inplace_fused_experts,
-    mutates_args=["hidden_states"],
-    fake_impl=inplace_fused_experts_fake,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
-)
+# direct_register_custom_op(
+#     op_name="inplace_fused_experts",
+#     op_func=inplace_fused_experts,
+#     mutates_args=["hidden_states"],
+#     fake_impl=inplace_fused_experts_fake,
+#     tags=(torch.Tag.needs_fixed_stride_order, ),
+# )
 
 
 def outplace_fused_experts(
@@ -1111,13 +1111,13 @@ def outplace_fused_experts_fake(
     return torch.empty_like(hidden_states)
 
 
-direct_register_custom_op(
-    op_name="outplace_fused_experts",
-    op_func=outplace_fused_experts,
-    mutates_args=[],
-    fake_impl=outplace_fused_experts_fake,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
-)
+# direct_register_custom_op(
+#     op_name="outplace_fused_experts",
+#     op_func=outplace_fused_experts,
+#     mutates_args=[],
+#     fake_impl=outplace_fused_experts_fake,
+#     tags=(torch.Tag.needs_fixed_stride_order, ),
+# )
 
 
 def torch_vllm_inplace_fused_experts(**kwargs) -> torch.Tensor:
