@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
 
-import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
+import torch
 import vllm.envs as envs
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
@@ -830,6 +830,20 @@ class FusedMoE(torch.nn.Module):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
+        # Chunked all2all staging tensor
+        self.batched_hidden_states = None
+        self.batched_router_logits = None
+        if self.moe_parallel_config.dp_size > 1:
+            self.batched_hidden_states = torch.zeros(
+                (MOE_DP_CHUNK_SIZE, self.hidden_size),
+                dtype=torch.bfloat16,
+                device=torch.cuda.current_device())
+
+            self.batched_router_logits = torch.zeros(
+                (MOE_DP_CHUNK_SIZE, self.global_num_experts),
+                dtype=torch.bfloat16,
+                device=torch.cuda.current_device())
+
     @property
     def tp_size(self):
         return self.moe_parallel_config.tp_size
@@ -1226,11 +1240,18 @@ class FusedMoE(torch.nn.Module):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
+            staged_hidden_states = self.batched_hidden_states[:chunk_end -
+                                                              chunk_start, :]
+            staged_router_logits = self.batched_router_logits[:chunk_end -
+                                                              chunk_start, :]
+            staged_hidden_states.copy_(hidden_states, non_blocking=True)
+            staged_router_logits.copy_(router_logits, non_blocking=True)
+
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
-                x=hidden_states,
-                router_logits=router_logits,
+                x=staged_hidden_states,
+                router_logits=staged_router_logits,
                 top_k=self.top_k,
                 renormalize=self.renormalize,
                 use_grouped_topk=self.use_grouped_topk,
@@ -1246,7 +1267,7 @@ class FusedMoE(torch.nn.Module):
 
             if not skip_result_store:
                 full_final_hidden_states[chunk_start:chunk_end, :].copy_(
-                    final_hidden_states)
+                    final_hidden_states, non_blocking=True)
 
         ctx = get_forward_context()
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
