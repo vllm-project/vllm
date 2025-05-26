@@ -602,28 +602,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
 
-        self.seq_lens_np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-            num_scheduled_tokens)
-
-        # Copy the tensors to the GPU.
-        self.input_ids[:total_num_scheduled_tokens].copy_(
-            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
-        if self.uses_mrope:
-            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
-                self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True)
-        else:
-            # Common case (1D positions)
-            self.positions[:total_num_scheduled_tokens].copy_(
-                self.positions_cpu[:total_num_scheduled_tokens],
-                non_blocking=True)
-
-        self.query_start_loc[:num_reqs + 1].copy_(
-            self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
-        self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
-                                       non_blocking=True)
+        np.add(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs],
+            num_scheduled_tokens,
+            out=self.seq_lens_np[:num_reqs],
+        )
 
         # Fill unused with -1. Needed for reshape_and_cache
         self.seq_lens[num_reqs:].fill_(0)

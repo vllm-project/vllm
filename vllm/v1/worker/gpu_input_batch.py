@@ -539,28 +539,11 @@ class InputBatch:
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
         if not self.all_greedy:
-            temperature = copy_slice(self.temperature_cpu_tensor,
-                                     self.temperature, num_reqs)
+            temperature = self.temperature[:num_reqs]
         else:
             temperature = None
-        if not self.no_top_p:
-            copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
-        if not self.no_top_k:
-            copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
-        if not self.no_min_p:
-            copy_slice(self.min_p_cpu_tensor, self.min_p, num_reqs)
 
         if not self.no_penalties:
-            # Since syncing these tensors is expensive only copy them
-            # if necessary i.e. if there are requests which require
-            # penalties to be applied during sampling.
-            copy_slice(self.frequency_penalties_cpu_tensor,
-                       self.frequency_penalties, num_reqs)
-            copy_slice(self.presence_penalties_cpu_tensor,
-                       self.presence_penalties, num_reqs)
-            copy_slice(self.repetition_penalties_cpu_tensor,
-                       self.repetition_penalties, num_reqs)
-
             # The prompt tokens are used only for applying penalties during
             # the sampling process. Hence copy these tensors only when
             # there are requests which need penalties to be applied.
@@ -571,8 +554,6 @@ class InputBatch:
         allowed_token_ids_mask: Optional[torch.Tensor] = None
         if not self.no_allowed_token_ids:
             assert self.allowed_token_ids_mask is not None
-            copy_slice(self.allowed_token_ids_mask_cpu_tensor,
-                       self.allowed_token_ids_mask, num_reqs)
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
         return SamplingMetadata(
