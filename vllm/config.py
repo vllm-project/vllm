@@ -543,7 +543,7 @@ class ModelConfig:
         sliding_window_pattern = getattr(self.hf_text_config,
                                          "sliding_window_pattern", None)
         has_interleaved_attention = sliding_window_pattern is not None or (
-            sliding_window is not None and isinstance(sliding_window, list))
+            isinstance(sliding_window, list))
 
         if not self.disable_sliding_window and has_interleaved_attention:
             if (backend :=
@@ -565,7 +565,10 @@ class ModelConfig:
                 # only the attention layer itself is aware of the sliding
                 # window, and use the window size to compute the attention.
                 self.hf_text_config.interleaved_sliding_window = sliding_window
-                delattr(self.hf_text_config, "sliding_window")
+
+                if hasattr(self.hf_text_config, "sliding_window"):
+                    delattr(self.hf_text_config, "sliding_window")
+
                 sliding_window = None
 
         self.max_model_len = _get_and_verify_max_len(
