@@ -5,9 +5,11 @@ nav:
       - getting_started/quickstart.md
       - getting_started/installation
     - Examples:
-      - Offline Inference: examples/offline_inference
-      - Online Serving: examples/online_serving
-      - Others: examples/others
+      - Offline Inference: getting_started/examples/offline_inference
+      - Online Serving: getting_started/examples/online_serving
+      - Others:
+        - LMCache: getting_started/examples/lmcache
+        - getting_started/examples/other/*
     - Quick Links:
       - User Guide: usage/README.md
       - Developer Guide: contributing/README.md
@@ -17,7 +19,6 @@ nav:
       - Releases: https://github.com/vllm-project/vllm/releases
   - User Guide:
     - Summary: usage/README.md
-    - usage/v1_guide.md
     - General:
       - usage/*
     - Inference and Serving:
