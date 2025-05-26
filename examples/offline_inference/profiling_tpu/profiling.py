@@ -31,18 +31,16 @@ def main(args: argparse.Namespace):
         max_tokens=args.output_len,
     )
     print(sampling_params)
-    dummy_prompt_token_ids = np.random.randint(10000,
-                                               size=(args.batch_size,
-                                                     args.input_len))
-    dummy_prompts: list[PromptType] = [{
-        "prompt_token_ids": batch
-    } for batch in dummy_prompt_token_ids.tolist()]
+    dummy_prompt_token_ids = np.random.randint(
+        10000, size=(args.batch_size, args.input_len)
+    )
+    dummy_prompts: list[PromptType] = [
+        {"prompt_token_ids": batch} for batch in dummy_prompt_token_ids.tolist()
+    ]
 
     def run_to_completion():
         start_time = time.perf_counter()
-        llm.generate(dummy_prompts,
-                     sampling_params=sampling_params,
-                     use_tqdm=False)
+        llm.generate(dummy_prompts, sampling_params=sampling_params, use_tqdm=False)
         end_time = time.perf_counter()
         latency = end_time - start_time
         return latency
@@ -58,10 +56,9 @@ def main(args: argparse.Namespace):
     profile_dir = args.profile_result_dir
     print(f"Profiling (results will be saved to '{profile_dir}')...")
     # Enable tracing on server
-    xp.trace_detached("localhost:9012",
-                      profile_dir,
-                      delay_ms=DELAY_MS,
-                      duration_ms=DURATION_MS)
+    xp.trace_detached(
+        "localhost:9012", profile_dir, delay_ms=DELAY_MS, duration_ms=DURATION_MS
+    )
     if DELAY_MS == 0:
         time.sleep(1.0)
     profile_latencies = []
@@ -72,30 +69,36 @@ def main(args: argparse.Namespace):
     return
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description='Benchmark the latency of processing a single batch of '
-        'requests till completion.')
-    parser.add_argument('--input-len', type=int, default=32)
-    parser.add_argument('--output-len', type=int, default=128)
-    parser.add_argument('--batch-size', type=int, default=8)
-    parser.add_argument('--num-iters-warmup',
-                        type=int,
-                        default=5,
-                        help='Number of iterations to run for warmup.')
-    parser.add_argument('--num-iters',
-                        type=int,
-                        default=1,
-                        help='Number of iterations to run for profiling.')
+        description="Benchmark the latency of processing a single batch of "
+        "requests till completion."
+    )
+    parser.add_argument("--input-len", type=int, default=32)
+    parser.add_argument("--output-len", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument(
-        '--profile-result-dir',
+        "--num-iters-warmup",
+        type=int,
+        default=5,
+        help="Number of iterations to run for warmup.",
+    )
+    parser.add_argument(
+        "--num-iters",
+        type=int,
+        default=1,
+        help="Number of iterations to run for profiling.",
+    )
+    parser.add_argument(
+        "--profile-result-dir",
         type=str,
         default="profiles",
-        help=
-        ('path to save the pytorch profiler output. Can be visualized '
-         'with ui.perfetto.dev or Tensorboard '
-         '(https://cloud.google.com/tpu/docs/pytorch-xla-performance-profiling-tpu-vm).'
-         ))
+        help=(
+            "path to save the pytorch profiler output. Can be visualized "
+            "with ui.perfetto.dev or Tensorboard "
+            "(https://cloud.google.com/tpu/docs/pytorch-xla-performance-profiling-tpu-vm)."
+        ),
+    )
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()

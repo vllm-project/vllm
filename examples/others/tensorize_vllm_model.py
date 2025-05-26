@@ -10,8 +10,11 @@ from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.tensorizer import (
-    TensorizerArgs, TensorizerConfig, tensorize_lora_adapter,
-    tensorize_vllm_model)
+    TensorizerArgs,
+    TensorizerConfig,
+    tensorize_lora_adapter,
+    tensorize_vllm_model,
+)
 from vllm.utils import FlexibleArgumentParser
 
 # yapf conflicts with isort for this docstring
