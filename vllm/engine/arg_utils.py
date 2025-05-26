@@ -39,11 +39,9 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
-                        GiB_bytes, is_in_doc_build, is_in_ray_actor)
+                        GiB_bytes, is_in_ray_actor)
 
 # yapf: enable
-
-IS_IN_DOC_BUILD = is_in_doc_build()
 
 logger = init_logger(__name__)
 
@@ -159,10 +157,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = set()
         if get_origin(field.type) in {Union, Annotated}:
-            if IS_IN_DOC_BUILD:
-                predicate = lambda _: True
-            else:
-                predicate = lambda arg: not isinstance(arg, SkipValidation)
+            predicate = lambda arg: not isinstance(arg, SkipValidation)
             type_hints.update(filter(predicate, get_args(field.type)))
         else:
             type_hints.add(field.type)
@@ -175,7 +170,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         if field.default is not MISSING:
             default = field.default
         elif field.default_factory is not MISSING:
-            if IS_IN_DOC_BUILD and is_dataclass(field.default_factory):
+            if is_dataclass(field.default_factory):
                 default = {}
             else:
                 default = field.default_factory()
