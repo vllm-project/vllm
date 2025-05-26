@@ -24,7 +24,7 @@ body:
     options:
       - label: Flaky test
       - label: Can reproduce locally
-      - label: Caused by external libraries (e.g. bug in HF Transformers)
+      - label: Caused by external libraries (e.g. bug in `transformers`)
 - type: textarea
   attributes:
     label: 🧪 Describe the failing test
