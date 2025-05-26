@@ -1733,7 +1733,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=np.int32)
 
         if skip_attn:
-            attn_metadata: Optional[dict[str, FlashAttentionMetadata]] = None
+            attn_metadata: Optional[dict[str, Any]] = None
         else:
             query_start_loc = self.query_start_loc[:num_reqs + 1]
             seq_lens = self.seq_lens[:num_reqs]
