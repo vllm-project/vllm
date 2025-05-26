@@ -47,7 +47,7 @@ body:
 
       If you have time, identify the PR that caused the test to fail on main. You can do so via the following methods:
 
-      - Find the PR where the test failure first occurred and try to reproduce it locally.
+      - Use Buildkite Test Suites to find the PR where the test failure first occurred, and reproduce the failure locally.
 
       - Run [`git bisect`](https://git-scm.com/docs/git-bisect) locally.
 
