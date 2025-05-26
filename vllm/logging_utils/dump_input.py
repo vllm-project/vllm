@@ -18,7 +18,7 @@ logger = init_logger(__name__)
 
 def prepare_object_to_dump(obj) -> str:
     if isinstance(obj, str):
-        return "'{obj}'"  # Double quotes
+        return f"'{obj}'"  # Double quotes
     elif isinstance(obj, dict):
         dict_str = ', '.join({f'{str(k)}: {prepare_object_to_dump(v)}' \
             for k, v in obj.items()})
@@ -42,9 +42,9 @@ def prepare_object_to_dump(obj) -> str:
         return obj.anon_repr()
     elif hasattr(obj, '__dict__'):
         items = obj.__dict__.items()
-        dict_str = ','.join([f'{str(k)}={prepare_object_to_dump(v)}' \
+        dict_str = ', '.join([f'{str(k)}={prepare_object_to_dump(v)}' \
             for k, v in items])
-        return (f"{type(obj).__name__}({dict_str})")
+        return f"{type(obj).__name__}({dict_str})"
     else:
         # Hacky way to make sure we can serialize the object in JSON format
         try:
