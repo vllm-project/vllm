@@ -383,20 +383,21 @@ class P2pNcclEngine:
                 while not self.send_queue:
                     self.send_queue_cv.wait()
                 tensor_id, remote_address, tensor = self.send_queue.popleft()
-                if not self.send_queue:
-                    self.send_queue_cv.notify()
+                # if not self.send_queue:
+                #     self.send_queue_cv.notify()
             self._send_sync(tensor_id, tensor, remote_address)
 
     def wait_for_sent(self):
-        if self.send_type == "PUT_ASYNC":
-            start_time = time.time()
-            with self.send_queue_cv:
-                while self.send_queue:
-                    self.send_queue_cv.wait()
-            duration = time.time() - start_time
-            logger.info(
-                "🚧[PUT_ASYNC]It took %.3fms to wait for the send_queue"
-                " to be empty, rank:%d", duration * 1000, self.rank)
+        return
+        # if self.send_type == "PUT_ASYNC":
+        #     start_time = time.time()
+        #     with self.send_queue_cv:
+        #         while self.send_queue:
+        #             self.send_queue_cv.wait()
+        #     duration = time.time() - start_time
+        #     logger.info(
+        #         "🚧[PUT_ASYNC]It took %.3fms to wait for the send_queue"
+        #         " to be empty, rank:%d", duration * 1000, self.rank)
 
     def _send_sync(
         self,
@@ -484,13 +485,13 @@ class P2pNcclEngine:
                 if (len(self.send_request_id_to_tensor_ids[request_id]) ==
                         num_layers):
                     finished_sending.add(request_id)
-    
+
         # Retrieve requests that have already received the KV cache.
-        finished_recving: set[str] = set()
-        for request_id in self.recv_request_id_to_tensor_ids:
-            if (len(self.recv_request_id_to_tensor_ids[request_id]) ==
-                    num_layers):
-                finished_recving.add(request_id)
+        # finished_recving: set[str] = set()
+        # for request_id in self.recv_request_id_to_tensor_ids:
+        #     if (len(self.recv_request_id_to_tensor_ids[request_id]) ==
+        #             num_layers):
+        #         finished_recving.add(request_id)
 
         logger.debug("🐞get_finished, finished_sending:%s, finished_recving:%s",
                      finished_sending, finished_recving)

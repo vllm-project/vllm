@@ -88,7 +88,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                          rank=rank,
                          local_rank=local_rank)
         self._block_size = vllm_config.cache_config.block_size
-        self._requests_need_load: dict[str, Request] = {}
+        self._requests_need_load: dict[str, Any] = {}
         self.config = vllm_config.kv_transfer_config
         self.rank = rank
         self.is_producer = self.config.is_kv_producer
@@ -332,7 +332,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             "num_computed_tokens:%d", num_external_tokens,
             len(request.prompt_token_ids), num_computed_tokens)
 
-        return num_external_tokens, True
+        return num_external_tokens, False
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
@@ -341,7 +341,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
         Update KVConnector state after block allocation.
         """
         if not self.is_producer and num_external_tokens > 0:
-            self._requests_need_load[request.request_id] = request
+            self._requests_need_load[request.request_id] = (
+                request, blocks.get_block_ids()[0])
 
     def build_connector_meta(
         self,
@@ -361,7 +362,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         meta = P2pNcclConnectorMetadata()
 
-        total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
             if self.is_producer:
                 num_scheduled_tokens = (
@@ -391,7 +391,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  token_ids=new_req.prompt_token_ids,
                                  block_ids=new_req.block_ids[0],
                                  block_size=self._block_size)
-                total_need_load += 1
+                self._requests_need_load.pop(new_req.req_id)
 
         for cached_req in scheduler_output.scheduled_cached_reqs:
             if self.is_producer:
@@ -431,7 +431,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # NOTE(rob): cached_req_data does not have the full
                 # list of token ids (only new tokens). So we look it
                 # up in the actual request object.
-                request = self._requests_need_load[cached_req.req_id]
+                request, _ = self._requests_need_load.pop(cached_req.req_id)
                 total_tokens = (len(cached_req.new_token_ids) +
                                 cached_req.num_computed_tokens)
                 token_ids = request.all_token_ids[:total_tokens]
@@ -444,9 +444,18 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  token_ids=token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size)
-                total_need_load += 1
 
-        assert total_need_load == len(self._requests_need_load)
+        # Requests loaded asynchronously are not in the scheduler_output.
+        # for request_id in self._requests_need_load:
+        #     request, block_ids = self._requests_need_load[request_id]
+        #     meta.add_request(request_id=request.request_id,
+        #                      token_ids=request.prompt_token_ids,
+        #                      block_ids=block_ids,
+        #                      block_size=self._block_size)
+
+        logger.debug("🐞build_connector_meta, _requests_need_load:%s",
+                     self._requests_need_load)
+
         self._requests_need_load.clear()
         return meta
 
@@ -471,7 +480,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self.chunked_prefill.pop(request.request_id, None)
 
-        return False, None
+        return True, None
 
     # ==============================
     # Static methods
@@ -479,8 +488,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     @staticmethod
     def parse_request_id(request_id: str, is_prefill=True) -> tuple[str, int]:
-        logger.debug("parse_request_id, request_id: %s, is_prefill: %s",
-                     request_id, is_prefill)
         # Regular expression to match the string hostname and integer port
         if is_prefill:
             pattern = r"___decode_addr_(.*):(\d+)"
@@ -494,8 +501,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
             ip = match.group(1)
             port = int(match.group(2))
 
-            logger.debug("parse_request_id, request_id: %s, ip: %s, port: %s",
-                         request_id, ip, str(port))
+            logger.debug(
+                "parse_request_id, request_id: %s, ip: %s, port: %s, "
+                "is_prefill:%s", request_id, ip, str(port), is_prefill)
+
             return ip, port
         raise ValueError(
             f"Request id {request_id} does not contain hostname and port")
