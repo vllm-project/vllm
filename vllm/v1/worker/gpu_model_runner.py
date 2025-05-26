@@ -7,10 +7,10 @@ import weakref
 from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
+import torch
 import torch.distributed
 import torch.nn as nn
 
-import torch
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadataBuilder)

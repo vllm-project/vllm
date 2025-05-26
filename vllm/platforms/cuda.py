@@ -7,9 +7,9 @@ import os
 from functools import wraps
 from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
+import torch
 from typing_extensions import ParamSpec
 
-import torch
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm.envs as envs

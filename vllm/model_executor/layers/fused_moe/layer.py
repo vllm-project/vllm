@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
 
+import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
-import torch
 import vllm.envs as envs
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
@@ -1234,16 +1234,18 @@ class FusedMoE(torch.nn.Module):
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):
 
+        assert self.batched_hidden_states is not None
+        assert self.batched_router_logits is not None
+
         full_final_hidden_states = torch.empty_like(full_hidden_states)
 
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
+            chunk_size = chunk_end - chunk_start
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            staged_hidden_states = self.batched_hidden_states[:chunk_end -
-                                                              chunk_start, :]
-            staged_router_logits = self.batched_router_logits[:chunk_end -
-                                                              chunk_start, :]
+            staged_hidden_states = self.batched_hidden_states[:chunk_size, :]
+            staged_router_logits = self.batched_router_logits[:chunk_size, :]
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
