@@ -16,7 +16,8 @@ prefix = (
     "teaching role. They have 5 years of previous teaching experience "
     "as an assistant teacher at a co-ed, public school with experience "
     "in middle school math teaching. Based on these information, fulfill "
-    "the following paragraph: ")
+    "the following paragraph: "
+)
 
 # Sample prompts.
 prompts = [
@@ -58,9 +59,11 @@ def main():
     cleanup_dist_env_and_memory()
 
     # Create an LLM with prefix caching enabled.
-    prefix_cached_llm = LLM(model="facebook/opt-125m",
-                            enable_prefix_caching=True,
-                            gpu_memory_utilization=0.4)
+    prefix_cached_llm = LLM(
+        model="facebook/opt-125m",
+        enable_prefix_caching=True,
+        gpu_memory_utilization=0.4,
+    )
 
     # Warmup so that the shared prompt's KV cache is computed.
     prefix_cached_llm.generate(generating_prompts[0], sampling_params)
@@ -81,10 +84,12 @@ def main():
         print("-" * 50)
 
     # Compare the results and display the speedup
-    generated_same = all([
-        regular_generated_texts[i] == cached_generated_texts[i]
-        for i in range(len(prompts))
-    ])
+    generated_same = all(
+        [
+            regular_generated_texts[i] == cached_generated_texts[i]
+            for i in range(len(prompts))
+        ]
+    )
     print(f"Generated answers are the same: {generated_same}")
 
 

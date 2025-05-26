@@ -20,6 +20,7 @@ Requirements: Linux, Python: 3.10 or higher, CUDA: 12.1
 Learn more about LMCache environment setup, please refer to:
 https://docs.lmcache.ai/getting_started/installation.html
 """
+
 import argparse
 import contextlib
 import os
@@ -49,8 +50,7 @@ def setup_environment_variables(vllm_version: str):
 
 
 @contextlib.contextmanager
-def build_llm_with_lmcache(lmcache_connector: str, model: str,
-                           vllm_version: str):
+def build_llm_with_lmcache(lmcache_connector: str, model: str, vllm_version: str):
     ktc = KVTransferConfig(
         kv_connector=lmcache_connector,
         kv_role="kv_both",
@@ -97,18 +97,19 @@ def print_output(
     for output in outputs:
         generated_text = output.outputs[0].text
         print(f"Generated text: {generated_text!r}")
-    print(f"Generation took {time.time() - start:.2f} seconds, "
-          f"{req_str} request done.")
+    print(f"Generation took {time.time() - start:.2f} seconds, {req_str} request done.")
     print("-" * 50)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-v",
-                        "--version",
-                        choices=["v0", "v1"],
-                        default="v1",
-                        help="Specify vLLM version (default: v1)")
+    parser.add_argument(
+        "-v",
+        "--version",
+        choices=["v0", "v1"],
+        default="v1",
+        help="Specify vLLM version (default: v1)",
+    )
     return parser.parse_args()
 
 
@@ -125,7 +126,6 @@ def main():
     setup_environment_variables(args.version)
 
     with build_llm_with_lmcache(lmcache_connector, model, args.version) as llm:
-
         # This example script runs two requests with a shared prefix.
         # Define the shared prompt and specific prompts
         shared_prompt = "Hello, how are you?" * 1000
@@ -136,9 +136,7 @@ def main():
             shared_prompt + "Tell me a very long story",
         ]
 
-        sampling_params = SamplingParams(temperature=0,
-                                         top_p=0.95,
-                                         max_tokens=10)
+        sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
         # Print the first output
         print_output(llm, first_prompt, sampling_params, "first")

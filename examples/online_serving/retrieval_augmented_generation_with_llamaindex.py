@@ -35,6 +35,7 @@ Notes:
     - Default ports: 8000 (embedding), 8001 (chat)
     - First run may take time to download models
 """
+
 import argparse
 from argparse import Namespace
 from typing import Any
@@ -59,7 +60,7 @@ def init_config(args: Namespace):
         "db_path": args.db_path,
         "chunk_size": args.chunk_size,
         "chunk_overlap": args.chunk_overlap,
-        "top_k": args.top_k
+        "top_k": args.top_k,
     }
 
 
@@ -117,52 +118,58 @@ def query_document(index: VectorStoreIndex, question: str, top_k: int):
 
 def get_parser() -> argparse.ArgumentParser:
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(
-        description='RAG with vLLM and LlamaIndex')
+    parser = argparse.ArgumentParser(description="RAG with vLLM and LlamaIndex")
 
     # Add command line arguments
     parser.add_argument(
-        '--url',
-        default=("https://docs.vllm.ai/en/latest/getting_started/"
-                 "quickstart.html"),
-        help='URL of the document to process')
-    parser.add_argument('--embedding-model',
-                        default="ssmits/Qwen2-7B-Instruct-embed-base",
-                        help='Model name for embeddings')
-    parser.add_argument('--chat-model',
-                        default="qwen/Qwen1.5-0.5B-Chat",
-                        help='Model name for chat')
-    parser.add_argument('--vllm-api-key',
-                        default="EMPTY",
-                        help='API key for vLLM compatible services')
-    parser.add_argument('--embedding-endpoint',
-                        default="http://localhost:8000/v1",
-                        help='Base URL for embedding service')
-    parser.add_argument('--chat-endpoint',
-                        default="http://localhost:8001/v1",
-                        help='Base URL for chat service')
-    parser.add_argument('--db-path',
-                        default="./milvus_demo.db",
-                        help='Path to Milvus database')
-    parser.add_argument('-i',
-                        '--interactive',
-                        action='store_true',
-                        help='Enable interactive Q&A mode')
-    parser.add_argument('-c',
-                        '--chunk-size',
-                        type=int,
-                        default=1000,
-                        help='Chunk size for document splitting')
-    parser.add_argument('-o',
-                        '--chunk-overlap',
-                        type=int,
-                        default=200,
-                        help='Chunk overlap for document splitting')
-    parser.add_argument('-k',
-                        '--top-k',
-                        type=int,
-                        default=3,
-                        help='Number of top results to retrieve')
+        "--url",
+        default=("https://docs.vllm.ai/en/latest/getting_started/quickstart.html"),
+        help="URL of the document to process",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default="ssmits/Qwen2-7B-Instruct-embed-base",
+        help="Model name for embeddings",
+    )
+    parser.add_argument(
+        "--chat-model", default="qwen/Qwen1.5-0.5B-Chat", help="Model name for chat"
+    )
+    parser.add_argument(
+        "--vllm-api-key", default="EMPTY", help="API key for vLLM compatible services"
+    )
+    parser.add_argument(
+        "--embedding-endpoint",
+        default="http://localhost:8000/v1",
+        help="Base URL for embedding service",
+    )
+    parser.add_argument(
+        "--chat-endpoint",
+        default="http://localhost:8001/v1",
+        help="Base URL for chat service",
+    )
+    parser.add_argument(
+        "--db-path", default="./milvus_demo.db", help="Path to Milvus database"
+    )
+    parser.add_argument(
+        "-i", "--interactive", action="store_true", help="Enable interactive Q&A mode"
+    )
+    parser.add_argument(
+        "-c",
+        "--chunk-size",
+        type=int,
+        default=1000,
+        help="Chunk size for document splitting",
+    )
+    parser.add_argument(
+        "-o",
+        "--chunk-overlap",
+        type=int,
+        default=200,
+        help="Chunk overlap for document splitting",
+    )
+    parser.add_argument(
+        "-k", "--top-k", type=int, default=3, help="Number of top results to retrieve"
+    )
 
     return parser
 
@@ -193,7 +200,7 @@ def main():
             question = input("\nEnter your question: ")
 
             # Check for exit command
-            if question.lower() in ['quit', 'exit', 'q']:
+            if question.lower() in ["quit", "exit", "q"]:
                 print("Exiting interactive mode...")
                 break
 

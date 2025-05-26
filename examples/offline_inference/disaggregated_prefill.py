@@ -4,6 +4,7 @@ This file demonstrates the example usage of disaggregated prefilling
 We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
 and then transfer the KV cache between them.
 """
+
 import os
 import time
 from multiprocessing import Event, Process
@@ -32,17 +33,21 @@ def run_prefill(prefill_done):
     # This instance is the prefill node (kv_producer, rank 0).
     # The number of parallel instances for KV cache transfer is set to 2,
     # as required for PyNcclConnector.
-    ktc = KVTransferConfig(kv_connector="PyNcclConnector",
-                           kv_role="kv_producer",
-                           kv_rank=0,
-                           kv_parallel_size=2)
+    ktc = KVTransferConfig(
+        kv_connector="PyNcclConnector",
+        kv_role="kv_producer",
+        kv_rank=0,
+        kv_parallel_size=2,
+    )
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
-    llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
-              kv_transfer_config=ktc,
-              max_model_len=2000,
-              gpu_memory_utilization=0.8)
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        kv_transfer_config=ktc,
+        max_model_len=2000,
+        gpu_memory_utilization=0.8,
+    )
 
     llm.generate(prompts, sampling_params)
     print("Prefill node is finished.")
@@ -72,17 +77,21 @@ def run_decode(prefill_done):
     # This instance is the decode node (kv_consumer, rank 1).
     # The number of parallel instances for KV cache transfer is set to 2,
     # as required for PyNcclConnector.
-    ktc = KVTransferConfig(kv_connector="PyNcclConnector",
-                           kv_role="kv_consumer",
-                           kv_rank=1,
-                           kv_parallel_size=2)
+    ktc = KVTransferConfig(
+        kv_connector="PyNcclConnector",
+        kv_role="kv_consumer",
+        kv_rank=1,
+        kv_parallel_size=2,
+    )
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
-    llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
-              kv_transfer_config=ktc,
-              max_model_len=2000,
-              gpu_memory_utilization=0.8)
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        kv_transfer_config=ktc,
+        max_model_len=2000,
+        gpu_memory_utilization=0.8,
+    )
 
     # Wait for the producer to start the pipe
     print("Waiting for prefill node to finish...")
@@ -99,8 +108,8 @@ def run_decode(prefill_done):
 
 def main():
     prefill_done = Event()
-    prefill_process = Process(target=run_prefill, args=(prefill_done, ))
-    decode_process = Process(target=run_decode, args=(prefill_done, ))
+    prefill_process = Process(target=run_prefill, args=(prefill_done,))
+    decode_process = Process(target=run_decode, args=(prefill_done,))
 
     # Start prefill node
     prefill_process.start()

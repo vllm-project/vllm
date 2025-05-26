@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import requests
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-    OTLPSpanExporter)
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import (BatchSpanProcessor,
-                                            ConsoleSpanExporter)
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.trace import SpanKind, set_tracer_provider
-from opentelemetry.trace.propagation.tracecontext import (
-    TraceContextTextMapPropagator)
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 trace_provider = TracerProvider()
 set_tracer_provider(trace_provider)
