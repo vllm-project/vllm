@@ -383,21 +383,20 @@ class P2pNcclEngine:
                 while not self.send_queue:
                     self.send_queue_cv.wait()
                 tensor_id, remote_address, tensor = self.send_queue.popleft()
-                # if not self.send_queue:
-                #     self.send_queue_cv.notify()
+                if not self.send_queue:
+                    self.send_queue_cv.notify()
             self._send_sync(tensor_id, tensor, remote_address)
 
     def wait_for_sent(self):
-        return
-        # if self.send_type == "PUT_ASYNC":
-        #     start_time = time.time()
-        #     with self.send_queue_cv:
-        #         while self.send_queue:
-        #             self.send_queue_cv.wait()
-        #     duration = time.time() - start_time
-        #     logger.info(
-        #         "🚧[PUT_ASYNC]It took %.3fms to wait for the send_queue"
-        #         " to be empty, rank:%d", duration * 1000, self.rank)
+        if self.send_type == "PUT_ASYNC":
+            start_time = time.time()
+            with self.send_queue_cv:
+                while self.send_queue:
+                    self.send_queue_cv.wait()
+            duration = time.time() - start_time
+            logger.info(
+                "🚧[PUT_ASYNC]It took %.3fms to wait for the send_queue"
+                " to be empty, rank:%d", duration * 1000, self.rank)
 
     def _send_sync(
         self,
@@ -476,18 +475,18 @@ class P2pNcclEngine:
                     logger.debug("🐞get_finished, remove tensor_id:%s, addr:%d",
                                  tensor_id, addr)
 
-        num_layers = len(forward_context.no_compile_layers)
+        # num_layers = len(forward_context.no_compile_layers)
 
         # Retrieve requests that have already sent the KV cache.
         finished_sending: set[str] = set()
-        if self.send_type == "PUT_ASYNC" or self.send_type == "GET":
-            for request_id in self.send_request_id_to_tensor_ids:
-                if (len(self.send_request_id_to_tensor_ids[request_id]) ==
-                        num_layers):
-                    finished_sending.add(request_id)
+        # if self.send_type == "PUT_ASYNC" or self.send_type == "GET":
+        #     for request_id in self.send_request_id_to_tensor_ids:
+        #         if (len(self.send_request_id_to_tensor_ids[request_id]) ==
+        #                 num_layers):
+        #             finished_sending.add(request_id)
 
         # Retrieve requests that have already received the KV cache.
-        # finished_recving: set[str] = set()
+        finished_recving: set[str] = set()
         # for request_id in self.recv_request_id_to_tensor_ids:
         #     if (len(self.recv_request_id_to_tensor_ids[request_id]) ==
         #             num_layers):

@@ -480,7 +480,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self.chunked_prefill.pop(request.request_id, None)
 
-        return True, None
+        return False, None
 
     # ==============================
     # Static methods
