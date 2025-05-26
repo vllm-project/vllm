@@ -81,14 +81,14 @@ body:
     required: true
 - type: markdown
   attributes:
-    value: >
-      ⚠️ Please separate bugs of `transformers` implementation or usage from bugs of `vllm`. If you think anything is wrong with the models' output:
+    value: |
+      ⚠️ Please separate bugs of `transformers` implementation or usage from bugs of `vllm`. If you think anything is wrong with the model's output:
 
       - Try the counterpart of `transformers` first. If the error appears, please go to [their issues](https://github.com/huggingface/transformers/issues?q=is%3Aissue+is%3Aopen+sort%3Aupdated-desc).
 
       - If the error only appears in vllm, please provide the detailed script of how you run `transformers` and `vllm`, also highlight the difference and what you expect.
 
-      Thanks for contributing 🎉!
+      Thanks for reporting 🙏!
 - type: checkboxes
   id: askllm
   attributes:

@@ -17,7 +17,7 @@ repos:
   - id: ruff
     args: [--output-format, github, --fix]
   - id: ruff-format
-    files: ^(.buildkite|benchmarks)/.*
+    files: ^(.buildkite|benchmarks|examples)/.*
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.1
   hooks:
@@ -39,6 +39,7 @@ repos:
   rev: v0.9.29
   hooks:
   - id: pymarkdown
+    exclude: '.*\.inc\.md'
     args: [fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
@@ -127,6 +128,20 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/update-dockerfile-graph.sh
     language: script
+  - id: enforce-import-regex-instead-of-re
+    name: Enforce import regex as re
+    entry: python tools/enforce_regex_import.py
+    language: python
+    types: [python]
+    pass_filenames: false
+    additional_dependencies: [regex]
+  # forbid directly import triton
+  - id: forbid-direct-triton-import
+    name: "Forbid direct 'import triton'"
+    entry: python tools/check_triton_import.py
+    language: python
+    types: [python]
+    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

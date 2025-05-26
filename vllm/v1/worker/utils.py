@@ -66,7 +66,7 @@ def gather_mm_placeholders(
     """
     Reconstructs the embeddings from the placeholder tokens.
 
-    This is the operation of {func}`scatter_mm_placeholders`.
+    This is the operation of [scatter_mm_placeholders][].
     """
     if is_embed is None:
         return placeholders

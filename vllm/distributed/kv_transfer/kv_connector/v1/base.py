@@ -183,7 +183,8 @@ class KVConnectorBase_V1(ABC):
         finished generating tokens.
 
         Returns:
-            ids of requests that have finished asynchronous (recving, sending).
+            ids of requests that have finished asynchronous transfer,
+            tuple of (sending/saving ids, recving/loading ids).
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
@@ -209,10 +210,11 @@ class KVConnectorBase_V1(ABC):
                 computed tokens for this request
 
         Returns:
-            * the number of tokens that can be loaded from the 
-              external KV cache beyond what is already computed.
-            * true if external KV cache tokens will be loaded
-              asynchronously (between scheduler steps).
+            A tuple with the following elements:
+                - The number of tokens that can be loaded from the 
+                  external KV cache beyond what is already computed.
+                - `True` if external KV cache tokens will be loaded
+                  asynchronously (between scheduler steps).
         """
         pass
 
