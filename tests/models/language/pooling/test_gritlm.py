@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import importlib.util
-import math
 from array import array
 
 import openai
@@ -104,16 +103,16 @@ def get_test_data():
 
 def validate_embed_output(q_rep: list[list[float]], d_rep: list[list[float]]):
     cosine_sim_q0_d0 = 1 - cosine(q_rep[0], d_rep[0])
-    assert math.isclose(cosine_sim_q0_d0, 0.609, abs_tol=0.001)
+    assert cosine_sim_q0_d0 == pytest.approx(0.609, abs=0.001)
 
     cosine_sim_q0_d1 = 1 - cosine(q_rep[0], d_rep[1])
-    assert math.isclose(cosine_sim_q0_d1, 0.101, abs_tol=0.001)
+    assert cosine_sim_q0_d1 == pytest.approx(0.101, abs=0.001)
 
     cosine_sim_q1_d0 = 1 - cosine(q_rep[1], d_rep[0])
-    assert math.isclose(cosine_sim_q1_d0, 0.120, abs_tol=0.001)
+    assert cosine_sim_q1_d0 == pytest.approx(0.120, abs=0.001)
 
     cosine_sim_q1_d1 = 1 - cosine(q_rep[1], d_rep[1])
-    assert math.isclose(cosine_sim_q1_d1, 0.534, abs_tol=0.001)
+    assert cosine_sim_q1_d1 == pytest.approx(0.534, abs=0.001)
 
 
 def test_gritlm_offline_embedding(vllm_runner):

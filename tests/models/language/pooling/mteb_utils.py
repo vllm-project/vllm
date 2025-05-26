@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import math
 from collections.abc import Sequence
 
 import mteb
@@ -115,4 +114,4 @@ def mteb_test_embed_models(hf_runner,
     print("SentenceTransformer:", model_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert math.isclose(st_main_score, vllm_main_score, rel_tol=MTEB_EMBED_TOL)
+    assert st_main_score == pytest.approx(vllm_main_score, rel=MTEB_EMBED_TOL)

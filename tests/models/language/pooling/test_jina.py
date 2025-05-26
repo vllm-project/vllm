@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import math
-
 import pytest
 
 from vllm import PoolingParams
@@ -60,7 +58,7 @@ def test_llm_1_to_1(vllm_runner, hf_runner, model_name, dtype: str):
     assert len(vllm_outputs) == 1
     assert len(hf_outputs) == 1
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
 
 
 @pytest.mark.parametrize("dtype", ["half"])
@@ -78,8 +76,8 @@ def test_llm_1_to_N(vllm_runner, hf_runner, model_name, dtype: str):
     assert len(vllm_outputs) == 10
     assert len(hf_outputs) == 10
 
-    assert math.isclose(hf_outputs[0], vllm_outputs[0], rel_tol=0.01)
-    assert math.isclose(hf_outputs[1], vllm_outputs[1], rel_tol=0.01)
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
+    assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
 @pytest.fixture(scope="module", params=EMBEDDING_MODELS)
