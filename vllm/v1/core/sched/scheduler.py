@@ -330,11 +330,10 @@ class Scheduler(SchedulerInterface):
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        if self.policy == "priority":
-            skipped_waiting_requests = cast(List[tuple[int, float, Request]],
-                                            [])
-        else:
-            skipped_waiting_requests = cast(Deque[Request], deque())
+        skipped_waiting_requests: Union[List[tuple[int, float, Request]],
+                                        Deque[Request]] = ([] if self.policy
+                                                           == "priority" else
+                                                           deque())
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -547,14 +546,16 @@ class Scheduler(SchedulerInterface):
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
             if self.policy == "priority":
-                for item in skipped_waiting_requests:  # iterate through list of tuples
-                    heapq.heappush(
-                        cast(List[tuple[int, float, Request]], self.waiting),
-                        item)
+                waiting_list = cast(List[tuple[int, float, Request]],
+                                    self.waiting)
+                skipped_list = cast(List[tuple[int, float, Request]],
+                                    skipped_waiting_requests)
+                for item in skipped_list:
+                    heapq.heappush(waiting_list, item)
             else:  # FCFS
-                cast(Deque[Request], self.waiting).extendleft(
-                    cast(Deque[Request], skipped_waiting_requests)
-                )  # skipped_waiting_requests is a deque here
+                waiting_deque = cast(Deque[Request], self.waiting)
+                skipped_deque = cast(Deque[Request], skipped_waiting_requests)
+                waiting_deque.extendleft(skipped_deque)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
