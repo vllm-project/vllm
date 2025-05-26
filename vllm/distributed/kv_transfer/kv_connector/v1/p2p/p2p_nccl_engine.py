@@ -5,7 +5,7 @@ import threading
 import time
 import typing
 from collections import deque
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgpack
 import torch
@@ -464,10 +464,10 @@ class P2pNcclEngine:
                 if tensor_id in self.recv_store:
                     with self.recv_store_cv:
                         tensor = self.recv_store.pop(tensor_id, None)
-                        self.send_request_id_to_tensor_ids.pop(request_id,
-                                                               None)
-                        self.recv_request_id_to_tensor_ids.pop(request_id,
-                                                               None)
+                        self.send_request_id_to_tensor_ids.pop(
+                            request_id, None)
+                        self.recv_request_id_to_tensor_ids.pop(
+                            request_id, None)
                     addr = 0
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
