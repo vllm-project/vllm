@@ -834,14 +834,15 @@ class FusedMoE(torch.nn.Module):
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
         if self.moe_parallel_config.use_pplx_kernels:
+            act_dtype = torch.get_default_dtype()
             self.batched_hidden_states = torch.zeros(
                 (MOE_DP_CHUNK_SIZE, self.hidden_size),
-                dtype=torch.bfloat16,
+                dtype=act_dtype,
                 device=torch.cuda.current_device())
 
             self.batched_router_logits = torch.zeros(
                 (MOE_DP_CHUNK_SIZE, self.global_num_experts),
-                dtype=torch.bfloat16,
+                dtype=act_dtype,
                 device=torch.cuda.current_device())
 
     @property
@@ -1235,6 +1236,8 @@ class FusedMoE(torch.nn.Module):
                              full_router_logits: torch.Tensor):
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
+        assert self.batched_hidden_states.dtype == full_hidden_states.dtype
+        assert self.batched_router_logits.dtype == full_router_logits.dtype
 
         full_final_hidden_states = torch.empty_like(full_hidden_states)
 
@@ -1243,8 +1246,10 @@ class FusedMoE(torch.nn.Module):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            staged_hidden_states = self.batched_hidden_states[:chunk_size, :]
-            staged_router_logits = self.batched_router_logits[:chunk_size, :]
+            staged_hidden_states = self.batched_hidden_states[:
+                                                              chunk_size, :]  # type: ignore
+            staged_router_logits = self.batched_router_logits[:
+                                                              chunk_size, :]  # type: ignore
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
