@@ -321,6 +321,7 @@ class HPUEncoderDecoderModelRunner(
         encoder_seq_lens_tensor = self._list_to_int32_tensor(encoder_seq_lens)
         attn_metadata.encoder_seq_lens = encoder_seq_lens
         attn_metadata.encoder_seq_lens_tensor = encoder_seq_lens_tensor
+        attn_metadata.max_encoder_seq_len = max(encoder_seq_lens, default=0)
 
         return attn_metadata
 
@@ -503,6 +504,7 @@ class HPUEncoderDecoderModelRunner(
             'seq_lens',
             'encoder_seq_lens',
             'encoder_seq_lens_tensor',
+            'max_encoder_seq_len',
             'cross_block_list',
             'cross_slot_mapping',
             'cross_block_mapping',

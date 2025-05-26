@@ -1671,6 +1671,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             seq_lens_tensor=None,
             encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
+            max_encoder_seq_len=max(encoder_seq_lens, default=0),
             cross_block_list=cross_block_list,
             cross_block_groups=cross_block_groups,
             cross_block_usage=cross_block_usage,

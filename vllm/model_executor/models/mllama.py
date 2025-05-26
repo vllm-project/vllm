@@ -1366,8 +1366,7 @@ class MllamaForCausalLM(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(MllamaMultiModalProcessor,
                                         info=MllamaProcessingInfo,
                                         dummy_inputs=MllamaDummyInputsBuilder)
-@CustomOp.register("mllama_for_conditional_generation")
-class MllamaForConditionalGeneration(CustomOp, SupportsMultiModal,
+class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                      SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1618,80 +1617,7 @@ class MllamaForConditionalGeneration(CustomOp, SupportsMultiModal,
             device)
         return full_text_row_masked_out_mask
 
-    def forward_cuda(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        **kwargs: object,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        self.forward_native(input_ids, positions, **kwargs)
-
-    def forward_hpu(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        **kwargs: object,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata.num_prefill_tokens > 0 and \
-            attn_metadata.num_decode_tokens > 0:
-            raise ValueError("Chunk prefill not supported")
-        image_inputs = self._parse_and_validate_image_input(**kwargs)
-        cross_attention_states = None
-        cross_attention_mask = None
-        kv_range_for_decode = None
-
-        # For 1) text-only prefill and decode, 2) image-present decode.
-        if image_inputs is None:
-            full_text_row_masked_out_mask = (
-                attn_metadata.encoder_seq_lens_tensor
-                != 0).reshape(-1, 1).to(input_ids.device)
-            skip_cross_attention = max(attn_metadata.encoder_seq_lens) == 0
-
-        # For image-present prefill.
-        else:
-            skip_cross_attention = False
-
-            # Get the actual number of encoder tokens for each sample.
-            # Because attn_metadata.encoder_seq_lens only counts the last
-            # group of images for each sample, which is used to cheat the
-            # block manager to allocate blocks for those images only.
-            # See MllamaMultiModalProcessor for more details.
-            num_tiles_tensor = kwargs.pop("num_tiles")
-            num_tiles = [t.tolist() for t in num_tiles_tensor]
-            num_tokens_per_tile = calc_token_per_chunk(self.image_size)
-            actual_encoder_seq_lens = [
-                sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles
-            ]
-            for actual_len, last_group_len in zip(
-                    actual_encoder_seq_lens, attn_metadata.encoder_seq_lens):
-                assert actual_len >= last_group_len
-
-            cross_attention_states = self.get_cross_attention_states(
-                image_inputs, attn_metadata, actual_encoder_seq_lens)
-
-            full_text_row_masked_out_mask = \
-                self.get_full_text_row_masked_out_mask(
-                    attn_metadata, input_ids.device)
-
-            cross_attention_mask, kv_range_for_decode = \
-                self.get_cross_attention_mask(
-                    input_ids, attn_metadata, num_tiles,
-                    num_tokens_per_tile, cross_attention_states.dtype)
-
-        outputs = self.language_model(
-            input_ids=input_ids,
-            positions=positions,
-            cross_attention_states=cross_attention_states,
-            cross_attention_mask=cross_attention_mask,
-            kv_range_for_decode=kv_range_for_decode,
-            full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-            skip_cross_attention=skip_cross_attention,
-        )
-
-        return outputs
-
-    def forward_native(
+    def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
