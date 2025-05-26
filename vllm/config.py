@@ -543,7 +543,7 @@ class ModelConfig:
         sliding_window_pattern = getattr(self.hf_text_config,
                                          "sliding_window_pattern", None)
         has_interleaved_attention = sliding_window_pattern is not None or (
-            isinstance(sliding_window, list))
+            sliding_window is not None and isinstance(sliding_window, list))
 
         if not self.disable_sliding_window and has_interleaved_attention:
             if (backend :=
