@@ -8,6 +8,7 @@ requires = [
     "setuptools-scm>=8.0",
     "torch == 2.7.0",
     "wheel",
+    "regex",
     "jinja2",
 ]
 build-backend = "setuptools.build_meta"
@@ -165,9 +166,12 @@ markers = [
 
 [tool.pymarkdown]
 plugins.md004.style = "sublist" # ul-style
+plugins.md007.indent = 4 # ul-indent
+plugins.md007.start_indented = true # ul-indent
 plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html
+plugins.md046.enabled = false # code-block-style
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
 
 [tool.ty]
