@@ -30,7 +30,7 @@
     },
     {
         "test_name": "serving_llama8B_tp4_random_128_128",
-        "qps_list": ["inf"],
+        "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 1000000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
@@ -62,7 +62,7 @@
     },
     {
         "test_name": "serving_llama8B_tp4_random_1024_128",
-        "qps_list": ["inf"],
+        "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 1000000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
@@ -90,38 +90,6 @@
 	    "random-output-len": 128,
 	    "ignore-eos": "",
             "num_prompts": 100
-        }
-    },
-    {
-        "test_name": "serving_llama8B_tp4_random_2048_2048",
-        "qps_list": ["inf"],
-        "server_environment_variables": {
-            "VLLM_RPC_TIMEOUT": 1000000,
-	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 600,
-	    "VLLM_CPU_KVCACHE_SPACE": 40
-        },
-        "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "tensor_parallel_size": 4,
-	    "device": "cpu",
-	    "dtype": "bfloat16",
-	    "distributed_executor_backend": "mp",
-	    "block_size": 128,
-	    "trust_remote_code": "",
-	    "enable_chunked_prefill": "True",
-            "disable_log_stats": "",
-            "disable_log_requests": "",
-            "load_format": "dummy"
-        },
-        "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "backend": "vllm",
-            "dataset_name": "random",
-	    "random-input-len": 2048,
-	    "random-output-len": 2048,
-	    "ignore-eos": "",
-            "num_prompts": 60
         }
     }
 ]
