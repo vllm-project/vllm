@@ -31,6 +31,10 @@
 
 {serving_tests_markdown_table}
 
+## Platform Information
+
+{platform_markdown_table}
+
 ## json version of the benchmarking tables
 
 This section contains the data of the markdown tables above in JSON format.
