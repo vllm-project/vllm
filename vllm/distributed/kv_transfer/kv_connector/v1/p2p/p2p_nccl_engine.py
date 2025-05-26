@@ -17,6 +17,9 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 from vllm.tensor_memory_pool import TensorMemoryPool
 from vllm.utils import current_stream, get_ip
 
+if TYPE_CHECKING:
+    from vllm.forward_context import ForwardContext
+
 logger = logging.getLogger(__name__)
 
 
@@ -366,15 +369,13 @@ class P2pNcclEngine:
         request_id = tensor_id.split('#')[0]
         if request_id not in self.send_request_id_to_tensor_ids:
             self.send_request_id_to_tensor_ids[request_id] = set()
-        self.send_request_id_to_tensor_ids[request_id].add(
-            tensor_id)
+        self.send_request_id_to_tensor_ids[request_id].add(tensor_id)
     
     def _have_received_tensor_id(self, tensor_id: str):
         request_id = tensor_id.split('#')[0]
         if request_id not in self.recv_request_id_to_tensor_ids:
             self.recv_request_id_to_tensor_ids[request_id] = set()
-        self.recv_request_id_to_tensor_ids[request_id].add(
-            tensor_id)
+        self.recv_request_id_to_tensor_ids[request_id].add(tensor_id)
 
     def _send_async(self):
         while True:
@@ -463,15 +464,16 @@ class P2pNcclEngine:
                 if tensor_id in self.recv_store:
                     with self.recv_store_cv:
                         tensor = self.recv_store.pop(tensor_id, None)
-                        self.recv_request_id_to_tensor_ids.discard(request_id)
-                        self.send_request_id_to_tensor_ids.discard(request_id)
+                        self.send_request_id_to_tensor_ids.pop(request_id,
+                                                               None)
+                        self.recv_request_id_to_tensor_ids.pop(request_id,
+                                                               None)
                     addr = 0
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
                         self.pool.free(addr)
-                    logger.debug(
-                        "🐞get_finished, remove tensor_id:%s, addr:%d",
-                        tensor_id, addr)
+                    logger.debug("🐞get_finished, remove tensor_id:%s, addr:%d",
+                                 tensor_id, addr)
 
         num_layers = len(forward_context.no_compile_layers)
 
@@ -486,13 +488,12 @@ class P2pNcclEngine:
         # Retrieve requests that have already received the KV cache.
         finished_recving: set[str] = set()
         for request_id in self.recv_request_id_to_tensor_ids:
-            if (len(self.recv_request_id_to_tensor_ids[request_id]) == 
+            if (len(self.recv_request_id_to_tensor_ids[request_id]) ==
                     num_layers):
                 finished_recving.add(request_id)
 
-        logger.debug(
-            "🐞get_finished, finished_sending:%s, finished_recving:%s",
-            finished_sending, finished_recving)
+        logger.debug("🐞get_finished, finished_sending:%s, finished_recving:%s",
+                     finished_sending, finished_recving)
 
         return finished_sending or None, finished_recving or None
 

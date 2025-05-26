@@ -101,8 +101,8 @@ class MultiConnector(KVConnectorBase_V1):
             c.wait_for_save()
 
     def get_finished(
-        self, finished_req_ids: set[str], **kwargs
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+            self, finished_req_ids: set[str],
+            **kwargs) -> tuple[Optional[set[str]], Optional[set[str]]]:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
         for c in self._connectors:

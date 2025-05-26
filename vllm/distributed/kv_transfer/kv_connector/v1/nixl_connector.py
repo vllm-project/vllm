@@ -139,8 +139,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def get_finished(self,
-                     finished_req_ids: set[str],
+    def get_finished(self, finished_req_ids: set[str],
                      **kwargs) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
