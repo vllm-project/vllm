@@ -80,18 +80,30 @@ class AutoWeightsLoader:
     environment variable ``VLLM_LOGGING_LEVEL=DEBUG``.
     """
 
+    # Models trained using early version ColossalAI
+    # may include these tensors in checkpoint. Skip them.
+    ROTARY_EMBEDS_UNUSED_WEIGHTS = [
+        "rotary_emb.inv_freq",
+        "rotary_emb.cos_cached",
+        "rotary_emb.sin_cached",
+    ]
+
     def __init__(
         self,
         module: nn.Module,
         *,
         skip_prefixes: Optional[list[str]] = None,
+        skip_substrs: Optional[list[str]] = None,
         ignore_unexpected_prefixes: Optional[list[str]] = None,
     ) -> None:
         super().__init__()
 
         self.module = module
         self.skip_prefixes = skip_prefixes or []
+        self.skip_substrs = skip_substrs or []
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
+        # update default skip_substrs
+        self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
 
     def _groupby_prefix(
         self,
@@ -119,7 +131,8 @@ class AutoWeightsLoader:
         return ".".join((prefix, rest))
 
     def _can_skip(self, qualname: str) -> bool:
-        return any(qualname.startswith(p) for p in self.skip_prefixes)
+        return (any(qualname.startswith(p) for p in self.skip_prefixes)
+                or any(substr in qualname for substr in self.skip_substrs))
 
     def _can_ignore_unexpected(self, qualname: str) -> bool:
         return any(
@@ -257,6 +270,9 @@ class AutoWeightsLoader:
     ) -> set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
+        # filter out weights with first-prefix/substr to skip in name
+        weights = ((name, weight) for name, weight in weights
+                   if not self._can_skip(name))
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
         return autoloaded_weights

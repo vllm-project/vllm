@@ -42,7 +42,6 @@ def tpu_platform_plugin() -> Optional[str]:
         logger.debug("Confirmed TPU platform is available.")
     except Exception as e:
         logger.debug("TPU platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.tpu.TpuPlatform" if is_tpu else None
 
@@ -112,7 +111,6 @@ def rocm_platform_plugin() -> Optional[str]:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
         logger.debug("ROCm platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
@@ -130,7 +128,6 @@ def hpu_platform_plugin() -> Optional[str]:
                          "habana_frameworks is not found.")
     except Exception as e:
         logger.debug("HPU platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.hpu.HpuPlatform" if is_hpu else None
 
@@ -148,7 +145,6 @@ def xpu_platform_plugin() -> Optional[str]:
             logger.debug("Confirmed XPU platform is available.")
     except Exception as e:
         logger.debug("XPU platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
 
@@ -170,7 +166,6 @@ def cpu_platform_plugin() -> Optional[str]:
 
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.cpu.CpuPlatform" if is_cpu else None
 
