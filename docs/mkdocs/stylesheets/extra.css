@@ -5,7 +5,7 @@
 }
 
 /* https://christianoliff.com/blog/styling-external-links-with-an-icon-in-css/ */
-a:not(:has(svg)):not(.md-icon) {
+a:not(:has(svg)):not(.md-icon):not(.autorefs-external) {
     align-items: center;
 
     &[href^="//"]::after,

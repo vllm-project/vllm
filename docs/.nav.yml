@@ -18,7 +18,7 @@ nav:
       - Roadmap: https://roadmap.vllm.ai
       - Releases: https://github.com/vllm-project/vllm/releases
   - User Guide:
-    - usage/README.md
+    - Summary: usage/README.md
     - General:
       - usage/*
     - Inference and Serving:
@@ -44,7 +44,7 @@ nav:
       - features/*
       - features/quantization
   - Developer Guide:
-    - contributing/README.md
+    - Summary: contributing/README.md
     - General:
       - glob: contributing/*
         flatten_single_child_sections: true
@@ -53,9 +53,10 @@ nav:
       - V0: design
       - V1: design/v1
   - API Reference:
-    - api/README.md
-    - glob: api/vllm/*
-      preserve_directory_names: true
+    - Summary: api/README.md
+    - Contents:
+      - glob: api/vllm/*
+        preserve_directory_names: true
   - Community:
     - community/*
     - Blog: https://blog.vllm.ai
