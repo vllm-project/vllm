@@ -46,7 +46,7 @@ class UBatchContext:
         # self.stream.wait_event(start_event)
         print("Starting ubatch %d" % self.id)
         # if self.gpu_wait_on_launch:
-        #     self.gpu_stream_wait()
+        self.gpu_stream_wait()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
