@@ -44,6 +44,7 @@ MODELS = [
     ########### Qwen2ForCausalLM
     EmbedModelInfo("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
                    architecture="Qwen2ForCausalLM",
+                   dtype="float32",
                    enable_test=True),
     ########## ModernBertModel
     EmbedModelInfo("Alibaba-NLP/gte-modernbert-base",
@@ -53,16 +54,9 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-def test_models_mteb(
-    hf_runner,
-    vllm_runner,
-    model_info: EmbedModelInfo,
-    monkeypatch,
-) -> None:
+def test_models_mteb(hf_runner, vllm_runner,
+                     model_info: EmbedModelInfo) -> None:
     from .mteb_utils import mteb_test_embed_models
-
-    if model_info.name == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
 
     vllm_extra_kwargs: dict[str, Any] = {}
     if model_info.architecture == "GteNewModel":
