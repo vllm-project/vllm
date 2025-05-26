@@ -370,7 +370,7 @@ class P2pNcclEngine:
         if request_id not in self.send_request_id_to_tensor_ids:
             self.send_request_id_to_tensor_ids[request_id] = set()
         self.send_request_id_to_tensor_ids[request_id].add(tensor_id)
-    
+
     def _have_received_tensor_id(self, tensor_id: str):
         request_id = tensor_id.split('#')[0]
         if request_id not in self.recv_request_id_to_tensor_ids:
