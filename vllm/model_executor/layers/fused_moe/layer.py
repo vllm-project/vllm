@@ -10,6 +10,8 @@ from weakref import WeakValueDictionary
 
 import torch
 import torch.nn.functional as F
+from compressed_tensors.quantization import (QuantizationStrategy,
+                                             QuantizationType)
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
@@ -25,8 +27,6 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from compressed_tensors.quantization import (
-    QuantizationStrategy, QuantizationType)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -281,7 +281,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 class AllToAllCache:
 
     def __init__(self):
-        print("INIT AllToAllCache")
         self._cache: WeakValueDictionary = WeakValueDictionary()
         self._lock = threading.RLock()  # Reentrant lock for thread safety
 
@@ -698,7 +697,8 @@ def _construct_prepare_finalize(
         if moe.block_size == moe.hidden_dim:
             scale_elems = 4  # hack to circumvent pplx data format requirements
         else:
-            scale_elems = (moe.hidden_dim + moe.block_size - 1) // moe.block_size
+            scale_elems = (moe.hidden_dim + moe.block_size -
+                           1) // moe.block_size
 
         all_to_all = get_all_to_all(
             max_num_tokens=max_num_tokens,
@@ -715,7 +715,6 @@ def _construct_prepare_finalize(
             hidden_dim_scale_bytes=(0 if moe.quant_dtype.itemsize != 1 else
                                     scale_elems * torch.float32.itemsize))
 
-        print("CALL PplxPrepareAndFinalize")
         return PplxPrepareAndFinalize(
             all_to_all,
             max_num_tokens=max_num_tokens,
@@ -727,7 +726,6 @@ def _construct_prepare_finalize(
                 "weights").strategy == QuantizationStrategy.TOKEN,
         )
 
-    print("RETURN NO PPLX KERNEL")
     return None
 
 
@@ -840,8 +838,8 @@ class FusedMoE(torch.nn.Module):
         if quant_config is not None:
             input_quant = quant_config.target_scheme_map["Linear"].get(
                 "input_activations")
-            if (input_quant is not None and input_quant.num_bits == 8 and
-                input_quant.type == QuantizationType.FLOAT):
+            if (input_quant is not None and input_quant.num_bits == 8
+                    and input_quant.type == QuantizationType.FLOAT):
                 quant_dtype = torch.float8_e4m3fn
 
         moe = MoEConfig(
@@ -863,15 +861,11 @@ class FusedMoE(torch.nn.Module):
             prepare_finalize = _construct_prepare_finalize(moe, quant_config)
         else:
             quant_method = quant_config.get_quant_method(self, prefix)
-            print("quant_method:", quant_method)
-            # print("strategy:", quant_config.target_scheme_map["Linear"].get(
-            # "weights").strategy)
             if quant_method.supports_pplx():
-                print("prepare finalize for quantized method")
-                prepare_finalize = _construct_prepare_finalize(moe, quant_config)
+                prepare_finalize = _construct_prepare_finalize(
+                    moe, quant_config)
                 quant_method.moe = moe
             else:
-                print("no prepare finalize for quantized method")
                 # No pplx for other quantized types yet.
                 prepare_finalize = None
 

@@ -90,7 +90,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
         num_dp = self.world_size // self.dp_size
-        expert_x = torch.empty(
+        expert_x = torch.zeros(
             (num_local_experts, self.max_num_tokens * num_dp, hidden_dim),
             dtype=a1q.dtype,
             device=device,
@@ -101,7 +101,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             float32_size = torch.float32.itemsize
             block_size = (self.block_shape[0] if self.block_shape is not None
                           else 1) * float32_size
-            expert_x_scale = torch.empty(
+            expert_x_scale = torch.zeros(
                 (
                     num_local_experts,
                     expert_x.size(1),
@@ -115,13 +115,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: Optional[torch.Tensor] = None
 
-        print(expert_num_tokens.dtype)
-        print(expert_x.dtype)
-        print(expert_x_scale.dtype)
-        print(a1q.dtype)
-        print(a1q_scale.dtype)
-        print(rank_topk_ids.dtype)
-
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,
@@ -131,10 +124,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=rank_topk_ids.to(torch.uint32),
             bound_m=bound_m,
         )
-        if self.per_act_token:
-            expert_x_scale = expert_x_scale[:, :, 0:1]
-        else:
-            expert_x_scale = expert_x_scale[0:1, 0:1, 0:1][0][0]
+        expert_x_scale = expert_x_scale[:, :, 0:1]
 
         return expert_x, expert_x_scale, expert_num_tokens
 

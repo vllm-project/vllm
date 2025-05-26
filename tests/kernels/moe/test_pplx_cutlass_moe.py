@@ -1,32 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 import dataclasses
 import traceback
+from typing import Callable
+
 import pytest
 import torch
-import random
-
-from typing import Callable, Optional
 
 from vllm import _custom_ops as ops
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config
 # from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp8_test
-from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
-                                                            fused_topk)
-from vllm.forward_context import set_forward_context
-from tests.kernels.utils import torch_moe
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
 
 try:
-    from pplx_kernels import AllToAll #or AllToAllInternode?
+    from pplx_kernels import AllToAll  # or AllToAllInternode?
     from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
                                       nvshmem_finalize, nvshmem_get_unique_id,
                                       nvshmem_init)
     has_pplx = False
-except ImportError as ex:
+except ImportError:
     has_pplx = False
-
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
 
 
 from torch.multiprocessing import (
@@ -37,6 +30,7 @@ NUM_EXPERTS = [40, 64]
 TOP_KS = [6, 8]
 
 P = ParamSpec("P")
+
 
 @dataclasses.dataclass
 class ProcessGroupInfo:
@@ -91,6 +85,7 @@ def _worker_parallel_launch(
     finally:
         torch.distributed.destroy_process_group()
 
+
 def parallel_launch(
     world_size: int,
     worker: Callable[Concatenate[ProcessGroupInfo, P], None],
@@ -110,6 +105,7 @@ def parallel_launch(
         join=True,
     )
 
+
 def rank_chunk(num, r, w):
     rem = num % w
     return (num // w) + (1 if r < rem else 0)
@@ -119,9 +115,9 @@ def rank_chunk(num, r, w):
 def chunk_by_rank(t, r, w):
     num = t.shape[0]
     chunk = rank_chunk(num, r, w)
-    #print(f"chunk {t.shape}, {w}, {r}, {chunk}, {r*chunk}:{(r + 1)*chunk}")
+    # print(f"chunk {t.shape}, {num}, {w}, {r}, {chunk}, {r*chunk}:{(r + 1)*chunk}")
     rem = num % w
-    if r < rem:
+    if rem == 0 or r < rem:
         return t[(r * chunk):(r + 1) * chunk].contiguous()
     else:
         long_chunks = (num // w + 1) * rem
@@ -129,12 +125,12 @@ def chunk_by_rank(t, r, w):
         start = long_chunks + short_chunks
         return t[start:start + chunk].contiguous()
 
-from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-    PplxPrepareAndFinalize)
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    CutlassExpertsFp8)
+
+from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
+from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+    PplxPrepareAndFinalize)
 
 
 def pplx_cutlass_moe(
@@ -161,7 +157,7 @@ def pplx_cutlass_moe(
 
     num_tokens, hidden_dim = a.shape
     num_experts = w1.shape[0]
-    block_size = hidden_dim # TODO support more cases
+    block_size = hidden_dim  # TODO support more cases
     device = pgi.device
     rank = pgi.rank
     world_size = pgi.world_size
@@ -180,7 +176,7 @@ def pplx_cutlass_moe(
     #                              torch.float32.itemsize))
 
     if block_size == hidden_dim:
-        scale_elems = 4 # hack to circumvent pplx data format requirements
+        scale_elems = 4  # hack to circumvent pplx data format requirements
     else:
         scale_elems = (hidden_dim + block_size - 1) // block_size,
     # print("SCALE ELEMS:", scale_elems)
@@ -193,7 +189,7 @@ def pplx_cutlass_moe(
         world_size=pgi.world_size,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
-        hidden_dim_bytes=hidden_dim,# * a.dtype.itemsize,
+        hidden_dim_bytes=hidden_dim,  # * a.dtype.itemsize,
         hidden_dim_scale_bytes=scale_elems * torch.float32.itemsize,
     )
 
@@ -210,10 +206,22 @@ def pplx_cutlass_moe(
     # print(w1.shape, w2.shape)
     # print(ab_strides1, c_strides1, ab_strides2, c_strides2)
     rank_num_experts = rank_chunk(num_experts, rank, world_size)
-    ab_strides1 = torch.full((rank_num_experts, ), w1.shape[2], device=device, dtype=torch.int64)
-    c_strides1 = torch.full((rank_num_experts, ), w1.shape[1], device=device, dtype=torch.int64)
-    ab_strides2 = torch.full((rank_num_experts, ), w2.shape[2], device=device, dtype=torch.int64)
-    c_strides2 = torch.full((rank_num_experts, ), w2.shape[1], device=device, dtype=torch.int64)
+    ab_strides1 = torch.full((rank_num_experts, ),
+                             w1.shape[2],
+                             device=device,
+                             dtype=torch.int64)
+    c_strides1 = torch.full((rank_num_experts, ),
+                            w1.shape[1],
+                            device=device,
+                            dtype=torch.int64)
+    ab_strides2 = torch.full((rank_num_experts, ),
+                             w2.shape[2],
+                             device=device,
+                             dtype=torch.int64)
+    c_strides2 = torch.full((rank_num_experts, ),
+                            w2.shape[1],
+                            device=device,
+                            dtype=torch.int64)
 
     # print("a1 scale before repeat:", a1_scale.shape, a.shape)
     # print(a1_scale)
@@ -236,16 +244,8 @@ def pplx_cutlass_moe(
         per_act_token=per_act_token,
     )
 
-    experts = CutlassExpertsFp8(
-            (num_experts + world_size - 1) // world_size,
-            max_num_tokens * world_size,
-            ab_strides1,
-            c_strides1,
-            ab_strides2,
-            c_strides2,
-            out_dtype,
-            per_act_token,
-            per_out_ch)
+    experts = CutlassExpertsFp8((num_experts + world_size - 1) // world_size,
+                                out_dtype, per_act_token, per_out_ch)
 
     fused_cutlass_experts = FusedMoEModularKernel(
         prepare_finalize,
@@ -255,8 +255,10 @@ def pplx_cutlass_moe(
     # a1_scale = a1_scale.repeat(a.shape).contiguous()
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
     score_chunk = chunk_by_rank(scores, rank, world_size).to(device)
-    chunk_topk_weight = chunk_by_rank(topk_weights, rank, world_size).to(device)
-    chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(torch.uint32).to(device)
+    chunk_topk_weight = chunk_by_rank(topk_weights, rank,
+                                      world_size).to(device)
+    chunk_topk_ids = chunk_by_rank(topk_ids, rank,
+                                   world_size).to(torch.uint32).to(device)
 
     # print("chunk topk:", topk_ids, "->", chunk_topk_ids, "rank_num_tokens:", rank_num_tokens)
     # print("chunk a:", a, "->", a_chunk)
@@ -271,21 +273,23 @@ def pplx_cutlass_moe(
     #       w2.shape,
     #       w2_scale.shape)
 
-    # print("a1 scale full:", a1_scale[:,0:1]) 
+    # print("a1 scale full:", a1_scale[:,0:1])
     # print("a1 scale chunk:", chunk_by_rank(a1_scale, rank, world_size)[:,0:1])
 
     # print("SCALE FULL:", w1_scale)
     # print("SCALE CHUNKED:", chunk_by_rank(w1_scale, rank, world_size))
-    out = fused_cutlass_experts(a_chunk,
-                        chunk_by_rank(w1, rank, world_size),
-                        chunk_by_rank(w2, rank, world_size),
-                        chunk_topk_weight,
-                        chunk_topk_ids,
-                        global_num_experts=num_experts,
-                        expert_map=None, #TODO
-                        w1_scale=chunk_by_rank(w1_scale, rank, world_size),
-                        w2_scale=chunk_by_rank(w2_scale, rank, world_size),
-                        a1_scale=chunk_by_rank(a1_scale, rank, world_size) if per_act_token else a1_scale[rank])
+    out = fused_cutlass_experts(
+        a_chunk,
+        chunk_by_rank(w1, rank, world_size),
+        chunk_by_rank(w2, rank, world_size),
+        chunk_topk_weight,
+        chunk_topk_ids,
+        global_num_experts=num_experts,
+        expert_map=None,  #TODO
+        w1_scale=chunk_by_rank(w1_scale, rank, world_size),
+        w2_scale=chunk_by_rank(w2_scale, rank, world_size),
+        a1_scale=chunk_by_rank(a1_scale, rank, world_size)
+        if per_act_token else a1_scale[rank])
 
     torch.cuda.synchronize()
 
@@ -293,10 +297,22 @@ def pplx_cutlass_moe(
 
     # return out
 
-    ab_strides1_ground = torch.full((num_experts, ), w1.shape[2], device=device, dtype=torch.int64)
-    c_strides1_ground = torch.full((num_experts, ), w1.shape[1], device=device, dtype=torch.int64)
-    ab_strides2_ground = torch.full((num_experts, ), w2.shape[2], device=device, dtype=torch.int64)
-    c_strides2_ground = torch.full((num_experts, ), w2.shape[1], device=device, dtype=torch.int64)
+    ab_strides1_ground = torch.full((num_experts, ),
+                                    w1.shape[2],
+                                    device=device,
+                                    dtype=torch.int64)
+    c_strides1_ground = torch.full((num_experts, ),
+                                   w1.shape[1],
+                                   device=device,
+                                   dtype=torch.int64)
+    ab_strides2_ground = torch.full((num_experts, ),
+                                    w2.shape[2],
+                                    device=device,
+                                    dtype=torch.int64)
+    c_strides2_ground = torch.full((num_experts, ),
+                                   w2.shape[1],
+                                   device=device,
+                                   dtype=torch.int64)
 
     # ground_output = cutlass_moe_fp8_test(a_chunk,
     #                             w1.transpose(1, 2).clone(),
@@ -312,12 +328,12 @@ def pplx_cutlass_moe(
     #                             None,
     #                             None,
     #                             out_dtype)
-    
+
     # print("GROUND OUT:", ground_output)
 
     # print("out:", out, out.shape, rank_num_tokens)
 
-    return out#[:rank_num_tokens]
+    return out  #[:rank_num_tokens]
 
 
 vllm_config = VllmConfig()
@@ -325,6 +341,8 @@ vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
 
 from vllm.model_executor.layers.activation import SiluAndMul
+
+
 def torch_moe2(a, w1, w2, topk_weight, topk_ids):
     M, K = a.shape
     topk = topk_ids.shape[1]
@@ -339,6 +357,7 @@ def torch_moe2(a, w1, w2, topk_weight, topk_ids):
 
     return (out.view(M, -1, w2.shape[1]) *
             topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
+
 
 def _pplx_moe(
     pgi: ProcessGroupInfo,
@@ -376,29 +395,16 @@ def _pplx_moe(
     score = torch.full(score.shape, 1, dtype=score.dtype, device=score.device)
 
     with set_current_vllm_config(vllm_config):
-        torch_output = torch_moe2(a_full, w1_full, w2_full,
-                                  topk_weights, topk_ids)
-        pplx_output = pplx_cutlass_moe(pgi,
-                                    dp_size,
-                                        a,
-                                        w1,
-                                        w2,
-                                        w1_scale,
-                                        w2_scale,
-                                        topk_weights,
-                                        topk_ids,
-                                        ab_strides1,
-                                        c_strides1,
-                                        ab_strides2,
-                                        c_strides2,
-                                        a1_scale,
-                                        score,
-                                        out_dtype,
-                                        per_act_token,
-                                        per_out_ch)
+        torch_output = torch_moe2(a_full, w1_full, w2_full, topk_weights,
+                                  topk_ids)
+        pplx_output = pplx_cutlass_moe(pgi, dp_size, a, w1, w2, w1_scale,
+                                       w2_scale, topk_weights, topk_ids,
+                                       ab_strides1, c_strides1, ab_strides2,
+                                       c_strides2, a1_scale, score, out_dtype,
+                                       per_act_token, per_out_ch)
 
         torch_output = chunk_by_rank(torch_output, pgi.rank,
-                                 pgi.world_size).to(pplx_output.device)
+                                     pgi.world_size).to(pplx_output.device)
 
     # print("PPLX OUT:", pplx_output)
     # print("TORCH OUT:", torch_output)
@@ -418,11 +424,11 @@ def _pplx_moe(
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [4, 2]])
-# @pytest.mark.parametrize("m", [224])
+# @pytest.mark.parametrize("m", [2])
 # @pytest.mark.parametrize("n", [3072])
-# @pytest.mark.parametrize("k", [1536])
-# @pytest.mark.parametrize("e", [64])
-# @pytest.mark.parametrize("topk", [8])
+# @pytest.mark.parametrize("k", [1024])
+# @pytest.mark.parametrize("e", [8])
+# @pytest.mark.parametrize("topk", [2])
 # @pytest.mark.parametrize("per_act_token", [True, False])
 # @pytest.mark.parametrize("per_out_ch", [True, False])
 # @pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [4, 2]])
@@ -492,13 +498,14 @@ def test_cutlass_moe_pptx(
         # print("GENERAL TOKEN EXPERT INDICES:", token_expert_indices)
 
         world_size, dp_size = world_dp_size
-        a_scale1 = torch.randn((m if per_act_token else 1, 1),
-                               device="cuda", dtype=torch.float32) / 10.0
+        a_scale1 = torch.randn(
+            (m if per_act_token else 1, 1), device="cuda",
+            dtype=torch.float32) / 10.0
         if not per_act_token:
             a_scale1 = a_scale1.repeat(world_size, 1)
         # print("original a:", a)
         parallel_launch(world_size, _pplx_moe, dp_size, a, w1_q, w2_q,
                         w1_scale, w2_scale, topk_weights, topk_ids,
                         ab_strides1, c_strides1, ab_strides2, c_strides2,
-                        a_scale1, score, dtype,
-                        a, w1_d, w2_d, per_act_token, per_out_ch)
+                        a_scale1, score, dtype, a, w1_d, w2_d, per_act_token,
+                        per_out_ch)

@@ -153,6 +153,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         K: int,
         topk: int,
         num_experts: int,
+        padded_M: int = 0,
     ) -> tuple[int, int, torch.dtype]:
         """
         Compute the number of elements for the temporary outputs of the two
@@ -317,14 +318,25 @@ class FusedMoEModularKernel(torch.nn.Module):
         a1 = hidden_states
         E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
 
+        # print("full topk_ids shape:", topk_ids.shape)
+        # raise ValueError("stop here")
+
         if global_num_experts == -1:
             global_num_experts = E
 
         output = a1 if inplace else torch.zeros_like(a1)
 
+        # print("prepare_finalize:", vars(self.prepare_finalize))
+
+        padded_M = (self.prepare_finalize.max_num_tokens *
+                    self.prepare_finalize.world_size)
+        # print("M:", M, "padded_M:", padded_M, "global_num_experts:",
+        #       global_num_experts)
+        # print("workspace shapes:", a1.shape, M, N, K, top_k, global_num_experts)
+
         workspace13_shape, workspace2_shape, workspace_dtype = (
             self.fused_experts.workspace_shapes(a1, M, N, K, top_k,
-                                                global_num_experts))
+                                                global_num_experts, padded_M))
 
         # We can reuse the memory between cache1 and cache3 because by the time
         # we need cache3, we're done with cache1

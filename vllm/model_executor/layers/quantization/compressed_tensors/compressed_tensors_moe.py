@@ -89,7 +89,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
     # PPLX is not supported by default
     def supports_pplx(self):
-        print("call from CompressedTensorsMoEMethod")
         return False
 
 
@@ -576,10 +575,9 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             CutlassExpertsFp8)
         from vllm.model_executor.layers.fused_moe.modular_kernel import (
             FusedMoEModularKernel)
-        
+
         # self.moe should have been set by the caller
         assert self.moe is not None
-        print("SET PREPARE FINALIZE")
 
         experts = CutlassExpertsFp8(
             (self.moe.num_experts + world_size - 1) // world_size,
@@ -588,7 +586,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             self.moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
-
 
         self.fused_experts = FusedMoEModularKernel(
             prepare_finalize,
@@ -633,22 +630,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        # from vllm.model_executor.layers.fused_moe import cutlass_moe_fp8
-
-        # print("APPLY TO SHAPES:")
-        # print("input shape:", x.shape)
-        # # print("input scale 1:", layer.w13_input_scale)
-        # # print("input scale 2:", layer.w2_input_scale)
-        # print("w13_weight shape:", layer.w13_weight.shape)
-        # print("w2_weight shape:", layer.w2_weight.shape)
-        # print("global_num_experts:", global_num_experts)
-        # print("hidden_size:", self.hidden_size)
-        # print("intermediate_size_per_partition:", self.intermediate_size_per_partition)
-        # # print("w13_weight_scale shape:", layer.w13_weight_scale.shape)
-        # # print("w2_weight_scale shape:", layer.w2_weight_scale.shape)
-        # # print("topk_weights shape:", topk_weights.shape)
-        # # print("topk_ids shape:", topk_ids.shape)
-
         return self.fused_experts(
             x,
             layer.w13_weight,
@@ -663,9 +644,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             a2_scale=layer.w2_input_scale,
         )
 
-
     def supports_pplx(self):
-        print("call from CompressedTensorsW8A8Fp8MoECutlassMethod")
         return True
 
 

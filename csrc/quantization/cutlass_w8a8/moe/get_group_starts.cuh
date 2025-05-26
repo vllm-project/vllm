@@ -16,18 +16,33 @@ __global__ void get_group_gemm_starts(
     ElementAB* b_base_as_int, ElementC* out_base_as_int,
     ElementAccumulator* a_scales_base_as_int,
     ElementAccumulator* b_scales_base_as_int, int64_t n, int64_t k,
-    bool per_act_token, bool per_out_ch) {
+    bool per_act_token, bool per_out_ch, bool is_a_padded,
+    int64_t padded_a_offset) {
   int expert_id = threadIdx.x;
 
   int64_t expert_offset = expert_offsets[expert_id];
 
-  a_offsets[expert_id] = a_base_as_int + expert_offset * k;
+  if (is_a_padded) {
+    a_offsets[expert_id] = a_base_as_int + padded_a_offset * expert_id * k;
+  } else {
+    a_offsets[expert_id] = a_base_as_int + expert_offset * k;
+  }
   b_offsets[expert_id] = b_base_as_int + expert_id * k * n;
   out_offsets[expert_id] = out_base_as_int + expert_offset * n;
   a_scales_offsets[expert_id] =
       a_scales_base_as_int + (per_act_token ? expert_offset : 0);
   b_scales_offsets[expert_id] =
       b_scales_base_as_int + (per_out_ch ? n * expert_id : expert_id);
+
+  // printf("K: %ld, N: %ld\n", k, n);
+  // printf("expert offsets: %d -> %ld, %ld, %ld, %ld, %ld\n", expert_id,
+  //      (is_a_padded ? padded_a_offset * expert_id * k : expert_offset * k),
+  //      expert_id * k * n, expert_offset * n,
+  //      (per_act_token ? expert_offset : 0),
+  //      (per_out_ch ? n * expert_id : expert_id));
+  // printf("computed offsets: %d -> %ld, %ld, %ld, %ld, %ld\n", expert_id,
+  //      a_offsets[expert_id], b_offsets[expert_id], out_offsets[expert_id],
+  //      a_scales_offsets[expert_id], b_scales_offsets[expert_id]);
 }
 
 #define __CALL_GET_STARTS_KERNEL(TENSOR_C_TYPE, C_TYPE)                    \
@@ -45,7 +60,8 @@ __global__ void get_group_gemm_starts(
             static_cast<C_TYPE*>(out_tensors.data_ptr()),                  \
             static_cast<float*>(a_scales.data_ptr()),                      \
             static_cast<float*>(b_scales.data_ptr()), out_tensors.size(1), \
-            a_tensors.size(1), per_act_token, per_out_ch);                 \
+            a_tensors.size(1), per_act_token, per_out_ch, is_a_padded,     \
+            padded_a_offset);                                              \
   }
 
 namespace {
@@ -65,6 +81,31 @@ void run_get_group_gemm_starts(
   int num_experts = static_cast<int>(expert_offsets.size(0));
   bool per_act_token = a_scales.numel() != 1;
   bool per_out_ch = b_scales.numel() != num_experts;
+  // printf("per_act_token: %d, per_out_ch: %d\n", per_act_token, per_out_ch);
+
+  bool is_a_padded = a_tensors.size(0) != out_tensors.size(0);
+  // printf("is_a_padded: %d\n", is_a_padded);
+  // std::stringstream ss;
+  // ss << "a_tensors shape: [";
+  // for (int i = 0; i < a_tensors.dim(); i++) {
+  //   ss << a_tensors.size(i);
+  //   if (i < a_tensors.dim() - 1) {
+  //     ss << ", ";
+  //   }
+  // }
+  // ss << "]" << std::endl;
+  // ss << "out_tensors shape: [";
+  // for (int i = 0; i < out_tensors.dim(); i++) {
+  //   ss << out_tensors.size(i);
+  //   if (i < out_tensors.dim() - 1) {
+  //     ss << ", ";
+  //   }
+  // }
+  // ss << "]" << std::endl;
+  // std::cout << ss.str();
+  int64_t padded_a_offset = is_a_padded ? a_tensors.size(0) / num_experts : 0;
+  // printf("padded_a_offset: %ld/%d -> %ld\n", a_tensors.size(0), num_experts,
+  //       padded_a_offset);
 
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 
