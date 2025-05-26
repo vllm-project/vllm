@@ -9,11 +9,12 @@ from typing import Optional, Union
 
 import numpy as np
 import numpy.typing as npt
+import pytest
 import regex as re
 import torch
 from PIL.Image import Image
 from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
-                          GenerationConfig)
+                          GenerationConfig, GenerationMixin)
 
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import patch_padding_side
@@ -619,6 +620,11 @@ def _internvl_generate(
     if getattr(self, "use_visual_token_mask", False):
         visual_token_mask = selected.reshape(B, N, 1).to(input_embeds.dtype)
         forward_kwargs["visual_token_mask"] = visual_token_mask
+
+    # e.g. InternVL2-2B
+    if not isinstance(self.language_model, GenerationMixin):
+        pytest.skip("HF impl is not compatible with current transformers")
+
     outputs = self.language_model.generate(
         **forward_kwargs,
         **generate_kwargs,
