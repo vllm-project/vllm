@@ -1311,7 +1311,17 @@ class FusedMoE(torch.nn.Module):
             assert logical_to_physical_map is not None
             assert logical_replica_count is not None
 
-            # 1. Record expert load metrics.
+            # 1. Convert the logical expert ids to physical expert ids
+            # Directly select a random replica for each logical expert
+            replica_indices = (
+                torch.rand_like(topk_ids, dtype=torch.float) *
+                logical_replica_count[topk_ids]).long().unsqueeze(-1)
+            physical_ids = logical_to_physical_map[topk_ids].gather(
+                -1, replica_indices).squeeze(-1)
+
+            topk_ids = physical_ids
+
+            # 2. Record expert load metrics.
 
             # TODO(bowen): When using `FusedMoEModularKernel`, this
             # can be done in a more unified way, since
@@ -1344,16 +1354,6 @@ class FusedMoE(torch.nn.Module):
                 dim=0,
                 index=topk_ids_flatten.long(),
                 src=torch.ones_like(topk_ids_flatten))
-
-            # 2. Convert the logical expert ids to physical expert ids
-            # Directly select a random replica for each logical expert
-            replica_indices = (
-                torch.rand_like(topk_ids, dtype=torch.float) *
-                logical_replica_count[topk_ids]).long().unsqueeze(-1)
-            physical_ids = logical_to_physical_map[topk_ids].gather(
-                -1, replica_indices).squeeze(-1)
-
-            topk_ids = physical_ids
 
         return topk_weights, topk_ids
 
