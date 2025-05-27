@@ -178,11 +178,11 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
                 tok_ids.extend(lb.keys())
                 biases.extend(lb.values())
 
-            self.bias_tensor = self._tensor(biases, torch.float32)
-            self.logits_slice = (self._tensor(reqs, torch.int32),
-                                 self._tensor(tok_ids, torch.int32))
+            self.bias_tensor = self._device_tensor(biases, torch.float32)
+            self.logits_slice = (self._device_tensor(reqs, torch.int32),
+                                 self._device_tensor(tok_ids, torch.int32))
 
-    def _tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
+    def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
         return (torch.tensor(data,
                              device="cpu",
                              dtype=dtype,
@@ -249,10 +249,10 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                     reqs.extend([req] * len(stop_tok_ids))
                     tok_ids.extend(stop_tok_ids)
 
-                self.logits_slice = (self._tensor(reqs, torch.int32),
-                                     self._tensor(tok_ids, torch.int32))
+                self.logits_slice = (self._device_tensor(reqs, torch.int32),
+                                     self._device_tensor(tok_ids, torch.int32))
 
-    def _tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
+    def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
         return (torch.tensor(data,
                              device="cpu",
                              dtype=dtype,
