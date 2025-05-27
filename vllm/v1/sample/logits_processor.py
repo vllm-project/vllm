@@ -45,7 +45,6 @@ class LogitsProcessor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    @property
     def requires_nongreedy(self) -> bool:
         """True if logits processor is incompatible with
         greedy sampling.
@@ -76,7 +75,6 @@ class MinPLogitsProcessor(LogitsProcessor):
         # Current slice of the device tensor
         self.min_p: torch.Tensor = self.min_p_device[:0]
 
-    @property
     def requires_nongreedy(self) -> bool:
         return True
 
@@ -147,7 +145,6 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         self.logits_slice: tuple[torch.Tensor, torch.Tensor] = (torch.tensor(
             ()), torch.tensor(()))
 
-    @property
     def requires_nongreedy(self) -> bool:
         return False
 
@@ -209,7 +206,6 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         self.logits_slice: tuple[torch.Tensor, torch.Tensor] = (torch.tensor(
             ()), torch.tensor(()))
 
-    @property
     def requires_nongreedy(self) -> bool:
         return False
 
