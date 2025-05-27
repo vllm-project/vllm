@@ -184,12 +184,6 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.gauge_num_tokens_waiting = self._gauge_cls(
-            name="vllm:num_tokens_waiting",
-            documentation=
-            "Total number of tokens currently waiting in the queue",
-            labelnames=labelnames).labels(*labelvalues)
-
         self.counter_gpu_prefix_cache_queries = self._counter_cls(
             name="vllm:gpu_prefix_cache_queries",
             documentation=
@@ -200,11 +194,6 @@ class PrometheusStatLogger(StatLoggerBase):
             name="vllm:gpu_prefix_cache_hits",
             documentation=
             "GPU prefix cache hits, in terms of number of cached tokens.",
-            labelnames=labelnames).labels(*labelvalues)
-
-        self.counter_num_tokens_preempted = self._counter_cls(
-            name="vllm:num_tokens_preempted",
-            documentation="Number of tokens from preempted requests",
             labelnames=labelnames).labels(*labelvalues)
 
         #
@@ -309,16 +298,6 @@ class PrometheusStatLogger(StatLoggerBase):
                 ],
                 labelnames=labelnames).labels(*labelvalues)
 
-        self.histogram_time_per_prefill_token_request = \
-            self._histogram_cls(
-                name="vllm:time_per_prefill_token_request_seconds",
-                documentation="Time spent per token during prefill  "
-                "phase in seconds",
-                buckets=[
-                    0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0
-                ],
-                labelnames=labelnames).labels(*labelvalues)
-
         request_latency_buckets = [
             0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
             40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
@@ -357,16 +336,6 @@ class PrometheusStatLogger(StatLoggerBase):
                 "Histogram of time spent in DECODE phase for request.",
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
-        max_token_capacity = min(
-            vllm_config.model_config.max_model_len *
-            vllm_config.scheduler_config.max_num_seqs,
-            vllm_config.scheduler_config.max_num_batched_tokens)
-        self.gauge_max_token_capacity_per_batch = self._gauge_cls(
-            name="vllm:max_token_capacity_per_batch",
-            documentation=
-            "Maximum tokens processed by the model server at max batch size",
-            labelnames=labelnames).labels(*labelvalues)
-        self.gauge_max_token_capacity_per_batch.set(max_token_capacity)
 
         #
         # LoRA metrics
@@ -411,7 +380,7 @@ class PrometheusStatLogger(StatLoggerBase):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
-        self.gauge_num_tokens_waiting.set(scheduler_stats.num_tokens_waiting)
+
         self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
 
         self.counter_gpu_prefix_cache_queries.inc(
@@ -433,8 +402,6 @@ class PrometheusStatLogger(StatLoggerBase):
         self.histogram_iteration_tokens.observe(
             iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)
-        self.counter_num_tokens_preempted.inc(
-            scheduler_stats.num_tokens_preempted)
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:
             self.histogram_max_num_generation_tokens_request.observe(
@@ -454,11 +421,6 @@ class PrometheusStatLogger(StatLoggerBase):
                 finished_request.queued_time)
             self.histogram_prefill_time_request.observe(
                 finished_request.prefill_time)
-            if finished_request.num_prompt_tokens > 0:
-                time_per_prefill_token = (finished_request.prefill_time /
-                                          finished_request.num_prompt_tokens)
-                self.histogram_time_per_prefill_token_request.observe(
-                    time_per_prefill_token)
             self.histogram_inference_time_request.observe(
                 finished_request.inference_time)
             self.histogram_decode_time_request.observe(
