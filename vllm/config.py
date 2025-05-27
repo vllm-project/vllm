@@ -46,9 +46,9 @@ from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                         POOLING_MODEL_MAX_NUM_BATCHED_TOKENS, GiB_bytes,
-                        LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, get_open_port, is_lossless_cast,
-                        is_torch_equal_or_newer, random_uuid,
+                        LayerBlockType, common_broadcastable_dtype,
+                        cuda_device_count_stateless, get_cpu_memory,
+                        get_open_port, is_torch_equal_or_newer, random_uuid,
                         resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
@@ -3096,19 +3096,15 @@ def _find_dtype(
         repo_mt = try_get_safetensors_metadata(model_id, revision=revision)
 
         if repo_mt and (files_mt := repo_mt.files_metadata):
-            param_dtypes = set[torch.dtype]().union(
-                *(_SAFETENSORS_TO_TORCH_DTYPE[dtype_str]
-                  for file_mt in files_mt.values()
-                  for dtype_str in file_mt.parameter_count
-                  if dtype_str in _SAFETENSORS_TO_TORCH_DTYPE))
+            param_dtypes: set[torch.dtype] = {
+                _SAFETENSORS_TO_TORCH_DTYPE[dtype_str]
+                for file_mt in files_mt.values()
+                for dtype_str in file_mt.parameter_count
+                if dtype_str in _SAFETENSORS_TO_TORCH_DTYPE
+            }
 
             if param_dtypes:
-                # Use the safest dtype out of the available ones
-                return max(
-                    param_dtypes,
-                    key=lambda dtype: sum(
-                        is_lossless_cast(dtype, dt) for dt in param_dtypes),
-                )
+                return common_broadcastable_dtype(param_dtypes)
 
     if config_dtype is None:
         config_dtype = torch.float32

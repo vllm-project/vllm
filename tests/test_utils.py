@@ -17,10 +17,11 @@ from vllm_test_utils.monitor import monitor
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
                         MemorySnapshot, PlaceholderModule, StoreBoolean,
-                        bind_kv_cache, deprecate_kwargs, get_open_port,
-                        is_lossless_cast, make_zmq_path, make_zmq_socket,
-                        memory_profiling, merge_async_iterators, sha256,
-                        split_zmq_path, supports_kw, swap_dict_values)
+                        bind_kv_cache, common_broadcastable_dtype,
+                        deprecate_kwargs, get_open_port, is_lossless_cast,
+                        make_zmq_path, make_zmq_socket, memory_profiling,
+                        merge_async_iterators, sha256, split_zmq_path,
+                        supports_kw, swap_dict_values)
 
 from .utils import create_new_process_for_each_test, error_on_warning
 
@@ -604,6 +605,21 @@ def test_lru_cache():
 # yapf: enable
 def test_is_lossless_cast(src_dtype, tgt_dtype, expected_result):
     assert is_lossless_cast(src_dtype, tgt_dtype) == expected_result
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    ("dtypes", "expected_result"),
+    [
+        ([torch.bool], torch.bool),
+        ([torch.bool, torch.int8], torch.int8),
+        ([torch.bool, torch.int8, torch.float16], torch.float16),
+        ([torch.bool, torch.int8, torch.float16, torch.complex32], torch.complex32),  # noqa: E501
+    ],
+)
+# yapf: enable
+def test_common_broadcastable_dtype(dtypes, expected_result):
+    assert common_broadcastable_dtype(dtypes) == expected_result
 
 
 def test_placeholder_module_error_handling():

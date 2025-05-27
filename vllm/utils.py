@@ -37,8 +37,8 @@ from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
                       _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
-from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
-                             Iterable, Iterator, KeysView, Mapping)
+from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
+                             Hashable, Iterable, Iterator, KeysView, Mapping)
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
@@ -1014,6 +1014,17 @@ def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
     tgt_info = torch.finfo(tgt_dtype)
     return (src_info.min >= tgt_info.min and src_info.max <= tgt_info.max
             and src_info.resolution >= tgt_info.resolution)
+
+
+def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
+    """
+    Get the common `dtype` where all of the other `dtypes` can be
+    cast to it without losing any information.
+    """
+    return max(
+        dtypes,
+        key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
+    )
 
 
 # `collections` helpers
