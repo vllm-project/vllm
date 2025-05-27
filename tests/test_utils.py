@@ -572,7 +572,7 @@ def test_lru_cache():
 @pytest.mark.parametrize(
     ("src_dtype", "tgt_dtype", "expected_result"),
     [
-        # Different safe levels
+        # Different precision_levels
         (torch.bool, torch.int8, True),
         (torch.bool, torch.float16, True),
         (torch.bool, torch.complex32, True),
