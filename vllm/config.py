@@ -4467,6 +4467,11 @@ class VllmConfig:
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
 
+    def reset_max_model_len(self, max_model_len: int):
+        self.model_config.max_model_len = max_model_len
+        self.scheduler_config.max_model_len = max_model_len
+        self.compute_hash()
+
     def __str__(self):
         return (
             f"model={self.model_config.model!r},"
