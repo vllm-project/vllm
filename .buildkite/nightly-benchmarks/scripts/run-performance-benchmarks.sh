@@ -272,7 +272,7 @@ run_throughput_tests() {
       fi
     fi
 
-    throughput_command="python3 benchmark_throughput.py \
+    throughput_command=" $throughput_envs python3 benchmark_throughput.py \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $throughput_args"
 
@@ -329,7 +329,7 @@ run_serving_tests() {
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
     echo "Running over qps list $qps_list"
 
-    # check if there is enough resouces to run the test
+    # check if there is enough resources to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
     if [ "$ON_CPU" == "1" ];then
       if [[ $numa_count -lt $tp ]]; then
@@ -455,7 +455,7 @@ main() {
 
   # postprocess benchmarking results
   pip install tabulate pandas
-  ON_CPU=$ON_CPU python3 $QUICK_BENCHMARK_ROOT/scripts/convert-results-json-to-markdown.py
+  python3 $QUICK_BENCHMARK_ROOT/scripts/convert-results-json-to-markdown.py
 
   upload_to_buildkite
 }

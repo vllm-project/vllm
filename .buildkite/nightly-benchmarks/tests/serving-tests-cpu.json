@@ -45,7 +45,7 @@
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
 	    "trust_remote_code": "",
-	    "enable_chunked_prefill": "True",
+	    "enable_chunked_prefill": "",
             "disable_log_stats": "",
             "disable_log_requests": "",
             "load_format": "dummy"
@@ -77,7 +77,7 @@
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
 	    "trust_remote_code": "",
-	    "enable_chunked_prefill": "True",
+	    "enable_chunked_prefill": "",
             "disable_log_stats": "",
             "disable_log_requests": "",
             "load_format": "dummy"
