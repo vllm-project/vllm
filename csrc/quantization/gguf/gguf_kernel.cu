@@ -96,7 +96,6 @@ torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W,  // quant weight
   const int padded = (col + 512 - 1) / 512 * 512;
   const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
   auto options = torch::TensorOptions().dtype(X.dtype()).device(W.device());
-  printf("rinning vecs %d row %d \n", vecs, (int)row);
   at::Tensor Y = torch::empty({vecs, row}, options);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
   options = torch::TensorOptions().dtype(torch::kInt32).device(W.device());
