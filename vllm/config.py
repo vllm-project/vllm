@@ -21,7 +21,8 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
 
 import regex as re
 import torch
-from pydantic import ConfigDict, SkipValidation, TypeAdapter, model_validator
+from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
+                      model_validator)
 from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
@@ -59,6 +60,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
     from vllm.model_executor.model_loader import BaseModelLoader
+    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
     ConfigType = type[DataclassInstance]
 else:
@@ -66,6 +68,7 @@ else:
     ExecutorBase = Any
     QuantizationConfig = Any
     BaseModelLoader = Any
+    TensorizerConfig = Any
     ConfigType = type
 
 logger = init_logger(__name__)
@@ -613,8 +616,17 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
+    @field_validator("quantization", mode="before")
+    @classmethod
+    def validate_quantization_before(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower()
+        return value
+
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
+        if not isinstance(self.tokenizer, str):
+            raise ValueError("tokenizer must be a string after __post_init__.")
         if not isinstance(self.max_model_len, int):
             raise ValueError(
                 "max_model_len must be an integer after __post_init__.")
@@ -846,8 +858,7 @@ class ModelConfig:
             "quark", "modelopt_fp4", "bitblas", "gptq_bitblas"
         ]
         if self.quantization is not None:
-            self.quantization = cast(QuantizationMethods,
-                                     self.quantization.lower())
+            self.quantization = cast(QuantizationMethods, self.quantization)
 
         # Parse quantization method from the HF model config, if available.
         quant_cfg = self._parse_quant_hf_config()
@@ -1632,7 +1643,8 @@ class LoadConfig:
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    model_loader_extra_config: dict = field(default_factory=dict)
+    model_loader_extra_config: Union[dict, TensorizerConfig] = field(
+        default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
     ignore_patterns: Optional[Union[list[str], str]] = None
@@ -1714,7 +1726,6 @@ class ParallelConfig:
     """Port of the data parallel master."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
-
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
@@ -2274,8 +2285,8 @@ class DeviceConfig:
             self.device = torch.device(self.device_type)
 
 
-SpeculativeMethod = Literal["ngram", "eagle", "medusa", "mlp_speculator",
-                            "draft_model", "deepseek_mtp"]
+SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
+                            "mlp_speculator", "draft_model", "deepseek_mtp"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
 

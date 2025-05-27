@@ -24,16 +24,16 @@ if current_platform.is_rocm():
     MODELS = [
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            quantization="GPTQ"),
+            quantization="gptq"),
     ]
 else:
     MODELS = [
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
-            quantization="AWQ"),
+            quantization="awq"),
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            quantization="GPTQ"),
+            quantization="gptq"),
     ]
 
 
@@ -100,7 +100,7 @@ def test_quant_model_lora(tinyllama_lora_files, model):
             "#ff8050",
             "#ff8080",
         ]
-    elif model.quantization == "AWQ":
+    elif model.quantization == "awq":
         expected_no_lora_output = [
             "I'm sorry, I don't understand",
             "I'm sorry, I don't understand",

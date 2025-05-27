@@ -170,10 +170,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         if field.default is not MISSING:
             default = field.default
         elif field.default_factory is not MISSING:
-            if is_dataclass(field.default_factory):
-                default = {}
-            else:
-                default = field.default_factory()
+            default = field.default_factory()
 
         # Get the help text for the field
         name = field.name
