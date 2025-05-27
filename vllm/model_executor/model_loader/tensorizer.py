@@ -7,7 +7,6 @@ import dataclasses
 import io
 import json
 import os
-import re
 import threading
 import time
 from collections.abc import Generator
@@ -15,6 +14,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, BinaryIO, Optional, Union
 
+import regex as re
 import torch
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -251,7 +251,7 @@ class TensorizerArgs:
       encryption_keyfile: File path to a binary file containing a  
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
-          examples/other/tensorize_vllm_model.py. 
+          examples/others/tensorize_vllm_model.py. 
       s3_access_key_id: The access key for the S3 bucket. Can also be set via
           the S3_ACCESS_KEY_ID environment variable.
       s3_secret_access_key: The secret access key for the S3 bucket. Can also
@@ -469,7 +469,7 @@ def tensorizer_weights_iterator(
                    "loading on vLLM, as tensorizer is forced to load to CPU. "
                    "Consider deserializing a vLLM model instead for faster "
                    "load times. See the "
-                   "examples/other/tensorize_vllm_model.py example script "
+                   "examples/others/tensorize_vllm_model.py example script "
                    "for serializing vLLM models.")
 
     deserializer_args = tensorizer_args.deserializer_params
