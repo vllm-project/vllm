@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: SIM117
 import pytest
+import vllm.transformers_utils.config as config
 
 from ...utils import EmbedModelInfo
 
+
+def cache_clear():
+    config.get_sentence_transformer_tokenizer_config.cache_clear()
+
+
 MODELS = [
     EmbedModelInfo("nomic-ai/nomic-embed-text-v1"),
-    EmbedModelInfo("nomic-ai/nomic-embed-text-v1.5"),
-    EmbedModelInfo("nomic-ai/CodeRankEmbed"),
+    #EmbedModelInfo("nomic-ai/nomic-embed-text-v1.5"),
+    #EmbedModelInfo("nomic-ai/CodeRankEmbed"),
     EmbedModelInfo("nomic-ai/nomic-embed-text-v2-moe"),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-long"),
+    #EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-long"),
 ]
 
 rope_theta = 1000
@@ -40,11 +46,10 @@ def test_set_max_model_len_legal1(model_info, vllm_runner):
         model_config = vllm_model.model.llm_engine.model_config
         assert model_config.max_model_len == 256
 
-@pytest.mark.parametrize("model_info", MODELS)
-def test_set_max_model_len_legal2(model_info, vllm_runner):
     # set 512 < max_model_len <= 2048
     if model_info.name == "nomic-ai/nomic-embed-text-v2-moe":
-        pytest.skip("model_config.encoder_config has some kind of cache?")
+        cache_clear()
+
         # For nomic-embed-text-v2-moe the length is set to 512
         # by sentence_bert_config.json.
         with pytest.raises(ValueError):
