@@ -516,10 +516,11 @@ class NomicBertModel(BertWithRope):
 
         head_dim = config.hidden_size // config.num_attention_heads
         rotary_emb_dim = head_dim * config.rotary_emb_fraction
+        max_trained_positions = getattr(config, "max_trained_positions", 2048)
         config.rotary_kwargs = {
             "head_size": head_dim,
             "rotary_dim": rotary_emb_dim,
-            "max_position": config.max_trained_positions,
+            "max_position": max_trained_positions,
             "base": getattr(config, "rope_theta", config.rotary_emb_base),
             "rope_scaling": getattr(config, "rope_scaling", None)
         }
@@ -533,13 +534,15 @@ class NomicBertModel(BertWithRope):
             # We need to allow users to manually change max_model_len.
             from vllm.config import _get_and_verify_max_len
             max_model_len = _get_and_verify_max_len(
-                hf_config=self.hf_text_config,
-                max_model_len=self.max_model_len,
-                disable_sliding_window=self.disable_sliding_window)
+                hf_config=vllm_config.model_config.hf_text_config,
+                max_model_len=vllm_config.model_config.max_model_len,
+                disable_sliding_window=False,
+                sliding_window_len=None
+            )
             vllm_config.reset_max_model_len(max_model_len)
         else:
-            # Reset max_model_len to config.max_trained_positions.
-            vllm_config.reset_max_model_len(config.max_trained_positions)
+            # Reset max_model_len to max_trained_positions
+            vllm_config.reset_max_model_len(max_trained_positions)
             logger.warning(
                 "We did not use the nomic context extension method, "
                 "current max_model_len is %s. "
