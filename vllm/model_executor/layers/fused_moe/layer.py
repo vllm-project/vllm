@@ -787,7 +787,7 @@ class FusedMoE(torch.nn.Module):
                           get_dp_group().world_size),
                 vllm_parallel_config=vllm_config.parallel_config))
 
-        self.global_num_experts = num_experts
+        self.global_num_experts = num_experts + num_redundant_experts
 
         # For smuggling this layer into the fused moe custom op
         self.use_direct_call = self.dp_size == 1
@@ -810,10 +810,6 @@ class FusedMoE(torch.nn.Module):
                 assert global_physical_experts % self.ep_size == 0, \
                     "EPLB currently only supports even distribution of " \
                     "experts across ranks."
-                self.initial_global_logical_to_physical_map = \
-                    EplbState.build_initial_global_logical_to_physical_map(
-                    num_experts, num_redundant_experts,)
-                '''Used in initial weight loading only in EPLB.'''
             else:
                 assert num_redundant_experts == 0, \
                     "Redundant experts are only supported with EPLB."
@@ -1071,28 +1067,9 @@ class FusedMoE(torch.nn.Module):
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
-        if self.enable_eplb:
-            # `expert_id` is logical; with redundant experts,
-            # we need to convert it to physical id
-            global_physical_ids = self.initial_global_logical_to_physical_map[
-                expert_id]
-            for global_physical_id in global_physical_ids:
-                local_physical_id = \
-                    self._map_global_expert_id_to_local_expert_id(
-                    global_physical_id)
-                if local_physical_id != -1:
-                    # Found a local replica of this logical expert
-                    expert_id = local_physical_id
-                    break
-            else:
-                # All of this logical expert's physical replica
-                # is not in our local space; skip loading
-                return
-        else:
-            expert_id = self._map_global_expert_id_to_local_expert_id(
-                expert_id)
-            if expert_id == -1:
-                return
+        expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
+        if expert_id == -1:
+            return
         # Hereafter, `expert_id` is local physical id
 
         quant_method_name = self.quant_method.__class__.__name__
@@ -1348,8 +1325,8 @@ class FusedMoE(torch.nn.Module):
             # to achieve better efficiency.
 
             # (num_logical_experts,)
-            expert_load_view += topk_ids.bincount(
-                minlength=expert_load_view.shape[0], )
+            expert_load_view += topk_ids.flatten().bincount(
+                minlength=expert_load_view.shape[0])
 
             # 2. Convert the logical expert ids to physical expert ids
             # Directly select a random replica for each logical expert
@@ -1504,16 +1481,30 @@ class FusedMoE(torch.nn.Module):
 
     @classmethod
     def make_expert_params_mapping(
-            cls, ckpt_gate_proj_name: str, ckpt_down_proj_name: str,
+            cls,
+            ckpt_gate_proj_name: str,
+            ckpt_down_proj_name: str,
             ckpt_up_proj_name: str,
-            num_experts: int) -> list[tuple[str, str, int, str]]:
+            num_experts: int,
+            num_redundant_experts: int = 0) -> list[tuple[str, str, int, str]]:
+
+        num_physical_experts = num_experts + num_redundant_experts
+
+        # In the returned mapping:
+        # - `expert_id` is the physical expert id
+        # - `weight_name` contains the weight name of the logical expert
+        # So that we should map the expert id to logical in `weight_name`
+        physical_to_logical_map = \
+            EplbState.build_initial_global_physical_to_logical_map(
+            num_experts, num_redundant_experts)
 
         return [
             # (param_name, weight_name, expert_id, shard_id)
             ("experts.w13_" if weight_name
              in [ckpt_gate_proj_name, ckpt_up_proj_name] else "experts.w2_",
-             f"experts.{expert_id}.{weight_name}.", expert_id, shard_id)
-            for expert_id in range(num_experts) for shard_id, weight_name in [
+             f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.",
+             expert_id, shard_id) for expert_id in range(num_physical_experts)
+            for shard_id, weight_name in [
                 ("w1", ckpt_gate_proj_name),
                 ("w2", ckpt_down_proj_name),
                 ("w3", ckpt_up_proj_name),

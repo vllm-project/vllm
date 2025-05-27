@@ -4,7 +4,7 @@ Expert parallelism load balancer (EPLB) metrics and states.
 """
 
 import time
-from collections.abc import Sequence, Set
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -91,27 +91,6 @@ class EplbState:
             i % num_routed_experts for i in range(num_redundant_experts)
         ]
         return global_physical_to_logical_map
-
-    @staticmethod
-    def build_initial_global_logical_to_physical_map(
-        num_routed_experts: int,
-        num_redundant_experts: int,
-    ) -> Sequence[Set[int]]:
-        """
-        Build an initial expert arrangement using the following structure:
-        [original routed experts, redundant experts]
-
-        Returns:
-            logical_to_physical_map (Sequence[set[int]]): A list of sets,
-            where each set contains the indices of the physical experts
-            that map to the corresponding logical expert.
-        """
-        global_logical_to_physical_map = [{i}
-                                          for i in range(num_routed_experts)]
-        for i in range(num_redundant_experts):
-            global_logical_to_physical_map[i % num_routed_experts].add(
-                i + num_routed_experts)
-        return global_logical_to_physical_map
 
     @classmethod
     def build(
