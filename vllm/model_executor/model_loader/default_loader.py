@@ -264,6 +264,24 @@ class DefaultModelLoader(BaseModelLoader):
                               fall_back_to_pt=True,
                               allow_patterns_overrides=None)
 
+    def load_weights(self, model: nn.Module,
+                     model_config: ModelConfig) -> None:
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        loaded_weights = model.load_weights(
+            self.get_all_weights(model_config, model))
+        self.counter_after_loading_weights = time.perf_counter()
+        logger.info(
+            "Loading weights took %.2f seconds",
+            self.counter_after_loading_weights -
+            self.counter_before_loading_weights)
+        # We only enable strict check for non-quantized models
+        # that have loaded weights tracking currently.
+        if model_config.quantization is None and loaded_weights is not None:
+            weights_not_loaded = weights_to_load - loaded_weights
+            if weights_not_loaded:
+                raise ValueError("Following weights were not initialized from "
+                                 f"checkpoint: {weights_not_loaded}")
+
     def load_model(self, vllm_config: VllmConfig,
                    model_config: ModelConfig) -> nn.Module:
         device_config = vllm_config.device_config
@@ -272,24 +290,7 @@ class DefaultModelLoader(BaseModelLoader):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config,
                                          model_config=model_config)
-
-            weights_to_load = {name for name, _ in model.named_parameters()}
-            loaded_weights = model.load_weights(
-                self.get_all_weights(model_config, model))
-            self.counter_after_loading_weights = time.perf_counter()
-            logger.info(
-                "Loading weights took %.2f seconds",
-                self.counter_after_loading_weights -
-                self.counter_before_loading_weights)
-            # We only enable strict check for non-quantized models
-            # that have loaded weights tracking currently.
-            if model_config.quantization is None and loaded_weights is not None:
-                weights_not_loaded = weights_to_load - loaded_weights
-                if weights_not_loaded:
-                    raise ValueError(
-                        "Following weights were not initialized from "
-                        f"checkpoint: {weights_not_loaded}")
-
+            self.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)
 
         return model.eval()
