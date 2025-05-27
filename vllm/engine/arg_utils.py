@@ -322,8 +322,7 @@ class EngineArgs:
     rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
     rope_theta: Optional[float] = ModelConfig.rope_theta
     hf_token: Optional[Union[bool, str]] = ModelConfig.hf_token
-    hf_overrides: Optional[HfOverrides] = \
-        get_field(ModelConfig, "hf_overrides")
+    hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
