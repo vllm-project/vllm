@@ -53,7 +53,8 @@ class MooncakeStoreConnector(KVConnectorBase):
                     self.kv_transfer_config)
                 self.kv_store = MooncakeStore(config)
         else:
-            logger.error("Can not find %s", self.kv_transfer_config.kv_connector)
+            logger.error("Can not find %s",
+                         self.kv_transfer_config.kv_connector)
 
         assert self.kv_store is not None
 
