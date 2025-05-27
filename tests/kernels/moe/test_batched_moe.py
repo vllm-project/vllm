@@ -7,7 +7,6 @@ from typing import Optional
 import pytest
 import torch
 import triton.language as tl
-from typing import Optional
 
 from tests.kernels.moe.utils import (batched_moe,
                                      make_quantized_test_activations,
@@ -201,12 +200,8 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
                                                       A_scale, B_scale,
                                                       block_shape)
 
-    ref_output2 = ref_impl(tensors.A,
-                           tensors.B,
-                           ref_output2,
-                           tensors.num_expert_tokens,
-                           A_scale,
-                           B_scale,
+    ref_output2 = ref_impl(tensors.A, tensors.B, ref_output2,
+                           tensors.num_expert_tokens, A_scale, B_scale,
                            block_shape[-2:])
 
     rtol, atol = {

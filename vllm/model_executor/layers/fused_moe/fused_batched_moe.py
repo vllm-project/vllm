@@ -11,47 +11,44 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
-from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
-                                                        _resize_cache,
-                                                        cdiv)
 
 
 @triton.jit
 def moe_mmk(
-    a_ptrs,
-    b_ptrs,
-    K,
-    expert_id,
-    a_scale_ptr,
-    b_scale_ptr,
-    # The stride variables represent how much to increase the ptr by when
-    # moving by 1 element in a particular dimension. E.g. `stride_am` is
-    # how much to increase `a_ptr` by to get the element one row down
-    # (A has M rows).
-    stride_ak,
-    stride_bk,
-    stride_asm,
-    stride_ask,
-    stride_bse,
-    stride_bsk,
-    stride_bsn,
-    # Offsets and masks
-    offs_m,
-    offs_n,
-    mask_m,
-    # Block size for block-wise quantization
-    group_n: tl.constexpr,
-    group_k: tl.constexpr,
-    # Meta-parameters
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    compute_type: tl.constexpr,
-    use_w8a8: tl.constexpr,
-    use_w8a16: tl.constexpr
-):
+        a_ptrs,
+        b_ptrs,
+        K,
+        expert_id,
+        a_scale_ptr,
+        b_scale_ptr,
+        # The stride variables represent how much to increase the ptr by when
+        # moving by 1 element in a particular dimension. E.g. `stride_am` is
+        # how much to increase `a_ptr` by to get the element one row down
+        # (A has M rows).
+        stride_ak,
+        stride_bk,
+        stride_asm,
+        stride_ask,
+        stride_bse,
+        stride_bsk,
+        stride_bsn,
+        # Offsets and masks
+        offs_m,
+        offs_n,
+        mask_m,
+        # Block size for block-wise quantization
+        group_n: tl.constexpr,
+        group_k: tl.constexpr,
+        # Meta-parameters
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        compute_type: tl.constexpr,
+        use_w8a8: tl.constexpr,
+        use_w8a16: tl.constexpr):
     offs_k = tl.arange(0, BLOCK_K)
 
     if use_w8a16:
@@ -315,22 +312,21 @@ def batched_triton_kernel(
 
 
 def invoke_moe_batched_triton_kernel(
-    A: torch.Tensor,  # [E, max_tokens, K]
-    B: torch.Tensor,  # [E, K, N]
-    C: torch.Tensor,  # [E, max_tokens, N]
-    expert_num_tokens: torch.Tensor,  # [E]
-    compute_type: tl.dtype,
-    # Quantization data
-    A_scale: Optional[torch.Tensor],
-    B_scale: Optional[torch.Tensor],
-    B_zp: torch.Tensor,
-    # Quantization schemes
-    use_fp8_w8a8: bool,
-    use_int8_w8a16: bool,
-    use_int4_w4a16: bool,
-    config: dict[str, int],
-    block_shape: Optional[list[int]] = None
-):
+        A: torch.Tensor,  # [E, max_tokens, K]
+        B: torch.Tensor,  # [E, K, N]
+        C: torch.Tensor,  # [E, max_tokens, N]
+        expert_num_tokens: torch.Tensor,  # [E]
+        compute_type: tl.dtype,
+        # Quantization data
+        A_scale: Optional[torch.Tensor],
+        B_scale: Optional[torch.Tensor],
+        B_zp: torch.Tensor,
+        # Quantization schemes
+        use_fp8_w8a8: bool,
+        use_int8_w8a16: bool,
+        use_int4_w4a16: bool,
+        config: dict[str, int],
+        block_shape: Optional[list[int]] = None):
     assert not use_int4_w4a16
     max_num_tokens = A.size(1)
     K = A.size(2)
@@ -480,11 +476,12 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             rows = torch.count_nonzero(topks.flatten())
             if rows == 0:
                 continue
+            rhs = a1[:topks.numel()][topks]
             idx = expert_id - first_expert
             if self.use_fp8_w8a8:
                 # TODO: use _fp8_quantize
-                b_a1[idx, :rows, :], tmp_scale = per_token_group_quant_fp8(rhs, block_k)
-                b_a1_scale[idx, :rows] = tmp_scale # inline?
+                b_a1[idx, :rows, :], b_a1_scale[
+                    idx, :rows] = per_token_group_quant_fp8(rhs, block_k)
             else:
                 b_a1[idx, :rows, :] = rhs
 
@@ -827,12 +824,13 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         #assert not self.use_fp8_w8a8
         if self.use_fp8_w8a8:
             per_act_token = False
-            qintermediate_cache2 = torch.zeros_like(intermediate_cache2,
+            # TODO: reuse?
+            qintermediate_cache2 = torch.empty_like(intermediate_cache2,
                                                     dtype=torch.float8_e4m3fn)
             block_n = self.block_shape[0]
             n_tiles = ((N // 2) + block_n - 1) // block_n
             scale_shape = (E, num_tokens, n_tiles)
-            a2q_scale = torch.zeros(scale_shape,
+            a2q_scale = torch.empty(scale_shape,
                                     dtype=torch.float32,
                                     device=hidden_states.device)
             for e in range(E):
@@ -842,10 +840,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                     #    intermediate_cache2[e],
                     #    a2_scale[e] if a2_scale is not None else None,
                     #    per_act_token, self.block_shape)
-                    qintermediate_cache2[e, :num_tokens, :], tmp_scale = per_token_group_quant_fp8(
-                         intermediate_cache2[e, :num_tokens], block_n)
-                    #print(a2q_scale[e, :tmp_scale.shape[0]].shape)
-                    #print(tmp_scale.shape)
+                    qintermediate_cache2[
+                        e, :
+                        num_tokens, :], tmp_scale = per_token_group_quant_fp8(
+                            intermediate_cache2[e, :num_tokens], block_n)
                     a2q_scale[e, :tmp_scale.shape[0]] = tmp_scale
         else:
             qintermediate_cache2 = intermediate_cache2
