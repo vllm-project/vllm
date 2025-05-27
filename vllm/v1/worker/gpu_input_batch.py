@@ -472,8 +472,6 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i2], \
                     self.allowed_token_ids_mask_cpu_tensor[i1]
 
-        # TODO need to handle LogitsProcessors here
-
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> list[tuple[int, int]]:
