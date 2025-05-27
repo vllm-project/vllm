@@ -80,6 +80,27 @@ class UBatchContext:
     #  before yielding back to ubatch1 but ensure we wont start the dispatch
     #  until ubatch0-dispatch is done avoiding overlapping dispatches that
     #  might share underlying buffers
+    #
+    # NOTE(lucas): I think we need to do:
+    #  ubatch0 
+    #   - work
+    #   - dispatch send
+    #   - yield
+    #  ubatch1
+    #   - work
+    #   - yield
+    #  ubatch0
+    #   - dispatch recv
+    #   - gpu record, event0
+    #   - yield
+    #  ubatch1
+    #   - gpu wait, event0
+    #   - dispatch send
+    #   - yield
+    #  ubatch0
+    #   - work
+    #   .....
+    # To ensure we record the cuda event before waiting
     def gpu_stream_wait(self):
         print("Waiting ubatch %d on %s in stream %s" % (self.id, self.gpu_wait_event, self.stream))
         self.stream.wait_event(self.gpu_wait_event)
