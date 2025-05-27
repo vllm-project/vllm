@@ -76,6 +76,7 @@ def results_to_json(latency, throughput, serving):
         }
     )
 
+
 def get_size(bytes, suffix="B"):
     """
     Scale bytes to its proper format
@@ -88,6 +89,7 @@ def get_size(bytes, suffix="B"):
         if bytes < factor:
             return f"{bytes:.2f}{unit}{suffix}"
         bytes /= factor
+
 
 if __name__ == "__main__":
     # collect results
@@ -169,20 +171,23 @@ if __name__ == "__main__":
     serving_results = pd.DataFrame.from_dict(serving_results)
     throughput_results = pd.DataFrame.from_dict(throughput_results)
 
-    from cpuinfo import get_cpu_info
-    import psutil
-    from numa import info
     import pandas as pd
+    import psutil
+    from cpuinfo import get_cpu_info
+    from numa import info
+
     svmem = psutil.virtual_memory()
     numa_size = info.get_num_configured_nodes()
     platform_data = {
-        'CPU Brand': [get_cpu_info()['brand_raw']],
-        'Physical cores': [psutil.cpu_count(logical=False)],
-        'Total cores': [psutil.cpu_count(logical=True)],
-        'Total Memory': [get_size(svmem.total)],
-        'Total NUMA nodes': [numa_size]
+        "CPU Brand": [get_cpu_info()["brand_raw"]],
+        "Physical cores": [psutil.cpu_count(logical=False)],
+        "Total cores": [psutil.cpu_count(logical=True)],
+        "Total Memory": [get_size(svmem.total)],
+        "Total NUMA nodes": [numa_size],
     }
-    platform_results = pd.DataFrame.from_dict(platform_data, orient='index', columns=['Platform Info'])
+    platform_results = pd.DataFrame.from_dict(
+        platform_data, orient="index", columns=["Platform Info"]
+    )
 
     raw_results_json = results_to_json(
         latency_results, throughput_results, serving_results
@@ -229,10 +234,9 @@ if __name__ == "__main__":
     throughput_md_table = tabulate(
         throughput_results, headers="keys", tablefmt="pipe", showindex=False
     )
-    platform_md_table = tabulate(platform_results,
-                                   headers='keys',
-                                   tablefmt='pipe',
-                                   showindex=True)
+    platform_md_table = tabulate(
+        platform_results, headers="keys", tablefmt="pipe", showindex=True
+    )
 
     # document the result
     with open(results_folder / "benchmark_results.md", "w") as f:
