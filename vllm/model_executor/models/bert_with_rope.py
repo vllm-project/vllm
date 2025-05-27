@@ -548,21 +548,23 @@ class NomicBertModel(BertWithRope):
                 "examples/offline_inference/context_extension.html",
                 vllm_config.model_config.max_model_len)
         else:
-            # We need to re-verify max_model_len to avoid lengths greater than position_embedding.
+            # We need to re-verify max_model_len to avoid lengths
+            # greater than position_embedding.
             from vllm.config import _get_and_verify_max_len
 
             model_config = vllm_config.model_config
+            hf_text_config = model_config.hf_text_config
             max_model_len = model_config.hf_overrides.get("max_model_len",
                                      vllm_config.model_config.max_model_len)
 
             # reset hf_text_config for _get_and_verify_max_len.
-            if hasattr(model_config.hf_text_config, "max_model_len"):
-                delattr(model_config.hf_text_config, "max_model_len")
-            model_config.hf_text_config.max_position_embeddings = max_trained_positions
-            model_config.hf_text_config.rope_scaling = config.rotary_kwargs["rope_scaling"]
+            if hasattr(hf_text_config, "max_model_len"):
+                delattr(hf_text_config, "max_model_len")
+            hf_text_config.max_position_embeddings = max_trained_positions
+            hf_text_config.rope_scaling = config.rotary_kwargs["rope_scaling"]
 
             max_model_len = _get_and_verify_max_len(
-                hf_config=model_config.hf_text_config,
+                hf_config=hf_text_config,
                 max_model_len=max_model_len,
                 disable_sliding_window=False,
                 sliding_window_len=None)
