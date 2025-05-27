@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from collections.abc import Sequence
 from typing import Optional
 
