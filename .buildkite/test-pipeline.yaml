@@ -222,6 +222,7 @@ steps:
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s v1/test_utils.py
     - pytest -v -s v1/test_oracle.py
+    - pytest -v -s v1/test_metrics_reader.py
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
     - pytest -v -s v1/e2e

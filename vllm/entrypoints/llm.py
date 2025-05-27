@@ -4,7 +4,8 @@ import itertools
 import warnings
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
+                    cast, overload)
 
 import cloudpickle
 import torch.nn as nn
@@ -46,6 +47,9 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
                         is_list_of)
+
+if TYPE_CHECKING:
+    from vllm.v1.metrics.reader import Metric
 
 logger = init_logger(__name__)
 
@@ -1293,6 +1297,20 @@ class LLM:
                 engine is used again.
         """
         self.llm_engine.wake_up(tags)
+
+    def get_metrics(self) -> list["Metric"]:
+        """Return a snapshot of aggregated metrics from Prometheus.
+
+        Returns:
+            A ``MetricSnapshot`` instance capturing the current state
+            of all aggregated metrics from Prometheus.
+
+        Note:
+            This method is only available with the V1 LLM engine.
+        """
+        from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+        assert isinstance(self.llm_engine, V1LLMEngine)
+        return self.llm_engine.get_metrics()
 
     # LEGACY
     def _convert_v1_inputs(
