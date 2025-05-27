@@ -5,4 +5,4 @@ CUDA_VISIBLE_DEVICES=7 nsys profile \
 	--trace-fork-before-exec=true \
         --output=prefiller \
         --force-overwrite=true \
-        python3 toy_example.py
+        python3 toy_decode.py

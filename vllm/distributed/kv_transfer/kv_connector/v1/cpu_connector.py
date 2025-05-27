@@ -1,38 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
-import contextlib
-import math
-import threading
-import time
-import uuid
-from abc import ABC, abstractmethod
-from collections import defaultdict, OrderedDict
-from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional
 
-import msgspec
 import torch
-import zmq
+from lmcache.utils import _lmcache_nvtx_annotate
 
-from vllm import envs
+from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.cpu_connector_utils import (
-    SourceSpec, DestinationSpec)
+    DestinationSpec, SourceSpec)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
-    NixlSendTask, NixlPrefillManager, NixlDecodeManager)
-
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    get_tp_group)
+    NixlDecodeManager, NixlPrefillManager, NixlSendTask)
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
-from vllm.utils import make_zmq_path, make_zmq_socket, round_down, cdiv
+from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import RequestStatus
-from vllm import _custom_ops as ops
-
-from lmcache.utils import _lmcache_nvtx_annotate
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -43,11 +27,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-def d2h_page_copy(
-        src_layer: torch.Tensor,
-        dst_buffer: torch.Tensor,
-        block_ids: list[int]
-    ) -> None:
+
+def d2h_page_copy(src_layer: torch.Tensor, dst_buffer: torch.Tensor,
+                  block_ids: list[int]) -> None:
     """Copy data from device to host.
 
     Args:
@@ -57,17 +39,18 @@ def d2h_page_copy(
             (2, len(block_ids), page_size, ...remaining dims...)
         block_ids (list[int]): The list of vllm block ids to copy from.
     """
-    block_mapping = torch.stack([torch.tensor(block_ids, dtype = torch.long), 
-                                 torch.arange(len(block_ids), dtype = torch.long)], dim = 1)
+    block_mapping = torch.stack([
+        torch.tensor(block_ids, dtype=torch.long),
+        torch.arange(len(block_ids), dtype=torch.long)
+    ],
+                                dim=1)
     ops.swap_blocks(src_layer[0], dst_buffer[0], block_mapping)
     ops.swap_blocks(src_layer[1], dst_buffer[1], block_mapping)
 
-def h2d_copy_leading_tokens(
-        src_buffer: torch.Tensor,
-        dst_layer: torch.Tensor,
-        src_block_id: int,
-        dst_block_id: int,
-        end_position_in_block: int) -> None:
+
+def h2d_copy_leading_tokens(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
+                            src_block_id: int, dst_block_id: int,
+                            end_position_in_block: int) -> None:
     """Copy the leading tokens in 1 block from host buffer to device layer.
 
     Args:
@@ -87,12 +70,9 @@ def h2d_copy_leading_tokens(
     dst_v.copy_(src_v, non_blocking=True)
 
 
-def h2d_copy_trailing_tokens(
-        src_buffer: torch.Tensor,
-        dst_layer: torch.Tensor,
-        src_block_id: int,
-        dst_block_id: int,
-        start_position_in_block: int) -> None:
+def h2d_copy_trailing_tokens(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
+                             src_block_id: int, dst_block_id: int,
+                             start_position_in_block: int) -> None:
     """Copy the trailing tokens in 1 block from host buffer to device layer.
 
     Args:
@@ -111,13 +91,11 @@ def h2d_copy_trailing_tokens(
     dst_k.copy_(src_k, non_blocking=True)
     dst_v.copy_(src_v, non_blocking=True)
 
-def h2d_copy_part_block(
-        src_buffer: torch.Tensor,
-        dst_layer: torch.Tensor,
-        src_block_id: int,
-        dst_block_id: int,
-        start_position_in_block: int,
-        end_position_in_block: int) -> None:
+
+def h2d_copy_part_block(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
+                        src_block_id: int, dst_block_id: int,
+                        start_position_in_block: int,
+                        end_position_in_block: int) -> None:
     """Copy the part of a block from host buffer to device layer.
 
     Args:
@@ -130,22 +108,21 @@ def h2d_copy_part_block(
         start_position_in_block (int): The start position in the block to copy.
         end_position_in_block (int): The end position in the block to copy.
     """
-    dst_k = dst_layer[0][dst_block_id][start_position_in_block:end_position_in_block]
-    src_k = src_buffer[0][src_block_id][start_position_in_block:end_position_in_block]
-    dst_v = dst_layer[1][dst_block_id][start_position_in_block:end_position_in_block]
-    src_v = src_buffer[1][src_block_id][start_position_in_block:end_position_in_block]
+    dst_k = dst_layer[0][dst_block_id][
+        start_position_in_block:end_position_in_block]
+    src_k = src_buffer[0][src_block_id][
+        start_position_in_block:end_position_in_block]
+    dst_v = dst_layer[1][dst_block_id][
+        start_position_in_block:end_position_in_block]
+    src_v = src_buffer[1][src_block_id][
+        start_position_in_block:end_position_in_block]
     dst_k.copy_(src_k, non_blocking=True)
     dst_v.copy_(src_v, non_blocking=True)
-        
 
-def h2d_page_copy(
-        src_buffer: torch.Tensor,
-        dst_layer: torch.Tensor,
-        block_ids: list[int],
-        start_token_idx: int,
-        stop_token_idx: int,
-        block_size: int
-    ) -> None:
+
+def h2d_page_copy(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
+                  block_ids: list[int], start_token_idx: int,
+                  stop_token_idx: int, block_size: int) -> None:
     """Copy data from host to device.
 
     Args:
@@ -163,13 +140,14 @@ def h2d_page_copy(
     separate_first_block = start_token_idx % block_size != 0
     separate_last_block = stop_token_idx % block_size != 0
 
-    start_block_id = start_token_idx // block_size # inclusive
+    start_block_id = start_token_idx // block_size  # inclusive
     end_block_id = stop_token_idx // block_size  # exclusive
-    src_block_ids = torch.arange(start_block_id, end_block_id, 
-                                 dtype = torch.long)
+    src_block_ids = torch.arange(start_block_id,
+                                 end_block_id,
+                                 dtype=torch.long)
     if separate_first_block:
         src_block_ids = src_block_ids[1:]
-    # NOTE: we don't need to add the last block id here, because the 
+    # NOTE: we don't need to add the last block id here, because the
     # end_block_id is exclusive
     # E.g., start = 10, stop = 50, block_size = 16, then we have
     #    start_block_id = 0 , separate_first_block = True
@@ -186,36 +164,24 @@ def h2d_page_copy(
         # Only one block to copy
         start_position_in_block = start_token_idx % block_size
         end_position_in_block = stop_token_idx % block_size
-        h2d_copy_part_block(
-            src_buffer,
-            dst_layer,
-            start_block_id,
-            vllm_block_ids[start_block_id],
-            start_position_in_block,
-            end_position_in_block)
+        h2d_copy_part_block(src_buffer, dst_layer, start_block_id,
+                            vllm_block_ids[start_block_id],
+                            start_position_in_block, end_position_in_block)
         return
 
     if separate_first_block:
         first_block_id_src = start_block_id
         first_block_id_dst = vllm_block_ids[first_block_id_src]
         start_token_idx_in_block = start_token_idx % block_size
-        h2d_copy_trailing_tokens(
-            src_buffer,
-            dst_layer,
-            first_block_id_src,
-            first_block_id_dst,
-            start_token_idx_in_block)
+        h2d_copy_trailing_tokens(src_buffer, dst_layer, first_block_id_src,
+                                 first_block_id_dst, start_token_idx_in_block)
 
     if separate_last_block:
         last_block_id_src = end_block_id
         last_block_id_dst = vllm_block_ids[last_block_id_src]
         stop_token_idx_in_block = stop_token_idx % block_size
-        h2d_copy_leading_tokens(
-            src_buffer,
-            dst_layer,
-            last_block_id_src,
-            last_block_id_dst,
-            stop_token_idx_in_block)
+        h2d_copy_leading_tokens(src_buffer, dst_layer, last_block_id_src,
+                                last_block_id_dst, stop_token_idx_in_block)
 
     # Step 3: copy the middle blocks
     block_mapping = torch.stack([src_block_ids, dst_block_ids], dim=1)
@@ -226,6 +192,7 @@ def h2d_page_copy(
 #####################################################################
 # Connector related code
 #####################################################################
+
 
 @dataclass
 class PrefillRequestTracker:
@@ -244,7 +211,7 @@ class PrefillRequestTracker:
     # Total number of tokens in the "full request"
     num_all_tokens: int = 0
 
-    # Total number of tokens that are already seen until this step 
+    # Total number of tokens that are already seen until this step
     num_total_tokens: int = 0
 
     # Number of tokens that are already saved
@@ -255,8 +222,8 @@ class PrefillRequestTracker:
 
     @staticmethod
     def from_new_request(
-            new_request: "NewRequestData",
-            num_tokens_to_compute: int,
+        new_request: "NewRequestData",
+        num_tokens_to_compute: int,
     ) -> "PrefillRequestTracker":
         """Create the request tracker from a new request.
 
@@ -273,7 +240,7 @@ class PrefillRequestTracker:
         return PrefillRequestTracker(
             req_id=new_request.req_id,
             num_all_tokens=len(new_request.prompt_token_ids),
-            num_total_tokens = num_tokens_to_compute,
+            num_total_tokens=num_tokens_to_compute,
             num_saved_tokens=0,
             allocated_block_ids=unfolded_block_ids,
         )
@@ -297,6 +264,7 @@ class PrefillRequestTracker:
             num_saved_tokens (int): the number of saved tokens.
         """
         self.num_saved_tokens = num_saved_tokens
+
 
 @dataclass
 class PrefillReqMeta:
@@ -335,7 +303,7 @@ class PrefillReqMeta:
                 f"Request {req_id} has more tokens than allocated blocks"
 
         token_range = slice(request_tracker.num_saved_tokens,
-                request_tracker.num_total_tokens)
+                            request_tracker.num_total_tokens)
 
         num_saved_full_blocks = request_tracker.num_saved_tokens // block_size
         num_active_blocks = cdiv(request_tracker.num_total_tokens, block_size)
@@ -348,10 +316,9 @@ class PrefillReqMeta:
         logger.debug(
             "Request %s: num_saved_full_blocks=%d, num_active_blocks=%d, "
             "blocks_to_save=%s, skip_leading_tokens=%d, "
-            "skip_trailing_tokens=%d", 
-            request_tracker.req_id,
-            num_saved_full_blocks, num_active_blocks,
-            blocks_to_save, skip_leading_tokens, skip_trailing_tokens)
+            "skip_trailing_tokens=%d", request_tracker.req_id,
+            num_saved_full_blocks, num_active_blocks, blocks_to_save,
+            skip_leading_tokens, skip_trailing_tokens)
 
         # Update the request tracker with the number of saved tokens
         request_tracker.update_num_saved_tokens(
@@ -374,14 +341,15 @@ class DecodeReqMeta:
     prefill_req_id: str
     # Allocated block ids
     block_ids: list[int]
-    # Skip the first N tokens 
+    # Skip the first N tokens
     skip_leading_tokens: int
     # if it's ready or not
     is_ready: bool = False
 
+
 @dataclass
 class CPUConnectorMetadata(KVConnectorMetadata):
-    prefill_meta: list[PrefillReqMeta] 
+    prefill_meta: list[PrefillReqMeta]
     decode_meta: list[DecodeReqMeta]
 
     def __init__(self) -> None:
@@ -407,6 +375,7 @@ class CPUConnectorMetadata(KVConnectorMetadata):
         """
         self.decode_meta.append(decode_meta)
 
+
 def validate_kv_transfer_config(
         kv_transfer_config: Optional["KVTransferConfig"]) -> None:
     """Validate the KV transfer configuration.
@@ -428,12 +397,14 @@ def validate_kv_transfer_config(
     assert "port" in extra_config, \
             "CPUConnector: must have 'port' in kv_connector_extra_config"
 
+
 class CPUConnector(KVConnectorBase_V1):
     """CPUKVConnector is an implementation of KVConnectorBase_V1 that
     provides a CPU-based KV cache sending mechanism.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole) -> None:
+    def __init__(self, vllm_config: "VllmConfig",
+                 role: KVConnectorRole) -> None:
         super().__init__(vllm_config, role)
 
         validate_kv_transfer_config(vllm_config.kv_transfer_config)
@@ -454,13 +425,14 @@ class CPUConnector(KVConnectorBase_V1):
         elif role == KVConnectorRole.WORKER:
             # Prefiller side sender
             if self.kv_role == "kv_producer":
-                self._kv_sender = NixlPrefillManager(1024 * 1024 * 1024) # 1GB for debug
+                self._kv_sender = NixlPrefillManager(1024 * 1024 *
+                                                     1024)  # 1GB for debug
             elif self.kv_role == "kv_consumer":
                 self._kv_receiver = NixlDecodeManager(
-                        1024 * 1024 * 1024, # 1GB for debug
-                        "localhost",
-                        54321, # Changed from string to int to match the class definition
-                    )
+                    1024 * 1024 * 1024,  # 1GB for debug
+                    "localhost",
+                    54321,  # Changed from string to int to match the class definition
+                )
             else:
                 raise ValueError(f"Unknown kv_role: {self.kv_role}")
 
@@ -493,8 +465,6 @@ class CPUConnector(KVConnectorBase_V1):
         # In-progress kv load requests's prefill request ids
         self._inflight_h2d_requests: set[str] = set()
 
-
-    
     def _connect_request_ids(self, p_reqid: str, d_reqid: str) -> None:
         self._decode_req_id_to_prefill_req_id[d_reqid] = p_reqid
         self._prefill_req_id_to_decode_req_id[p_reqid] = d_reqid
@@ -502,10 +472,8 @@ class CPUConnector(KVConnectorBase_V1):
     ############################################################
     # Scheduler Side Methods
     ############################################################
-    def _build_prefiller_meta(
-            self, 
-            scheduler_output: SchedulerOutput,
-            output_meta: CPUConnectorMetadata) -> None:
+    def _build_prefiller_meta(self, scheduler_output: SchedulerOutput,
+                              output_meta: CPUConnectorMetadata) -> None:
         """Build the prefill request metadata from the scheduler output.
 
         Args:
@@ -523,8 +491,7 @@ class CPUConnector(KVConnectorBase_V1):
             self._prefill_reqs[request.req_id] = request_tracker
 
             req_meta = PrefillReqMeta.from_request_tracker(
-                request_tracker,
-                self._block_size)
+                request_tracker, self._block_size)
             output_meta.add_prefill(req_meta)
 
         for request in scheduler_output.scheduled_cached_reqs:
@@ -532,14 +499,11 @@ class CPUConnector(KVConnectorBase_V1):
             request_tracker.update(request)
 
             req_meta = PrefillReqMeta.from_request_tracker(
-                request_tracker,
-                self._block_size)
+                request_tracker, self._block_size)
             output_meta.add_prefill(req_meta)
 
-    def build_decode_meta(
-            self,
-            scheduler_output: SchedulerOutput,
-            output_meta: CPUConnectorMetadata) -> None:
+    def build_decode_meta(self, scheduler_output: SchedulerOutput,
+                          output_meta: CPUConnectorMetadata) -> None:
         """Build the decode request metadata from the scheduler output.
 
         Args:
@@ -551,7 +515,7 @@ class CPUConnector(KVConnectorBase_V1):
             if not req_meta.is_ready:
                 updated_decode_req_metas[req_meta.req_id] = req_meta
             # NOTE (ApostaC): Even if the request is not ready, we still
-            # want the worker connector to know about it, so that it can 
+            # want the worker connector to know about it, so that it can
             # connector the decode request id to the prefill request id
             output_meta.add_decode(req_meta)
         self._decode_req_metas = updated_decode_req_metas
@@ -559,7 +523,7 @@ class CPUConnector(KVConnectorBase_V1):
     def get_num_new_matched_tokens(
             self, request: "Request",
             num_computed_tokens: int) -> tuple[int, bool]:
-        # NOTE(ApostaC): For a single request, this function will be called 
+        # NOTE(ApostaC): For a single request, this function will be called
         # two times if the first time we returned async_load flag as True.
         # The second time will be the "real schedule" time
 
@@ -569,16 +533,18 @@ class CPUConnector(KVConnectorBase_V1):
         kv_transfer_params = request.kv_transfer_params
         num_tokens = len(request.prompt_token_ids)
         request_id = request.request_id
-        logger.info("For request %s, num_computed_tokens is %d, "
-                    "total_num_tokens is %d", request_id, num_computed_tokens,
-                    num_tokens)
+        logger.info(
+            "For request %s, num_computed_tokens is %d, "
+            "total_num_tokens is %d", request_id, num_computed_tokens,
+            num_tokens)
 
         if request.request_id in self._should_be_ready_reqs:
             self._should_be_ready_reqs.remove(request.request_id)
             return 0, False
 
         if kv_transfer_params is None or "prefill_request_id" not in kv_transfer_params:
-            logger.warning("Request %s does not have prefill_request_id", request.request_id)
+            logger.warning("Request %s does not have prefill_request_id",
+                           request.request_id)
             #return 0, False
 
             # DEBUG: Set the prefill_request_id to the request id
@@ -591,17 +557,15 @@ class CPUConnector(KVConnectorBase_V1):
         self._connect_request_ids(prefill_request_id, request_id)
         self._should_be_ready_reqs.add(request_id)
 
-        # NOTE: because the scheduler wants here to return "full blocks" if 
-        # the async flag is true (see _update_waiting_for_remote_kv in 
-        # scheduler.py). We need to carefully deal with it when copying 
+        # NOTE: because the scheduler wants here to return "full blocks" if
+        # the async flag is true (see _update_waiting_for_remote_kv in
+        # scheduler.py). We need to carefully deal with it when copying
         # the KV cache at worker side
         return num_tokens // self._block_size * self._block_size, True
 
-    def update_state_after_alloc(
-            self,
-            request: "Request",
-            blocks: "KVCacheBlocks",
-            num_external_tokens: int) -> None:
+    def update_state_after_alloc(self, request: "Request",
+                                 blocks: "KVCacheBlocks",
+                                 num_external_tokens: int) -> None:
         """Update the state of the request after allocation.
         """
         # NOTE(ApostaC): This function is called twice for the same request
@@ -621,12 +585,11 @@ class CPUConnector(KVConnectorBase_V1):
         block_ids = []
         for blks in blocks.get_block_ids():
             block_ids.extend(blks)
-        req_meta = DecodeReqMeta(
-                req_id = request.request_id,
-                prefill_req_id = p_req_id,
-                block_ids = block_ids,
-                skip_leading_tokens = 0,
-                is_ready = False)
+        req_meta = DecodeReqMeta(req_id=request.request_id,
+                                 prefill_req_id=p_req_id,
+                                 block_ids=block_ids,
+                                 skip_leading_tokens=0,
+                                 is_ready=False)
         self._decode_req_metas[request.request_id] = req_meta
 
     def build_connector_meta(
@@ -639,13 +602,13 @@ class CPUConnector(KVConnectorBase_V1):
             self.build_decode_meta(scheduler_output, meta)
         else:
             raise ValueError(f"Unknown kv_role: {self.kv_role}")
-        
+
         return meta
 
     def request_finished(
-            self,
-            request: "Request",
-            block_ids: list[int],
+        self,
+        request: "Request",
+        block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         print("In request_finished")
         return False, None
@@ -664,18 +627,20 @@ class CPUConnector(KVConnectorBase_V1):
         return self._layer_id_to_name[layer_id]
 
     def _get_kv_shape(self, num_blocks: int) -> torch.Size:
-        return torch.Size((2, num_blocks, ) + self._kv_page_shape)
+        return torch.Size((
+            2,
+            num_blocks,
+        ) + self._kv_page_shape)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         self._gpu_kv_caches = kv_caches
         idx = 0
-        for layer_name in kv_caches.keys():
+        for layer_name in kv_caches:
             self._layer_name_to_id[layer_name] = idx
             self._layer_id_to_name[idx] = layer_name
             idx += 1
 
         self._kv_page_shape = kv_caches[list(kv_caches.keys())[0]].shape[2:]
-
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -702,20 +667,18 @@ class CPUConnector(KVConnectorBase_V1):
                 "Connector metadata is not of type CPUConnectorMetadata"
 
         for decode_meta in meta.decode_meta:
-            self._connect_request_ids(
-                    decode_meta.prefill_req_id,
-                    decode_meta.req_id)
+            self._connect_request_ids(decode_meta.prefill_req_id,
+                                      decode_meta.req_id)
             if not decode_meta.is_ready:
                 continue
 
             total_expected_tokens = len(decode_meta.block_ids) * \
-                    self._block_size 
+                    self._block_size
 
             self._inflight_h2d_requests.add(decode_meta.prefill_req_id)
             for layer_id in range(len(self._gpu_kv_caches)):
                 decode_specs = self._kv_receiver.get_kv_specs(
-                    decode_meta.prefill_req_id,
-                    layer_id)
+                    decode_meta.prefill_req_id, layer_id)
                 layer_name = self._layer_id_to_name[layer_id]
                 dst_layer = self._gpu_kv_caches[layer_name]
                 for decode_spec in decode_specs:
@@ -727,13 +690,8 @@ class CPUConnector(KVConnectorBase_V1):
                     block_ids = decode_meta.block_ids
 
                     with torch.cuda.stream(self._cuda_stream):
-                        h2d_page_copy(
-                            src_buffer,
-                            dst_layer,
-                            block_ids,
-                            start,
-                            stop,
-                            self._block_size)
+                        h2d_page_copy(src_buffer, dst_layer, block_ids, start,
+                                      stop, self._block_size)
         event = torch.cuda.Event()
         event.record(self._cuda_stream)
         self._decoder_cuda_events.append(event)
@@ -793,8 +751,10 @@ class CPUConnector(KVConnectorBase_V1):
                 layer_id=self._get_layer_id(layer_name),
                 start=prefill_req.token_range.start,
                 stop=prefill_req.token_range.stop,
-                shape=tuple(self._get_kv_shape(len(prefill_req.blocks_to_save))),
-                dtype_str=str(kv_layer.dtype).split('.')[-1],  # Convert torch.float32 -> "float32"
+                shape=tuple(self._get_kv_shape(len(
+                    prefill_req.blocks_to_save))),
+                dtype_str=str(kv_layer.dtype).split('.')
+                [-1],  # Convert torch.float32 -> "float32"
                 num_all_tokens=prefill_req.num_all_tokens,
             )
 
@@ -802,7 +762,7 @@ class CPUConnector(KVConnectorBase_V1):
             dest_spec = DestinationSpec(
                 rank=get_tensor_model_parallel_rank(),
                 host=self._host,
-                base_port=self._port,  
+                base_port=self._port,
             )
 
             # Create the send task
@@ -818,11 +778,9 @@ class CPUConnector(KVConnectorBase_V1):
             self._cuda_stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self._cuda_stream):
                 # Copy the data from the GPU to the CPU buffer page by page
-                d2h_page_copy(
-                    src_layer=kv_layer,
-                    dst_buffer=buffer,
-                    block_ids=prefill_req.blocks_to_save
-                )
+                d2h_page_copy(src_layer=kv_layer,
+                              dst_buffer=buffer,
+                              block_ids=prefill_req.blocks_to_save)
 
             # record the cuda stream
             task.cuda_event = torch.cuda.Event()
@@ -834,8 +792,6 @@ class CPUConnector(KVConnectorBase_V1):
         # 1. coalesce the d2h page copy to a single call
         # 2. use a single cuda event instead of a list of cuda events
         # 3. use a cuda event pool to prevent the creation overhead
-
-
 
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
@@ -873,7 +829,8 @@ class CPUConnector(KVConnectorBase_V1):
         if self.kv_role == "kv_consumer":
             # decoder side
             self._kv_receiver.progress()
-            p_ready_reqs = self._kv_receiver.get_finished(len(self._gpu_kv_caches))
+            p_ready_reqs = self._kv_receiver.get_finished(
+                len(self._gpu_kv_caches))
             ret = set()
             # TODO: Bug here: we need to send the prefill request id from scheduler
             # connector to the worker connector in kv_params

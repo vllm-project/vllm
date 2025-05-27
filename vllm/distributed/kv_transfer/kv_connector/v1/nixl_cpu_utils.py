@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
-import math
 import threading
 import time
 import uuid
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict, defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -12,29 +11,19 @@ from typing import TYPE_CHECKING, Any, Optional
 import msgspec
 import torch
 import zmq
-
 from lmcache.utils import _lmcache_nvtx_annotate
 
-from vllm import envs
-from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.cpu_connector_utils import (
-        SendTask, KVSenderInterface, SourceSpec, DestinationSpec, DecoderKVSpec,
-        SendTaskState)
+    DecoderKVSpec, DestinationSpec, KVSenderInterface, SendTask, SendTaskState,
+    SourceSpec)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
 from vllm.logger import init_logger
-from vllm.utils import make_zmq_path, make_zmq_socket, round_down
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import RequestStatus
+from vllm.utils import make_zmq_path, make_zmq_socket
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
-    from vllm.forward_context import ForwardContext
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.request import Request
+    pass
 
 logger = init_logger(__name__)
 
@@ -52,6 +41,7 @@ except ImportError:
 ###################################################################
 
 DEFAULT_NIXL_PAGE_SIZE = 4096
+
 
 def init_nixl_agent(
     buffer_size: int,
@@ -84,16 +74,15 @@ def init_nixl_agent(
 
     # Create xfer handlers
     xfer_desc = []
-    for base_addr in range(buffer_ptr, 
-                           buffer_ptr + buffer_size,
+    for base_addr in range(buffer_ptr, buffer_ptr + buffer_size,
                            nixl_page_size):
         xfer_desc.append((base_addr, nixl_page_size, 0))
 
     xfer_descs = nixl_agent.get_xfer_descs(xfer_desc, mem_type="DRAM")
-    xfer_handler = nixl_agent.prep_xfer_dlist(
-            "", xfer_descs, mem_type="DRAM")
+    xfer_handler = nixl_agent.prep_xfer_dlist("", xfer_descs, mem_type="DRAM")
 
     return nixl_agent, reg_descs, xfer_descs, xfer_handler
+
 
 class RingBufferAllocator:
     """RingBufferAllocator is a simple ring buffer allocator for managing
@@ -143,7 +132,7 @@ class RingBufferAllocator:
         """
         # During allocation, we always make sure that high watermark and
         # low watermark are aligned to the alignment size
-        aligned_size = self._align_size(size)   # Align the requested size
+        aligned_size = self._align_size(size)  # Align the requested size
         turnaround_size = (self._high_watermark // self._size + 1) * self._size
 
         local_high = self._high_watermark % self._size
@@ -181,8 +170,8 @@ class RingBufferAllocator:
                 # No space available
                 return -1, None
 
-    def view_as_tensor(self, vaddr: int, 
-                       dtype: torch.dtype, shape: torch.Size) -> torch.Tensor:
+    def view_as_tensor(self, vaddr: int, dtype: torch.dtype,
+                       shape: torch.Size) -> torch.Tensor:
         """View the buffer as a tensor.
         Args:
             vaddr (int): The virtual address of the buffer.
@@ -202,8 +191,6 @@ class RingBufferAllocator:
         # Get the tensor
         return self._buffer[paddr:paddr + size].view(dtype).view(shape)
 
-
-
     def free(self, address: int) -> None:
         """Free the buffer at the given address.
 
@@ -214,7 +201,7 @@ class RingBufferAllocator:
         assert address in self._allocated, \
                 f"Address {address} not found in allocated buffers"
 
-        # Pop the address from the allocated dict, and update the 
+        # Pop the address from the allocated dict, and update the
         # low watermark
         self._allocated.pop(address)
 
@@ -263,9 +250,11 @@ class RingBufferAllocator:
         """
         return self._buffer.data_ptr()
 
+
 ###################################################################
 # NIXL Related Classes
 ###################################################################
+
 
 class NixlProtocolMsg(msgspec.Struct):
     msg_type: str
@@ -274,11 +263,7 @@ class NixlProtocolMsg(msgspec.Struct):
     receiver_paddr: Optional[int] = None
 
 
-
-def make_send_req_msg(
-    source_spec: SourceSpec,
-    req_uuid: str
-) -> bytes:
+def make_send_req_msg(source_spec: SourceSpec, req_uuid: str) -> bytes:
     """Make the send request message.
 
     Args:
@@ -290,19 +275,18 @@ def make_send_req_msg(
     # Create the request message
     msg_type = "REQMSG"
     receiver_paddr = None
-    send_req_msg = NixlProtocolMsg(
-        msg_type=msg_type,
-        req_uuid=req_uuid,
-        source_spec=source_spec,
-        receiver_paddr=receiver_paddr
-    )
+    send_req_msg = NixlProtocolMsg(msg_type=msg_type,
+                                   req_uuid=req_uuid,
+                                   source_spec=source_spec,
+                                   receiver_paddr=receiver_paddr)
     # Encode the message
     send_req_msg_bytes = msgspec.msgpack.encode(send_req_msg)
     return send_req_msg_bytes
 
+
 def make_receive_ready_msg(
-        req_uuid: str,
-        receiver_paddr: int,
+    req_uuid: str,
+    receiver_paddr: int,
 ) -> bytes:
     """Make the receive ready message.
 
@@ -316,19 +300,16 @@ def make_receive_ready_msg(
     # Create the request message
     msg_type = "READYMSG"
     source_spec = None
-    receive_ready_msg = NixlProtocolMsg(
-        msg_type=msg_type,
-        req_uuid=req_uuid,
-        source_spec=source_spec,
-        receiver_paddr=receiver_paddr
-    )
+    receive_ready_msg = NixlProtocolMsg(msg_type=msg_type,
+                                        req_uuid=req_uuid,
+                                        source_spec=source_spec,
+                                        receiver_paddr=receiver_paddr)
     # Encode the message
     receive_ready_msg_bytes = msgspec.msgpack.encode(receive_ready_msg)
     return receive_ready_msg_bytes
 
-def make_send_finish_msg(
-        req_uuid: str,
-) -> bytes:
+
+def make_send_finish_msg(req_uuid: str, ) -> bytes:
     """Make the send finish message.
 
     Args:
@@ -341,18 +322,17 @@ def make_send_finish_msg(
     msg_type = "FINISHMSG"
     source_spec = None
     receiver_paddr = None
-    send_finish_msg = NixlProtocolMsg(
-        msg_type=msg_type,
-        req_uuid=req_uuid,
-        source_spec=source_spec,
-        receiver_paddr=receiver_paddr
-    )
+    send_finish_msg = NixlProtocolMsg(msg_type=msg_type,
+                                      req_uuid=req_uuid,
+                                      source_spec=source_spec,
+                                      receiver_paddr=receiver_paddr)
     # Encode the message
     send_finish_msg_bytes = msgspec.msgpack.encode(send_finish_msg)
     return send_finish_msg_bytes
 
 
 class NixlCPUSender:
+
     def __init__(
         self,
         buffer_size: int,
@@ -372,7 +352,7 @@ class NixlCPUSender:
                 self._local_xfer_handlers = \
             init_nixl_agent(buffer_size, buffer_ptr, nixl_page_size)
 
-        # Remote xfer dlists, peer name -> prepped xfer handlers 
+        # Remote xfer dlists, peer name -> prepped xfer handlers
         self._remote_xfer_handlers: dict[str, Any] = {}
 
         # Add ZMQ context for handshakes
@@ -382,12 +362,11 @@ class NixlCPUSender:
         # uuid -> (remote agent name, receiver paddr)
         self._ready_requests: dict[str, tuple[str, int]] = {}
 
-        # NOTE(ApostaC): we don't track the requests that are waiting for the 
+        # NOTE(ApostaC): we don't track the requests that are waiting for the
         # receiver to be ready, and may want to add this in the future
 
         # Msg decoder
         self._msg_decoder = msgspec.msgpack.Decoder(NixlProtocolMsg)
-
 
     def _get_desc_idxs(self, paddr: int, size: int) -> list[int]:
         """Get the sender descriptor indexes for the given physical address
@@ -439,13 +418,8 @@ class NixlCPUSender:
         notif_msg = make_send_finish_msg(req_uuid)
         # Transfer
         handle = self._nixl_wrapper.make_prepped_xfer(
-            "WRITE",
-            self._local_xfer_handlers,
-            desc_idxs,
-            remote_xfer_handlers,
-            r_desc_idxs,
-            notif_msg
-        )
+            "WRITE", self._local_xfer_handlers, desc_idxs,
+            remote_xfer_handlers, r_desc_idxs, notif_msg)
 
         self._nixl_wrapper.transfer(handle)
 
@@ -465,7 +439,7 @@ class NixlCPUSender:
             logger.error("Error in send operation")
             return False
         return status == "DONE"
-    
+
     def prepare_send(
         self,
         source_spec: SourceSpec,
@@ -557,11 +531,11 @@ class NixlCPUSender:
             sock.send(local_meta)
 
             metadata_bytes = sock.recv()
-            
+
             # Get remote agent name and register it
             remote_agent_name = self._nixl_wrapper.add_remote_agent(
                 metadata_bytes)
-            
+
             # Store remote agent info
             self._remote_agents[destination_spec.get_id()] = remote_agent_name
 
@@ -570,14 +544,14 @@ class NixlCPUSender:
             s_remote_xfer_descs = sock.recv()
             remote_xfer_dlist = self._nixl_wrapper.deserialize_descs(
                 s_remote_xfer_descs)
-            
 
             remote_xfer_handlers = self._nixl_wrapper.prep_xfer_dlist(
                 remote_agent_name, remote_xfer_dlist, mem_type="DRAM")
 
-            self._remote_xfer_handlers[remote_agent_name] = remote_xfer_handlers
-            
-            logger.debug("Successfully completed handshake with %s", 
+            self._remote_xfer_handlers[
+                remote_agent_name] = remote_xfer_handlers
+
+            logger.debug("Successfully completed handshake with %s",
                          destination_spec)
 
     def close(self) -> None:
@@ -591,7 +565,9 @@ class NixlCPUSender:
             self._nixl_wrapper.release_dlist_handle(remote_xfer_handler)
         del self._nixl_wrapper
 
+
 class NixlCPUReceiver:
+
     def __init__(
         self,
         allocator: RingBufferAllocator = None,
@@ -624,7 +600,7 @@ class NixlCPUReceiver:
                 self._reg_dlist, \
                 self._local_xfer_dlist, \
                 self._local_xfer_handlers = \
-            init_nixl_agent(self._buffer_size, self._buffer_ptr, 
+            init_nixl_agent(self._buffer_size, self._buffer_ptr,
                             nixl_page_size)
 
         # Add handshake listener thread
@@ -643,17 +619,19 @@ class NixlCPUReceiver:
                 obj = self._msg_decoder.decode(msg)
                 if obj.msg_type == "REQMSG":
                     # Add the request to the pending allocation
-                    self._pending_allocation[obj.req_uuid] = (obj.source_spec,
-                                                             remote_agent_name)
+                    self._pending_allocation[obj.req_uuid] = (
+                        obj.source_spec, remote_agent_name)
                 elif obj.msg_type == "FINISHMSG":
                     # Add the request to the finished requests
                     if obj.req_uuid in self._inflight_requests:
                         source_spec = self._inflight_requests.pop(obj.req_uuid)
                         vaddr = self._inflight_request_vaddr.pop(obj.req_uuid)
-                        self._finished_requests[obj.req_uuid] = (source_spec, vaddr)
+                        self._finished_requests[obj.req_uuid] = (source_spec,
+                                                                 vaddr)
                     else:
-                        logger.error("Request %s not found in inflight requests", 
-                                     obj.req_uuid)
+                        logger.error(
+                            "Request %s not found in inflight requests",
+                            obj.req_uuid)
                 else:
                     logger.error("Unexpected message type: %s", obj.msg_type)
                     continue
@@ -668,8 +646,7 @@ class NixlCPUReceiver:
             if requested_size > self._buffer_size:
                 raise RuntimeError(
                     f"Requested size {requested_size} is larger than the "
-                    f"nixl receiver buffer size {self._buffer_size}"
-                )
+                    f"nixl receiver buffer size {self._buffer_size}")
 
             vaddr, buffer = self._allocator.allocate(requested_size)
             if vaddr == -1:
@@ -677,7 +654,7 @@ class NixlCPUReceiver:
                 # No space available, skip all the requests
 
                 # NOTE: an alternative is to try allocation for other requests
-                # and then come back to this one, but this may create 
+                # and then come back to this one, but this may create
                 # starvation
                 break
 
@@ -690,7 +667,7 @@ class NixlCPUReceiver:
             ready_msg = make_receive_ready_msg(req_uuid, paddr)
             self._nixl_wrapper.send_notif(peer_name, ready_msg)
 
-            # Add the request to the allocated requests 
+            # Add the request to the allocated requests
             allocated_requests.append(req_uuid)
 
         # Remove the allocated requests from the pending allocation
@@ -703,7 +680,7 @@ class NixlCPUReceiver:
         self._process_msgs()
         self._process_allocation_requests()
 
-    def get_finished(self, clear = False) -> list[tuple[SourceSpec, int]]:
+    def get_finished(self, clear=False) -> list[tuple[SourceSpec, int]]:
         """Get the requests that finishes receiving.
 
         Args:
@@ -713,8 +690,8 @@ class NixlCPUReceiver:
             list[tuple[SourceSpec, int]]: A list of tuples containing the source 
                 spec and the address.
         """
-        ret = [(source_spec, vaddr) for source_spec, vaddr in 
-                self._finished_requests.values()]
+        ret = [(source_spec, vaddr)
+               for source_spec, vaddr in self._finished_requests.values()]
         if clear:
             self._finished_requests.clear()
         return ret
@@ -731,17 +708,12 @@ class NixlCPUReceiver:
             target=self._nixl_handshake_listener,
             args=(host, base_port, ready_event),
             daemon=True,
-            name="nixl_cpu_handshake_listener"
-        )
+            name="nixl_cpu_handshake_listener")
         self._handshake_listener_t.start()
         ready_event.wait()
 
-    def _nixl_handshake_listener(
-        self, 
-        host: str,
-        base_port: int,
-        ready_event: threading.Event
-    ) -> None:
+    def _nixl_handshake_listener(self, host: str, base_port: int,
+                                 ready_event: threading.Event) -> None:
         """Background thread that listens for and responds to handshake requests.
         
         Args:
@@ -751,15 +723,15 @@ class NixlCPUReceiver:
         """
         # Prepare metadata
         local_meta = self._nixl_wrapper.get_agent_metadata()
-        
+
         # Setup ZMQ socket
         port = base_port + get_tensor_model_parallel_rank()
         path = make_zmq_path("tcp", host, port)
         logger.debug("Starting handshake listener on path: %s", path)
-        
+
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
-            
+
             while not self._stop_listener.is_set():
                 try:
                     identity, _, msg = sock.recv_multipart(flags=zmq.NOBLOCK)
@@ -768,18 +740,21 @@ class NixlCPUReceiver:
                         # Send back the local xfer descs
                         s_local_xfer_descs = self._nixl_wrapper.get_serialized_descs(
                             self._local_xfer_dlist)
-                        sock.send_multipart([identity, b"", s_local_xfer_descs])
-                        logger.debug("Sent back the local xfer descs to %s", identity)
+                        sock.send_multipart(
+                            [identity, b"", s_local_xfer_descs])
+                        logger.debug("Sent back the local xfer descs to %s",
+                                     identity)
                     else:
                         # Send the agent metadata
                         remote_agent_name = self._nixl_wrapper.add_remote_agent(
                             msg)
                         self._remote_agents[identity] = remote_agent_name
-                        logger.debug("Successfully received handshake from %s", 
+                        logger.debug("Successfully received handshake from %s",
                                      identity)
                         # Send back the local metadata to the sender
                         sock.send_multipart([identity, b"", local_meta])
-                        logger.debug("Sent local metadata back to %s", identity)
+                        logger.debug("Sent local metadata back to %s",
+                                     identity)
 
                 except zmq.error.Again:
                     # No message available
@@ -797,8 +772,9 @@ class NixlCPUReceiver:
             self._handshake_listener_t = None
 
     def close(self):
-        logger.info("Watermark information before closing: (low: %d, high: %d)",
-                    self._allocator.low_watermark, self._allocator.high_watermark)
+        logger.info(
+            "Watermark information before closing: (low: %d, high: %d)",
+            self._allocator.low_watermark, self._allocator.high_watermark)
         self.stop_handshake_listener()
         self._nixl_wrapper.deregister_memory(self._reg_dlist)
         del self._nixl_wrapper
@@ -844,7 +820,6 @@ class NixlSendTask(SendTask):
     # nixl transfer handle
     transfer_handle: Optional[nixl_xfer_handle] = None
 
-
     def __post_init__(self) -> None:
         self.creation_time = time.time()
 
@@ -860,7 +835,7 @@ class NixlSendTask(SendTask):
         # check if the send is ready
         if not self.state.receiver_ready and self.receiver_paddr is None:
             rname, rpaddr = self.parent_sender.check_and_remove_prepared_send(
-                    self.request_uuid)
+                self.request_uuid)
             if rname is not None:
                 assert rpaddr != -1
                 self.receiver_paddr = rpaddr
@@ -878,21 +853,21 @@ class NixlPrefillManager(KVSenderInterface):
     with NIXL for sending data.
     """
 
-    def __init__(self, buffer_size: int) -> None: 
+    def __init__(self, buffer_size: int) -> None:
         super().__init__()
         nixl_page_size = DEFAULT_NIXL_PAGE_SIZE
         self._buffer_size = buffer_size
         self._allocator = RingBufferAllocator(self._buffer_size,
                                               nixl_page_size)
-        self._nixl_sender = NixlCPUSender(
-                buffer_size, self._allocator.get_buffer_ptr(),
-                nixl_page_size)
+        self._nixl_sender = NixlCPUSender(buffer_size,
+                                          self._allocator.get_buffer_ptr(),
+                                          nixl_page_size)
 
     def create_send_task(
-            self,
-            source_spec: SourceSpec,
-            destination_spec: DestinationSpec,
-        ) -> SendTask:
+        self,
+        source_spec: SourceSpec,
+        destination_spec: DestinationSpec,
+    ) -> SendTask:
         """Create a non-ready send task with a CPU buffer allocated.
 
         Args:
@@ -905,7 +880,7 @@ class NixlPrefillManager(KVSenderInterface):
         size = source_spec.get_size()
         address, buffer = self._allocator.allocate(size)
         while address == -1:
-            # If allocation fails, wait for a while to process 
+            # If allocation fails, wait for a while to process
             # and try again
             time.sleep(0.001)
             self.progress()
@@ -913,19 +888,17 @@ class NixlPrefillManager(KVSenderInterface):
         assert buffer is not None, "Buffer allocation failed"
 
         # Prepare the send request in NixlSender
-        req_uuid = self._nixl_sender.prepare_send(
-                source_spec, destination_spec)
+        req_uuid = self._nixl_sender.prepare_send(source_spec,
+                                                  destination_spec)
 
         # Create a send task with the allocated buffer
-        task = NixlSendTask(
-            buffer=buffer,
-            source_spec=source_spec,
-            destination_spec=destination_spec,
-            state=SendTaskState(),
-            buffer_vaddr=address,
-            parent_sender=self._nixl_sender,
-            request_uuid=req_uuid
-        )
+        task = NixlSendTask(buffer=buffer,
+                            source_spec=source_spec,
+                            destination_spec=destination_spec,
+                            state=SendTaskState(),
+                            buffer_vaddr=address,
+                            parent_sender=self._nixl_sender,
+                            request_uuid=req_uuid)
         self.add_send_task(task)
         return task
 
@@ -949,14 +922,12 @@ class NixlPrefillManager(KVSenderInterface):
         assert isinstance(task, NixlSendTask), \
             "Task is not a NixlSendTask"
         handle = self._nixl_sender.send(
-                self._allocator.virtual_to_physical(task.buffer_vaddr),
-                task.receiver_paddr,
-                task.source_spec.get_size(),
-                task.request_uuid,
-                task.destination_spec)
+            self._allocator.virtual_to_physical(task.buffer_vaddr),
+            task.receiver_paddr, task.source_spec.get_size(),
+            task.request_uuid, task.destination_spec)
         task.transfer_handle = handle
         task.mark_sending()
-        return 
+        return
 
     def pre_progress_hook(self) -> None:
         for task in self.get_send_tasks():
@@ -981,19 +952,17 @@ class NixlPrefillManager(KVSenderInterface):
         self.wait_for_all_tasks()
         self._nixl_sender.close()
 
+
 class NixlDecodeManager:
-    def __init__(self, 
-                 buffer_size: int,
-                 host: str,
-                 port: int) -> None:
+
+    def __init__(self, buffer_size: int, host: str, port: int) -> None:
         self.nixl_page_size = DEFAULT_NIXL_PAGE_SIZE
         self._buffer_size = buffer_size
         self._allocator = RingBufferAllocator(self._buffer_size,
                                               self.nixl_page_size)
-        self._nixl_receiver = NixlCPUReceiver(self._allocator, 
+        self._nixl_receiver = NixlCPUReceiver(self._allocator,
                                               self.nixl_page_size)
         self._nixl_receiver.start_handshake_listener(host, port)
-
 
         # How many tokens are received for each request, each layer
         # (p_request_id, layer_id) -> num_tokens
@@ -1005,7 +974,7 @@ class NixlDecodeManager:
 
         # The detailed specs of the requests
         # (p_request_id, layer_id) -> (SourceSpec, vaddr)
-        self._request_specs: dict[tuple(str, int), 
+        self._request_specs: dict[tuple(str, int),
                                   list[tuple(SourceSpec, int)]] = {}
 
         # Metadata
@@ -1015,13 +984,14 @@ class NixlDecodeManager:
 
         # Multi process receiving check
         # p_request_id -> number of ready workers
-        self._done_receiving_count: defaultdict[str, int] = defaultdict(lambda: 0)
+        self._done_receiving_count: defaultdict[str,
+                                                int] = defaultdict(lambda: 0)
 
     def _check_receive_and_update(self):
         """Checks the KV cache receiving status and update the internal
         states
         """
-        finished_list = self._nixl_receiver.get_finished(clear = True)
+        finished_list = self._nixl_receiver.get_finished(clear=True)
         for source_spec, vaddr in finished_list:
             # Get the request id and layer id
             p_request_id = source_spec.request_id
@@ -1029,21 +999,22 @@ class NixlDecodeManager:
             num_received_tokens = source_spec.stop - source_spec.start
 
             if p_request_id not in self._expected_tokens:
-                self._expected_tokens[p_request_id] = source_spec.num_all_tokens
+                self._expected_tokens[
+                    p_request_id] = source_spec.num_all_tokens
 
             # Update the received tokens
             if p_request_id not in self._received_tokens:
                 self._received_tokens[p_request_id] = {}
             if layer_id not in self._received_tokens[p_request_id]:
                 self._received_tokens[p_request_id][layer_id] = 0
-            self._received_tokens[p_request_id][layer_id] += num_received_tokens
+            self._received_tokens[p_request_id][
+                layer_id] += num_received_tokens
 
             # Update received specs
             if (p_request_id, layer_id) not in self._request_specs:
                 self._request_specs[(p_request_id, layer_id)] = []
             self._request_specs[(p_request_id, layer_id)].append(
-                (source_spec, vaddr)
-            )
+                (source_spec, vaddr))
 
     def progress(self) -> None:
         """Process the received requests and the data. Updates the internal
@@ -1080,7 +1051,7 @@ class NixlDecodeManager:
         if self.world_size == 1:
             return ready_requests
 
-        # For multi-process 
+        # For multi-process
         if self.rank == 0:
             for p_request_id in ready_requests:
                 self._done_receiving_count[p_request_id] += 1
@@ -1088,7 +1059,7 @@ class NixlDecodeManager:
             other_ranks_finished_ids: list[str] = []
             for i in range(1, self.world_size):
                 other_ranks_finished_ids.extend(
-                        self.tp_group.recv_object(src=i))
+                    self.tp_group.recv_object(src=i))
             for p_request_id in other_ranks_finished_ids:
                 self._done_receiving_count[p_request_id] += 1
 
@@ -1103,22 +1074,18 @@ class NixlDecodeManager:
             self.tp_group.send_object(ready_requests, dst=0)
             return ready_requests
 
-    def _create_decoder_kv_spec(self, 
-                                source_spec: SourceSpec,
+    def _create_decoder_kv_spec(self, source_spec: SourceSpec,
                                 vaddr: int) -> DecoderKVSpec:
         """Create a DecoderKVSpec from the source spec and the virtual address.
         """
         # Get the correct buffer
-        return DecoderKVSpec(
-            start = source_spec.start,
-            stop = source_spec.stop,
-            buffer = self._allocator.view_as_tensor(
-                vaddr, source_spec.dtype, source_spec.tensor_shape)
-        )
+        return DecoderKVSpec(start=source_spec.start,
+                             stop=source_spec.stop,
+                             buffer=self._allocator.view_as_tensor(
+                                 vaddr, source_spec.dtype,
+                                 source_spec.tensor_shape))
 
-
-    def get_kv_specs(self, 
-                     p_request_id: str,
+    def get_kv_specs(self, p_request_id: str,
                      layer_id: int) -> list[DecoderKVSpec]:
         """Get the KV specs for the given request id and layer id, which 
         will be used for connector to load the KV back to CPU
@@ -1129,11 +1096,12 @@ class NixlDecodeManager:
         """
         ret = []
         if (p_request_id, layer_id) not in self._request_specs:
-            logger.warning("Request %s not found in request specs", 
+            logger.warning("Request %s not found in request specs",
                            (p_request_id, layer_id))
             return ret
 
-        for source_spec, vaddr in self._request_specs[(p_request_id, layer_id)]:
+        for source_spec, vaddr in self._request_specs[(p_request_id,
+                                                       layer_id)]:
             # Create the decoder kv spec
             decoder_kv_spec = self._create_decoder_kv_spec(source_spec, vaddr)
             ret.append(decoder_kv_spec)
@@ -1155,14 +1123,15 @@ class NixlDecodeManager:
                     "Found received tokens but no request specs"
 
                 # Free the memory
-                for src_spec, vaddr in self._request_specs[(p_request_id, layer_id)]:
+                for src_spec, vaddr in self._request_specs[(p_request_id,
+                                                            layer_id)]:
                     self._allocator.free(vaddr)
 
                 # Clear the request specs
                 self._request_specs.pop((p_request_id, layer_id), None)
 
         else:
-            logger.warning("Request %s not found in received tokens", 
+            logger.warning("Request %s not found in received tokens",
                            p_request_id)
 
     def close(self):

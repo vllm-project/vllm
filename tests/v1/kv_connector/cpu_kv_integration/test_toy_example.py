@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+
 import pytest
+
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
+
 
 @pytest.fixture
 def env_setup():
     """Set up required environment variables"""
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 
 @pytest.fixture
 def input_prompts():
@@ -24,6 +28,7 @@ def input_prompts():
         context3 + "Your name is",
         context4 + "The capital of China is",
     ]
+
 
 @pytest.fixture
 def llm_instance():
@@ -43,38 +48,42 @@ def llm_instance():
         block_size=64,
     )
 
+
 def test_llm_generation(env_setup, input_prompts, llm_instance, tmp_path):
     """Test LLM generation and output saving"""
     # Configure sampling parameters
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
-    
+
     # Generate outputs
     outputs = llm_instance.generate(input_prompts, sampling_params)
-    
+
     # Verify outputs
-    assert len(outputs) == len(input_prompts), "Number of outputs should match number of prompts"
-    
+    assert len(outputs) == len(
+        input_prompts), "Number of outputs should match number of prompts"
+
     # Process outputs
     new_prompts = []
     for output in outputs:
         assert hasattr(output, 'prompt'), "Output should have prompt attribute"
-        assert hasattr(output, 'outputs'), "Output should have outputs attribute"
+        assert hasattr(output,
+                       'outputs'), "Output should have outputs attribute"
         assert len(output.outputs) > 0, "Output should have generated text"
-        
+
         prompt = output.prompt
         generated_text = output.outputs[0].text
         new_prompts.append(prompt + generated_text)
-    
+
     # Test file writing
     output_file = tmp_path / "output.txt"
     with open(output_file, "w") as f:
         for prompt in new_prompts:
             f.write(prompt + "\n")
-    
+
     # Verify file contents
     assert output_file.exists(), "Output file should be created"
-    with open(output_file, "r") as f:
+    with open(output_file) as f:
         lines = f.readlines()
-        assert len(lines) == len(input_prompts), "File should contain all prompts"
+        assert len(lines) == len(
+            input_prompts), "File should contain all prompts"
         for line in lines:
             assert line.strip(), "Lines should not be empty"

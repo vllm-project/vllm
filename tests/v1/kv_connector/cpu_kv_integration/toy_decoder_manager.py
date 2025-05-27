@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import torch.multiprocessing as mp
 import time
 
+import torch.multiprocessing as mp
+
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
-    NixlCPUReceiver, RingBufferAllocator, NixlDecodeManager
-)
+    NixlDecodeManager)
+
 
 def main():
     """Main function to run the receiver."""
@@ -14,7 +15,7 @@ def main():
     test_base_port = 54321
     test_rank = 0
     expected_layers = 32
-    
+
     # Buffer configuration
     buffer_size = 1 << 30  # 1GB
     nixl_page_size = 4096  # Standard page size
@@ -26,13 +27,11 @@ def main():
         utils.get_tensor_model_parallel_world_size = lambda: 1
         utils.get_tp_group = lambda: None
 
-        decoder_manager = NixlDecodeManager(buffer_size,
-                                            test_host,
+        decoder_manager = NixlDecodeManager(buffer_size, test_host,
                                             test_base_port)
 
-
         print(f"Receiver started on {test_host}:{test_base_port}")
-        
+
         # Run progress loop until interrupted
         try:
             while True:
@@ -45,29 +44,31 @@ def main():
                     for i in range(expected_layers):
                         decode_specs = decoder_manager.get_kv_specs(req_id, i)
                         for spec in decode_specs:
-                            print(f"Received layer {i} tokens "
-                                  f"{spec.start} - {spec.stop} request {req_id}. "
-                                  f"The shape is {spec.buffer.shape}. "
-                                  f"The digest is {spec.buffer.mean()}.")
+                            print(
+                                f"Received layer {i} tokens "
+                                f"{spec.start} - {spec.stop} request {req_id}. "
+                                f"The shape is {spec.buffer.shape}. "
+                                f"The digest is {spec.buffer.mean()}.")
 
                     decoder_manager.free_request(req_id)
 
                 allocator = decoder_manager._allocator
-                print("Allocator high/low watermark:", allocator.high_watermark,
-                        allocator.low_watermark)
+                print("Allocator high/low watermark:",
+                      allocator.high_watermark, allocator.low_watermark)
                 time.sleep(1)  # Small sleep to prevent busy waiting
-                
+
         except KeyboardInterrupt:
             decoder_manager.close()
             print("\nShutting down receiver...")
-        
+
         print("Receiver stopped")
-        
+
     except Exception as e:
         print(f"Receiver error: {e}")
         raise
 
+
 if __name__ == "__main__":
     # Set multiprocessing start method
     mp.set_start_method("spawn", force=True)
-    main() 
+    main()

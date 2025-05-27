@@ -1,38 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-import contextlib
 import math
-import threading
-import time
-import uuid
 from abc import ABC, abstractmethod
-from collections import defaultdict, OrderedDict
-from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import msgspec
 import torch
-import zmq
-
-from vllm import envs
-from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    get_tp_group)
-from vllm.logger import init_logger
-from vllm.utils import make_zmq_path, make_zmq_socket, round_down, cdiv
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import RequestStatus
-from vllm import _custom_ops as ops
-
 from lmcache.utils import _lmcache_nvtx_annotate
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
-    from vllm.forward_context import ForwardContext
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
-    from vllm.v1.request import Request
+    pass
 
 logger = init_logger(__name__)
 
@@ -61,6 +40,7 @@ class DestinationSpec:
         """
         return f"{self.rank}_{self.host}_{self.base_port}"
 
+
 class SourceSpec(msgspec.Struct):
     """SourceSpec is used to specify the source of kv sending task.
     """
@@ -72,7 +52,7 @@ class SourceSpec(msgspec.Struct):
 
     # The range of tokens to be offloaded
     start: int  # For token_range slice
-    stop: int   # For token_range slice
+    stop: int  # For token_range slice
 
     # The shape of the offloaded KV cache tensor as a tuple
     shape: tuple[int, ...]
@@ -106,6 +86,7 @@ class SourceSpec(msgspec.Struct):
         return (f"SourceSpec(request_id={self.request_id}, "
                 f"layer_id={self.layer_id}, "
                 f"token_range={self.token_range}, shape={self.tensor_shape})")
+
 
 @dataclass
 class DecoderKVSpec:
@@ -148,6 +129,7 @@ class SendTaskState:
         """
         return self.send_done
 
+
 @dataclass
 class SendTask:
     """Wraps a KV Cache sending task
@@ -167,9 +149,8 @@ class SendTask:
             torch.Tensor: The tensor of the send task.
         """
         num_elements = self.source_spec.tensor_shape.numel()
-        return self.buffer.view(
-                self.source_spec.dtype)[:num_elements].view(
-                        self.source_spec.tensor_shape)
+        return self.buffer.view(self.source_spec.dtype)[:num_elements].view(
+            self.source_spec.tensor_shape)
 
     def update_states(self) -> None:
         """Update the states of the send task. This needs to be OVERWRITTEN in
@@ -209,13 +190,13 @@ class SendTask:
         """
         self.state.is_sending = True
 
+
 class KVSenderInterface(ABC):
     """KVSenderInterface is an interface for sending KV cache data.
     """
 
     def __init__(self) -> None:
         self._send_tasks: list[SendTask] = []
-
 
     def add_send_task(self, task: SendTask) -> None:
         """Add a send task to the list of send tasks.
@@ -267,7 +248,8 @@ class KVSenderInterface(ABC):
         # Update after going through all send tasks
         self.post_progress_hook()
 
-        logger.info("KVSender progress: sent %d, freed %d", num_sent, num_freed)
+        logger.info("KVSender progress: sent %d, freed %d", num_sent,
+                    num_freed)
 
     ######################################################
     # Abstract methods (to be implemented by subclasses) #
@@ -275,10 +257,10 @@ class KVSenderInterface(ABC):
 
     @abstractmethod
     def create_send_task(
-            self,
-            source_spec: SourceSpec,
-            destination_spec: DestinationSpec,
-        ) -> SendTask:
+        self,
+        source_spec: SourceSpec,
+        destination_spec: DestinationSpec,
+    ) -> SendTask:
         """Create a non-ready send task with a CPU buffer allocated.
 
         Args:
@@ -326,5 +308,3 @@ class KVSenderInterface(ABC):
             task (SendTask): The send task to be processed.
         """
         raise NotImplementedError("post_progress_hook() not implemented")
-
-
