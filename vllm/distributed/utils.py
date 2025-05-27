@@ -20,8 +20,7 @@ import torch
 from torch.distributed import ProcessGroup, TCPStore
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
-                                                _unregister_process_group,
-                                                is_nccl_available)
+                                                _unregister_process_group)
 from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
@@ -468,13 +467,12 @@ def stateless_init_torch_distributed_process_group(
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
 
-    pg: ProcessGroup = ProcessGroup(
-        prefix_store,
-        group_rank,
-        group_size,
-    )
-
     if backend == "gloo":
+        pg: ProcessGroup = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
         from torch.distributed.distributed_c10d import ProcessGroupGloo
         backend_class = ProcessGroupGloo(prefix_store,
                                          group_rank,
@@ -482,26 +480,19 @@ def stateless_init_torch_distributed_process_group(
                                          timeout=timeout)
         backend_type = ProcessGroup.BackendType.GLOO
         device = torch.device("cpu")
-    elif backend == "nccl":
-        assert is_nccl_available()
-        from torch.distributed.distributed_c10d import ProcessGroupNCCL
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
 
-        backend_options = ProcessGroupNCCL.Options()
-        backend_options._timeout = timeout
+        pg._register_backend(device, backend_type, backend_class)
 
-        backend_class = ProcessGroupNCCL(prefix_store, group_rank, group_size,
-                                         backend_options)
-        backend_type = ProcessGroup.BackendType.NCCL
-        device = torch.device("cuda")
-    else:
-        raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
-
-    pg._set_default_backend(backend_type)
-    backend_class._set_sequence_number_for_group()
-
-    pg._register_backend(device, backend_type, backend_class)
-
-    return pg
+        return pg
+    from vllm.platforms import current_platform
+    return current_platform.stateless_init_device_torch_dist_pg(
+        backend=backend,
+        prefix_store=prefix_store,
+        group_rank=group_rank,
+        group_size=group_size,
+        timeout=timeout)
 
 
 def stateless_destroy_torch_distributed_process_group(
