@@ -29,9 +29,6 @@ set(ignoreMe "${VLLM_PYTHON_PATH}")
 #
 set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
-# Supported NVIDIA architectures.
-set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
-
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201")
 
@@ -78,6 +75,15 @@ endif()
 # etc.
 #
 find_package(Torch REQUIRED)
+
+# Supported NVIDIA architectures.
+# This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
+if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
+   CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
+  set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0")
+else()
+  set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0")
+endif()
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -226,6 +232,8 @@ endif()
 #
 
 set(VLLM_EXT_SRC
+  "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
+  "csrc/mamba/causal_conv1d/causal_conv1d.cu"
   "csrc/cache_kernels.cu"
   "csrc/attention/paged_attention_v1.cu"
   "csrc/attention/paged_attention_v2.cu"
@@ -281,8 +289,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   FetchContent_MakeAvailable(cutlass)
 
   list(APPEND VLLM_EXT_SRC
-    "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
-    "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/permute_cols.cu"
