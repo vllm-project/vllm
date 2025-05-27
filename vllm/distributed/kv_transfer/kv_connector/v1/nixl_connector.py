@@ -489,6 +489,9 @@ class NixlConnectorWorker:
 
         # TODO(tms): Find a more robust way to detect and handle MLA
         use_mla = len(first_kv_cache.shape) == 3
+        # FIXME Actual memory layout is NOT the one you expect from
+        # dims, needs docs
+        assert not first_kv_cache.is_contiguous()
         if use_mla:
             # MLA case.
             self.num_blocks = first_kv_cache.shape[0]
@@ -575,11 +578,9 @@ class NixlConnectorWorker:
             # local descr, and that makes handling regular flow less clean.
             for block_id in range(self.num_blocks):
                 block_offset = block_id * self.block_len
-                for slot_idx in range(self.block_size):
-                    slot_offset = slot_idx * self.slot_size_bytes
-                    addr = base_addr + block_offset + slot_offset
-                    # (addr, len, device id)
-                    blocks_data.append((addr, self.slot_size_bytes, self.tp_rank))
+                addr = base_addr + block_offset
+                # (addr, len, device id)
+                blocks_data.append((addr, self.block_len, self.rank))
         logger.debug("Created %s blocks for src engine %s and rank %s",
                      len(blocks_data), self.engine_id, self.tp_rank)
 
@@ -635,15 +636,14 @@ class NixlConnectorWorker:
                                   (world_size=4)                         (world_size=2)
                                                  tp_ratio = 4 // 2 = 2                  
                                 
-        Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, block_size, kv_heads, head_dim]  
-        then D-Worker_j has [2, num_blocksD, block_size, kv_heads//tp_ratio, head_dim].
+        Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, kv_heads, block_size, head_dim]  
+        then D-Worker_j has [2, num_blocksD, kv_heads//tp_ratio, block_size, head_dim]. Mind the "HND" layout format.
         Assuming num_blocksD >= num_blocksP, D-Worker0 reads from P-Worker0 by preparing the kv_heads//tp_ratio 
-        first heads from all the slots of all the blocks in the case. 
-        D-Worker1 will do the same, but reading the second split along the kv_heads dimension.
+        first heads from all the slots of all the blocks. D-Worker1 will do the same, but reading the second split
+        along the kv_heads dimension, and so forth until "tp_ratio" D TP workers have pulled from P-Worker0.   
         
-        Note that the above will also hold true for the homogeneous TP case.
+        Note that the above will also hold true for the homogeneous TP case, where tp_ratio evaluates to 1.
         """ # noqa: E501
-
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
         if (engine_id in self._remote_agents and \
@@ -663,11 +663,14 @@ class NixlConnectorWorker:
         assert tp_ratio > 0, "Decode TP cannot be smaller than"
         " prefill TP"
 
-        # TODO we should also check hidden_dim and kv precision, they must match
         remote_block_size = nixl_agent_meta.block_len / (self.slot_size_bytes *
                                                          tp_ratio)
-        assert self.block_size == remote_block_size, "Remote P worker with "
-        "different block size is not supported"
+        assert self.block_size == remote_block_size, "Remote P worker with \
+        different block size is not supported"
+
+        assert nixl_agent_meta.block_len == self.block_len * tp_ratio, "Remote\
+         P worker KV layer cache must be of shape \
+        [2, N, local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
 
         # Create dst descs and xfer side handles. TP workers have same #blocks.
         if engine_id in self.dst_num_blocks:
@@ -685,18 +688,17 @@ class NixlConnectorWorker:
         if p_remote_rank == remote_rank:
             self.kv_caches_base_addr[
                 engine_id] = nixl_agent_meta.kv_caches_base_addr
-            rank_offset = self.tp_rank % tp_ratio * self.slot_size_bytes
+            rank_offset = self.rank % tp_ratio * self.block_len
             # Register all remote blocks, but only the corresponding kv heads.
             for base_addr in nixl_agent_meta.kv_caches_base_addr:
                 for block_id in range(nixl_agent_meta.num_blocks):
                     block_offset = block_id * nixl_agent_meta.block_len
-                    for slot_idx in range(self.block_size):
-                        # Remote has `tp_ratio` times the kv_heads of local.
-                        slot_offset = slot_idx * self.slot_size_bytes * tp_ratio
-                        addr = base_addr + block_offset + slot_offset
-                        # (addr, len, device id)
-                        blocks_data.append((addr + rank_offset,
-                                            self.slot_size_bytes, remote_rank))
+                    # For each block, grab the heads chunk belonging to rank_i
+                    # of size remote_nheads // tp_ratio, which correspond to
+                    # self.block_len == remote_block_len//tp_ratio bytes.
+                    addr = base_addr + block_offset + rank_offset
+                    # (addr, len, device id)
+                    blocks_data.append((addr, self.block_len, remote_rank))
             logger.debug(
                 "Created %s blocks for dst engine %s with remote rank %s and " \
                 "local rank %s",
@@ -774,8 +776,11 @@ class NixlConnectorWorker:
             return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
-        """Get req_ids which got a remote xfer message."""
-
+        """
+        Get req_ids which got a remote xfer message. When multiple consumers
+        are reading from the same producer (heterogeneous TP scenario), wait
+        for all consumers to be done pulling.
+        """
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
@@ -947,8 +952,6 @@ class NixlConnectorWorker:
         If layer_idx is provided, we use the region_ids for the given layer.
         Otherwise, we use all regions.
         """
-        # TODO TP docs
-
         if layer_idx is None:
             region_ids = range(self.num_regions)
         else:
@@ -970,9 +973,7 @@ class NixlConnectorWorker:
         descs_ids: list[int] = []
         for reg_id in region_ids:
             for block_id in block_ids:
-                for slot_id in range(self.block_size):
-                    descs_ids.append(reg_id * num_blocks * self.block_size +
-                                     block_id * self.block_size + slot_id)
+                descs_ids.append(reg_id * num_blocks + block_id)
         return descs_ids
 
 
