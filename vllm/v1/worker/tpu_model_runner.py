@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import bisect
 import gc
-import os
 import time
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
@@ -10,7 +9,6 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
-
 # TPU XLA related
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
@@ -25,31 +23,19 @@ from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (
-    BatchedTensorInputs,
-    MultiModalKwargs,
-    PlaceholderRange,
-)
+from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
+                                    PlaceholderRange)
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
-from vllm.v1.attention.backends.pallas import (
-    PallasAttentionBackend,
-    PallasMetadata,
-)
+from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
+                                               PallasMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheSpec,
-    SlidingWindowSpec,
-)
-from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
-    LogprobsTensors,
-    ModelRunnerOutput,
-)
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec,
+                                        SlidingWindowSpec)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
+                             ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
