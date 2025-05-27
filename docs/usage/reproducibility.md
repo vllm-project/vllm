@@ -49,4 +49,4 @@ The random state in user code (i.e. the code that constructs [LLM][vllm.LLM] cla
 - For V1: The workers are run in the same process as user code, i.e.: `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
 
 By default, these conditions are not active so you can use vLLM without having to worry about
-accidentally making determinstic subsequent operations that rely on random state.
+accidentally making deterministic subsequent operations that rely on random state.
