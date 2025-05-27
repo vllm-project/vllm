@@ -484,6 +484,9 @@ class NixlConnectorWorker:
 
         # TODO(tms): Find a more robust way to detect and handle MLA
         use_mla = len(first_kv_cache.shape) == 3
+        # FIXME Actual memory layout is NOT the one you expect from
+        # dims, needs docs
+        assert not first_kv_cache.is_contiguous()
         if use_mla:
             # MLA case.
             self.num_blocks = first_kv_cache.shape[0]
@@ -569,11 +572,9 @@ class NixlConnectorWorker:
             # local descr, and that makes handling regular flow less clean.
             for block_id in range(self.num_blocks):
                 block_offset = block_id * self.block_len
-                for slot_idx in range(self.block_size):
-                    slot_offset = slot_idx * self.slot_size_bytes
-                    addr = base_addr + block_offset + slot_offset
-                    # (addr, len, device id)
-                    blocks_data.append((addr, self.slot_size_bytes, self.rank))
+                addr = base_addr + block_offset
+                # (addr, len, device id)
+                blocks_data.append((addr, self.block_len, self.rank))
         logger.debug("Created %s blocks for src engine %s and rank %s",
                      len(blocks_data), self.engine_id, self.rank)
 
@@ -637,6 +638,7 @@ class NixlConnectorWorker:
         
         Note that the above will also hold true for the homogeneous TP case.
         """ # noqa: E501
+        # TODO refresh docs
 
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
@@ -657,11 +659,14 @@ class NixlConnectorWorker:
         assert tp_ratio > 0, "Decode TP cannot be smaller than"
         " prefill TP"
 
-        # TODO we should also check hidden_dim and kv precision, they must match
         remote_block_size = nixl_agent_meta.block_len / (self.slot_size_bytes *
                                                          tp_ratio)
-        assert self.block_size == remote_block_size, "Remote P worker with "
-        "different block size is not supported"
+        assert self.block_size == remote_block_size, "Remote P worker with \
+        different block size is not supported"
+
+        assert nixl_agent_meta.block_len == self.block_len * tp_ratio, "Remote\
+         P worker KV layer cache must be of shape \
+        [2, N, local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
 
         # Create dst descs and xfer side handles. TP workers have same #blocks.
         if engine_id in self.dst_num_blocks:
@@ -679,18 +684,17 @@ class NixlConnectorWorker:
         if p_remote_rank == remote_rank:
             self.kv_caches_base_addr[
                 engine_id] = nixl_agent_meta.kv_caches_base_addr
-            rank_offset = self.rank % tp_ratio * self.slot_size_bytes
+            rank_offset = self.rank % tp_ratio * self.block_len
             # Register all remote blocks, but only the corresponding kv heads.
             for base_addr in nixl_agent_meta.kv_caches_base_addr:
                 for block_id in range(nixl_agent_meta.num_blocks):
                     block_offset = block_id * nixl_agent_meta.block_len
-                    for slot_idx in range(self.block_size):
-                        # Remote has `tp_ratio` times the kv_heads of local.
-                        slot_offset = slot_idx * self.slot_size_bytes * tp_ratio
-                        addr = base_addr + block_offset + slot_offset
-                        # (addr, len, device id)
-                        blocks_data.append((addr + rank_offset,
-                                            self.slot_size_bytes, remote_rank))
+                    # For each block, grab the heads chunk belonging to rank_i
+                    # of size remote_nheads // tp_ratio, which correspond to
+                    # self.block_len == remote_block_len//tp_ratio bytes.
+                    addr = base_addr + block_offset + rank_offset
+                    # (addr, len, device id)
+                    blocks_data.append((addr, self.block_len, remote_rank))
             logger.debug(
                 "Created %s blocks for dst engine %s with remote rank %s and " \
                 "local rank %s",
@@ -964,9 +968,7 @@ class NixlConnectorWorker:
         descs_ids: list[int] = []
         for reg_id in region_ids:
             for block_id in block_ids:
-                for slot_id in range(self.block_size):
-                    descs_ids.append(reg_id * num_blocks * self.block_size +
-                                     block_id * self.block_size + slot_id)
+                descs_ids.append(reg_id * num_blocks + block_id)
         return descs_ids
 
 
