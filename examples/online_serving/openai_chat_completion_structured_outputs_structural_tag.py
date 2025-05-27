@@ -7,18 +7,20 @@ from openai import OpenAI
 # to enforce the format of a tool call response, but it could be used for
 # any structured output within a subset of the response.
 
+openai_api_key = "EMPTY"
+openai_api_base = "http://localhost:8000/v1"
+
 
 def main():
     client = OpenAI(
-        base_url="http://localhost:8000/v1",
-        api_key="-",
+        base_url=openai_api_base,
+        api_key=openai_api_key,
     )
 
-    messages = [{
-        "role":
-        "user",
-        "content":
-        """
+    messages = [
+        {
+            "role": "user",
+            "content": """
 You have access to the following function to retrieve the weather in a city:
 
     {
@@ -55,29 +57,28 @@ You are a helpful assistant.
 
 Given the previous instructions, what is the weather in New York City, Boston,
 and San Francisco?
-"""
-    }]
+""",
+        }
+    ]
 
     response = client.chat.completions.create(
         model=client.models.list().data[0].id,
         messages=messages,
         response_format={
-            "type":
-            "structural_tag",
-            "structures": [{
-                "begin": "<function=get_weather>",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "city": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "end": "</function>"
-            }],
-            "triggers": ["<function="]
-        })
+            "type": "structural_tag",
+            "structures": [
+                {
+                    "begin": "<function=get_weather>",
+                    "schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                    "end": "</function>",
+                }
+            ],
+            "triggers": ["<function="],
+        },
+    )
     print(response)
 
 

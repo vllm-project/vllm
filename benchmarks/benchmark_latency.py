@@ -167,6 +167,9 @@ if __name__ == "__main__":
     )
 
     parser = EngineArgs.add_cli_args(parser)
+    # V1 enables prefix caching by default which skews the latency
+    # numbers. We need to disable prefix caching by default.
+    parser.set_defaults(enable_prefix_caching=False)
     args = parser.parse_args()
     if args.profile and not envs.VLLM_TORCH_PROFILER_DIR:
         raise OSError(
