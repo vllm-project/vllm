@@ -536,40 +536,36 @@ class NomicBertModel(BertWithRope):
             # Reset max_model_len to max_trained_positions.
             # nomic-embed-text-v2-moe the length is set to 512
             # by sentence_bert_config.json.
+            max_model_len_before = vllm_config.model_config.max_model_len
             max_model_len = min(vllm_config.model_config.max_model_len,
                                 max_trained_positions)
 
-            vllm_config.reset_max_model_len(max_model_len)
+            vllm_config.recalculate_max_model_len(max_model_len)
             logger.warning(
                 "We did not use the nomic context extension method, "
+                "max_model_len before is %s."
                 "current max_model_len is %s. "
                 "The context extension uses vllm style "
                 "rope_theta and rope_scaling. See: "
                 "examples/offline_inference/context_extension.html",
-                vllm_config.model_config.max_model_len)
+                max_model_len_before, vllm_config.model_config.max_model_len)
         else:
             # We need to re-verify max_model_len to avoid lengths
             # greater than position_embedding.
-            from vllm.config import _get_and_verify_max_len
-
             model_config = vllm_config.model_config
             hf_text_config = model_config.hf_text_config
             hf_overrides = model_config.hf_overrides or {}
             max_model_len = hf_overrides.get(
                 "max_model_len", vllm_config.model_config.max_model_len)
 
-            # reset hf_text_config for _get_and_verify_max_len.
+            # reset hf_text_config for recalculate_max_model_len.
             if hasattr(hf_text_config, "max_model_len"):
                 delattr(hf_text_config, "max_model_len")
             hf_text_config.max_position_embeddings = max_trained_positions
             hf_text_config.rope_scaling = config.rotary_kwargs["rope_scaling"]
+            model_config.encoder_config = None
 
-            max_model_len = _get_and_verify_max_len(
-                hf_config=hf_text_config,
-                max_model_len=max_model_len,
-                disable_sliding_window=False,
-                sliding_window_len=None)
-            vllm_config.reset_max_model_len(max_model_len)
+            vllm_config.recalculate_max_model_len(max_model_len)
         return config
 
 

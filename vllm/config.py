@@ -4468,7 +4468,15 @@ class VllmConfig:
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
 
-    def reset_max_model_len(self, max_model_len: int):
+    def recalculate_max_model_len(self, max_model_len):
+        model_config = self.model_config
+        max_model_len = _get_and_verify_max_len(
+            hf_config=model_config.hf_text_config,
+            max_model_len=max_model_len,
+            disable_sliding_window=model_config.disable_sliding_window,
+            sliding_window_len=model_config.get_hf_config_sliding_window(),
+            spec_target_max_model_len=model_config.spec_target_max_model_len,
+            encoder_config=model_config.encoder_config)
         self.model_config.max_model_len = max_model_len
         self.scheduler_config.max_model_len = max_model_len
         self.compute_hash()
