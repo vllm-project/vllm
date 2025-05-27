@@ -5,6 +5,7 @@ import atexit
 import gc
 import importlib
 import inspect
+import json
 import multiprocessing
 import os
 import signal
@@ -16,7 +17,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from json import JSONDecodeError
 from typing import Annotated, Optional, Union
 
 import prometheus_client
@@ -961,7 +961,7 @@ async def invocations(raw_request: Request):
     """
     try:
         body = await raw_request.json()
-    except JSONDecodeError as e:
+    except json.JSONDecodeError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=f"JSON decode error: {e}") from e
 
@@ -1321,6 +1321,16 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Load logging config for uvicorn if specified
+    log_config = None
+    if getattr(args, "log_config_file", None):
+        try:
+            with open(args.log_config_file) as f:
+                log_config = json.load(f)
+        except Exception as e:
+            logger.warning("Failed to load log config from file %s: error %e",
+                           args.log_config_file, e)
+
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
 
@@ -1337,8 +1347,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
                     "s" if is_ssl else "", _listen_addr(sock_addr[0]),
                     sock_addr[1])
 
-        shutdown_task = await serve_http(
-            app,
+        serve_http_kwargs = dict(
+            app=app,
             sock=sock,
             enable_ssl_refresh=args.enable_ssl_refresh,
             host=args.host,
@@ -1354,7 +1364,10 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             ssl_cert_reqs=args.ssl_cert_reqs,
             **uvicorn_kwargs,
         )
+        if log_config is not None:
+            serve_http_kwargs['log_config'] = log_config
 
+        shutdown_task = await serve_http(**serve_http_kwargs)
     # NB: Await server shutdown only after the backend context is exited
     try:
         await shutdown_task
