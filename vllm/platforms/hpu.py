@@ -7,6 +7,7 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import Platform, PlatformEnum, _Backend
 
@@ -38,8 +39,8 @@ class HpuPlatform(Platform):
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return True
 
-    @staticmethod
-    def inference_mode():
+    @classmethod
+    def inference_mode(cls):
         return torch.no_grad()
 
     @classmethod
@@ -79,6 +80,16 @@ class HpuPlatform(Platform):
                     "To override that behavior, please set "
                     "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        if vllm_config.model_config and vllm_config.model_config.use_mla:
+            logger.info(
+                "MLA is enabled on a non-GPU platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            vllm_config.scheduler_config.max_num_batched_tokens = max(
+                vllm_config.scheduler_config.max_model_len,
+                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
     @classmethod
     def is_pin_memory_available(cls):

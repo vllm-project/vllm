@@ -45,9 +45,6 @@ MODELS = [
     EmbedModelInfo("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
                    architecture="Qwen2ForCausalLM",
                    enable_test=True),
-    EmbedModelInfo("Alibaba-NLP/gte-Qwen2-7B-instruct",
-                   architecture="Qwen2ForCausalLM",
-                   enable_test=False),
     ########## ModernBertModel
     EmbedModelInfo("Alibaba-NLP/gte-modernbert-base",
                    architecture="ModernBertModel",
@@ -58,14 +55,9 @@ MODELS = [
 @pytest.mark.parametrize("model_info", MODELS)
 def test_models_mteb(hf_runner, vllm_runner,
                      model_info: EmbedModelInfo) -> None:
-    pytest.skip("Skipping mteb test.")
-
     from .mteb_utils import mteb_test_embed_models
 
     vllm_extra_kwargs: dict[str, Any] = {}
-    if model_info.name == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
-        vllm_extra_kwargs["hf_overrides"] = {"is_causal": True}
-
     if model_info.architecture == "GteNewModel":
         vllm_extra_kwargs["hf_overrides"] = {"architectures": ["GteNewModel"]}
 
@@ -83,9 +75,6 @@ def test_models_correctness(hf_runner, vllm_runner, model_info: EmbedModelInfo,
     example_prompts = [str(s).strip() for s in example_prompts]
 
     vllm_extra_kwargs: dict[str, Any] = {}
-    if model_info.name == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
-        vllm_extra_kwargs["hf_overrides"] = {"is_causal": True}
-
     if model_info.architecture == "GteNewModel":
         vllm_extra_kwargs["hf_overrides"] = {"architectures": ["GteNewModel"]}
 
