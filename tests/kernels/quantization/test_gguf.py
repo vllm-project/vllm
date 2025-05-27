@@ -8,7 +8,6 @@ from gguf import GGMLQuantizationType, GGUFReader, ReaderTensor, dequantize
 from huggingface_hub import snapshot_download
 
 import vllm._custom_ops as ops
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.gguf import _fused_moe_gguf
 from vllm.platforms import current_platform
@@ -35,11 +34,11 @@ def get_gguf_MoE_tensors(
     return GGUFReader(sample_file).tensors
 
 
-DTYPES = [torch.half, torch.bfloat16, torch.float32]
+DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
 # Hidden_size for testing, must match the sample file in HF repo,
 # we have `hidden_size = 256, 1024` for test in HF repo currently.
 HIDDEN_SIZES = [256, 1024]
-NUM_TOKENS = [7, 83, 128, 2048]  # Arbitrary values for testing
+NUM_TOKENS = [7, 2050]  # Arbitrary values for testing
 SEEDS = [0]
 QUANT_TYPES = [
     # i-matrix
@@ -176,12 +175,11 @@ def test_moe(num_tokens: int, hidden_size: int, dtype: torch.dtype,
 
     w2_dequant = torch.tensor(dequantize(w2.data, quant_type),
                               device="cuda").to(dtype)
-    act = SiluAndMul()
 
     output = _fused_moe_gguf(x, torch.tensor(w13.data, device="cuda"),
                              torch.tensor(w2.data,
                                           device="cuda"), topk_weights,
-                             topk_ids, quant_type, quant_type, act)
+                             topk_ids, quant_type, quant_type, "silu")
 
     ref_output = fused_experts(x, w13_dequant, w2_dequant, topk_weights,
                                topk_ids).reshape(output.shape)

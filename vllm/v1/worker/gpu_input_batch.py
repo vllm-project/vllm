@@ -8,7 +8,6 @@ import torch
 
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
@@ -46,7 +45,7 @@ class InputBatch(BaseInputBatch[SamplingRequestState]):
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
-        kv_cache_config: KVCacheConfig,
+        block_size: int,
     ):
         super().__init__(
             max_num_reqs,
@@ -55,7 +54,7 @@ class InputBatch(BaseInputBatch[SamplingRequestState]):
             device,
             pin_memory,
             vocab_size,
-            kv_cache_config,
+            block_size,
         )
 
         # Sampling-related.

@@ -4,7 +4,8 @@ import itertools
 import warnings
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
+                    cast, overload)
 
 import cloudpickle
 import torch.nn as nn
@@ -46,6 +47,9 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
                         is_list_of)
+
+if TYPE_CHECKING:
+    from vllm.v1.metrics.reader import Metric
 
 logger = init_logger(__name__)
 
@@ -116,7 +120,8 @@ class LLM:
             to eager mode. Additionally for encoder-decoder models, if the
             sequence length of the encoder input is larger than this, we fall
             back to the eager mode.
-        disable_custom_all_reduce: See {class}`~vllm.config.ParallelConfig`
+        disable_custom_all_reduce: See
+            [ParallelConfig][vllm.config.ParallelConfig].
         disable_async_output_proc: Disable async output processing.
             This may result in lower performance.
         hf_token: The token to use as HTTP bearer authorization for remote files
@@ -128,13 +133,11 @@ class LLM:
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
-        **kwargs: Arguments for {class}`~vllm.EngineArgs`. (See
-            {ref}`engine-args`)
+        **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
-    :::{note}
-    This class is intended to be used for offline inference. For online
-    serving, use the {class}`~vllm.AsyncLLMEngine` class instead.
-    :::
+    Note:
+        This class is intended to be used for offline inference. For online
+        serving, use the [AsyncLLMEngine][vllm.AsyncLLMEngine] class instead.
     """
 
     DEPRECATE_LEGACY: ClassVar[bool] = True
@@ -143,7 +146,7 @@ class LLM:
     DEPRECATE_INIT_POSARGS: ClassVar[bool] = True
     """
     A flag to toggle whether to deprecate positional arguments in
-    {meth}`LLM.__init__`.
+    [LLM.__init__][].
     """
 
     @classmethod
@@ -404,7 +407,7 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See {class}`~vllm.inputs.PromptType`
+                for batch inference. See [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each prompts.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.
@@ -422,11 +425,10 @@ class LLM:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
 
-        :::{note}
-        Using `prompts` and `prompt_token_ids` as keyword parameters is
-        considered legacy and may be deprecated in the future. You should
-        instead pass them via the `inputs` parameter.
-        :::
+        Note:
+            Using `prompts` and `prompt_token_ids` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the `inputs` parameter.
         """
         runner_type = self.llm_engine.model_config.runner_type
         if runner_type not in ["generate", "transcription"]:
@@ -495,17 +497,16 @@ class LLM:
                 `self` argument, in addition to the arguments passed in `args`
                 and `kwargs`. The `self` argument will be the worker object.
             timeout: Maximum time in seconds to wait for execution. Raises a
-                {exc}`TimeoutError` on timeout. `None` means wait indefinitely.
+                [`TimeoutError`][] on timeout. `None` means wait indefinitely.
             args: Positional arguments to pass to the worker method.
             kwargs: Keyword arguments to pass to the worker method.
 
         Returns:
             A list containing the results from each worker.
 
-        :::{note}
-        It is recommended to use this API to only pass control messages,
-        and set up data-plane communication to pass data.
-        :::
+        Note:
+            It is recommended to use this API to only pass control messages,
+            and set up data-plane communication to pass data.
         """
 
         return self.llm_engine.collective_rpc(method, timeout, args, kwargs)
@@ -672,7 +673,7 @@ class LLM:
         Generate responses for a chat conversation.
 
         The chat conversation is converted into a text prompt using the
-        tokenizer and calls the {meth}`generate` method to generate the
+        tokenizer and calls the [generate][] method to generate the
         responses.
 
         Multi-modal inputs can be passed in the same way you would pass them
@@ -681,8 +682,8 @@ class LLM:
         Args:
             messages: A list of conversations or a single conversation.
 
-              - Each conversation is represented as a list of messages.
-              - Each message is a dictionary with 'role' and 'content' keys.
+                - Each conversation is represented as a list of messages.
+                - Each message is a dictionary with 'role' and 'content' keys.
 
             sampling_params: The sampling parameters for text generation.
                 If None, we use the default sampling parameters. When it
@@ -692,27 +693,27 @@ class LLM:
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
-              If not provided, the model's default chat template will be used.
+                If not provided, the model's default chat template will be used.
             chat_template_content_format: The format to render message content.
 
-              - "string" will render the content as a string.
-                Example: ``"Who are you?"``
-              - "openai" will render the content as a list of dictionaries,
-                similar to OpenAI schema.
-                Example: ``[{"type": "text", "text": "Who are you?"}]``
+                - "string" will render the content as a string.
+                  Example: `"Who are you?"`
+                - "openai" will render the content as a list of dictionaries,
+                  similar to OpenAI schema.
+                  Example: `[{"type": "text", "text": "Who are you?"}]`
 
             add_generation_prompt: If True, adds a generation template
                 to each message.
             continue_final_message: If True, continues the final message in
                 the conversation instead of starting a new one. Cannot be
-                ``True`` if ``add_generation_prompt`` is also ``True``.
+                `True` if `add_generation_prompt` is also `True`.
             chat_template_kwargs: Additional kwargs to pass to the chat
                 template.
             mm_processor_kwargs: Multimodal processor kwarg overrides for this
                 chat request. Only used for offline requests.
 
         Returns:
-            A list of ``RequestOutput`` objects containing the generated
+            A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
         """
         list_of_messages: list[list[ChatCompletionMessageParam]]
@@ -911,7 +912,7 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See {class}`~vllm.inputs.PromptType`
+                for batch inference. See [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each prompts.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
@@ -924,11 +925,10 @@ class LLM:
             A list of `PoolingRequestOutput` objects containing the
             pooled hidden states in the same order as the input prompts.
 
-        :::{note}
-        Using `prompts` and `prompt_token_ids` as keyword parameters is
-        considered legacy and may be deprecated in the future. You should
-        instead pass them via the `inputs` parameter.
-        :::
+        Note:
+            Using `prompts` and `prompt_token_ids` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the `inputs` parameter.
         """
         runner_type = self.llm_engine.model_config.runner_type
         if runner_type != "pooling":
@@ -1001,7 +1001,7 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See {class}`~vllm.inputs.PromptType`
+                for batch inference. See [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each prompts.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
@@ -1011,7 +1011,7 @@ class LLM:
                 generation, if any.
 
         Returns:
-            A list of ``EmbeddingRequestOutput`` objects containing the
+            A list of `EmbeddingRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
         if self.llm_engine.model_config.task != "embed":
@@ -1045,7 +1045,7 @@ class LLM:
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See {class}`~vllm.inputs.PromptType`
+                for batch inference. See [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each prompts.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
@@ -1053,7 +1053,7 @@ class LLM:
                 generation, if any.
 
         Returns:
-            A list of ``ClassificationRequestOutput`` objects containing the
+            A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
         if self.llm_engine.model_config.task != "classify":
@@ -1163,11 +1163,11 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
-        """Generate similarity scores for all pairs ``<text,text_pair>``.
+        """Generate similarity scores for all pairs `<text,text_pair>`.
 
-        The inputs can be ``1 -> 1``, ``1 -> N`` or ``N -> N``.
-        In the ``1 - N`` case the ``text_1`` sentence will be replicated ``N``
-        times to pair with the ``text_2`` sentences.
+        The inputs can be `1 -> 1`, `1 -> N` or `N -> N`.
+        In the `1 - N` case the `text_1` sentence will be replicated `N`
+        times to pair with the `text_2` sentences.
         The input pairs are used to build a list of prompts for the
         cross encoder model. This class automatically batches the prompts,
         considering the memory constraint. For the best performance, put all
@@ -1175,9 +1175,9 @@ class LLM:
 
         Args:
             text_1: can be a single prompt or a list of prompts, in which
-                case it has to have the same length as the ``text_2`` list
+                case it has to have the same length as the `text_2` list
             text_2: The texts to pair with the query to form the input
-                to the LLM. See {class}`~vllm.inputs.PromptType` for
+                to the LLM. See [PromptType][vllm.inputs.PromptType] for
                 more details about the format of each prompts.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
@@ -1185,7 +1185,7 @@ class LLM:
                 generation, if any.
 
         Returns:
-            A list of ``ScoringRequestOutput`` objects containing the
+            A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
         """
         runner_type = self.llm_engine.model_config.runner_type
@@ -1286,17 +1286,31 @@ class LLM:
 
     def wake_up(self, tags: Optional[list[str]] = None):
         """
-        Wake up the engine from sleep mode. See the {meth}`sleep` method
+        Wake up the engine from sleep mode. See the [sleep][] method
         for more details.
         
         Args:
             tags: An optional list of tags to reallocate the engine memory 
                 for specific memory allocations. Values must be in 
-                ("weights", "kv_cache",). If None, all memory is reallocated.
+                `("weights", "kv_cache")`. If None, all memory is reallocated.
                 wake_up should be called with all tags (or None) before the 
                 engine is used again.
         """
         self.llm_engine.wake_up(tags)
+
+    def get_metrics(self) -> list["Metric"]:
+        """Return a snapshot of aggregated metrics from Prometheus.
+
+        Returns:
+            A ``MetricSnapshot`` instance capturing the current state
+            of all aggregated metrics from Prometheus.
+
+        Note:
+            This method is only available with the V1 LLM engine.
+        """
+        from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+        assert isinstance(self.llm_engine, V1LLMEngine)
+        return self.llm_engine.get_metrics()
 
     # LEGACY
     def _convert_v1_inputs(
@@ -1306,27 +1320,25 @@ class LLM:
     ):
         # skip_tokenizer_init is now checked in engine
 
+        if prompts is None and prompt_token_ids is None:
+            raise ValueError(
+                "Either prompts or prompt_token_ids must be provided.")
+        if prompts is not None and prompt_token_ids is not None \
+                and len(prompts) != len(prompt_token_ids):
+            raise ValueError(
+                "The lengths of prompts and prompt_token_ids must be the same."
+            )
+
         if prompts is not None:
             prompts = [p["content"] for p in parse_and_batch_prompt(prompts)]
         if prompt_token_ids is not None:
             prompt_token_ids = [
                 p["content"] for p in parse_and_batch_prompt(prompt_token_ids)
             ]
-
-        num_requests = None
         if prompts is not None:
             num_requests = len(prompts)
-        if prompt_token_ids is not None:
-            if (num_requests is not None
-                    and num_requests != len(prompt_token_ids)):
-                raise ValueError("The lengths of prompts and prompt_token_ids "
-                                 "must be the same.")
-
+        elif prompt_token_ids is not None:
             num_requests = len(prompt_token_ids)
-        if num_requests is None:
-            raise ValueError("Either prompts or prompt_token_ids must be "
-                             "provided.")
-
         parsed_prompts: list[PromptType] = []
         for i in range(num_requests):
             item: PromptType

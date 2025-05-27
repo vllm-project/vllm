@@ -230,7 +230,7 @@ class GPUPoolingModelRunner(GPUBaseModelRunner[InputBatch,
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            kv_cache_config=kv_cache_config,
+            block_size=self.cache_config.block_size,
         )
 
     # def get_input_batch(self) -> InputBatch:

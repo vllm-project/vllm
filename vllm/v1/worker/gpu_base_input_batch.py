@@ -8,7 +8,6 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 
@@ -51,7 +50,7 @@ class BaseInputBatch(Generic[RequestState]):
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
-        kv_cache_config: KVCacheConfig,
+        block_size: int,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -93,7 +92,7 @@ class BaseInputBatch(Generic[RequestState]):
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
-            kv_cache_config=kv_cache_config,
+            block_size=block_size,
         )
 
         # lora related

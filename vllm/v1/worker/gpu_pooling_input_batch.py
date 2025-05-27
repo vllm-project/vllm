@@ -8,7 +8,6 @@ import numpy as np
 import torch
 
 from vllm.pooling_params import PoolingParams
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.gpu_base_input_batch import (BaseInputBatch,
                                                  BaseRequestState)
@@ -41,17 +40,10 @@ class InputBatch(BaseInputBatch):
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
-        kv_cache_config: KVCacheConfig,
+        block_size: int,
     ):
-        super().__init__(
-            max_num_reqs,
-            max_model_len,
-            max_num_batched_tokens,
-            device,
-            pin_memory,
-            vocab_size,
-            kv_cache_config,
-        )
+        super().__init__(max_num_reqs, max_model_len, max_num_batched_tokens,
+                         device, pin_memory, vocab_size, block_size)
         self.token_type_ids_cpu_tensor: Optional[torch.Tensor] = None
         self._token_type_ids_cpu: Optional[np.ndarray] = None
         self.pooling_params: dict[str, PoolingParams] = {}

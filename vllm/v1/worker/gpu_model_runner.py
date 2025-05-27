@@ -15,7 +15,7 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
-from vllm.utils import LazyLoader
+from vllm.utils import LazyLoader, async_tensor_h2d
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
@@ -66,12 +66,16 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
+
+            # NOTE(Jiayi): currently we put the entire draft model on
+            # the last PP rank. This is not ideal if there are many
+            # layers in the draft model.
             if get_pp_group().is_last_rank:
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
                 elif self.speculative_config.use_eagle():
-                    self.drafter = EagleProposer(self.vllm_config,
-                                                 self.device)  # type: ignore
+                    self.drafter = EagleProposer(self.vllm_config, self.device,
+                                                 self)  # type: ignore
                     if self.speculative_config.method == "eagle3":
                         self.use_aux_hidden_state_outputs = True
                 elif self.speculative_config.method == "medusa":
@@ -589,7 +593,16 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
             next_token_ids = torch.tensor(next_token_ids,
                                           dtype=torch.int32,
                                           device=self.device)
-            eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
+            # At this moment, we assume all eagle layers belong to the same KV
+            # cache group, thus using the same attention metadata.
+            eagle_attn_metadata = attn_metadata[
+                self.drafter.attn_layer_names[0]]
+
+            # NOTE: deepseek_mtp uses MLA which does not have `block_table`
+            if hasattr(eagle_attn_metadata, "block_table"):
+                block_table = eagle_attn_metadata.block_table
+            else:
+                block_table = None
 
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
@@ -613,14 +626,16 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
                     n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
                     for i, n in enumerate(num_draft_tokens)
                 ]
-                num_rejected_tokens = torch.tensor(
+                num_rejected_tokens_tensor = async_tensor_h2d(
                     num_rejected_tokens,
                     dtype=torch.int32,
-                    device=self.device,
-                )
+                    target_device=self.device,
+                    pin_memory=True)
+                num_tokens = num_scheduled_tokens - sum(num_rejected_tokens)
                 cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                     eagle_attn_metadata.query_start_loc,
-                    num_rejected_tokens,
+                    num_rejected_tokens_tensor,
+                    num_tokens,
                 )
                 target_token_ids = self.input_ids[token_indices]
                 target_positions = positions[token_indices]
@@ -639,7 +654,7 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
                 target_slot_mapping=target_slot_mapping,
                 next_token_ids=next_token_ids,
                 cu_num_tokens=cu_num_tokens,
-                block_table=eagle_attn_metadata.block_table,
+                block_table=block_table,
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
@@ -794,8 +809,7 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
         return prompt_logprobs_dict
 
     def _extra_dummy_run(self, num_tokens: int, skip_attn: bool = True):
-        if self.use_spec_decode and \
-            self.speculative_config.method in ('eagle', 'eagle3'):
+        if self.use_spec_decode and self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
             self.drafter.dummy_run(num_tokens)
 
@@ -809,7 +823,10 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         hidden_states = hidden_states[logit_indices]
-
+        # The dummy hidden states may contain special values,
+        # like `inf` or `nan`.
+        # To avoid breaking the sampler, we use a random tensor here instead.
+        hidden_states = torch.rand_like(hidden_states)
         logits = self.model.compute_logits(hidden_states, None)
         num_reqs = logits.size(0)
 
@@ -885,8 +902,16 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            kv_cache_config=kv_cache_config,
+            block_size=self.cache_config.block_size,
         )
+
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        if self.speculative_config and self.speculative_config.use_eagle():
+            assert isinstance(self.drafter, EagleProposer)
+            # validate all draft model layers belong to the same kv cache
+            # group
+            self.drafter.validate_same_kv_cache_group(kv_cache_config)
+        super().initialize_kv_cache(kv_cache_config)
 
     #def get_input_batch(self) -> InputBatch:
     #    return self.input_batch
