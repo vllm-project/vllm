@@ -125,7 +125,7 @@ class LoggingStatLogger(StatLoggerBase):
             generation_throughput,
             scheduler_stats.num_running_reqs,
             scheduler_stats.num_waiting_reqs,
-            scheduler_stats.gpu_cache_usage * 100,
+            scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
@@ -179,8 +179,8 @@ class PrometheusStatLogger(StatLoggerBase):
         #
         # GPU cache
         #
-        self.gauge_gpu_cache_usage = self._gauge_cls(
-            name="vllm:gpu_cache_usage_perc",
+        self.gauge_kv_cache_usage = self._gauge_cls(
+            name="vllm:kv_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames).labels(*labelvalues)
 
@@ -399,7 +399,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
-        self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
+        self.gauge_kv_cache_usage.set(scheduler_stats.kv_cache_usage)
 
         self.counter_gpu_prefix_cache_queries.inc(
             scheduler_stats.prefix_cache_stats.queries)
