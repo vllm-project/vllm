@@ -126,6 +126,10 @@ class ModelCase:
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
                     reason="amd-quark>=0.9 is not available")
 def test_mxfp4_loading_and_execution(vllm_runner, model_case: ModelCase):
+    if torch.cuda.device_count() < model_case.tp:
+        pytest.skip(f"This test requires >={model_case.tp} gpus, got only "
+                    "{torch.cuda.device_count()}")
+
     with vllm_runner(model_case.model_id,
                      tensor_parallel_size=model_case.tp,
                      load_format="dummy") as llm:
@@ -176,6 +180,11 @@ ACCURACY_CONFIGS = [
     not HF_HUB_AMD_ORG_ACCESS,
     reason="Read access to huggingface.co/amd is required for this test.")
 def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
+    if torch.cuda.device_count() < 8:
+        pytest.skip(
+            f"This test requires >=8 gpus, got only {torch.cuda.device_count()}"
+        )
+
     task = "gsm8k"
     rtol = 0.03
 
