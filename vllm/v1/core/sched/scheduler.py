@@ -315,17 +315,10 @@ class Scheduler(SchedulerInterface):
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
-                        logger.debug(
-                            "Request %s is ready for "
-                            "scheduling after waiting for remote kvs.",
-                            request)
                         request.status = RequestStatus.WAITING
                         num_prealloc_computed_tokens = (
                             request.num_computed_tokens)
                     else:
-                        logger.debug(
-                            "Request %s is still waiting "
-                            "for remote kvs", request)
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
@@ -367,22 +360,9 @@ class Scheduler(SchedulerInterface):
                             self.connector.get_num_new_matched_tokens(
                                 request, num_native_computed_tokens))
 
-                        if request.request_id in self.finished_recving_kv_req_ids:  # noqa: E501
-                            logger.debug(
-                                "Request %s is in finished_recving_kv_req_ids" \
-                                "but still getting external tokens. "
-                                "num_external_tokens=%d, "
-                                "load_kv_async=%s", request.request_id,
-                                num_external_computed_tokens, load_kv_async)
-
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_native_computed_tokens +
                                            num_external_computed_tokens)
-                    logger.debug(
-                        "KV: Request %s has %d native tokens and %d "
-                        "external tokens. num_computed_tokens=%d",
-                        request.request_id, num_native_computed_tokens,
-                        num_external_computed_tokens, num_computed_tokens)
                 else:
                     # P/D: skip checking prefix cache if loaded from remote kvs.
                     new_computed_blocks = KVCacheBlocks.create_empty()
@@ -407,18 +387,8 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
-                    if num_new_tokens <= 0:
-                        logger.debug(
-                            "KV: Request %s has no new tokens to schedule. "
-                            "num_tokens=%d, num_computed_tokens=%d",
-                            request.request_id, request.num_tokens,
-                            num_computed_tokens)
                     if (0 < self.scheduler_config.long_prefill_token_threshold
                             < num_new_tokens):
-                        logger.debug(
-                            "KV: Request %s has long prefill. "
-                            "num_new_tokens=%d, num_computed_tokens=%d",
-                            request.request_id, num_new_tokens)
                         num_new_tokens = (
                             self.scheduler_config.long_prefill_token_threshold)
                         logger.debug(
@@ -426,11 +396,6 @@ class Scheduler(SchedulerInterface):
                             "num_new_tokens=%d", request.request_id,
                             num_new_tokens)
                     num_new_tokens = min(num_new_tokens, token_budget)
-                    if num_new_tokens <= 0:
-                        logger.debug(
-                            "KV: Request %s failing assert. num_new_tokens=%d" \
-                            "after min with token_budget=%d",
-                            request.request_id, num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -457,7 +422,6 @@ class Scheduler(SchedulerInterface):
                     delay_cache_blocks=load_kv_async,
                 )
                 if new_blocks is None:
-                    logger.debug("KV: Request %s cannot be scheduled.")
                     # The request cannot be scheduled.
                     break
 
@@ -466,10 +430,6 @@ class Scheduler(SchedulerInterface):
                 # needed for this request.
                 if num_external_computed_tokens:
                     assert self.connector is not None
-                    logger.debug("KV: calling update_state_after_alloc " \
-                                 "Request %s has %d external tokens.",
-                                 request.request_id,
-                                 num_external_computed_tokens)
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
@@ -493,10 +453,8 @@ class Scheduler(SchedulerInterface):
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
-                    logger.debug("KV: Request %s is being scheduled.", request)
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
-                    logger.debug("KV: Request %s is resumed.", request)
                     scheduled_resumed_reqs.append(request)
                 else:
                     raise RuntimeError(
@@ -1019,8 +977,6 @@ class Scheduler(SchedulerInterface):
 
         # Now that the blocks are ready, actually cache them.
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
-        logger.debug("Request %s KV transfer complete. Got %d block_ids",
-                     request.request_id, len(block_ids))
 
         num_computed_tokens = len(block_ids) * self.block_size
         if num_computed_tokens == request.num_tokens:
@@ -1034,10 +990,6 @@ class Scheduler(SchedulerInterface):
 
         # Update the request state for scheduling.
         request.num_computed_tokens = num_computed_tokens
-        logger.debug(
-            "Request %s: cached %d tokens successfully, request.num_tokens=%d",
-            request.request_id, num_computed_tokens, request.num_tokens)
-
         # Return that we are ready.
         self.finished_recving_kv_req_ids.remove(request.request_id)
         return True

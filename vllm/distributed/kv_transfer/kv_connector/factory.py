@@ -59,12 +59,9 @@ class KVConnectorFactory:
                              f"but found {envs.VLLM_USE_V1=}")
 
         kv_transfer_config = config.kv_transfer_config
-        # Generate the engine_id here, before any processes are forked,
-        # to ensure consistency across all instances
         if not hasattr(kv_transfer_config, "_initialized_engine_id"):
             import uuid
             kv_transfer_config.engine_id = str(uuid.uuid4())
-            # Mark that we've initialized the engine_id to avoid regenerating
             kv_transfer_config._initialized_engine_id = True
             logger.debug("Generated new engine_id %s in connector factory",
                          kv_transfer_config.engine_id)

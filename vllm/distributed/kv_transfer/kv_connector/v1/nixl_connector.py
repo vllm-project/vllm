@@ -89,10 +89,6 @@ class NixlConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
-        logger.debug(
-            "Initializing NixlConnector with engine_id: %s from config, " \
-            "role: %s",
-            self.engine_id, role)
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler : Optional[NixlConnectorScheduler] = \
@@ -139,7 +135,6 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
@@ -339,7 +334,6 @@ class NixlConnectorWorker:
         self.engine_id = engine_id
         self.rank = get_tensor_model_parallel_rank()
 
-        logger.debug("NIXL worker %s TP rank %s", self.engine_id, self.rank)
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
 
@@ -443,38 +437,28 @@ class NixlConnectorWorker:
         logger.debug(
             "Attempting NIXL handshake with remote at %s (unique rank: %s)",
             path, self.unique_rank)
-        try:
-            with zmq_ctx(zmq.REQ, path) as sock:
-                # Send query for the request.
-                logger.debug("Sending metadata request to remote")
-                sock.send(GET_META_MSG)
-                metadata_bytes = sock.recv()
-                decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-                metadata = decoder.decode(metadata_bytes)
-                got_metadata_time = time.perf_counter()
-                logger.debug("Received remote metadata with engine_id: %s",
-                             metadata.engine_id)
+        with zmq_ctx(zmq.REQ, path) as sock:
+            # Send query for the request.
+            logger.debug("Sending metadata request to remote")
+            sock.send(GET_META_MSG)
+            metadata_bytes = sock.recv()
+            decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+            metadata = decoder.decode(metadata_bytes)
+            got_metadata_time = time.perf_counter()
+            logger.debug("Received remote metadata with engine_id: %s",
+                         metadata.engine_id)
 
-                # Register Remote agent.
-                self.add_remote_agent(metadata)
-                setup_agent_time = time.perf_counter()
+            # Register Remote agent.
+            self.add_remote_agent(metadata)
+            setup_agent_time = time.perf_counter()
 
-                logger.debug("NIXL handshake: get metadata took: %s",
-                             got_metadata_time - start_time)
-                logger.debug("NIXL handshake: add agent took: %s",
-                             setup_agent_time - got_metadata_time)
-        except Exception as e:
-            logger.error("Failed during NIXL handshake: %s", str(e))
-            raise
+            logger.debug("NIXL handshake: get metadata took: %s",
+                         got_metadata_time - start_time)
+            logger.debug("NIXL handshake: add agent took: %s",
+                         setup_agent_time - got_metadata_time)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-
-        logger.debug(
-            "NIXL worker %s registering KV caches, TP rank: %s, DP rank: %s, " \
-            "unique rank: %s",
-            self.engine_id, self.rank,
-            get_dp_group().rank_in_group, self.unique_rank)
 
         _, first_kv_cache = next(iter(kv_caches.items()))
         kv_elem_size = first_kv_cache.element_size()
@@ -574,13 +558,8 @@ class NixlConnectorWorker:
             engine_id, self.engine_id)
 
         if engine_id in self._remote_agents:
-            logger.debug(
-                "Remote agent with engine_id %s already exists, skipping",
-                engine_id)
             return
 
-        logger.debug("Registering new remote agent with engine_id: %s",
-                     engine_id)
         self._remote_agents[engine_id] = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata)
         self.kv_caches_base_addr[
@@ -594,10 +573,6 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 blocks_data.append(
                     (base_addr + block_offset, self.block_len, self.rank))
-        logger.debug(
-            "Created %s blocks for src engine %s rank %s \
-                      and TP rank %s", len(blocks_data), self.engine_id,
-            self.rank, self.unique_rank)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
@@ -613,8 +588,6 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 blocks_data.append(
                     (base_addr + block_offset, self.block_len, self.rank))
-        logger.debug("Created %s blocks for dst engine %s and TP rank %s",
-                     len(blocks_data), engine_id, self.unique_rank)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
@@ -785,10 +758,6 @@ class NixlConnectorWorker:
 
         # Get side handles.
         local_xfer_side_handle = self.src_xfer_side_handle
-        logger.debug(
-            "Looking up dst_engine_id %s in dst_xfer_side_handles. " \
-            "Available keys: %s",
-            dst_engine_id, list(self.dst_xfer_side_handles.keys()))
         try:
             remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
         except KeyError:
