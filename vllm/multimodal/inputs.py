@@ -738,6 +738,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         json_mapped = json_map_leaves(
             lambda x: x.to(
                 device=device,
+                # This mimics the behavior of transformers.BatchFeature
                 dtype=dtype if x.is_floating_point() else None,
                 non_blocking=True,
             ),
