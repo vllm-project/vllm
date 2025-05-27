@@ -994,7 +994,7 @@ def get_config_qtype(
     elif use_int8_w8a8:
         return torch.int8
     elif use_mxfp4_w4a4:
-        # TODO: replay by a torch.dtype once PyTorch natively supports mxfp4.
+        # TODO: replace by a torch.dtype once PyTorch natively supports mxfp4.
         return "mxfp4"
     return None
 
