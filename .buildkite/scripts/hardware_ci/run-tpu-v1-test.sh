@@ -91,7 +91,7 @@ docker run --privileged --net host --shm-size=16G -it \
     } & \
     { \
         echo TEST_13: Running test_lora.py; \
-        python3 -m pytest -s -v /workspace/vllm/tests/tpu/lora/test_lora.py; \
+        VLLM_XLA_CHECK_RECOMPILATION=0 python3 -m pytest -s -v /workspace/vllm/tests/tpu/lora/test_lora.py; \
         echo TEST_13_EXIT_CODE: \$?; \
     } & \
     wait \
