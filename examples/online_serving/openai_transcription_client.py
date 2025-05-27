@@ -7,8 +7,8 @@ from openai import OpenAI
 
 from vllm.assets.audio import AudioAsset
 
-mary_had_lamb = AudioAsset('mary_had_lamb').get_local_path()
-winning_call = AudioAsset('winning_call').get_local_path()
+mary_had_lamb = AudioAsset("mary_had_lamb").get_local_path()
+winning_call = AudioAsset("winning_call").get_local_path()
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
@@ -31,7 +31,8 @@ def sync_openai():
             extra_body=dict(
                 seed=4419,
                 repetition_penalty=1.3,
-            ))
+            ),
+        )
         print("transcription result:", transcription.text)
 
 
@@ -42,33 +43,30 @@ sync_openai()
 async def stream_openai_response():
     data = {
         "language": "en",
-        'stream': True,
+        "stream": True,
         "model": "openai/whisper-large-v3",
     }
     url = openai_api_base + "/audio/transcriptions"
     headers = {"Authorization": f"Bearer {openai_api_key}"}
-    print("transcription result:", end=' ')
+    print("transcription result:", end=" ")
     async with httpx.AsyncClient() as client:
         with open(str(winning_call), "rb") as f:
-            async with client.stream('POST',
-                                     url,
-                                     files={'file': f},
-                                     data=data,
-                                     headers=headers) as response:
+            async with client.stream(
+                "POST", url, files={"file": f}, data=data, headers=headers
+            ) as response:
                 async for line in response.aiter_lines():
                     # Each line is a JSON object prefixed with 'data: '
                     if line:
-                        if line.startswith('data: '):
-                            line = line[len('data: '):]
+                        if line.startswith("data: "):
+                            line = line[len("data: ") :]
                         # Last chunk, stream ends
-                        if line.strip() == '[DONE]':
+                        if line.strip() == "[DONE]":
                             break
                         # Parse the JSON response
                         chunk = json.loads(line)
                         # Extract and print the content
-                        content = chunk['choices'][0].get('delta',
-                                                          {}).get('content')
-                        print(content, end='')
+                        content = chunk["choices"][0].get("delta", {}).get("content")
+                        print(content, end="")
 
 
 # Run the asynchronous function

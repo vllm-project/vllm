@@ -4,7 +4,6 @@
 import argparse
 import dataclasses
 import json
-import re
 import sys
 import threading
 import warnings
@@ -13,6 +12,7 @@ from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
 
+import regex as re
 import torch
 from typing_extensions import TypeIs, deprecated
 
@@ -183,7 +183,11 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         kwargs[name] = {"default": default, "help": help}
 
         # Set other kwargs based on the type hints
-        json_tip = "\n\nShould be a valid JSON string."
+        json_tip = """\n\nShould either be a valid JSON string or JSON keys
+        passed individually. For example, the following sets of arguments are
+        equivalent:\n\n
+        - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
+        - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n"""
         if dataclass_cls is not None:
             dataclass_init = lambda x, f=dataclass_cls: f(**json.loads(x))
             # Special case for configs with a from_cli method
@@ -573,7 +577,7 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             deprecated=True,
             help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
-            "of v0.8.6. Use `--reasoning-parser` to specify the reasoning "
+            "of v0.9.0. Use `--reasoning-parser` to specify the reasoning "
             "parser backend instead. This flag (`--enable-reasoning`) will be "
             "removed in v0.10.0. When `--reasoning-parser` is specified, "
             "reasoning mode is automatically enabled.")
@@ -733,7 +737,9 @@ class EngineArgs:
             title="DeviceConfig",
             description=DeviceConfig.__doc__,
         )
-        device_group.add_argument("--device", **device_kwargs["device"])
+        device_group.add_argument("--device",
+                                  **device_kwargs["device"],
+                                  deprecated=True)
 
         # Speculative arguments
         speculative_group = parser.add_argument_group(
@@ -973,7 +979,7 @@ class EngineArgs:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
-        device_config = DeviceConfig(device=self.device)
+        device_config = DeviceConfig(device=current_platform.device_type)
         model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
@@ -1078,7 +1084,7 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
         )
 
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:
@@ -1189,8 +1195,7 @@ class EngineArgs:
         #############################################################
         # Unsupported Feature Flags on V1.
 
-        if (self.load_format == LoadFormat.TENSORIZER.value
-                or self.load_format == LoadFormat.SHARDED_STATE.value):
+        if self.load_format == LoadFormat.SHARDED_STATE.value:
             _raise_or_fallback(
                 feature_name=f"--load_format {self.load_format}",
                 recommend_to_remove=False)
@@ -1286,14 +1291,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Some quantization is not compatible with torch.compile.
-        V1_UNSUPPORTED_QUANT = ["gguf"]
-        if model_config.quantization in V1_UNSUPPORTED_QUANT:
-            _raise_or_fallback(
-                feature_name=f"--quantization {model_config.quantization}",
-                recommend_to_remove=False)
-            return False
-
         # No Embedding Models so far.
         if model_config.task not in ["generate"]:
             _raise_or_fallback(feature_name=f"--task {model_config.task}",
@@ -1321,22 +1318,25 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Only Ngram speculative decoding so far.
+        # V1 supports N-gram, Medusa, and Eagle speculative decoding.
         is_ngram_enabled = False
         is_eagle_enabled = False
+        is_medusa_enabled = False
         if self.speculative_config is not None:
             # This is supported but experimental (handled below).
             speculative_method = self.speculative_config.get("method")
             if speculative_method:
                 if speculative_method in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
-                elif speculative_method in ("eagle", "eagle3"):
+                elif speculative_method == "medusa":
+                    is_medusa_enabled = True
+                elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
                     is_eagle_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")
                 if speculative_model in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
-            if not (is_ngram_enabled or is_eagle_enabled):
+            if not (is_ngram_enabled or is_eagle_enabled or is_medusa_enabled):
                 # Other speculative decoding methods are not supported yet.
                 _raise_or_fallback(feature_name="Speculative Decoding",
                                    recommend_to_remove=False)
@@ -1376,18 +1376,11 @@ class EngineArgs:
             return False
 
         if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend not in ["ray", "mp"]):
+                and self.distributed_executor_backend
+                not in ("ray", "mp", "external_launcher")):
             name = "Pipeline Parallelism without Ray distributed executor " \
-                    "or multiprocessing executor"
+                    "or multiprocessing executor or external launcher"
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
-            return False
-
-        # ngram is supported on V1, but off by default for now.
-        if is_ngram_enabled and _warn_or_fallback("ngram"):
-            return False
-
-        # Eagle is under development, so we don't support it yet.
-        if is_eagle_enabled and _warn_or_fallback("Eagle"):
             return False
 
         # Non-[CUDA, TPU] may be supported on V1, but off by default for now.

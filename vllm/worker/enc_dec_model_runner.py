@@ -202,9 +202,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 encoder_input_ids=model_input.encoder_input_tokens,
                 encoder_positions=model_input.encoder_input_positions,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device),
-                **seqlen_agnostic_kwargs)
+                **MultiModalKwargs.as_kwargs(
+                    multi_modal_kwargs,
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                ),
+                **seqlen_agnostic_kwargs,
+            )
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
