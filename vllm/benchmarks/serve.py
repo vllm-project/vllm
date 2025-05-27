@@ -7,7 +7,7 @@ to launch the vLLM OpenAI API server:
 
 On the client side, run:
     vllm bench serve \
-        --endpoint-type <endpoint_type. Default 'openi-comp'> \
+        --endpoint-type <endpoint_type. Default 'openai'> \
         --label <benchmark result label. Default using endpoint_type> \
         --model <your_model> \
         --dataset-name <dataset_name. Default 'random'> \
@@ -22,7 +22,7 @@ import os
 import random
 import time
 import warnings
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -31,7 +31,14 @@ import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
+from vllm.benchmarks.datasets import (AIMODataset, ASRDataset, BurstGPTDataset,
+                                      ConversationDataset, HuggingFaceDataset,
+                                      InstructCoderDataset, MTBenchDataset,
+                                      NextEditPredictionDataset, RandomDataset,
+                                      SampleRequest, ShareGPTDataset,
+                                      SonnetDataset, VisionArenaDataset)
 from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
+                                                   OPENAI_COMPATIBLE_BACKENDS,
                                                    RequestFuncInput,
                                                    RequestFuncOutput)
 from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
@@ -71,53 +78,18 @@ class BenchmarkMetrics:
     percentiles_e2el_ms: list[tuple[float, float]]
 
 
-def sample_random_requests(
-    prefix_len: int,
-    input_len: int,
-    output_len: int,
-    num_prompts: int,
-    range_ratio: float,
-    tokenizer: PreTrainedTokenizerBase,
-) -> list[tuple[str, int, int]]:
-    prefix_token_ids = np.random.randint(0,
-                                         tokenizer.vocab_size,
-                                         size=prefix_len).tolist()
-
-    input_lens = np.random.randint(
-        int(input_len * range_ratio),
-        input_len + 1,
-        size=num_prompts,
-    )
-    output_lens = np.random.randint(
-        int(output_len * range_ratio),
-        output_len + 1,
-        size=num_prompts,
-    )
-    offsets = np.random.randint(0, tokenizer.vocab_size, size=num_prompts)
-    input_requests = []
-    for i in range(num_prompts):
-        prompt = tokenizer.decode(prefix_token_ids +
-                                  [(offsets[i] + i + j) % tokenizer.vocab_size
-                                   for j in range(input_lens[i])])
-
-        input_requests.append((prompt, int(prefix_len + input_lens[i]),
-                               int(output_lens[i]), None))
-
-    return input_requests
-
-
 async def get_request(
-    input_requests: list[tuple[str, int, int]],
+    input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-) -> AsyncGenerator[tuple[str, int, int], None]:
+) -> AsyncGenerator[SampleRequest, None]:
     """
     Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness.
 
     Args:
         input_requests:
-            A list of input requests, each represented as a tuple.
+            A list of input requests, each represented as a SampleRequest.
         request_rate:
             The rate at which requests are generated (requests/s).
         burstiness (optional):
@@ -129,7 +101,7 @@ async def get_request(
             in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
     """
-    input_requests = iter(input_requests)
+    input_requests: Iterable[SampleRequest] = iter(input_requests)
 
     # Calculate scale parameter theta to maintain the desired request_rate.
     assert burstiness > 0, (
@@ -151,7 +123,7 @@ async def get_request(
 
 
 def calculate_metrics(
-    input_requests: list[tuple[str, int, int]],
+    input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
@@ -184,7 +156,7 @@ def calculate_metrics(
         if outputs[i].success:
             output_len = outputs[i].output_tokens
 
-            if output_len is None:
+            if not output_len:
                 # We use the tokenizer to count the number of output tokens
                 # for some serving backends instead of looking at
                 # len(outputs[i].itl) since multiple output tokens may be
@@ -194,7 +166,7 @@ def calculate_metrics(
                     tokenizer(outputs[i].generated_text,
                               add_special_tokens=False).input_ids)
             actual_output_lens.append(output_len)
-            total_input += input_requests[i][1]
+            total_input += input_requests[i].prompt_len
             tpot = 0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
@@ -277,19 +249,19 @@ async def benchmark(
     model_id: str,
     model_name: str,
     tokenizer: PreTrainedTokenizerBase,
-    input_requests: list[tuple[str, int, int]],
+    input_requests: list[SampleRequest],
     logprobs: Optional[int],
-    best_of: int,
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
     profile: bool,
     selected_percentile_metrics: list[str],
-    selected_percentiles: list[str],
+    selected_percentiles: list[float],
     ignore_eos: bool,
     goodput_config_dict: dict[str, float],
     max_concurrency: Optional[int],
-    lora_modules: Optional[list[str]],
+    lora_modules: Optional[Iterable[str]],
+    extra_body: Optional[dict],
 ):
     if endpoint_type in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -298,11 +270,13 @@ async def benchmark(
 
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-        input_requests[0])
-    if endpoint_type != "openai-chat" and test_mm_content is not None:
-        # multi-modal benchmark is only available on OpenAI Chat endpoint.
-        raise ValueError("Multi-modal content is only supported on "
-                         "'openai-chat' endpoint_type.")
+        input_requests[0].prompt,
+        input_requests[0].prompt_len,
+        input_requests[0].expected_output_len,
+        input_requests[0].multi_modal_data,
+    )
+
+    assert test_mm_content is None or isinstance(test_mm_content, dict)
     test_input = RequestFuncInput(
         model=model_id,
         model_name=model_name,
@@ -311,9 +285,9 @@ async def benchmark(
         prompt_len=test_prompt_len,
         output_len=test_output_len,
         logprobs=logprobs,
-        best_of=best_of,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
+        extra_body=extra_body,
     )
 
     test_output = await request_func(request_func_input=test_input)
@@ -338,9 +312,9 @@ async def benchmark(
                                          prompt_len=test_prompt_len,
                                          output_len=test_output_len,
                                          logprobs=logprobs,
-                                         best_of=best_of,
                                          multi_modal_content=test_mm_content,
-                                         ignore_eos=ignore_eos)
+                                         ignore_eos=ignore_eos,
+                                         extra_body=extra_body)
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
@@ -374,7 +348,12 @@ async def benchmark(
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate, burstiness):
-        prompt, prompt_len, output_len, mm_content = request
+        prompt, prompt_len, output_len, mm_content = (
+            request.prompt,
+            request.prompt_len,
+            request.expected_output_len,
+            request.multi_modal_data,
+        )
         req_model_id, req_model_name = model_id, model_name
         if lora_modules:
             req_lora_module = next(lora_modules)
@@ -387,9 +366,9 @@ async def benchmark(
                                               prompt_len=prompt_len,
                                               output_len=output_len,
                                               logprobs=logprobs,
-                                              best_of=best_of,
                                               multi_modal_content=mm_content,
-                                              ignore_eos=ignore_eos)
+                                              ignore_eos=ignore_eos,
+                                              extra_body=extra_body)
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
@@ -405,7 +384,6 @@ async def benchmark(
             prompt_len=test_prompt_len,
             output_len=test_output_len,
             logprobs=logprobs,
-            best_of=best_of,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
@@ -567,7 +545,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--endpoint-type",
         type=str,
-        default="openai-comp",
+        default="openai",
         choices=list(ASYNC_REQUEST_FUNCS.keys()),
     )
     parser.add_argument(
@@ -596,8 +574,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--dataset-name",
         type=str,
         default="random",
-        choices=["random"],
+        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf"],
         help="Name of the dataset to benchmark on.",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default=None,
+        help="Path to the sharegpt/sonnet dataset. "
+        "Or the huggingface dataset ID if using HF dataset.",
     )
     parser.add_argument(
         "--max-concurrency",
@@ -623,13 +608,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         help=
         "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
-    )
-    parser.add_argument(
-        "--best-of",
-        type=int,
-        default=1,
-        help="Generates `best_of` sequences per prompt and "
-        "returns the best one.",
     )
     parser.add_argument("--use-beam-search", action="store_true")
     parser.add_argument(
@@ -692,6 +670,17 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Specify to save benchmark results to a json file",
     )
     parser.add_argument(
+        "--save-detailed",
+        action="store_true",
+        help="When saving the results, whether to include per request "
+        "information such as response, error, ttfs, tpots, etc.",
+    )
+    parser.add_argument(
+        "--append-result",
+        action="store_true",
+        help="Append the benchmark result to the existing json file.",
+    )
+    parser.add_argument(
         "--metadata",
         metavar="KEY=VALUE",
         nargs="*",
@@ -733,6 +722,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default="99",
         help="Comma-separated list of percentiles for selected metrics. "
         "To report 25-th, 50-th, and 75-th percentiles, use \"25,50,75\". "
+        "Default value is \"99\"."
         "Use \"--percentile-metrics\" to select metrics.",
     )
     parser.add_argument(
@@ -745,7 +735,41 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "separated by spaces. Allowed request level metric names are "
         "\"ttft\", \"tpot\", \"e2el\". For more context on the definition of "
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
-        "and the blog: https://hao-ai-lab.github.io/blogs/distserve")
+        "and the blog: https://hao-ai-lab.github.io/blogs/distserve",
+    )
+
+    # group for dataset specific arguments
+    sonnet_group = parser.add_argument_group("sonnet dataset options")
+    sonnet_group.add_argument(
+        "--sonnet-input-len",
+        type=int,
+        default=550,
+        help=
+        "Number of input tokens per request, used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--sonnet-output-len",
+        type=int,
+        default=150,
+        help=
+        "Number of output tokens per request, used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--sonnet-prefix-len",
+        type=int,
+        default=200,
+        help=
+        "Number of prefix tokens per request, used only for sonnet dataset.",
+    )
+
+    sharegpt_group = parser.add_argument_group("sharegpt dataset options")
+    sharegpt_group.add_argument(
+        "--sharegpt-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output length "
+        "from the ShareGPT dataset.",
+    )
 
     random_group = parser.add_argument_group("random dataset options")
     random_group.add_argument(
@@ -765,9 +789,11 @@ def add_cli_args(parser: argparse.ArgumentParser):
     random_group.add_argument(
         "--random-range-ratio",
         type=float,
-        default=1.0,
-        help="Range of sampled ratio of input/output length, "
-        "used only for random sampling.",
+        default=0.0,
+        help="Range ratio for sampling input/output length, "
+        "used only for random sampling. Must be in the range [0, 1) to define "
+        "a symmetric sampling range"
+        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
     random_group.add_argument(
         "--random-prefix-len",
@@ -777,6 +803,54 @@ def add_cli_args(parser: argparse.ArgumentParser):
         " context. The length range of context in a random "
         " request is [random-prefix-len, "
         " random-prefix-len + random-prefix-len * random-range-ratio).")
+
+    hf_group = parser.add_argument_group("hf dataset options")
+    hf_group.add_argument("--hf-subset",
+                          type=str,
+                          default=None,
+                          help="Subset of the HF dataset.")
+    hf_group.add_argument("--hf-split",
+                          type=str,
+                          default=None,
+                          help="Split of the HF dataset.")
+    hf_group.add_argument(
+        "--hf-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output lengths "
+        "from the sampled HF dataset.",
+    )
+
+    sampling_group = parser.add_argument_group("sampling parameters")
+    sampling_group.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Top-p sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
+    sampling_group.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="Top-k sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
+    sampling_group.add_argument(
+        "--min-p",
+        type=float,
+        default=None,
+        help="Min-p sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
+    sampling_group.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Temperature sampling parameter. Only has effect on "
+        "openai-compatible backends. If not specified, default to greedy "
+        "decoding (i.e. temperature==0.0).",
+    )
 
     parser.add_argument(
         '--tokenizer-mode',
@@ -826,26 +900,141 @@ def main(args: argparse.Namespace):
     tokenizer = get_tokenizer(tokenizer_id,
                               tokenizer_mode=tokenizer_mode,
                               trust_remote_code=args.trust_remote_code)
-    # TODO: This should be refactored to use the benchmark_dataset.py
-    # in later PRs.
+
     if args.dataset_name is None:
         raise ValueError(
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required.")
-    elif args.dataset_name == "random":
-        input_requests = sample_random_requests(
-            prefix_len=args.random_prefix_len,
-            input_len=args.random_input_len,
-            output_len=args.random_output_len,
-            num_prompts=args.num_prompts,
-            range_ratio=args.random_range_ratio,
+
+    if args.dataset_name == "sonnet":
+        dataset = SonnetDataset(dataset_path=args.dataset_path)
+        # For the "sonnet" dataset, formatting depends on the backend.
+        if args.backend == "openai-chat":
+            input_requests = dataset.sample(
+                num_requests=args.num_prompts,
+                input_len=args.sonnet_input_len,
+                output_len=args.sonnet_output_len,
+                prefix_len=args.sonnet_prefix_len,
+                tokenizer=tokenizer,
+                return_prompt_formatted=False,
+            )
+        else:
+            assert tokenizer.chat_template or tokenizer.default_chat_template, (
+                "Tokenizer/model must have chat template for sonnet dataset.")
+            input_requests = dataset.sample(
+                num_requests=args.num_prompts,
+                input_len=args.sonnet_input_len,
+                output_len=args.sonnet_output_len,
+                prefix_len=args.sonnet_prefix_len,
+                tokenizer=tokenizer,
+                return_prompt_formatted=True,
+            )
+
+    elif args.dataset_name == "hf":
+        # all following datasets are implemented from the
+        # HuggingFaceDataset base class
+        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = VisionArenaDataset
+            args.hf_split = "train"
+            args.hf_subset = None
+        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = InstructCoderDataset
+            args.hf_split = "train"
+        elif args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = MTBenchDataset
+            args.hf_split = "train"
+        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ConversationDataset
+            args.hf_split = "train"
+        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = AIMODataset
+            args.hf_split = "train"
+        elif args.dataset_path in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS:  # noqa: E501
+            dataset_class = NextEditPredictionDataset
+            args.hf_split = "train"
+        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ASRDataset
+            args.hf_split = "train"
+        else:
+            supported_datasets = set([
+                dataset_name for cls in HuggingFaceDataset.__subclasses__()
+                for dataset_name in cls.SUPPORTED_DATASET_PATHS
+            ])
+            raise ValueError(
+                f"Unsupported dataset path: {args.dataset_path}. "
+                "Huggingface dataset only supports dataset_path"
+                f" from one of following: {supported_datasets}. "
+                "Please consider contributing if you would "
+                "like to add support for additional dataset formats.")
+
+        if dataset_class.IS_MULTIMODAL and endpoint_type not in [
+                "openai-chat",
+                "openai-audio",
+        ]:
+            # multi-modal benchmark is only available on OpenAI Chat backend.
+            raise ValueError(
+                "Multi-modal content is only supported on 'openai-chat' and "
+                "'openai-audio' backend.")
+        input_requests = dataset_class(
+            dataset_path=args.dataset_path,
+            dataset_subset=args.hf_subset,
+            dataset_split=args.hf_split,
+            random_seed=args.seed,
+        ).sample(
+            num_requests=args.num_prompts,
             tokenizer=tokenizer,
+            output_len=args.hf_output_len,
         )
 
     else:
-        raise ValueError(f"Unknown dataset: {args.dataset_name}")
+        # For datasets that follow a similar structure, use a mapping.
+        dataset_mapping = {
+            "sharegpt":
+            lambda: ShareGPTDataset(random_seed=args.seed,
+                                    dataset_path=args.dataset_path).sample(
+                                        tokenizer=tokenizer,
+                                        num_requests=args.num_prompts,
+                                        output_len=args.sharegpt_output_len,
+                                    ),
+            "burstgpt":
+            lambda: BurstGPTDataset(random_seed=args.seed,
+                                    dataset_path=args.dataset_path).
+            sample(tokenizer=tokenizer, num_requests=args.num_prompts),
+            "random":
+            lambda: RandomDataset(dataset_path=args.dataset_path).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                prefix_len=args.random_prefix_len,
+                input_len=args.random_input_len,
+                output_len=args.random_output_len,
+                range_ratio=args.random_range_ratio,
+            ),
+        }
 
+        try:
+            input_requests = dataset_mapping[args.dataset_name]()
+        except KeyError as err:
+            raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
     goodput_config_dict = check_goodput_args(args)
+
+    # Collect the sampling parameters.
+    sampling_params = {
+        k: v
+        for k, v in {
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+            "min_p": args.min_p,
+            "temperature": args.temperature,
+        }.items() if v is not None
+    }
+
+    # Sampling parameters are only supported by openai-compatible backend.
+    if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
+        raise ValueError("Sampling parameters are only supported by "
+                         "openai-compatible backends.")
+
+    if "temperature" not in sampling_params:
+        sampling_params["temperature"] = 0.0  # Default to greedy decoding.
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
@@ -861,7 +1050,6 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             input_requests=input_requests,
             logprobs=args.logprobs,
-            best_of=args.best_of,
             request_rate=args.request_rate,
             burstiness=args.burstiness,
             disable_tqdm=args.disable_tqdm,
@@ -874,10 +1062,11 @@ def main(args: argparse.Namespace):
             goodput_config_dict=goodput_config_dict,
             max_concurrency=args.max_concurrency,
             lora_modules=args.lora_modules,
+            extra_body=sampling_params,
         ))
 
     # Save config and results to json
-    if args.save_result:
+    if args.save_result or args.append_result:
         result_json: dict[str, Any] = {}
 
         # Setup
@@ -887,7 +1076,6 @@ def main(args: argparse.Namespace):
         result_json["label"] = label
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
-        result_json["best_of"] = args.best_of
         result_json["num_prompts"] = args.num_prompts
 
         # Metadata
@@ -910,6 +1098,19 @@ def main(args: argparse.Namespace):
         # Merge with benchmark result
         result_json = {**result_json, **benchmark_result}
 
+        if not args.save_detailed:
+            # Remove fields with too many data points
+            for field in [
+                    "input_lens",
+                    "output_lens",
+                    "ttfts",
+                    "itls",
+                    "generated_texts",
+                    "errors",
+            ]:
+                if field in result_json:
+                    del result_json[field]
+
         # Save to file
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
@@ -920,6 +1121,11 @@ def main(args: argparse.Namespace):
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, "w", encoding='utf-8') as outfile:
+        with open(file_name,
+                  mode="a+" if args.append_result else "w",
+                  encoding="utf-8") as outfile:
+            # Append a newline.
+            if args.append_result and outfile.tell() != 0:
+                outfile.write("\n")
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
