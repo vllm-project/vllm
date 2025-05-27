@@ -5,9 +5,8 @@ The actual execution of the rearrangement.
 This involves the exchange of expert weights between GPUs.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, MutableSequence, Sequence
 from functools import partial
-from typing import Dict, List, MutableSequence, Tuple
 
 import torch
 from torch.distributed import (P2POp, ProcessGroup, batch_isend_irecv,
@@ -51,7 +50,7 @@ def get_ep_ranks_with_expert(
     num_local_experts: int,
     old_indices: Sequence[int],
     new_indices: Sequence[int],
-) -> Tuple[MutableSequence[int], MutableSequence[int]]:
+) -> tuple[MutableSequence[int], MutableSequence[int]]:
     """
     Get the ranks of the experts that need to be exchanged.
 
@@ -71,8 +70,8 @@ def get_ep_ranks_with_expert(
         local_cnt=num_local_experts,
     )
 
-    ranks_to_send: List[int] = []
-    ranks_to_recv: List[int] = []
+    ranks_to_send: list[int] = []
+    ranks_to_recv: list[int] = []
 
     for i, e in enumerate(old_indices):
         if e == idx:
@@ -133,10 +132,10 @@ def shuffle_layer(
                                           expert_weights_buffer):
                     buffer[dst].copy_(weight[src])
 
-    p2p_ops: List[P2POp] = []
+    p2p_ops: list[P2POp] = []
 
     # 2. Initiate sending of weights.
-    experts_send_loc: Dict[int, int] = {}
+    experts_send_loc: dict[int, int] = {}
     for src in range(num_local_experts):
         expert = old_indices[local2global(src)]
         if expert in experts_send_loc:
@@ -173,7 +172,7 @@ def shuffle_layer(
             ]
 
     # 3. Initiate receiving of weights.
-    experts_recv_loc: Dict[int, int] = {}
+    experts_recv_loc: dict[int, int] = {}
     for dst in range(num_local_experts):
         if is_received_locally[dst]:
             continue
@@ -254,7 +253,7 @@ def rearrange_expert_weights_inplace(
 
     num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
     assert new_global_expert_indices.shape == (num_moe_layers,
-                                               num_local_physical_experts)
+                                               num_physical_experts)
 
     ep_rank = ep_group.rank()
     ep_size = ep_group.size()
