@@ -6,6 +6,12 @@ reproducible results:
 - For V1: Turn off multiprocessing to make the scheduling deterministic by setting `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
 - For V0: Set the global seed (see below).
 
+Example: <gh-file:examples/offline_inference/reproducibility.py>
+
+!!! warning
+
+    Applying the above settings [changes the random state in user code](#locality-of-random-state).
+
 !!! note
 
     Even with the above settings, vLLM only provides reproducibility
@@ -13,13 +19,6 @@ reproducible results:
     Also, the online serving API (`vllm serve`) does not support reproducibility
     because it is almost impossible to make the scheduling deterministic in the
     online setting.
-
-!!! note
-
-    Applying the above settings changes the random state in user code
-    (i.e. the code that constructs [LLM][vllm.LLM] class).
-    This may affect subsequent operations outside vLLM; see
-    [this example](../examples/offline_inference/reproducibility.md).
 
 ## Setting the global seed
 
@@ -44,9 +43,10 @@ In V1, the `seed` parameter defaults to `0` which sets the random state for each
 
 ### Locality of random state
 
-The random state in user code is updated by vLLM under the following conditions:
+The random state in user code (i.e. the code that constructs [LLM][vllm.LLM] class) is updated by vLLM under the following conditions:
 
 - For V0: The seed is specified.
-- For V1: The workers are run in the same process as the code that constructs [LLM][vllm.LLM] class, i.e.: `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
+- For V1: The workers are run in the same process as user code, i.e.: `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
 
-By default, these conditions are not active so you can use vLLM without having to worry about hidden changes to the random state of your own code.
+By default, these conditions are not active so you can use vLLM without having to worry about
+accidentally making determinstic subsequent operations that rely on random state.
