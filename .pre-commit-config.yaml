@@ -17,7 +17,7 @@ repos:
   - id: ruff
     args: [--output-format, github, --fix]
   - id: ruff-format
-    files: ^(.buildkite|benchmarks|examples/online_serving/structured_outputs)/.*
+    files: ^(.buildkite|benchmarks)/.*
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.1
   hooks:
