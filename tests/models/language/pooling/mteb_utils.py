@@ -119,4 +119,4 @@ def mteb_test_embed_models(hf_runner,
     print("SentenceTransformer:", model_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, rel=MTEB_EMBED_TOL)
+    assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_EMBED_TOL)

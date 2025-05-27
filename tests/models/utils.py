@@ -13,9 +13,6 @@ from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
 from .registry import HF_EXAMPLE_MODELS
 
-if TYPE_CHECKING:
-    from ..conftest import HfRunner
-
 TokensText = tuple[list[int], str]
 
 
