@@ -830,6 +830,8 @@ class Scheduler(SchedulerInterface):
 
         self.running = new_running
 
+        # Create EngineCoreOutputs for all clients that have requests with
+        # outputs in this step.
         engine_core_outputs = {
             client_index: EngineCoreOutputs(outputs=outs)
             for client_index, outs in outputs.items()
@@ -840,6 +842,7 @@ class Scheduler(SchedulerInterface):
             # Include ids of requests that finished since last outputs
             # were sent.
             for client_index, finished_set in finished_req_ids.items():
+                # Set finished request set in EngineCoreOutputs for this client.
                 if (eco := engine_core_outputs.get(client_index)) is not None:
                     eco.finished_requests = finished_set
                 else:
