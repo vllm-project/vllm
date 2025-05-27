@@ -128,7 +128,7 @@ class ModelCase:
 def test_mxfp4_loading_and_execution(vllm_runner, model_case: ModelCase):
     if torch.cuda.device_count() < model_case.tp:
         pytest.skip(f"This test requires >={model_case.tp} gpus, got only "
-                    "{torch.cuda.device_count()}")
+                    f"{torch.cuda.device_count()}")
 
     with vllm_runner(model_case.model_id,
                      tensor_parallel_size=model_case.tp,
