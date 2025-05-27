@@ -23,33 +23,32 @@ Finally, update our [list of supported models][supported-models] to promote your
 
 ## Out-of-tree models
 
-You can load an external model using a plugin without modifying the vLLM codebase.
-
-!!! info
-    [vLLM's Plugin System][plugin-system]
+You can load an external model [using a plugin][plugin-system] without modifying the vLLM codebase.
 
 To register the model, use the following code:
 
 ```python
-from vllm import ModelRegistry
-from your_code import YourModelForCausalLM
-ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
+# The entrypoint of your plugin
+def register():
+    from vllm import ModelRegistry
+    from your_code import YourModelForCausalLM
+
+    ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
 ```
 
 If your model imports modules that initialize CUDA, consider lazy-importing it to avoid errors like `RuntimeError: Cannot re-initialize CUDA in forked subprocess`:
 
 ```python
-from vllm import ModelRegistry
+# The entrypoint of your plugin
+def register():
+    from vllm import ModelRegistry
 
-ModelRegistry.register_model(
-    "YourModelForCausalLM",
-    "your_code:YourModelForCausalLM"
-)
+    ModelRegistry.register_model(
+        "YourModelForCausalLM",
+        "your_code:YourModelForCausalLM"
+    )
 ```
 
 !!! warning
     If your model is a multimodal model, ensure the model class implements the [SupportsMultiModal][vllm.model_executor.models.interfaces.SupportsMultiModal] interface.
     Read more about that [here][supports-multimodal].
-
-!!! note
-    Although you can directly put these code snippets in your script using `vllm.LLM`, the recommended way is to place these snippets in a vLLM plugin. This ensures compatibility with various vLLM features like distributed inference and the API server.
