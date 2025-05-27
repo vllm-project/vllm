@@ -12,9 +12,9 @@ hf_overrides = {
     "rope_scaling": {
         "rope_type": "yarn",
         "factor": factor,
-        "original_max_position_embeddings": original_max_position_embeddings
+        "original_max_position_embeddings": original_max_position_embeddings,
     },
-    "max_model_len": int(original_max_position_embeddings * factor)
+    "max_model_len": int(original_max_position_embeddings * factor),
 }
 
 llm = LLM(model="Qwen/Qwen3-0.6B", hf_overrides=hf_overrides)
@@ -26,22 +26,9 @@ sampling_params = SamplingParams(
 )
 
 conversation = [
-    {
-        "role": "system",
-        "content": "You are a helpful assistant"
-    },
-    {
-        "role": "user",
-        "content": "Hello"
-    },
-    {
-        "role": "assistant",
-        "content": "Hello! How can I assist you today?"
-    },
-    {
-        "role": "user",
-        "content": "Write an essay about the importance of higher education.",
-    },
+    {"role": "system", "content": "You are a helpful assistant"},
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hello! How can I assist you today?"},
 ]
 outputs = llm.chat(conversation, sampling_params, use_tqdm=False)
 
