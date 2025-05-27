@@ -530,8 +530,8 @@ class NomicBertModel(BertWithRope):
         # with SentenceTransformer.
         # The context extension uses vllm style rope_theta and rope_scaling.
         # See #17785 #18755
-        if (not vllm_config.model_config.hf_overrides and
-                vllm_config.model_config.original_max_model_len is None):
+        if (not vllm_config.model_config.hf_overrides
+                and vllm_config.model_config.original_max_model_len is None):
             # Default
             # Reset max_model_len to max_trained_positions.
             # nomic-embed-text-v2-moe the length is set to 512
@@ -554,8 +554,8 @@ class NomicBertModel(BertWithRope):
 
             model_config = vllm_config.model_config
             hf_text_config = model_config.hf_text_config
-            max_model_len = model_config.hf_overrides.get("max_model_len",
-                                     vllm_config.model_config.max_model_len)
+            max_model_len = model_config.hf_overrides.get(
+                "max_model_len", vllm_config.model_config.max_model_len)
 
             # reset hf_text_config for _get_and_verify_max_len.
             if hasattr(hf_text_config, "max_model_len"):
