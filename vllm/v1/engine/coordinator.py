@@ -210,21 +210,26 @@ class CoordinatorProc:
                         stats[1] = outputs.scheduler_stats.num_running_reqs
                         self.stats_changed = True
 
-                    if outputs.wave_complete is not None:
+                    if (wave := outputs.wave_complete) is not None:
                         # 2. Notification from rank 0 engine that we've
                         # moved into the global paused state
                         # (engines_running==False)
                         if self.current_wave <= wave:
+                            logger.debug("Moving DP wave from %d to %d.",
+                                         self.current_wave, wave)
                             self.current_wave = wave + 1
                             self.engines_running = False
                             self.stats_changed = True
-                    elif outputs.start_wave is not None and (
+                    elif (wave := outputs.start_wave) is not None and (
                             wave > self.current_wave or
                         (wave == self.current_wave
                          and not self.engines_running)):
                         # 3. The engine received request for a non-current wave
                         # so we must ensure that other engines progress to the
                         # next wave (race condition handling).
+                        logger.debug(
+                            "Starting wave %d after notification of "
+                            "stale wave request from engine.", wave)
                         self.current_wave = wave
                         self.engines_running = True
                         self.stats_changed = True
