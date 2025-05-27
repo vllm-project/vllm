@@ -23,6 +23,7 @@ from io import BytesIO
 from typing import Any, Callable, Optional, Union
 
 import numpy as np
+import pandas as pd
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
