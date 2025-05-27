@@ -29,7 +29,7 @@ prometheus_client.disable_created_metrics()
 # to extract the metrics definitions.
 
 
-# begin-metrics-definitions
+# --8<-- [start:metrics-definitions]
 class Metrics:
     """
     vLLM uses a multiprocessing-based frontend for the OpenAI server.
@@ -140,16 +140,13 @@ class Metrics:
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames)
-        buckets = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
-        if not vllm_config.model_config.enforce_eager:
-            buckets = vllm_config.compilation_config.\
-                cudagraph_capture_sizes.copy()
-            buckets.sort()
         self.histogram_iteration_tokens = self._histogram_cls(
             name="vllm:iteration_tokens_total",
             documentation="Histogram of number of tokens per engine_step.",
             labelnames=labelnames,
-            buckets=buckets)
+            buckets=[
+                1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384
+            ])
         self.histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
@@ -296,7 +293,7 @@ class Metrics:
             labelnames=labelnames))
 
 
-# end-metrics-definitions
+# --8<-- [end:metrics-definitions]
 
     def _unregister_vllm_metrics(self) -> None:
         for collector in list(prometheus_client.REGISTRY._collector_to_names):

@@ -20,7 +20,8 @@
 # https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/config.json
 """Inference-only StabeLM (https://github.com/Stability-AI/StableLM)
 model compatible with HuggingFace weights."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -104,9 +105,8 @@ class StablelmAttention(nn.Module):
             1, self.total_num_key_value_heads // tp_size)
         self.head_dim = self.hidden_size // self.total_num_heads
         self.max_position_embeddings = config.max_position_embeddings
-        rope_pct = getattr(config, "rope_pct",
-                           getattr(config, "partial_rotary_factor", 1))
-        self.rotary_ndims = int(self.head_dim * rope_pct)
+        self.partial_rotary_factor = getattr(
+            config, "rope_pct", getattr(config, "partial_rotary_factor", 1))
         self.scaling = self.head_dim**-0.5
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_key_value_heads * self.head_dim
@@ -130,9 +130,10 @@ class StablelmAttention(nn.Module):
                                         prefix=f"{prefix}.o_proj")
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.rotary_ndims,
+            rotary_dim=self.head_dim,
             max_position=self.config.max_position_embeddings,
             base=self.config.rope_theta,
+            partial_rotary_factor=self.partial_rotary_factor,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -180,7 +181,7 @@ class StablelmDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -252,8 +253,8 @@ class StableLMEpochModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -263,7 +264,7 @@ class StableLMEpochModel(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -335,15 +336,7 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            # Models trained using ColossalAI may include these tensors in
-            # the checkpoint. Skip them.
-            skip_prefixes=[
-                "rotary_emb.inv_freq", "rotary_emb.cos_cached",
-                "rotary_emb.sin_cached"
-            ],
-        )
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

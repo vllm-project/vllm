@@ -17,7 +17,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Dict, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -85,7 +85,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(
         self,
         *,
-        size: Optional[Dict[str, int]] = None,
+        size: Optional[dict[str, int]] = None,
         **kwargs: object,
     ) -> Idefics3Processor:
         if size is not None:
@@ -752,8 +752,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

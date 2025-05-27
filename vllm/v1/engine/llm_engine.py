@@ -10,7 +10,6 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -28,7 +27,10 @@ from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.utils import report_usage_stats
+from vllm.v1.metrics.loggers import (PrometheusStatLogger, StatLoggerBase,
+                                     StatLoggerFactory)
+from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
+from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
 
@@ -44,7 +46,7 @@ class LLMEngine:
         executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[list[StatLoggerFactory]] = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
@@ -56,9 +58,19 @@ class LLMEngine:
                 "LLMEngine.from_vllm_config(...) or explicitly set "
                 "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
+        if stat_loggers is not None:
+            raise NotImplementedError(
+                "Passing StatLoggers to LLMEngine in V1 is not yet supported. "
+                "Set VLLM_USE_V1=0 and file and issue on Github.")
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
+
+        self.log_stats = log_stats
+        self.stat_logger: Optional[StatLoggerBase] = None
+        if self.log_stats:
+            self.stat_logger = PrometheusStatLogger(vllm_config)
 
         # important: init dp group before init the engine_core
         # In the decoupled engine case this is handled in EngineCoreProc.
@@ -82,7 +94,7 @@ class LLMEngine:
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=False)
+                                                log_stats=self.log_stats)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -90,29 +102,24 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,  # FIXME: implement
+            log_stats=self.log_stats,
         )
 
         if not multiprocess_mode:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
-        # If usage stat is enabled, collect relevant info.
-        report_usage_stats(vllm_config, usage_context)
+        # Don't keep the dummy data in memory
+        self.reset_mm_cache()
 
     @classmethod
     def from_vllm_config(
         cls,
         vllm_config: VllmConfig,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[list[StatLoggerFactory]] = None,
         disable_log_stats: bool = False,
     ) -> "LLMEngine":
-        if stat_loggers is not None:
-            raise NotImplementedError(
-                "Passing StatLoggers to V1 is not yet supported. "
-                "Set VLLM_USE_V1=0 and file and issue on Github.")
-
         return cls(vllm_config=vllm_config,
                    executor_class=Executor.get_class(vllm_config),
                    log_stats=(not disable_log_stats),
@@ -125,7 +132,7 @@ class LLMEngine:
         cls,
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[list[StatLoggerFactory]] = None,
         enable_multiprocessing: bool = False,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
@@ -179,22 +186,22 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
         # Process raw inputs into the request.
-        request = self.processor.process_inputs(request_id, prompt, params,
-                                                arrival_time, lora_request,
-                                                trace_headers,
-                                                prompt_adapter_request,
-                                                priority)
+        prompt_str, request = self.processor.process_inputs(
+            request_id, prompt, params, arrival_time, lora_request,
+            tokenization_kwargs, trace_headers, prompt_adapter_request,
+            priority)
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
         if n == 1:
             # Make a new RequestState and queue.
-            self.output_processor.add_request(request, None, 0)
+            self.output_processor.add_request(request, prompt_str, None, 0)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
             return
@@ -208,7 +215,8 @@ class LLMEngine:
             child_request.sampling_params = params
 
             # Make a new RequestState and queue.
-            self.output_processor.add_request(child_request, parent_req, idx)
+            self.output_processor.add_request(child_request, prompt_str,
+                                              parent_req, idx)
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
@@ -223,11 +231,20 @@ class LLMEngine:
         outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
+        iteration_stats = IterationStats() if self.log_stats else None
         processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs)
+            outputs.outputs,
+            engine_core_timestamp=outputs.timestamp,
+            iteration_stats=iteration_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
+
+        # 4) Record stats
+        if self.stat_logger is not None:
+            assert outputs.scheduler_stats is not None
+            self.stat_logger.record(scheduler_stats=outputs.scheduler_stats,
+                                    iteration_stats=iteration_stats)
 
         return processed_outputs.request_outputs
 
@@ -243,6 +260,11 @@ class LLMEngine:
     def stop_profile(self):
         self.engine_core.profile(False)
 
+    def reset_mm_cache(self):
+        self.processor.mm_registry.reset_processor_cache()
+        self.processor.mm_input_cache_client.reset()
+        self.engine_core.reset_mm_cache()
+
     def reset_prefix_cache(self, device: Optional[Device] = None):
         self.engine_core.reset_prefix_cache()
 
@@ -254,6 +276,10 @@ class LLMEngine:
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
+
+    def get_metrics(self) -> list[Metric]:
+        assert self.log_stats, "Stat logging disabled"
+        return get_metrics_snapshot()
 
     def get_tokenizer_group(self) -> TokenizerGroup:
         if self.tokenizer is None:

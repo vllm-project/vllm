@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 -m pip install \
         -r requirements/tpu.txt
-RUN python3 setup.py develop
+RUN python3 -m pip install -e .
 
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils

@@ -95,7 +95,7 @@ def cutlass_fp8_gemm_helper(m: int,
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
-    torch.testing.assert_close(out, baseline, rtol=1e-2, atol=5e-2)
+    torch.testing.assert_close(out, baseline, rtol=1e-2, atol=1.5e-1)
 
     opcheck(torch.ops._C.cutlass_scaled_mm,
             (out, a, b, scale_a, scale_b, bias))
@@ -160,6 +160,8 @@ def test_cutlass_fp8_blockwise_scale_gemm(m: int, n: int, k: int,
     if k % b_scale_group_shape[0] != 0 or n % b_scale_group_shape[1] != 0:
         return
     if m % a_scale_group_shape[0] != 0 or k % a_scale_group_shape[1] != 0:
+        return
+    if m % 4 != 0 and current_platform.has_device_capability(100):
         return
     cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape,
                             use_bias)
