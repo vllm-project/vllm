@@ -19,7 +19,7 @@ from vllm.v1.sample.logits_processor import (LogitBiasLogitsProcessor,
                                              MinTokensLogitsProcessor)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
-from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 is_tpu = current_platform.is_tpu()
 
@@ -36,7 +36,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: list[int]
+    block_ids: list[list[int]]
     num_computed_tokens: int
     output_token_ids: list[int]
 
@@ -65,15 +65,14 @@ class InputBatch:
         self,
         max_num_reqs: int,
         max_model_len: int,
-        max_num_blocks_per_req: int,
         max_num_batched_tokens: int,
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
+        block_size: int,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
         self.pin_memory = pin_memory
@@ -106,12 +105,13 @@ class InputBatch:
             self.num_computed_tokens_cpu_tensor.numpy()
 
         # Block table.
-        self.block_table = BlockTable(
+        self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
-            max_num_blocks_per_req=max_num_blocks_per_req,
+            max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
+            block_size=block_size,
         )
 
         # Sampling-related.

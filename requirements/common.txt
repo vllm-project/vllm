@@ -1,3 +1,4 @@
+regex # Replace re for higher-performance regex matching
 cachetools
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
@@ -7,7 +8,7 @@ tqdm
 blake3
 py-cpuinfo
 transformers >= 4.51.1
-huggingface-hub[hf_xet] >= 0.30.0  # Required for Xet downloads.
+huggingface-hub[hf_xet] >= 0.32.0  # Required for Xet downloads.
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
@@ -40,7 +41,7 @@ compressed-tensors == 0.9.4 # required for compressed-tensors
 depyf==0.18.0 # required for profiling and debugging with compilation config
 cloudpickle # allows pickling lambda functions in model_executor/models/registry.py
 watchfiles # required for http server to monitor the updates of TLS files
-python-json-logger # Used by logging as per examples/other/logging_configuration.md
+python-json-logger # Used by logging as per examples/others/logging_configuration.md
 scipy # Required for phi-4-multimodal-instruct
 ninja # Required for xgrammar, rocm, tpu, xpu
 opentelemetry-sdk>=1.26.0  # vllm.tracing

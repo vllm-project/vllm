@@ -6,7 +6,6 @@ import enum
 import hashlib
 import inspect
 import json
-import re
 import textwrap
 import uuid
 import warnings
@@ -20,6 +19,7 @@ from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
                     Protocol, TypeVar, Union, cast, get_args, get_origin)
 
+import regex as re
 import torch
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
@@ -533,13 +533,19 @@ class ModelConfig:
             self.model, hf_token=self.hf_token, revision=self.revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, self.dtype)
 
-        interleaved_attn_models = ["gemma2", "gemma3_text", "cohere2"]
-        sliding_window = getattr(self.hf_text_config, "sliding_window", None)
-        has_interleaved_attention = (sliding_window is not None) and (
-            isinstance(sliding_window, list) or
-            (self.hf_text_config.model_type in interleaved_attn_models))
+        # Workaround for Gemma 2 which uses interleaved sliding window
+        # attention, but it's not specified in its config. TODO: remove this
+        # when Gemma 2 is fixed in Transformers.
+        if self.hf_text_config.model_type == "gemma2":
+            self.hf_text_config.sliding_window_pattern = 2
 
-        if (not self.disable_sliding_window and has_interleaved_attention):
+        sliding_window = getattr(self.hf_text_config, "sliding_window", None)
+        sliding_window_pattern = getattr(self.hf_text_config,
+                                         "sliding_window_pattern", None)
+        has_interleaved_attention = sliding_window_pattern is not None or (
+            isinstance(sliding_window, list))
+
+        if not self.disable_sliding_window and has_interleaved_attention:
             if (backend :=
                     envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
@@ -559,7 +565,10 @@ class ModelConfig:
                 # only the attention layer itself is aware of the sliding
                 # window, and use the window size to compute the attention.
                 self.hf_text_config.interleaved_sliding_window = sliding_window
-                delattr(self.hf_text_config, "sliding_window")
+
+                if hasattr(self.hf_text_config, "sliding_window"):
+                    delattr(self.hf_text_config, "sliding_window")
+
                 sliding_window = None
 
         self.max_model_len = _get_and_verify_max_len(
@@ -984,7 +993,7 @@ class ModelConfig:
             self.use_async_output_proc = False
             return
 
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         from vllm.platforms import current_platform
         if not current_platform.is_async_output_supported(self.enforce_eager):
@@ -1000,7 +1009,7 @@ class ModelConfig:
         if self.runner_type == "pooling":
             self.use_async_output_proc = False
 
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if speculative_config:
             self.use_async_output_proc = False
@@ -2252,7 +2261,7 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "medusa", "mlp_speculator",
-                            "draft_model"]
+                            "draft_model", "deepseek_mtp"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
 
@@ -2516,6 +2525,15 @@ class SpeculativeConfig:
                 elif (self.draft_model_config.hf_config.model_type ==
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "deepseek_mtp"):
+                    self.method = "deepseek_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "All Deepseek MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
                 else:
                     self.method = "draft_model"
 
@@ -2526,11 +2544,10 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
-                    from vllm.platforms import current_platform
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig) or current_platform.is_neuron():
+                                  EAGLEConfig):
                         pass
                     else:
                         eagle_config = EAGLEConfig(
@@ -2736,7 +2753,7 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp")
 
     def __repr__(self) -> str:
         method = self.method
@@ -3492,7 +3509,7 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
-    engine_id: str = str(uuid.uuid4())
+    engine_id: Optional[str] = None
     """The engine id for KV transfers."""
 
     kv_buffer_device: Optional[str] = "cuda"
@@ -3549,6 +3566,9 @@ class KVTransferConfig:
         return hash_str
 
     def __post_init__(self) -> None:
+        if self.engine_id is None:
+            self.engine_id = str(uuid.uuid4())
+
         if self.kv_role is not None and self.kv_role not in get_args(KVRole):
             raise ValueError(f"Unsupported kv_role: {self.kv_role}. "
                              f"Supported roles are {get_args(KVRole)}")
@@ -3647,6 +3667,8 @@ class PassConfig:
     """Whether to enable the custom no-op elimination pass."""
     enable_sequence_parallelism: bool = False
     """Whether to enable sequence parallelism."""
+    enable_async_tp: bool = False
+    """Whether to enable async TP."""
 
     def uuid(self):
         """
@@ -3656,7 +3678,8 @@ class PassConfig:
         compilation.
         """
         include = {
-            "enable_fusion", "enable_noop", "enable_sequence_parallelism"
+            "enable_fusion", "enable_noop", "enable_sequence_parallelism",
+            "enable_async_tp"
         }
         dict_ = {k: v for k, v in asdict(self).items() if k in include}
         return InductorPass.hash_dict(dict_)
@@ -4269,6 +4292,12 @@ class VllmConfig:
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
+
+        # async tp is built on top of sequence parallelism
+        # and requires it to be enabled.
+        if self.compilation_config.pass_config.enable_async_tp:
+            self.compilation_config.pass_config.enable_sequence_parallelism = \
+                True
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
@@ -4538,7 +4567,7 @@ def contains_object_print(text):
         text (str): The text to check
 
     Returns:
-        bool: True if a match is found, False otherwise
+        result (bool): `True` if a match is found, `False` otherwise.
     """
     pattern = r'at 0x[a-fA-F0-9]{2,16}>'
     match = re.search(pattern, text)
