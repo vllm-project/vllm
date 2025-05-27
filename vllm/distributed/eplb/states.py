@@ -214,7 +214,7 @@ class EplbState:
             logger.info("Rearranging experts...")
 
         # Perform all-reduce to get the expert load across all ranks
-        global_expert_load_window = self.expert_load_window.clone()
+        global_expert_load_window = self.expert_load_window.sum(dim=0)
         all_reduce(global_expert_load_window, group=ep_group)
 
         # TODO(bowen): Treat differently for prefill and decode nodes
