@@ -556,7 +556,7 @@ class NixlConnectorWorker:
         logger.debug(
             "Adding remote agent with engine_id: %s (current engine_id: %s)",
             engine_id, self.engine_id)
-
+        assert engine_id != self.engine_id, "Conflict engine id found!"
         if engine_id in self._remote_agents:
             return
 
