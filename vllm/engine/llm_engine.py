@@ -130,11 +130,11 @@ class LLMEngine:
     iteration-level scheduling and efficient memory management to maximize the
     serving throughput.
 
-    The [LLM][vllm.LLM] class wraps this class for offline batched inference
-    and the [AsyncLLMEngine][] class wraps this class for online serving.
+    The [`LLM`][vllm.LLM] class wraps this class for offline batched inference
+    and the [`AsyncLLMEngine`][vllm.engine.async_llm_engine.AsyncLLMEngine]
+    class wraps this class for online serving.
 
-    The config arguments are derived from [EngineArgs][vllm.EngineArgs]. (See
-    [engine-args][])
+    The config arguments are derived from [`EngineArgs`][vllm.EngineArgs].
 
     Args:
         vllm_config: The configuration for initializing and running vLLM.

@@ -23,13 +23,13 @@ class ParsedTokens(TypedDict):
 
 @overload
 def parse_and_batch_prompt(
-        prompt: Union[str, list[str]]) -> Sequence[ParsedText]:
+    prompt: Union[str, list[str]], ) -> Sequence[ParsedText]:
     ...
 
 
 @overload
 def parse_and_batch_prompt(
-        prompt: Union[list[int], list[list[int]]]) -> Sequence[ParsedTokens]:
+    prompt: Union[list[int], list[list[int]]], ) -> Sequence[ParsedTokens]:
     ...
 
 
@@ -86,7 +86,7 @@ class ParsedTokensPrompt(TypedDict):
 
 
 class ParsedEmbedsPrompt(TypedDict):
-    type: Literal['embeds']
+    type: Literal["embeds"]
     content: EmbedsPrompt
 
 
@@ -133,7 +133,7 @@ def parse_singleton_prompt(prompt: SingletonPrompt) -> ParsedSingletonPrompt:
 
 
 def is_explicit_encoder_decoder_prompt(
-        prompt: PromptType) -> TypeIs[ExplicitEncoderDecoderPrompt]:
+    prompt: PromptType, ) -> TypeIs[ExplicitEncoderDecoderPrompt]:
     return isinstance(prompt, dict) and "encoder_prompt" in prompt
 
 

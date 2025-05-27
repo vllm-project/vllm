@@ -27,7 +27,7 @@ VLLM_INVALID_TOKEN_ID = -1
 
 
 def array_full(token_id: int, count: int):
-    """{class}`array` equivalent of [numpy.full][]."""
+    """[`array`][] equivalent of [numpy.full][]."""
     return array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
 
 
@@ -192,8 +192,8 @@ class SequenceData(msgspec.Struct,
     def from_prompt_token_counts(
             *token_counts: tuple[int, int]) -> "SequenceData":
         """
-        Construct a {class}`SequenceData` instance by concatenating
-        prompt token sequences.
+        Construct a [`SequenceData`][vllm.sequence.SequenceData] instance
+        by concatenating prompt token sequences.
 
         Each tuple represents one token sequence, expressed in the form
         `(token_id, count)`.
@@ -216,8 +216,8 @@ class SequenceData(msgspec.Struct,
         prompt_embeds: Optional[torch.Tensor] = None,
     ) -> "SequenceData":
         """
-        Construct a {class}`SequenceData` instance from prompt and output
-        token sequences.
+        Construct a [`SequenceData`][vllm.sequence.SequenceData] instance
+        from prompt and output token sequences.
         """
         prompt_token_ids_arr = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                      prompt_token_ids)
@@ -452,9 +452,11 @@ class SequenceData(msgspec.Struct,
 class Sequence:
     """Stores the data, status, and block information of a sequence.
 
-    The sequence is constructed from the {data}`DecoderOnlyInputs`
-    (for decoder-only) or {data}`EncoderDecoderInputs` (for encoder-decoder)
-    instance passed in through the `inputs` constructor argument.
+    The sequence is constructed from the
+    [`DecoderOnlyInputs`][vllm.inputs.data.DecoderOnlyInputs] (for decoder-only)
+    or [`EncoderDecoderInputs`][vllm.inputs.data.EncoderDecoderInputs]
+    (for encoder-decoder) instance passed in through the `inputs`
+    constructor argument.
 
     Args:
         seq_id: The ID of the sequence.

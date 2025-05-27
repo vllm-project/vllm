@@ -84,7 +84,7 @@ class DeviceCapability(NamedTuple):
 
     def to_int(self) -> int:
         """
-        Express device capability as an integer ``<major><minor>``.
+        Express device capability as an integer `<major><minor>`.
 
         It is assumed that the minor version is always a single digit.
         """
@@ -206,10 +206,11 @@ class Platform:
         """
         Test whether this platform is compatible with a device capability.
 
-        The ``capability`` argument can either be:
+        The `capability` argument can either be:
 
-        - A tuple ``(major, minor)``.
-        - An integer ``<major><minor>``. (See {meth}`DeviceCapability.to_int`)
+        - A tuple `(major, minor)`.
+        - An integer `<major><minor>`. (See
+        [`DeviceCapability.to_int`][vllm.platforms.interface.DeviceCapability.to_int])
         """
         current_capability = cls.get_device_capability(device_id=device_id)
         if current_capability is None:

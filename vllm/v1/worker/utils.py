@@ -10,7 +10,7 @@ def sanity_check_mm_encoder_outputs(
 ) -> None:
     """
     Perform sanity checks for the result of
-    {meth}`vllm.model_executor.models.SupportsMultiModal.get_multimodal_embeddings`.
+    [`vllm.model_executor.models.SupportsMultiModal.get_multimodal_embeddings`][].
     """
     assert isinstance(mm_embeddings, (list, tuple, torch.Tensor)), (
         "Expected multimodal embeddings to be a list/tuple of 2D tensors, "
@@ -39,7 +39,7 @@ def scatter_mm_placeholders(
     Scatter the multimodal embeddings into a contiguous tensor that represents
     the placeholder tokens.
 
-    {class}`vllm.multimodal.processing.PromptUpdateDetails.is_embed`.
+    [`vllm.multimodal.processing.PromptUpdateDetails.is_embed`][].
 
     Args:
         embeds: The multimodal embeddings.

@@ -228,17 +228,19 @@ class Sampler(nn.Module):
     ) -> Optional[SamplerOutput]:
         """
         Single-step scheduling:
-        * Perform GPU-side sampling computation & compute
-          GPU-side logprobs tensor
-        * Pythonize sampling result & logprobs tensor
+            * Perform GPU-side sampling computation & compute
+            GPU-side logprobs tensor
+            * Pythonize sampling result & logprobs tensor
 
         Multi-step scheduling:
-        * Perform GPU-side sampling computation & compute
-          GPU-side logprobs tensor
-        * Defer Pythonization of sampling result & logprobs
-          tensor
-        * Encapsulate arguments required for deferred Pythonization
-          in the {class}`SamplerOutput` structure
+            * Perform GPU-side sampling computation & compute
+            GPU-side logprobs tensor
+            * Defer Pythonization of sampling result & logprobs
+            tensor
+            * Encapsulate arguments required for deferred Pythonization
+            in the
+            [`SamplerOutput`][vllm.model_executor.layers.sampler.SamplerOutput]
+            structure
 
         Args:
             logits: (num_tokens, vocab_size).

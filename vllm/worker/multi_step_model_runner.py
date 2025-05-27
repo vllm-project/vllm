@@ -733,12 +733,13 @@ def _pythonize_sampler_output(
     logprobs_tensor: Optional[torch.Tensor],
     cache: Optional[PythonizationCache],
 ) -> None:
-    """ This function is only called when the output tensors are ready. 
-    See {class}`ModelOutput`. 
-    
-    Modifies `output.outputs` and `pinned_sampled_token_buffer` in-place, 
+    """ This function is only called when the output tensors are ready.
+    See [`ModelOutput`][vllm.worker.multi_step_model_runner.ModelOutput].
+
+    Modifies `output.outputs` and `pinned_sampled_token_buffer` in-place,
     adding a Pythonized output data structure
-    ({class}`CompletionSequenceGroupOutput`) for each {class}`SequenceGroup`.
+    ([`CompletionSequenceGroupOutput`][vllm.sequence.CompletionSequenceGroupOutput])
+    for each [`SequenceGroup`][vllm.sequence.SequenceGroup].
 
     Args:
       model_input
