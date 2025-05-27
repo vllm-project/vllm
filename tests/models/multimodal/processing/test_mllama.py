@@ -49,7 +49,7 @@ def test_profiling(
                         ] * max_num_seqs
 
     mm_kwargs = processor.apply(
-        prompt=dummy_mm_data.prompt_text,
+        prompt=dummy_mm_data.prompt,
         mm_data=dummy_mm_data.mm_data,
         hf_processor_mm_kwargs=dict(),
     )["mm_kwargs"]
