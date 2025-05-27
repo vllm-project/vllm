@@ -587,8 +587,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param.shard_id.append(loaded_shard_id)
                 param.shard_id_map[loaded_shard_id] = len(param.data_container)
                 param.data_container.append(loaded_weight)
-                if len(param.data_container) == 2:
-                    self.qweight = param.materialize_nested()
                 return
 
         param_data = param.data
@@ -982,8 +980,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 param.shard_id.append(loaded_shard_id)
                 param.shard_id_map[loaded_shard_id] = len(param.data_container)
                 param.data_container.append(loaded_weight)
-                if len(param.data_container) == 3:
-                    self.qweight = param.materialize_nested()
                 return
 
         param_data = param.data
