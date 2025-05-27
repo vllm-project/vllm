@@ -179,8 +179,9 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                 # check allow node_to_cpus list
                 node_to_cpus= []
                 for i in range(numa_size):
-                    if set(info.node_to_cpus(i)).issubset(cpus_allow_list):
-                        node_to_cpus.append(info.node_to_cpus(i))
+                    node_intersect = set(info.node_to_cpus(i)).intersection(cpus_allow_list)
+                    if bool(node_intersect):
+                        node_to_cpus.append(list(node_intersect))
 
                 if world_size > len(node_to_cpus):
                     logger.error("Auto thread-binding failed due to world size: %d is larger than allowed NUMA nodes number: %d. Please try to bind threads manually.",
