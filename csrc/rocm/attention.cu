@@ -291,8 +291,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,             // [num_seqs, num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,           // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale,
-    const float* __restrict__ fp8_out_scale_ptr) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
   // clang-format on
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;
   const auto warpid = threadIdx.x / WARP_SIZE;
@@ -806,8 +805,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,             // [num_seqs, num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,           // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale,
-    const float* __restrict__ fp8_out_scale_ptr) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
   // clang-format on
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;
   const auto warpid = threadIdx.x / WARP_SIZE;
@@ -1249,8 +1247,6 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
 
   // final write to tmp_out after vout accumulation
   if (warpid == 0) {
-    const float out_scale =
-        (fp8_out_scale_ptr != nullptr) ? 1.0f / (*fp8_out_scale_ptr) : 1.0f;
     _B16x4 vout[QHLOOP][VHELOOP];
     // iterate across heads
     for (int qh = 0; qh < QHLOOP; qh++) {
@@ -3019,8 +3015,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     float* __restrict__ max_logits,           // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,               // [num_seqs, num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,             // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale,
-    const float* __restrict__ fp8_out_scale_ptr) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
   UNREACHABLE_CODE
 }
 
@@ -3047,8 +3042,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     float* __restrict__ max_logits,          // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,              // [num_seqs, num_heads, max_num_partitions, head_size]
     OUTT* __restrict__ final_out,            // [num_seqs, num_heads, head_size]
-    int max_ctx_blocks, const float* k_scale, const float* v_scale,
-    const float* __restrict__ fp8_out_scale_ptr) {
+    int max_ctx_blocks, const float* k_scale, const float* v_scale) {
   UNREACHABLE_CODE
 }
 
@@ -3079,7 +3073,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           block_tables_ptr, context_lens_ptr, query_start_loc_ptr,             \
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
           kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
-          max_ctx_blocks, k_scale_ptr, v_scale_ptr, fp8_out_scale_ptr);
+          max_ctx_blocks, k_scale_ptr, v_scale_ptr);
 
 #define LAUNCH_CUSTOM_ATTENTION_MFMA4(GQA_RATIO)                               \
   paged_attention_ll4mi_QKV_mfma4_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,   \
@@ -3090,7 +3084,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           block_tables_ptr, context_lens_ptr, query_start_loc_ptr,             \
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
           kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
-          max_ctx_blocks, k_scale_ptr, v_scale_ptr, fp8_out_scale_ptr);
+          max_ctx_blocks, k_scale_ptr, v_scale_ptr);
 
 #define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                          \
   paged_attention_ll4mi_reduce_kernel<T, OUTT, HEAD_SIZE, HEAD_SIZE, \
