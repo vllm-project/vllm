@@ -559,15 +559,12 @@ class NomicBertModel(BertWithRope):
             # reset hf_text_config for recalculate_max_model_len.
             if hasattr(hf_text_config, "max_model_len"):
                 delattr(hf_text_config, "max_model_len")
-
             hf_text_config.max_position_embeddings = max_trained_positions
             hf_text_config.rope_scaling = config.rotary_kwargs["rope_scaling"]
 
             # The priority of sentence_bert_config.json is higher
             # than max_position_embeddings
-            encoder_config = model_config.encoder_config
-            encoder_config.pop("max_seq_length", None)
-            model_config.encoder_config = encoder_config
+            model_config.encoder_config.pop("max_seq_length", None)
 
             vllm_config.recalculate_max_model_len(max_model_len)
         return config
