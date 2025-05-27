@@ -186,12 +186,12 @@ class TreeArray:
                 # Reached a leaf node, can't go deeper
                 break
 
-            # Find the child with highest local probability
+            # Find the child with highest global probability
             best_child = -1
             best_prob = -1
             for child in children:
-                if self.local_probs[child] > best_prob:
-                    best_prob = self.local_probs[child]
+                if self.global_probs[child] > best_prob:
+                    best_prob = self.global_probs[child]
                     best_child = child
 
             if best_child == -1:
