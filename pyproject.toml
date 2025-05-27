@@ -168,6 +168,3 @@ respect-ignore-files = true
 
 [tool.ty.environment]
 python = "./.venv"
-
-[tool.uv.workspace]
-members = ["examples/online_serving/structured_outputs"]
