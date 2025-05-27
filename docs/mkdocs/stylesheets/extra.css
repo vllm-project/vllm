@@ -22,3 +22,15 @@ a:not(:has(svg)):not(.md-icon):not(.autorefs-external) {
         display: inline-block;
     }
 }
+
+/* Light mode: darker section titles */
+body[data-md-color-scheme="default"] .md-nav__item--section > label.md-nav__link .md-ellipsis {
+  color: rgba(0, 0, 0, 0.7) !important;
+  font-weight: 700;
+}
+
+/* Dark mode: lighter gray section titles */
+body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .md-ellipsis {
+  color: rgba(255, 255, 255, 0.75) !important;
+  font-weight: 700;
+}
