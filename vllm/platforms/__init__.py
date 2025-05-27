@@ -7,7 +7,7 @@ from itertools import chain
 from typing import TYPE_CHECKING, Optional
 
 from vllm.plugins import load_plugins_by_group
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils import resolve_obj_by_qualname, supports_xccl
 
 from .interface import _Backend  # noqa: F401
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -139,10 +139,21 @@ def xpu_platform_plugin() -> Optional[str]:
     try:
         # installed IPEX if the machine has XPUs.
         import intel_extension_for_pytorch  # noqa: F401
-        import oneccl_bindings_for_pytorch  # noqa: F401
         import torch
+        import os
+        default_backend = "xccl" if supports_xccl() else "ccl"
+        XPU_CCL_BACKEND = os.getenv("XPU_CCL_BACKEND", default_backend)
+
+        if XPU_CCL_BACKEND not in ["xccl", "ccl"]:
+            raise ValueError(f"Unknown {XPU_CCL_BACKEND} backend for XPU platform")
+
+        if XPU_CCL_BACKEND == "ccl":
+            logger.debug("xccl is not available in current torch, checking ccl")
+            import oneccl_bindings_for_pytorch  # noqa: F401
+
         if hasattr(torch, 'xpu') and torch.xpu.is_available():
             is_xpu = True
+            logger.debug(f"Confirmed {XPU_CCL_BACKEND} backend is available.")
             logger.debug("Confirmed XPU platform is available.")
     except Exception as e:
         logger.debug("XPU platform is not available because: %s", str(e))
