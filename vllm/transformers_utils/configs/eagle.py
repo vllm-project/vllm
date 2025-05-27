@@ -70,7 +70,8 @@ class EAGLEConfig(PretrainedConfig):
 
         if self.model is not None:
             for k, v in self.model.to_dict().items():
-                setattr(self, k, v)
+                if k not in kwargs:
+                    setattr(self, k, v)
 
     @classmethod
     def from_pretrained(
