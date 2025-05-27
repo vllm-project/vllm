@@ -67,14 +67,24 @@ class TensorizerLoader(BaseModelLoader):
         with self.tensorizer_config.open_stream():
             pass
 
-    def load_weights(self, model: nn.Module, model_config: ModelConfig,
-                     tensorizer_config: TensorizerConfig) -> None:
+    def _patch_tensorizer_config(
+            self, model_config: ModelConfig) -> TensorizerConfig:
+        model_class = get_model_architecture(model_config)[0]
+        tensorizer_config = copy.copy(self.tensorizer_config)
+        tensorizer_config.model_class = model_class
+        tensorizer_config.hf_config = model_config.hf_config
+        tensorizer_config.dtype = model_config.dtype
+        return tensorizer_config
+
+    def load_weights(self, model: nn.Module,
+                     model_config: ModelConfig) -> None:
         """Load serialized model weights with tensorizer.
 
         Expects a vLLM-tensorized model. See the
         examples/others/tensorize_vllm_model.py example script
         for serializing vLLM models."""
         if is_vllm_tensorized(self.tensorizer_config):
+            tensorizer_config = self._patch_tensorizer_config(model_config)
             deserialize_tensorizer_model(model, tensorizer_config)
         else:
             model.load_weights(self._get_weights_iterator())
@@ -92,14 +102,10 @@ class TensorizerLoader(BaseModelLoader):
                 get_tensor_model_parallel_rank())
 
         if is_vllm_tensorized(self.tensorizer_config):
-            model_class = get_model_architecture(model_config)[0]
-            tensorizer_config = copy.copy(self.tensorizer_config)
-            tensorizer_config.model_class = model_class
-            tensorizer_config.hf_config = model_config.hf_config
-            tensorizer_config.dtype = model_config.dtype
+            tensorizer_config = self._patch_tensorizer_config(model_config)
             model = init_tensorizer_model(tensorizer_config=tensorizer_config,
                                           vllm_config=vllm_config)
-            self.load_weights(model, model_config, tensorizer_config)
+            self.load_weights(model, model_config)
             return model
         return self._load_model_serialized_cpu(vllm_config=vllm_config)
 
