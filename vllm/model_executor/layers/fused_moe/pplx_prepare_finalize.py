@@ -74,7 +74,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                        self.per_act_token,
                                                        self.block_shape)
 
-        a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
+        if a1q_scale is not None:
+            a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
         # rem_experts need to be 0 for pplx to work properly.
         rem_experts = num_experts % self.world_size
@@ -123,7 +124,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=rank_topk_ids.to(torch.uint32),
             bound_m=bound_m,
         )
-        expert_x_scale = expert_x_scale[:, :, 0:1]
+        if expert_x_scale is not None:
+            expert_x_scale = expert_x_scale[:, :, 0:1]
 
         return expert_x, expert_x_scale, expert_num_tokens
 

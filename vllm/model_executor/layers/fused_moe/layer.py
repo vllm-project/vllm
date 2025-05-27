@@ -265,11 +265,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 # dp_size actually means tp_size, bug in pplx kernels
                 dp_size=all2all_manager.tp_group.world_size,
                 hidden_dim=moe.hidden_dim,
-                hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
+                hidden_dim_bytes=moe.hidden_dim * moe.quant_dtype.itemsize,
                 # For blocked per token: set to
                 #   ceil_div(hidden_dim, block_size) * sizeof(float32)
                 # For per-token: set to sizeof(float32)
-                hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else (
+                hidden_dim_scale_bytes=(0 if moe.quant_dtype.itemsize != 1 else (
                     (moe.hidden_dim + moe.block_size - 1) // moe.block_size *
                     torch.float32.itemsize)),
                 group_name=all2all_manager.cpu_group.group_name,
@@ -285,8 +285,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 # dp_size actually means tp_size, bug in pplx kernels
                 dp_size=all2all_manager.tp_group.world_size,
                 quant_dtype=moe.quant_dtype,
-                per_act_token=quant_config.target_scheme_map["Linear"].get(
-                    "weights").strategy == QuantizationStrategy.TOKEN,
+                per_act_token=(quant_config.target_scheme_map["Linear"].get(
+                    "weights").strategy == QuantizationStrategy.TOKEN
+                    if quant_config is not None else False),
             )
 
         if prepare_finalize is not None:
@@ -821,18 +822,11 @@ class FusedMoE(torch.nn.Module):
             quant_method = UnquantizedFusedMoEMethod(moe)
         else:
             quant_method = quant_config.get_quant_method(self, prefix)
-            # TODO merge leftover, remove when fixed
-            # if quant_method.supports_pplx():
-            #     prepare_finalize = _construct_prepare_finalize(
-            #         moe, quant_config)
-            #     quant_method.moe = moe
-            # else:
-            #     # No pplx for other quantized types yet.
-            #     prepare_finalize = None
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
+        self.quant_method.moe = moe
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,

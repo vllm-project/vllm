@@ -180,7 +180,7 @@ def pplx_cutlass_moe(
         scale_elems = (hidden_dim + block_size - 1) // block_size,
     # print("SCALE ELEMS:", scale_elems)
 
-    ata = AllToAll(
+    ata = AllToAll.internode(
         max_num_tokens=max_num_tokens,
         num_experts=num_experts,
         experts_per_token=topk,

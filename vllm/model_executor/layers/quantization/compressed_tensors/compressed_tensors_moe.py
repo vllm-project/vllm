@@ -87,10 +87,6 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}")
 
-    # PPLX is not supported by default
-    def supports_pplx(self):
-        return False
-
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
@@ -565,34 +561,27 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
-    def set_prepare_finalize(
-        self,
-        dp_size: int,
-        world_size: int,
-        prepare_finalize,
-    ) -> bool:
+    def select_gemm_impl(self, prepare_finalize):
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             CutlassExpertsFp8)
         from vllm.model_executor.layers.fused_moe.modular_kernel import (
             FusedMoEModularKernel)
 
+        # print("self:", vars(self))
+
         # self.moe should have been set by the caller
         assert self.moe is not None
 
         experts = CutlassExpertsFp8(
-            (self.moe.num_experts + world_size - 1) // world_size,
+            ((self.moe.num_experts + prepare_finalize.world_size - 1) //
+             prepare_finalize.world_size),
             # self.ab_strides1, self.c_strides1, self.ab_strides2,
             # self.c_strides2,
             self.moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
 
-        self.fused_experts = FusedMoEModularKernel(
-            prepare_finalize,
-            experts,
-        )
-
-        return True
+        return experts
 
     def apply(
         self,
@@ -643,9 +632,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
         )
-
-    def supports_pplx(self):
-        return True
 
 
 class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
