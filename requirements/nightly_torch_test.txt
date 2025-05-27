@@ -39,3 +39,5 @@ matplotlib # required for qwen-vl test
 num2words # required for smolvlm test
 pqdm
 timm # required for internvl test
+
+schemathesis>=3.39.15  # Required for openai schema test.
