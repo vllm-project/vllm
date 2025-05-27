@@ -566,8 +566,7 @@ class NomicBertModel(BertWithRope):
             # The priority of sentence_bert_config.json is higher
             # than max_position_embeddings
             encoder_config = model_config.encoder_config
-            if hasattr(encoder_config, "max_seq_length"):
-                delattr(encoder_config, "max_seq_length")
+            encoder_config.pop("max_seq_length", None)
             model_config.encoder_config = encoder_config
 
             vllm_config.recalculate_max_model_len(max_model_len)
