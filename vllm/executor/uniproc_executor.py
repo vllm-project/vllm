@@ -143,16 +143,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             answer = get_pp_group().broadcast_object_async(
                 answer,
                 src=self.parallel_config.pipeline_parallel_size - 1)
-            # if pp_group.is_first_rank and answer is None:
-            #     # we need to async receive from last PP ranks
-            #     answer = self.torch_future_to_concurrent_future(pp_group.irecv_object(pp_size-1))
-            # elif pp_group.is_last_rank and answer is not None:
-            #     # we need to async send to the first PP rank
-            #     pp_group.isend_object(answer, 0)
-            #     future = Future()
-            #     future.set_result(answer)
-            #     return [future]
-        # only return answer for tp_rank=0 and pp_rank=0
         return [answer]
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """

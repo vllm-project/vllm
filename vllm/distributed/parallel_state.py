@@ -534,28 +534,6 @@ class GroupCoordinator:
                                                 group=self.device_group)
         return obj_list
 
-    def isend_object(self, obj: Any, dst: int) -> torch.Future:
-        """Send the input object list to the destination rank."""
-        """NOTE: `dst` is the local rank of the destination rank."""
-
-        assert dst < self.world_size, f"Invalid dst rank ({dst})"
-
-        assert dst != self.rank_in_group, (
-            "Invalid destination rank. Destination rank is the same "
-            "as the current rank.")
-
-        object_tensor = torch.frombuffer(
-            pickle.dumps(obj),
-            dtype=torch.uint8
-        ).to(self.device)
-        size_tensor = torch.tensor([object_tensor.numel()],
-                                    dtype=torch.long,
-                                    device=self.device)
-        work = self.device_communicator.isend(size_tensor, dst=dst)
-        assert work is not None
-        return work.get_future().then(
-            lambda x: self.device_communicator.send(object_tensor, dst=dst)
-        )
     def send_object(self, obj: Any, dst: int) -> None:
         """Send the input object list to the destination rank."""
         """NOTE: `dst` is the local rank of the destination rank."""
@@ -619,27 +597,6 @@ class GroupCoordinator:
         obj = pickle.loads(object_tensor.numpy().tobytes())
 
         return obj
-
-    def irecv_object(self, src: int) -> torch.Future:
-        """Receive the input object list from the source rank async."""
-        """NOTE: `src` is the local rank of the source rank."""
-
-        assert src < self.world_size, f"Invalid src rank ({src})"
-
-        assert src != self.rank_in_group, (
-            "Invalid source rank. Source rank is the same as the current rank."
-        )
-        def recv_object_tensor(size_tensor: torch.Tensor) -> Any:
-            # Tensor to receive serialized objects into.
-            object_tensor = self.device_communicator.recv(size_tensor.item(),
-                                                          dtype=torch.uint8,
-                                                          src=src)
-            return pickle.loads(object_tensor.cpu().numpy().tobytes())
-        work = self.device_communicator.irecv(1, dtype=torch.long, src=src)
-        assert work is not None
-        return work.get_future().then(lambda x: recv_object_tensor(x.value()[0]))
-        # Receive object size
-
 
     def broadcast_tensor_dict(
         self,
@@ -929,7 +886,7 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: Optional[str] = None,
 ) -> GroupCoordinator:
-
+    # assert use_message_queue_broadcaster is False
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
