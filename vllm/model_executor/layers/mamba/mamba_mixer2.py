@@ -2,7 +2,9 @@
 
 from typing import Optional, Union
 
+import numpy as np
 import torch
+import triton
 from torch import nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
@@ -16,7 +18,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.mamba.mamba2_metadata import Mamba2Metadata
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn, causal_conv1d_update)
+    causal_conv1d_fn, causal_conv1d_fn_triton, causal_conv1d_update,
+    causal_conv1d_update_triton)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
@@ -157,9 +160,9 @@ def mamba_v2_sharded_weight_loader(
     tp_size: int,
     tp_rank: int,
 ) -> LoaderFunction:
-    """Create a weight loader for mamba v2. This ensures that the projections 
-    are correctly sharded so that they can be split into x, B, C. It also 
-    ensures that all the groups corresponding to a head shard is placed 
+    """Create a weight loader for mamba v2. This ensures that the projections
+    are correctly sharded so that they can be split into x, B, C. It also
+    ensures the the all the groups corresponding to a head shard is placed
     together with it.
     """
 
@@ -409,6 +412,21 @@ class MambaMixer2(CustomOp):
                                        n_groups,
                                        self.use_rms_norm,
                                        eps=rms_norm_eps)
+        self.conv_in_triton = self.is_conv_in_Triton()
+
+    def forward_cuda(self, *args, **kwargs):
+        if self.conv_in_triton:
+            return self.forward_triton(*args, **kwargs)
+        else:
+            return self.forward_cuda_split(*args, **kwargs)
+
+    def is_conv_in_Triton(self):
+        import os
+        path = os.environ.get("VLLM_USE_TRITON_CONV1D", None)
+        if path is not None:
+            print("mamba_mixer2 - VLLM_USE_TRITON_CONV1D")
+            return True
+        return False
 
     def forward_native(
         self,
@@ -418,7 +436,315 @@ class MambaMixer2(CustomOp):
     ):
         pass
 
-    def forward_cuda(
+    def forward_triton(
+        self,
+        hidden_states: torch.Tensor,
+        mamba_cache_params: MambaCacheParams,
+        mamba2_metadata: Mamba2Metadata,
+    ):
+        # ruff: noqa: E501
+        # mamba2_metadata contains metadata necessary for the mamba2 triton
+        # kernels to operate in continuous batching and in chunked prefill
+        # modes; they are computed at top-level model forward since they
+        # stay the same and reused for all mamba layers in the same iteration
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
+
+        num_prefills = attn_metadata.num_prefills  # #requests
+        num_decodes = attn_metadata.num_decode_tokens  # #tokens==#requests
+        num_prefill_tokens = attn_metadata.num_prefill_tokens  # #tokens
+        has_prefill = num_prefills > 0
+        has_decode = num_decodes > 0
+
+        seq_len, _ = hidden_states.shape
+        groups_time_state_size = self.n_groups * self.ssm_state_size
+
+        # 1. Gated MLP's linear projection
+        projected_states, _ = self.in_proj(hidden_states)
+        gate, hidden_states_B_C, dt = torch.split(
+            projected_states,
+            [
+                self.intermediate_size // self.tp_size,
+                self.conv_dim // self.tp_size,
+                self.num_heads // self.tp_size,
+            ],
+            dim=-1,
+        )
+
+        # 2. Convolution sequence transformation
+        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
+                                               self.conv1d.weight.size(2))
+
+        # causal_conv1d_fn deals with both prefill and decode if input
+        # has prefill requests.
+        if has_prefill:
+            # |---------- N-1 iteration --------|
+            # |---------------- N iteration ---------------------|
+            # |- tokenA -|......................|-- newTokens ---|
+            # |---------- context_len ----------|
+            # |-------------------- seq_len ---------------------|
+            #                                   |-- query_len ---|
+
+            # - "cache_indices" updates the conv_state cache in positions
+            #   pointed to by "mamba_cache_params.state_indices_tensor"
+            # print("attn_metadata.query_start_loc=", attn_metadata.query_start_loc)
+            if True:  # self.conv_in_triton:
+                x = hidden_states_B_C.transpose(
+                    0, 1)  # this is the form that causal-conv see
+                if mamba2_metadata.width is None:
+                    # load the conv1d.weight information (which is expected to be the same across layers)
+                    mamba2_metadata.stride_w_dim, mamba2_metadata.stride_w_width = conv_weights.stride(
+                    )
+                    _, width = conv_weights.shape
+                    final_states = mamba_cache_params.conv_state
+                    mamba2_metadata.num_cache_lines = final_states.size(0)
+                    mamba2_metadata.num_cache_lines, mamba2_metadata.dim, state_len = final_states.size(
+                    )
+                    # mamba2_metadata.num_cache_lines, mamba2_metadata.dim, mamba2_metadata.state_len = final_states.size()
+                    # state_len = width - 1
+                    mamba2_metadata.width = width
+                    mamba2_metadata.np2_statelen = triton.next_power_of_2(
+                        state_len)
+                    mamba2_metadata.stride_istate_seq, mamba2_metadata.stride_istate_dim, mamba2_metadata.stride_istate_token = final_states.stride(
+                    )
+
+                if mamba2_metadata.cu_seqlen is None:
+                    dim, cu_seqlen = x.shape
+                    out = torch.zeros_like(x)
+                    # mamba2_metadata.dim = dim
+                    mamba2_metadata.cu_seqlen = cu_seqlen
+                    mamba2_metadata.stride_x_seq = 0
+                    mamba2_metadata.stride_x_dim, mamba2_metadata.stride_x_token = x.stride(
+                    )
+                    mamba2_metadata.out = out
+                    mamba2_metadata.stride_o_dim, mamba2_metadata.stride_o_token = out.stride(
+                    )
+                    query_start_loc = attn_metadata.query_start_loc
+                    seqlens = np.diff(query_start_loc.to('cpu'))
+                    nums_dict = {}  # type: ignore
+                    for BLOCK_M in [8]:  # cover all BLOCK_M values
+                        nums = -(-seqlens // BLOCK_M)
+                        nums_dict[BLOCK_M] = {}
+                        nums_dict[BLOCK_M]['nums'] = nums
+                        nums_dict[BLOCK_M]['tot'] = nums.sum().item()
+                        mlist = torch.from_numpy(
+                            np.repeat(np.arange(len(nums)), nums))
+                        nums_dict[BLOCK_M]['mlist'] = mlist
+                        mlist_len = len(nums_dict[BLOCK_M]['mlist'])
+                        nums_dict[BLOCK_M]['mlist_len'] = mlist_len
+                        # type: ignore
+                        mamba2_metadata.MAX_NUM_PROGRAMS = max(
+                            mamba2_metadata.MAX_NUM_PROGRAMS, mlist_len)
+                        offsetlist = []  # type: ignore
+                        for idx, num in enumerate(nums):
+                            offsetlist.extend(range(num))
+                        offsetlist = torch.tensor(offsetlist,
+                                                  dtype=torch.int32)
+                        nums_dict[BLOCK_M]['offsetlist'] = offsetlist
+
+                        if mamba2_metadata.batch_ptr is None:
+                            # Update default value after class definition
+                            PAD_SLOT_ID = -1
+                            mamba2_metadata.MAX_NUM_PROGRAMS *= 2
+                            mamba2_metadata.batch_ptr = torch.full(
+                                (mamba2_metadata.MAX_NUM_PROGRAMS, ),
+                                PAD_SLOT_ID,
+                                dtype=torch.int32,
+                                device='cuda')
+                            mamba2_metadata.token_chunk_offset_ptr = torch.full(
+                                (mamba2_metadata.MAX_NUM_PROGRAMS, ),
+                                PAD_SLOT_ID,
+                                dtype=torch.int32,
+                                device='cuda')
+                        else:
+                            if mamba2_metadata.batch_ptr.nelement(
+                            ) < mamba2_metadata.MAX_NUM_PROGRAMS:
+                                mamba2_metadata.batch_ptr.resize_(
+                                    mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
+                                        PAD_SLOT_ID)  # type: ignore
+                                mamba2_metadata.token_chunk_offset_ptr.resize_(  # type: ignore
+                                    mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
+                                        PAD_SLOT_ID)  # type: ignore
+
+                        mamba2_metadata.batch_ptr[0:mlist_len].copy_(mlist)
+                        mamba2_metadata.token_chunk_offset_ptr[  # type: ignore
+                            0:mlist_len].copy_(offsetlist)
+                        nums_dict[BLOCK_M][
+                            'batch_ptr'] = mamba2_metadata.batch_ptr
+                        nums_dict[BLOCK_M][
+                            'token_chunk_offset_ptr'] = mamba2_metadata.token_chunk_offset_ptr  # type: ignore
+                    mamba2_metadata.seqlens = seqlens
+                    mamba2_metadata.padded_batch = query_start_loc.size(0) - 1
+                    mamba2_metadata.nums_dict = nums_dict
+                hidden_states_B_C = causal_conv1d_fn_triton(
+                    x,
+                    conv_weights,
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                    conv_states=mamba_cache_params.conv_state,
+                    has_initial_states=mamba2_metadata.has_initial_states,
+                    cache_indices=mamba_cache_params.state_indices_tensor,
+                    metadata=mamba2_metadata,
+                    query_start_loc=attn_metadata.query_start_loc).transpose(
+                        0, 1)[:seq_len]
+
+        else:
+            if True:  #self.conv_in_triton:
+                x = hidden_states_B_C
+                unsqueeze = x.dim() == 2
+                if unsqueeze:
+                    # make it (batch, dim, seqlen) with seqlen == 1
+                    x = x.unsqueeze(-1)
+                if mamba2_metadata.cu_seqlen is None:
+                    # dim, cu_seqlen = x.shape
+                    # mamba2_metadata.dim = dim
+                    #mamba2_metadata.cu_seqlen = cu_seqlen
+                    mamba2_metadata.cu_seqlen = 1
+                    mamba2_metadata.stride_x_seq, mamba2_metadata.stride_x_dim, mamba2_metadata.stride_x_token = x.stride(
+                    )
+                hidden_states_B_C = causal_conv1d_update_triton(
+                    x,
+                    mamba_cache_params.conv_state,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state_indices=mamba_cache_params.state_indices_tensor,
+                    metadata=mamba2_metadata,
+                )
+                if unsqueeze:
+                    hidden_states_B_C = hidden_states_B_C.squeeze(-1)
+
+        # - get hidden_states, B and C after depthwise convolution.
+        hidden_states, B, C = torch.split(
+            hidden_states_B_C,
+            [
+                self.intermediate_size // self.tp_size,
+                groups_time_state_size // self.tp_size,
+                groups_time_state_size // self.tp_size,
+            ],
+            dim=-1,
+        )
+
+        # 3. State Space Model sequence transformation
+
+        # Separate prefill and decode by splitting varlen input
+        # Split along token dimension
+        hidden_states_p, hidden_states_d = torch.split(
+            hidden_states,
+            [num_prefill_tokens, num_decodes],
+            dim=0,
+        )
+        B_p, B_d = torch.split(
+            B,
+            [num_prefill_tokens, num_decodes],
+            dim=0,
+        )
+        C_p, C_d = torch.split(
+            C,
+            [num_prefill_tokens, num_decodes],
+            dim=0,
+        )
+        dt_p, dt_d = torch.split(
+            dt,
+            [num_prefill_tokens, num_decodes],
+            dim=0,
+        )
+        # Split along batch dimension
+        state_indices_tensor_p, state_indices_tensor_d = torch.split(
+            mamba_cache_params.state_indices_tensor,
+            [num_prefills, num_decodes],
+            dim=0,
+        )
+
+        ssd_output_list = []
+
+        # Process prefill requests
+        if has_prefill:
+            initial_states = None
+            if (mamba2_metadata.has_initial_states is not None
+                    and mamba2_metadata.prep_initial_states):
+                # making a copy of the states
+                initial_states = torch.where(
+                    mamba2_metadata.has_initial_states[:num_prefills, None,
+                                                       None, None],
+                    mamba_cache_params.ssm_state[state_indices_tensor_p], 0)
+
+            scan_output, varlen_state = mamba_chunk_scan_combined(
+                hidden_states_p.view(1, num_prefill_tokens,
+                                     self.num_heads // self.tp_size,
+                                     self.head_dim),
+                dt_p.unsqueeze(0),
+                self.A,
+                B_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
+                         -1),
+                C_p.view(1, num_prefill_tokens, self.n_groups // self.tp_size,
+                         -1),
+                chunk_size=mamba2_metadata.chunk_size,
+                D=self.D,
+                z=None,
+                dt_bias=self.dt_bias,
+                seq_idx=mamba2_metadata.seq_idx,
+                chunk_indices=mamba2_metadata.chunk_indices,
+                chunk_offsets=mamba2_metadata.chunk_offsets,
+                cu_seqlens=attn_metadata.query_start_loc[:num_prefills + 1],
+                initial_states=initial_states,
+                return_varlen_states=True,
+                return_final_states=False,
+                dt_softplus=True,
+                dt_limit=(0.0, float("inf")),
+            )
+
+            # update ssm states
+            # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
+            mamba_cache_params.ssm_state[state_indices_tensor_p] = varlen_state
+
+            # - reshape
+            ssd_output_list.append(scan_output.view(num_prefill_tokens, -1))
+
+        # Process decode requests
+        if has_decode:
+            n_groups = self.n_groups // self.tp_size
+            A_d = self.A[:, None, ...][:, :, None].expand(
+                -1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
+            dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
+            dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
+            D_d = self.D[:, None, ...].expand(-1, self.head_dim)
+            B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
+            C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
+            hidden_states_d = hidden_states_d.view(
+                -1, self.num_heads // self.tp_size, self.head_dim)
+
+            # - the hidden is reshaped into (bs, num_heads, head_dim)
+            # - mamba_cache_params.ssm_state's slots will be selected
+            #   using state_indices_tensor_d
+
+            hidden_states_d = selective_state_update(
+                mamba_cache_params.ssm_state,
+                hidden_states_d,
+                dt_d,
+                A_d,
+                B_d,
+                C_d,
+                D_d,
+                z=None,
+                dt_bias=dt_bias,
+                dt_softplus=True,
+                state_batch_indices=state_indices_tensor_d,
+            )
+            ssd_output_list.append(
+                hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
+                                     self.head_dim))
+
+        # Merge prefill and decode outputs before passing to gated MLP
+        hidden_states = torch.vstack(ssd_output_list)
+
+        # 4. gated MLP
+        hidden_states = self.norm(hidden_states, gate)
+
+        # 5. Final linear projection
+        out, _ = self.out_proj(hidden_states)
+        return out
+
+    def forward_cuda_split(
         self,
         hidden_states: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
