@@ -8,13 +8,11 @@ The rearrangement algorithm is adapted from
 [DeepSeek EPLB](https://github.com/deepseek-ai/eplb).
 """
 
-from typing import Tuple
-
 import torch
 
 
 def balanced_packing(weight: torch.Tensor,
-                     num_packs: int) -> Tuple[torch.Tensor, torch.Tensor]:
+                     num_packs: int) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Pack n weighted objects to m packs, such that each bin contains exactly
     n/m objects and the weights of all packs are as balanced as possible.
@@ -63,7 +61,7 @@ def balanced_packing(weight: torch.Tensor,
 
 def replicate_experts(
         weight: torch.Tensor,
-        num_phy: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_phy: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Replicate `num_log` experts to `num_phy` replicas, such that the maximum
     load of all replicas is minimized.
@@ -180,7 +178,7 @@ def rebalance_experts(
     num_groups: int,
     num_nodes: int,
     num_gpus: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Entry point for expert-parallelism load balancer.
 
@@ -200,7 +198,7 @@ def rebalance_experts(
         logical_to_physical_map: [layers, num_logical_experts, X], the replica
             indices for each expert
         expert_count: [layers, num_logical_experts], number of physical
-            replicasfor each logical expert
+            replicas for each logical expert
     """
     num_layers, num_logical_experts = weight.shape
     weight = weight.float().cpu()
@@ -212,7 +210,8 @@ def rebalance_experts(
         # use global load-balance policy
         phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
             weight, num_replicas, 1, 1, num_gpus)
-    maxlogcnt = logcnt.max().item()
+    num_redundant_experts = num_replicas - num_logical_experts
+    maxlogcnt = num_redundant_experts + 1
     log2phy: torch.Tensor = torch.full(
         (num_layers, num_logical_experts, maxlogcnt),
         -1,
