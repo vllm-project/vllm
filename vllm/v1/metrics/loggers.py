@@ -179,9 +179,13 @@ class PrometheusStatLogger(StatLoggerBase):
         #
         # GPU cache
         #
-        self.gauge_kv_cache_usage = self._gauge_cls(
-            name="vllm:kv_cache_usage_perc",
-            documentation="GPU KV-cache usage. 1 means 100 percent usage.",
+        # Deprecated in 0.9 - Renamed as vllm:kv_cache_usage_perc
+        # TODO: in 0.10, only enable if show_hidden_metrics=True
+        self.gauge_gpu_cache_usage = self._gauge_cls(
+            name="vllm:gpu_cache_usage_perc",
+            documentation=(
+                "GPU KV-cache usage. 1 means 100 percent usage."
+                "DEPRECATED: Use vllm:kv_cache_usage_perc instead."),
             labelnames=labelnames).labels(*labelvalues)
 
         # Deprecated in 0.9 - Renamed as vllm:prefix_cache_queries
@@ -200,6 +204,11 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation=(
                 "GPU prefix cache hits, in terms of number of cached tokens."
                 "DEPRECATED: Use vllm:prefix_cache_hits instead."),
+            labelnames=labelnames).labels(*labelvalues)
+
+        self.gauge_kv_cache_usage = self._gauge_cls(
+            name="vllm:kv_cache_usage_perc",
+            documentation="KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_prefix_cache_queries = self._counter_cls(
@@ -398,6 +407,8 @@ class PrometheusStatLogger(StatLoggerBase):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
+
+        self.gauge_gpu_cache_usage.set(scheduler_stats.kv_cache_usage)
 
         self.gauge_kv_cache_usage.set(scheduler_stats.kv_cache_usage)
 
