@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import bisect
 import gc
+import os
 import time
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -152,7 +153,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
         self.vocab_size = model_config.get_vocab_size()
+
         if self.lora_config is not None:
+            # If LoRA is enabled, we need to disable the recompilation check
+            # because there is currently a small recompilation when we set a
+            # LoRA adapter (_tpu_set_lora / _tpu_reset_lora).
+            # TODO: Remove this recompilation
+            os.environ["VLLM_XLA_CHECK_RECOMPILATION"] = "0"
+            self.check_recompilation = False
             self.vocab_size += self.lora_config.lora_extra_vocab_size
 
         # Multi-modal data support
@@ -1534,21 +1542,21 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
 
 def replace_set_lora(model):
 
-    def _tpu_set_lora(self,
-                      idx: int,
-                      lora_a: torch.Tensor,
-                      lora_b: torch.Tensor,
-                      embeddings_tensor: Optional[torch.Tensor],
-                      bias: Optional[torch.Tensor] = None):
-        # index = torch.tensor([idx], dtype=torch.int32, device="xla")
-        index = idx
+    def _tpu_set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor] = None,
+    ):
+        # TODO: The integer index leads to a recompilation, but converting it
+        # to a tensor doesn't seem to work anymore. This might be fixed with a
+        # later release of torch_xla.
         self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
         xm.mark_step()
 
-    def _tpu_reset_lora(self, idx: Union[int, torch.Tensor]):
-        # index = idx if not isinstance(idx, int) else torch.tensor(
-        #     [idx], dtype=torch.int32, device="xla")
-        index = idx
+    def _tpu_reset_lora(self, index: int):
         self._original_reset_lora(index)
         xm.mark_step()
 
