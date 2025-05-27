@@ -345,8 +345,8 @@ class NixlConnectorWorker:
 
         # NOTE(weaton): Hack to get rank uniqueness across TP + DP ranks.
         # Used for NIXL side channel communication.
-        self.unique_rank = (self.rank *
-                            self.world_size) + get_dp_group().rank_in_group
+        self.unique_rank = (get_dp_group().rank_in_group *
+                            self.world_size) + self.rank
         logger.debug(
             "NIXL worker %s TP rank %s, DP local rank %s, unique rank %s",
             self.engine_id, self.rank,
