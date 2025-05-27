@@ -23,7 +23,11 @@ reproducible results:
 
 ## Setting the global seed
 
-The `seed` parameter in vLLM is used to control the random states for various random number generators. This parameter can affect the behavior of random operations in user code, especially when working with models in vLLM.
+The `seed` parameter in vLLM is used to control the random states for various random number generators.
+
+If a specific seed value is provided, the random states for `random`, `np.random`, and `torch.manual_seed` will be set accordingly.
+
+However, in some cases, setting the seed will also [change the random state in user code](#locality-of-random-state).
 
 ### Default Behavior
 
@@ -38,13 +42,11 @@ In V1, the `seed` parameter defaults to `0` which sets the random state for each
     
     For more information, see: <gh-pr:17929>
 
-### Specifying a Seed
-
-If a specific seed value is provided, the random states for `random`, `np.random`, and `torch.manual_seed` will be set accordingly. This can be useful for reproducibility, as it ensures that the random operations produce the same results across multiple runs.
-
 ### Locality of random state
 
-By default, the random state in code outside of vLLM remains unaffected by vLLM.
+The random state in user code is updated by vLLM under the following conditions:
 
-- In V0: The seed is not specified by default.
-- In V1: The workers are run in separate processes, unless `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
+- For V0: The seed is specified.
+- For V1: The workers are run in the same process as the code that constructs [LLM][vllm.LLM] class, i.e.: `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
+
+By default, these conditions are not active so you can use vLLM without having to worry about hidden changes to the random state of your own code.
