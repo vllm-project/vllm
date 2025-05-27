@@ -73,7 +73,7 @@ WEIGHT_SHAPES = {
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["batch_size"],
-        x_vals=[1, 16, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
+        x_vals=[1, 16, 64, 128],
         x_log=False,
         line_arg="provider",
         line_vals=[
@@ -98,7 +98,7 @@ WEIGHT_SHAPES = {
             "fp8-channel-w-token-a-noquant",
             # "fp8-channel-w-tensor-a-noquant",
         ],
-        ylabel="TB/s (larger is better)",
+        ylabel="GB/s (larger is better)",
         plot_name="BF16 vs FP8 GEMMs",
         args={},
     )
@@ -229,9 +229,9 @@ def benchmark(batch_size, provider, N, K):
             lambda: run_quant(), quantiles=[0.5, 0.2, 0.8]
         )
 
-    # Calculate TB/s
-    tbps = lambda ms: (2 * M * N * K + M * N) * a.element_size() * 1e-12 / (ms * 1e-3)
-    return tbps(ms), tbps(max_ms), tbps(min_ms)
+    # Calculate GB/s
+    gbps = lambda ms: (2 * M * N * K + M * N) * a.element_size() * 1e-12 / (ms * 1e-3)
+    return gbps(ms), gbps(max_ms), gbps(min_ms)
 
 
 def prepare_shapes(args):
@@ -266,9 +266,13 @@ if __name__ == "__main__":
 
     KN_model_names = prepare_shapes(args)
     for K, N, model_name in KN_model_names:
-        print(f"{model_name}, N={N} K={K}, BF16 vs FP8 GEMMs TB/s:")
+        print(f"{model_name}, N={N} K={K}, BF16 vs FP8 GEMMs GB/s:")
         benchmark.run(
-            print_data=True, show_plots=True, save_path="bench_fp8_res", N=N, K=K
+            print_data=True,
+            show_plots=True,
+            save_path=f"bench_fp8_res_n{N}_k{K}",
+            N=N,
+            K=K,
         )
 
     print("Benchmark finished!")
