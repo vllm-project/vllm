@@ -407,6 +407,26 @@ class CPUConnectorMetadata(KVConnectorMetadata):
         """
         self.decode_meta.append(decode_meta)
 
+def validate_kv_transfer_config(
+        kv_transfer_config: Optional["KVTransferConfig"]) -> None:
+    """Validate the KV transfer configuration.
+    It expects the host and port configuration in the kv_connector_extra_config
+
+    Args:
+        kv_transfer_config (Optional[KVTransferConfig]): The KV transfer
+            configuration to validate.
+
+    Raises:
+        AssertionError: If the configuration is invalid.
+    """
+    assert kv_transfer_config is not None, \
+        "KV transfer config is not set in the vLLM config"
+
+    extra_config = kv_transfer_config.kv_connector_extra_config
+    assert "host" in extra_config, \
+            "CPUConnector: must have 'host' in kv_connector_extra_config"
+    assert "port" in extra_config, \
+            "CPUConnector: must have 'port' in kv_connector_extra_config"
 
 class CPUConnector(KVConnectorBase_V1):
     """CPUKVConnector is an implementation of KVConnectorBase_V1 that
@@ -415,6 +435,14 @@ class CPUConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole) -> None:
         super().__init__(vllm_config, role)
+
+        validate_kv_transfer_config(vllm_config.kv_transfer_config)
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self._host = extra_config["host"]
+        self._port = extra_config["port"]
+        if isinstance(self._port, str):
+            # Convert the port to an integer if it's a string
+            self._port = int(self._port)
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
@@ -771,11 +799,10 @@ class CPUConnector(KVConnectorBase_V1):
             )
 
             # Create a destination spec
-            # TODO: remove the hard-code here
             dest_spec = DestinationSpec(
                 rank=get_tensor_model_parallel_rank(),
-                host="localhost",
-                base_port=54321,  # Changed from string to int to match the class definition
+                host=self._host,
+                base_port=self._port,  
             )
 
             # Create the send task
