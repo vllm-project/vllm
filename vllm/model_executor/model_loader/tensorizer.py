@@ -399,8 +399,8 @@ def init_tensorizer_model(tensorizer_config: TensorizerConfig,
         return tensorizer_config.model_class(vllm_config=vllm_config)
 
 
-def deserialize_tensorizer_model(
-        model: nn.Module, tensorizer_config: TensorizerConfig) -> nn.Module:
+def deserialize_tensorizer_model(model: nn.Module,
+                                 tensorizer_config: TensorizerConfig) -> None:
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
     before_mem = get_mem_usage()
     start = time.perf_counter()

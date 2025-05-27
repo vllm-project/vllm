@@ -12,11 +12,9 @@ from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm import envs
-from vllm.config import LoadConfig, LoadFormat, ModelConfig, VllmConfig
+from vllm.config import LoadConfig, LoadFormat, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import (
-    initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     fastsafetensors_weights_iterator, filter_duplicate_safetensors_files,
@@ -281,16 +279,3 @@ class DefaultModelLoader(BaseModelLoader):
             if weights_not_loaded:
                 raise ValueError("Following weights were not initialized from "
                                  f"checkpoint: {weights_not_loaded}")
-
-    def load_model(self, vllm_config: VllmConfig,
-                   model_config: ModelConfig) -> nn.Module:
-        device_config = vllm_config.device_config
-        target_device = torch.device(device_config.device)
-        with set_default_torch_dtype(model_config.dtype):
-            with target_device:
-                model = initialize_model(vllm_config=vllm_config,
-                                         model_config=model_config)
-            self.load_weights(model, model_config)
-            process_weights_after_loading(model, model_config, target_device)
-
-        return model.eval()
