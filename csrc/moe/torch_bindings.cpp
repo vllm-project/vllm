@@ -72,21 +72,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "expert_first_token_offset, Tensor! src_row_id2dst_row_id_map, Tensor! "
       "m_indices)->()");
 
-#if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
-    m.def(
-        "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"
-        "Tensor topk_ids,Tensor src_row_id2dst_row_id_map, Tensor "
-        "expert_first_token_offset, int n_expert, int n_local_expert,int "
-        "topk, Tensor! hidden_states)->()");
-#else
-    m.def(
-        "moe_unpermute(Tensor input, Tensor topk_weights, Tensor! topk_ids,"
-        "Tensor token_expert_indicies, Tensor? expert_map, int n_expert,"
-        "int n_local_expert,"
-        "int topk, int? align_block_size,Tensor! permuted_input, Tensor! "
-        "expert_first_token_offset, Tensor! src_row_id2dst_row_id_map, Tensor! "
-        "m_indices)->()");
-#endif
+  #if defined(CUDA_VERSION) && (CUDA_VERSION >= 12000)
+  m.def(
+      "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"
+      "Tensor topk_ids,Tensor src_row_id2dst_row_id_map, Tensor "
+      "expert_first_token_offset, int n_expert, int n_local_expert,int "
+      "topk, Tensor! hidden_states)->()");
+
+  #else
+  m.def(
+      "moe_unpermute(Tensor input, Tensor topk_weights, Tensor! topk_ids,"
+      "Tensor token_expert_indicies, Tensor? expert_map, int n_expert,"
+      "int n_local_expert,"
+      "int topk, int? align_block_size,Tensor! permuted_input, Tensor! "
+      "expert_first_token_offset, Tensor! src_row_id2dst_row_id_map, Tensor! "
+      "m_indices)->()");
+  #endif
 
   m.def("moe_permute_unpermute_supported() -> bool");
   m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
