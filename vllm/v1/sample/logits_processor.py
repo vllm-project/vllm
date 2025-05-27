@@ -44,8 +44,9 @@ class LogitsProcessor(ABC):
         """
         raise NotImplementedError
 
+    @classmethod
     @abstractmethod
-    def requires_nongreedy(self) -> bool:
+    def requires_nongreedy(cls) -> bool:
         """True if logits processor is incompatible with
         greedy sampling.
         TODO(andy): won't be utilized until logits
@@ -75,7 +76,8 @@ class MinPLogitsProcessor(LogitsProcessor):
         # Current slice of the device tensor
         self.min_p: torch.Tensor = self.min_p_device[:0]
 
-    def requires_nongreedy(self) -> bool:
+    @classmethod
+    def requires_nongreedy(cls) -> bool:
         return True
 
     def get_min_p_by_index(self, index: int) -> float:
@@ -145,7 +147,8 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         self.logits_slice: tuple[torch.Tensor, torch.Tensor] = (torch.tensor(
             ()), torch.tensor(()))
 
-    def requires_nongreedy(self) -> bool:
+    @classmethod
+    def requires_nongreedy(cls) -> bool:
         return False
 
     def update_states(self, batch_update: Optional[BatchUpdate] = None):
@@ -178,11 +181,11 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
                 tok_ids.extend(lb.keys())
                 biases.extend(lb.values())
 
-            self.bias_tensor = self._tensor(biases, torch.float32)
-            self.logits_slice = (self._tensor(reqs, torch.int32),
-                                 self._tensor(tok_ids, torch.int32))
+            self.bias_tensor = self._device_tensor(biases, torch.float32)
+            self.logits_slice = (self._device_tensor(reqs, torch.int32),
+                                 self._device_tensor(tok_ids, torch.int32))
 
-    def _tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
+    def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
         return (torch.tensor(data,
                              device="cpu",
                              dtype=dtype,
@@ -206,7 +209,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         self.logits_slice: tuple[torch.Tensor, torch.Tensor] = (torch.tensor(
             ()), torch.tensor(()))
 
-    def requires_nongreedy(self) -> bool:
+    @classmethod
+    def requires_nongreedy(cls) -> bool:
         return False
 
     def update_states(self, batch_update: Optional[BatchUpdate] = None):
@@ -249,10 +253,10 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                     reqs.extend([req] * len(stop_tok_ids))
                     tok_ids.extend(stop_tok_ids)
 
-                self.logits_slice = (self._tensor(reqs, torch.int32),
-                                     self._tensor(tok_ids, torch.int32))
+                self.logits_slice = (self._device_tensor(reqs, torch.int32),
+                                     self._device_tensor(tok_ids, torch.int32))
 
-    def _tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
+    def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
         return (torch.tensor(data,
                              device="cpu",
                              dtype=dtype,
