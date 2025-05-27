@@ -39,6 +39,7 @@ class UBatchContext:
     def __enter__(self):
         global _CURRENT_CONTEXT
         _CURRENT_CONTEXT[threading.get_ident()] = self
+        self._restore_context()
         # Assume we start on the compute stream
         assert current_stream() == self.compute_stream, \
             "Expected to start on the compute stream, but found %s" % current_stream()
@@ -52,9 +53,6 @@ class UBatchContext:
         return False
 
     def _restore_context(self):
-        # When we resume i.e. switch back to this micro-batch, we make sure
-        # we have the correct stream and forward context
-        torch.cuda.set_stream(self.stream)
         forward_context._forward_context = self.forward_context
 
     def _signal_comm_done(self):
@@ -130,20 +128,21 @@ def yield_and_switch_from_comm_to_compute(x: torch.Tensor, schedule: str="defaul
     pass
 
 def dump_ubatching_state():
-    """
-    Dump the current UBatchContext state for debugging.
-    """
+    pass
+    # """
+    # Dump the current UBatchContext state for debugging.
+    # """
     
-    dp_rank = os.getenv("VLLM_DP_RANK", None)
+    # dp_rank = os.getenv("VLLM_DP_RANK", None)
     
-    for ctx in _CURRENT_CONTEXT.values():
-        print(f"UBatchContext: {ctx.id} (dp_rank {dp_rank})\n"
-              f" Stream: {ctx.stream}, ({ctx.stream.query()})\n"
-              f" Original Stream: {ctx.original_stream}, ({ctx.original_stream.query()})\n"
-              f" CPU Wait Event: {ctx.cpu_wait_event}\n"
-              f" GPU Wait Event: {ctx.gpu_wait_event}  ({ctx.gpu_wait_event.query()})\n"
-              f" CPU Signal Event: {ctx.cpu_signal_event}\n"
-              f" GPU Signal Event: {ctx.gpu_signal_event} ({ctx.gpu_signal_event.query()})\n")
+    # for ctx in _CURRENT_CONTEXT.values():
+    #     print(f"UBatchContext: {ctx.id} (dp_rank {dp_rank})\n"
+    #           f" Stream: {ctx.stream}, ({ctx.stream.query()})\n"
+    #           f" Original Stream: {ctx.original_stream}, ({ctx.original_stream.query()})\n"
+    #           f" CPU Wait Event: {ctx.cpu_wait_event}\n"
+    #           f" GPU Wait Event: {ctx.gpu_wait_event}  ({ctx.gpu_wait_event.query()})\n"
+    #           f" CPU Signal Event: {ctx.cpu_signal_event}\n"
+    #           f" GPU Signal Event: {ctx.gpu_signal_event} ({ctx.gpu_signal_event.query()})\n")
 
 """
 """
@@ -181,4 +180,4 @@ def make_ubatch_contexts(
                 )
         ctxs.append(ctx)
 
-    return ctxs, 
+    return ctxs

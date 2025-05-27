@@ -1318,9 +1318,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return model_output
         
         @torch.inference_mode()
-        def _ubatch_thread(ubatch_ctx, root_stream, token_slice, attn_metadata, results, save_results, use_dummy_input, setup_done_evt):
-            ubatch_ctx.stream.wait_stream(root_stream)
-            
+        def _ubatch_thread(ubatch_ctx, token_slice, results, save_results, use_dummy_input):            
             model_output = _run(token_slice, ubatch_ctx, use_dummy_input)
 
             if save_results:
@@ -1330,24 +1328,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             results = []
             assert len(ubatch_slices) == 2, "Only two ubatches has been tested"
             root_stream = current_stream()
-            
-            if not hasattr(self, "ubatch_streams"):
-                # Create the ubatch streams
-                self.ubatch_streams = [torch.cuda.Stream(self.device)  for _ in range(len(ubatch_slices))]
-        
-            
-            # We have to be careful creating the forward contexts here otherwise we can end
-            #  up with the dummy contexts have num_tokens set to 0 
-            # ubatch_fwd_ctxs = [create_forward_context(
-            #         attn_metadata[i] if attn_metadata is not None else None,
-            #         self.vllm_config, num_tokens=(tokens_slice.stop - tokens_slice.start)
-            #     ) for i, (_, tokens_slice) in enumerate(ubatch_slices)]
-            ubatch_ctxs, start_hook = make_ubatch_contexts(
+
+            ubatch_ctxs = make_ubatch_contexts(
                 len(ubatch_slices),
                 compute_stream=root_stream,
                 device=self.device)
-            setup_done = threading.Event()
-            ubatch_threads = []
             
             # Ubatches will manually manage the forward context, so we override
             # it to None here so we can have it restored correctly later
@@ -1366,19 +1351,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     
                     thread = threading.Thread(target=_ubatch_thread, args=(
                         ubatch_ctxs[i],
-                        root_stream,
                         tokens_slice,
-                        attn_metadata[i] if attn_metadata is not None else None,
                         results,
                         not is_dummy_ubatch or is_dummy_run,
                         is_dummy_ubatch or is_dummy_run,
-                        setup_done,
                     ))
                     ubatch_threads.append(thread)
                     thread.start()
-                    
-                # Single the first ubatch to start
-                start_hook(root_stream)
                     
                 for thread in ubatch_threads:
                     thread.join()
