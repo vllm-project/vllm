@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Iterable
+from copy import deepcopy
 from typing import Optional
 
 import torch
@@ -564,7 +565,9 @@ class NomicBertModel(BertWithRope):
 
             # The priority of sentence_bert_config.json is higher
             # than max_position_embeddings
-            model_config.encoder_config.pop("max_seq_length", None)
+            encoder_config = deepcopy(model_config.encoder_config)
+            encoder_config.pop("max_seq_length", None)
+            model_config.encoder_config = encoder_config
 
             vllm_config.recalculate_max_model_len(max_model_len)
         return config
