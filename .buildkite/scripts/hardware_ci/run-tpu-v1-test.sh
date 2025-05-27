@@ -53,7 +53,7 @@ run_test() {
     local log_file="$RESULTS_DIR/test_${test_num}.log"
     local actual_exit_code
 
-    echo "TEST_$test_num: Running $test_name"
+    echo "--- TEST_$test_num: Running $test_name ---"
     
     # Execute the test command.
     eval "$test_command" > >(tee -a "$log_file") 2> >(tee -a "$log_file" >&2)
