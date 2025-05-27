@@ -3,18 +3,10 @@ from collections.abc import Sequence
 from typing import Optional
 
 import pytest
-import torch
-import torch.nn.functional as F
 
 from tests.conftest import HfRunner
-from tests.models.utils import EmbedModelInfo, check_embeddings_close
-
-
-def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
-    tensor = torch.tensor(tensor)
-    tensor = tensor[..., :dimensions]
-    tensor = F.normalize(tensor, p=2, dim=1)
-    return tensor
+from tests.models.utils import (EmbedModelInfo, check_embeddings_close,
+                                matryoshka_fy)
 
 
 def run_embedding_correctness_test(

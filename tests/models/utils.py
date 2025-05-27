@@ -320,6 +320,13 @@ def check_embeddings_close(
         assert sim >= 1 - tol, fail_msg
 
 
+def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
+    tensor = torch.tensor(tensor)
+    tensor = tensor[..., :dimensions]
+    tensor = F.normalize(tensor, p=2, dim=1)
+    return tensor
+
+
 class EmbedModelInfo(NamedTuple):
     name: str
     is_matryoshka: bool = False

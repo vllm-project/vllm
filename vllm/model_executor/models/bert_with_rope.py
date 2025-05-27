@@ -529,23 +529,23 @@ class NomicBertModel(BertWithRope):
         # with SentenceTransformer.
         # The context extension uses vllm style rope_theta and rope_scaling.
         # See #17785
-
-        vllm_config.model_config.max_model_len = config.max_trained_positions
         if vllm_config.model_config.hf_overrides is not None:
+            # We need to allow users to manually change max_model_len.
             from vllm.config import _get_and_verify_max_len
-            vllm_config.model_config.max_model_len = _get_and_verify_max_len(
+            max_model_len = _get_and_verify_max_len(
                 hf_config=self.hf_text_config,
                 max_model_len=self.max_model_len,
                 disable_sliding_window=self.disable_sliding_window)
+            vllm_config.reset_max_model_len(max_model_len)
         else:
+            # Reset max_model_len to config.max_trained_positions.
+            vllm_config.reset_max_model_len(config.max_trained_positions)
             logger.warning(
                 "We did not use the nomic context extension method, "
                 "current max_model_len is %s. "
                 "The context extension uses vllm style "
-                "rope_theta and rope_scaling.",
+                "rope_theta and rope_scaling. ",
                 vllm_config.model_config.max_model_len)
-        vllm_config.scheduler_config.max_model_len = (
-            vllm_config.model_config.max_model_len)
 
         return config
 
