@@ -134,17 +134,17 @@ class SpecDecodingProm:
 
         self.counter_spec_decode_num_drafts = \
             self._counter_cls(
-                name="vllm:spec_decode_num_drafts_total",
+                name="vllm:spec_decode_num_drafts",
                 documentation="Number of spec decoding drafts.",
                 labelnames=labelnames).labels(*labelvalues)
         self.counter_spec_decode_num_draft_tokens = \
             self._counter_cls(
-                name="vllm:spec_decode_num_draft_tokens_total",
+                name="vllm:spec_decode_num_draft_tokens",
                 documentation="Number of draft tokens.",
                 labelnames=labelnames,).labels(*labelvalues)
         self.counter_spec_decode_num_accepted_tokens = \
             self._counter_cls(
-                name="vllm:spec_decode_num_accepted_tokens_total",
+                name="vllm:spec_decode_num_accepted_tokens",
                 documentation="Number of accepted tokens.",
                 labelnames=labelnames).labels(*labelvalues)
 
