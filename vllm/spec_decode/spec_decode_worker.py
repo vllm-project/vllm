@@ -352,6 +352,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Hidden states from target model to pass to proposer
         # in the subsequent step.
         self.previous_hidden_states: Optional[HiddenStates] = None
+        
+        # Acceptance rate tracking for debugging
+        self._total_draft_tokens = 0
+        self._total_accepted_tokens = 0
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
         self._num_spec_prefill_steps = num_spec_prefill_steps
@@ -809,8 +813,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Debug logging
         from vllm.logger import init_logger
         logger = init_logger(__name__)
-        logger.info(f"[SPEC_DECODE_DEBUG] Starting verification: proposals.proposal_lens={proposals.proposal_lens}")
-        logger.info(f"[SPEC_DECODE_DEBUG] proposals.proposal_token_ids.shape={proposals.proposal_token_ids.shape}")
 
         with Timer() as scoring_timer:
             proposal_scores = self.scorer.score_proposals(
@@ -837,7 +839,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             # TODO avoid sampling here?
             self.proposer_worker.execute_model(prefill_req)
 
-        logger.info(f"[SPEC_DECODE_DEBUG] Starting _verify_tokens with max_proposal_len={execute_model_req.num_lookahead_slots}")
         with Timer() as verification_timer:
             accepted_token_ids, target_logprobs = self._verify_tokens(
                 execute_model_req.seq_group_metadata_list, proposal_scores,
@@ -912,6 +913,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             draft_token_ids=proposal_token_ids,
             **sampler_extra_kwargs,
         )
+        
+        # Track acceptance rate for debugging
+        self._track_acceptance_rate(proposal_token_ids, accepted_token_ids)
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
@@ -1310,6 +1314,30 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     def stop_profile(self):
         if isinstance(self.scorer_worker, WorkerBase):
             self.scorer_worker.stop_profile()
+    
+    def _track_acceptance_rate(self, proposal_token_ids: torch.Tensor, accepted_token_ids: torch.Tensor):
+        """Track acceptance rate for debugging purposes."""
+        # Count draft tokens (non-negative values in proposal_token_ids)
+        draft_tokens = (proposal_token_ids >= 0).sum().item()
+        
+        # Count accepted tokens (non-negative values in accepted_token_ids, excluding bonus token)
+        # accepted_token_ids shape: [batch_size, max_proposal_len + 1]
+        # The first column is the bonus token, skip it
+        accepted_tokens = (accepted_token_ids[:, 1:] >= 0).sum().item()
+        
+        self._total_draft_tokens += draft_tokens
+        self._total_accepted_tokens += accepted_tokens
+        
+        # Print acceptance rate periodically
+        if self._total_draft_tokens > 0 and self._total_draft_tokens % 100 == 0:
+            acceptance_rate = self._total_accepted_tokens / self._total_draft_tokens
+            print(f"[ACCEPTANCE_RATE] {self._total_accepted_tokens}/{self._total_draft_tokens} = {acceptance_rate:.3f}")
+    
+    def get_acceptance_rate(self) -> float:
+        """Get current acceptance rate."""
+        if self._total_draft_tokens == 0:
+            return 0.0
+        return self._total_accepted_tokens / self._total_draft_tokens
 
 
 def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,

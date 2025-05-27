@@ -19,7 +19,10 @@ class LayerSkipModelMixin:
         from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
         from vllm.distributed import get_pp_group
         
-        head_file = os.path.join(path, f"h{layer}.pt")
+        # Map layer_skip to the actual layer the LSQ head was trained on
+        # layer_skip=17 means "exit after layer 16", so load h16.pt
+        actual_layer = layer - 1
+        head_file = os.path.join(path, f"h{actual_layer}.pt")
         
         # Validate file exists
         if not os.path.isfile(head_file):
@@ -44,7 +47,7 @@ class LayerSkipModelMixin:
             lsq_head = ParallelLMHead(
                 num_embeddings=self.config.vocab_size,
                 embedding_dim=self.config.hidden_size,
-                quant_config=self.quant_config,
+                quant_config=getattr(self, 'quant_config', None),
                 prefix=f"lsq_head_{layer}"
             )
             

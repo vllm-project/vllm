@@ -486,11 +486,9 @@ class Qwen2ForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP)
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if self.draft_mode:
             # Draft mode: early exit
-            print(f"[DRAFT_MODE_DEBUG] Using early exit at layer {self.draft_layer}")
             return self.forward_with_early_exit(input_ids, positions, self.draft_layer, intermediate_tensors)
         else:
             # Normal mode: full forward pass
-            print(f"[DRAFT_MODE_DEBUG] Using full forward pass (normal mode)")
             hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                        inputs_embeds)
             return hidden_states
@@ -502,13 +500,11 @@ class Qwen2ForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP)
     ) -> Optional[torch.Tensor]:
         if self.draft_mode and hasattr(self, 'lsq_heads') and self.draft_layer in self.lsq_heads:
             # Draft mode: use LSQ head (already TP-sharded ParallelLMHead)
-            print(f"[LOGITS_DEBUG] Using LSQ head for layer {self.draft_layer}")
             lsq_head = self.lsq_heads[self.draft_layer]
             logits = self.logits_processor(lsq_head, hidden_states, sampling_metadata)
             return logits
         else:
             # Normal mode: use LM head
-            print(f"[LOGITS_DEBUG] Using normal LM head (draft_mode={getattr(self, 'draft_mode', False)})")
             logits = self.logits_processor(self.lm_head, hidden_states,
                                            sampling_metadata)
             return logits
