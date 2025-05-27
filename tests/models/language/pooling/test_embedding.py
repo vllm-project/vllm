@@ -53,7 +53,11 @@ def test_models(
     # https://github.com/UKPLab/sentence-transformers/blob/v3.1.1/sentence_transformers/models/Transformer.py#L159
     # This makes the input_ids different between hf_model and vllm_model.
     # So we need to strip the input texts to avoid test failing.
-    example_prompts = [str(s).strip() for s in example_prompts]
+
+    # Some embedding models may lowercase prompts in sentence_transformers, see:
+    # https://github.com/UKPLab/sentence-transformers/blob/v3.2.1/sentence_transformers/models/Transformer.py#L393-L395
+    #  For alignment and simplicity, we lowercase all prompts in the test.
+    example_prompts = [str(s).strip().lower() for s in example_prompts]
 
     with hf_runner(model, dtype=dtype,
                    is_sentence_transformer=True) as hf_model:
