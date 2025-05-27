@@ -263,6 +263,11 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
             mm_data,
             mm_kwargs,
         )
+        if "pixel_values" in processed_outputs:
+            # Cast pixel values to model dtype already here,
+            # so we need to transfer less data to the GPU
+            processed_outputs["pixel_values"] = processed_outputs[
+                "pixel_values"].to(self.info.ctx.model_config.dtype)
 
         # HF processor pops the `num_crops` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
@@ -504,18 +509,12 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         return next(self.parameters()).dtype
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            if d.shape != expected_dims:
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_dims}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
+        image_size = self.config.vision_config.image_size
+        expected_dims = (3, image_size, image_size)
+        if data.shape[1:] != expected_dims:
+            raise ValueError(
+                "The expected shape of pixel values per image per batch is "
+                f"{expected_dims}. You supplied {tuple(data.shape)}.")
         return data
 
     def _parse_and_validate_image_input(
@@ -549,9 +548,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         vision_tower: SiglipVisionModel,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-        target_dtype = vision_tower.get_input_embeddings().weight.dtype
-        image_features = vision_tower(pixel_values.to(dtype=target_dtype))
-        return image_features
+        return vision_tower(pixel_values)
 
     def _process_image_input(
         self,
