@@ -2,7 +2,7 @@
 # Copyright © 2025, Oracle and/or its affiliates.
 
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
@@ -52,7 +52,7 @@ class RTNConfig(QuantizationConfig):
         return "rtn"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
 
     @classmethod
@@ -60,11 +60,11 @@ class RTNConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "RTNConfig":
+    def from_config(cls, config: dict[str, Any]) -> "RTNConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(weight_bits, group_size)
@@ -142,7 +142,7 @@ class RTNLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -209,7 +209,7 @@ class RTNLinearMethod(LinearMethodBase):
 
 
 def rtn_quantize(tensor: torch.Tensor, num_bits: int,
-                 group_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+                 group_size: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize a tensor using per-group static scaling factor.
 
     Args:
