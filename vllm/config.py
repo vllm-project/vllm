@@ -571,6 +571,7 @@ class ModelConfig:
 
                 sliding_window = None
 
+        self.original_max_model_len = self.max_model_len
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=self.max_model_len,
