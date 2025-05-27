@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import textwrap
+import uuid
 import warnings
 from collections import Counter
 from contextlib import contextmanager
