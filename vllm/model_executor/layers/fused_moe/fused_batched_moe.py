@@ -619,7 +619,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.dp_size = dp_size
 
         if use_mxfp4_w4a4:
-            raise ValueError(f"BatchedTritonExperts does not support use_mxfp4_w4a4=True for now.")
+            raise ValueError("BatchedTritonExperts does not "
+                             "support use_mxfp4_w4a4=True for now.")
 
     def workspace_shapes(
         self,
