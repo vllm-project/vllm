@@ -20,6 +20,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.config import KVTransferConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
@@ -300,7 +301,8 @@ class PrefillReqMeta:
         """
         assert request_tracker.num_total_tokens <= \
                 len(request_tracker.allocated_block_ids) * block_size, \
-                f"Request {req_id} has more tokens than allocated blocks"
+                f"Request {request_tracker.req_id} has more tokens " + \
+                "than allocated blocks"
 
         token_range = slice(request_tracker.num_saved_tokens,
                             request_tracker.num_total_tokens)
@@ -425,13 +427,15 @@ class CPUConnector(KVConnectorBase_V1):
         elif role == KVConnectorRole.WORKER:
             # Prefiller side sender
             if self.kv_role == "kv_producer":
+                # TODO: remove the hard-code here
                 self._kv_sender = NixlPrefillManager(1024 * 1024 *
                                                      1024)  # 1GB for debug
             elif self.kv_role == "kv_consumer":
+                # TODO: remove the hard-code here
                 self._kv_receiver = NixlDecodeManager(
                     1024 * 1024 * 1024,  # 1GB for debug
                     "localhost",
-                    54321,  # Changed from string to int to match the class definition
+                    54321,
                 )
             else:
                 raise ValueError(f"Unknown kv_role: {self.kv_role}")
@@ -542,7 +546,8 @@ class CPUConnector(KVConnectorBase_V1):
             self._should_be_ready_reqs.remove(request.request_id)
             return 0, False
 
-        if kv_transfer_params is None or "prefill_request_id" not in kv_transfer_params:
+        if kv_transfer_params is None or \
+                "prefill_request_id" not in kv_transfer_params:
             logger.warning("Request %s does not have prefill_request_id",
                            request.request_id)
             #return 0, False
@@ -634,11 +639,9 @@ class CPUConnector(KVConnectorBase_V1):
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         self._gpu_kv_caches = kv_caches
-        idx = 0
-        for layer_name in kv_caches:
+        for idx, layer_name in enumerate(kv_caches):
             self._layer_name_to_id[layer_name] = idx
             self._layer_id_to_name[idx] = layer_name
-            idx += 1
 
         self._kv_page_shape = kv_caches[list(kv_caches.keys())[0]].shape[2:]
 
@@ -832,8 +835,8 @@ class CPUConnector(KVConnectorBase_V1):
             p_ready_reqs = self._kv_receiver.get_finished(
                 len(self._gpu_kv_caches))
             ret = set()
-            # TODO: Bug here: we need to send the prefill request id from scheduler
-            # connector to the worker connector in kv_params
+            # TODO: Bug here: we need to send the prefill request id from
+            # scheduler connector to the worker connector in kv_params
             for p_req_id in p_ready_reqs:
                 ret.add(self._prefill_req_id_to_decode_req_id[p_req_id])
 

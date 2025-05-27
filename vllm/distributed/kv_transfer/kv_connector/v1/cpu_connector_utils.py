@@ -30,7 +30,8 @@ class DestinationSpec:
     base_port: int
 
     def __str__(self) -> str:
-        return f"DestinationSpec(rank={self.rank}, host={self.host}, base_port={self.base_port})"
+        return f"DestinationSpec(rank={self.rank}, " + \
+               f"host={self.host}, base_port={self.base_port})"
 
     def get_id(self) -> str:
         """Get the id of the destination spec.
@@ -79,7 +80,7 @@ class SourceSpec(msgspec.Struct):
         return getattr(torch, self.dtype_str)
 
     def get_size(self) -> int:
-        """Get the size in bytes of the cooresponding kv cache."""
+        """Get the size in bytes of the corresponding kv cache."""
         return math.prod(self.shape) * self.dtype.itemsize
 
     def __str__(self) -> str:

@@ -210,7 +210,7 @@ class RingBufferAllocator:
 
         # Else, set the low_watermark to the first address in the allocated
         # dict
-        for addr in self._allocated.keys():
+        for addr in self._allocated:
             new_low_watermark = addr
             break
         self._low_watermark = new_low_watermark
@@ -615,7 +615,7 @@ class NixlCPUReceiver:
         notifs = self._nixl_wrapper.get_new_notifs()
         for remote_agent_name in notifs:
             for msg in notifs[remote_agent_name]:
-                # Decode the messag
+                # Decode the message
                 obj = self._msg_decoder.decode(msg)
                 if obj.msg_type == "REQMSG":
                     # Add the request to the pending allocation
@@ -687,8 +687,8 @@ class NixlCPUReceiver:
             clear (bool): Whether to clear the finished requests or not.
 
         Returns:
-            list[tuple[SourceSpec, int]]: A list of tuples containing the source 
-                spec and the address.
+            list[tuple[SourceSpec, int]]: A list of tuples containing the 
+                source spec and the address.
         """
         ret = [(source_spec, vaddr)
                for source_spec, vaddr in self._finished_requests.values()]
@@ -714,12 +714,14 @@ class NixlCPUReceiver:
 
     def _nixl_handshake_listener(self, host: str, base_port: int,
                                  ready_event: threading.Event) -> None:
-        """Background thread that listens for and responds to handshake requests.
+        """Background thread that listens for and responds to handshake 
+        requests.
         
         Args:
             host (str): Host address to listen on
             base_port (int): Base port number to listen on
-            ready_event (threading.Event): Event to signal when listener is ready
+            ready_event (threading.Event): Event to signal when listener is
+                ready
         """
         # Prepare metadata
         local_meta = self._nixl_wrapper.get_agent_metadata()
@@ -738,8 +740,8 @@ class NixlCPUReceiver:
 
                     if msg == b"get_xfer_descs":
                         # Send back the local xfer descs
-                        s_local_xfer_descs = self._nixl_wrapper.get_serialized_descs(
-                            self._local_xfer_dlist)
+                        s_local_xfer_descs = self._nixl_wrapper.\
+                                get_serialized_descs(self._local_xfer_dlist)
                         sock.send_multipart(
                             [identity, b"", s_local_xfer_descs])
                         logger.debug("Sent back the local xfer descs to %s",
@@ -841,10 +843,9 @@ class NixlSendTask(SendTask):
                 self.receiver_paddr = rpaddr
                 self.state.receiver_ready = True
 
-        if not self.is_done() and self.transfer_handle is not None:
-            # Check if the transfer is finished
-            if self.parent_sender.is_send_finished(self.transfer_handle):
-                self.state.send_done = True
+        if not self.is_done() and self.transfer_handle is not None \
+                and self.parent_sender.is_send_finished(self.transfer_handle):
+            self.state.send_done = True
 
 
 class NixlPrefillManager(KVSenderInterface):
@@ -1063,7 +1064,7 @@ class NixlDecodeManager:
             for p_request_id in other_ranks_finished_ids:
                 self._done_receiving_count[p_request_id] += 1
 
-            all_done_recving: list[str]
+            all_done_recving: list[str] = []
             for p_request_id in self._done_receiving_count:
                 if self._done_receiving_count[p_request_id] == \
                         self.world_size:
