@@ -134,6 +134,8 @@ ENTRYPOINT ["bash"]
 FROM base AS vllm-openai
 
 WORKDIR /workspace/
+ADD ./benchmarks/ ./benchmarks/
+ADD ./.buildkite/ ./.buildkite/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
