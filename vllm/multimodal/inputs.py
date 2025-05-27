@@ -735,13 +735,13 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     ) -> BatchedTensorInputs:
         json_inputs = cast(JSONTree[torch.Tensor], batched_inputs)
 
+        def maybe_cast_dtype(x: torch.Tensor):
+            # This mimics the behavior of transformers.BatchFeature
+            return x.to(dtype=dtype) if x.is_floating_point() else x
+
         json_mapped = json_map_leaves(
-            lambda x: x.to(
-                device=device,
-                # This mimics the behavior of transformers.BatchFeature
-                dtype=dtype if x.is_floating_point() else None,
-                non_blocking=True,
-            ),
+            # NOTE: Cast the dtype before sending it to device
+            lambda x: maybe_cast_dtype(x).to(device=device, non_blocking=True),
             json_inputs,
         )
 
