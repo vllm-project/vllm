@@ -4,6 +4,7 @@ import time
 
 import torch.multiprocessing as mp
 
+import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
     NixlDecodeManager)
 
@@ -18,11 +19,9 @@ def main():
 
     # Buffer configuration
     buffer_size = 1 << 30  # 1GB
-    nixl_page_size = 4096  # Standard page size
 
     try:
         # Mock tensor_model_parallel_rank for this process
-        import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
         utils.get_tensor_model_parallel_rank = lambda: test_rank
         utils.get_tensor_model_parallel_world_size = lambda: 1
         utils.get_tp_group = lambda: None

@@ -4,6 +4,7 @@ import time
 
 import torch.multiprocessing as mp
 
+import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
     NixlCPUReceiver, RingBufferAllocator)
 
@@ -21,7 +22,6 @@ def main():
 
     try:
         # Mock tensor_model_parallel_rank for this process
-        import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
         utils.get_tensor_model_parallel_rank = lambda: test_rank
 
         # Create ring buffer allocator
@@ -46,19 +46,18 @@ def main():
                 if finished:
                     for source_spec, vaddr in finished:
                         print(
-                            f"Received data from request {source_spec.request_id}"
-                        )
+                            f"Got data from request {source_spec.request_id}")
                         paddr = allocator.virtual_to_physical(vaddr)
 
                         # Verify received data
                         num_elements = source_spec.get_size()
-                        received_data = allocator._buffer[paddr : paddr + num_elements]\
+                        received_data = allocator._buffer\
+                                [paddr : paddr + num_elements]\
                                 .view(source_spec.dtype)\
                                 .reshape(source_spec.tensor_shape)
-                        print(
-                            f"Received layer {source_spec.layer_id} tokens "
-                            f"{source_spec.start} - {source_spec.stop} of request "
-                            f"{source_spec.request_id}")
+                        print(f"Received layer {source_spec.layer_id} tokens "
+                              f"{source_spec.start} - {source_spec.stop} of "
+                              f"request {source_spec.request_id}")
                         print(f"The shape is {received_data.shape}")
                         print(f"The digest is {received_data.mean()}")
                         allocator.free(vaddr)

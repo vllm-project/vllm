@@ -10,7 +10,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.cpu_connector import (
 @pytest.fixture
 def device_tensors():
     """Create sample device tensors for testing."""
-    # Create tensors with shape (2, num_blocks, page_size, head_size, hidden_size)
+    # Create tensors with shape (2, num_blocks, page_size, head_size,
+    # hidden_size)
     num_blocks = 4
     page_size = 16
     head_size = 8

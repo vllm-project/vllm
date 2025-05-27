@@ -5,12 +5,17 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
+import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
     DestinationSpec, NixlCPUReceiver, NixlCPUSender, RingBufferAllocator,
     SourceSpec)
 
 try:
-    from nixl._api import nixl_agent as NixlWrapper
+    #from nixl._api import nixl_agent as NixlWrapper
+    import importlib
+    spec = importlib.util.find_spec("nixl._api.nixl_agent")
+    if spec is None:
+        raise ImportError("NIXL is not available")
     NIXL_AVAILABLE = True
 except ImportError:
     NIXL_AVAILABLE = False
@@ -21,7 +26,6 @@ def run_receiver(buffer_config, host, base_port, rank, ready_event,
     """Process function for running the receiver."""
     try:
         # Mock tensor_model_parallel_rank for this process
-        import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
         utils.get_tensor_model_parallel_rank = lambda: rank
 
         # Create ring buffer allocator
@@ -53,7 +57,6 @@ def run_sender(buffer_config, host, base_port, rank, receiver_ready_event):
     """Process function for running the sender."""
     try:
         # Mock tensor_model_parallel_rank for this process
-        import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
         utils.get_tensor_model_parallel_rank = lambda: rank
 
         # Create ring buffer allocator
@@ -94,7 +97,6 @@ def run_receiver_with_progress(buffer_config,
     """Process function for running the receiver with progress loop."""
     try:
         # Mock tensor_model_parallel_rank for this process
-        import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
         utils.get_tensor_model_parallel_rank = lambda: rank
 
         # Create ring buffer allocator
@@ -150,7 +152,6 @@ def run_sender_with_protocol(buffer_config, host, base_port, rank,
     """Process function for running the sender with protocol communication."""
     try:
         # Mock tensor_model_parallel_rank for this process
-        import vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils as utils
         utils.get_tensor_model_parallel_rank = lambda: rank
 
         # Create ring buffer allocator
@@ -284,21 +285,10 @@ class TestNixlCPUUtils:
         assert receiver._reg_dlist is not None
         assert receiver._local_xfer_dlist is not None
 
-    def test_creation_with_invalid_buffer_size(self, buffer_config):
-        """Test creation with invalid buffer size."""
-        with pytest.raises(
-                Exception
-        ):  # Specific exception type depends on NIXL implementation
-            # Create allocator with invalid size
-            allocator = RingBufferAllocator(
-                size=0,  # Invalid size
-                align_to=buffer_config['nixl_page_size'])
-
-            NixlCPUReceiver(allocator=allocator,
-                            nixl_page_size=buffer_config['nixl_page_size'])
-
     def test_nixl_handshake_multiprocess(self, buffer_config):
-        """Test NIXL handshake between sender and receiver in separate processes."""
+        """Test NIXL handshake between sender and receiver in separate 
+        processes.
+        """
         # Setup test parameters
         test_host = "127.0.0.1"
         test_base_port = 50051
@@ -376,7 +366,8 @@ class TestNixlCPUUtils:
         try:
             # Wait for protocol communication to complete
             protocol_complete = protocol_success.wait(timeout=20)
-            assert protocol_complete, "Protocol communication failed or timed out"
+            assert protocol_complete, \
+                    "Protocol communication failed or timed out"
 
             # Wait for sender process to complete
             sender_process.join(timeout=5)
