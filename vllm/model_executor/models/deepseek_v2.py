@@ -34,7 +34,8 @@ from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_ep_group, get_pp_group,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -105,7 +106,7 @@ class DeepseekV2MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
 
-        self.ep_group = get_pp_group().device_group
+        self.ep_group = get_ep_group().device_group
         self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.n_routed_experts
