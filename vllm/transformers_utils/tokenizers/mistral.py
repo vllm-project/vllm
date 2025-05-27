@@ -156,7 +156,11 @@ def make_mistral_chat_completion_request(
     #
     # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
     for message in messages:
-        if message.get("role") == "assistant":
+        # Remove reasoning_content as unsupported by Mistral
+        _ = message.pop("reasoning_content", None)  # type: ignore
+
+        # Convert list text content to string
+        if message.get("role") in ("assistant", "tool"):
             content = message.get("content")
             if isinstance(content, list):
                 content = "\n".join(chunk.get("text") for chunk in content)
