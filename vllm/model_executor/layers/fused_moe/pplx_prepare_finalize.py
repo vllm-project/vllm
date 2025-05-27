@@ -7,7 +7,10 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.v1.worker.ubatching import get_current_ubatch_context, yield_impl
+from vllm.v1.worker.ubatching import (
+    get_current_ubatch_context, yield_and_switch_from_compute_to_comm_impl,
+    yield_and_switch_from_comm_to_compute_impl
+)
 
 
 # Note use: layer.get_all_to_all() to get an AllToAll instance
@@ -119,14 +122,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_recv=not send,
             )
         
-        #print("Dispatch pre-wait")
-        if (ubatch_ctx := get_current_ubatch_context()) is not None:
-            ubatch_ctx.gpu_stream_wait()
-        #print("Dispatch launched")
+        yield_and_switch_from_compute_to_comm_impl(schedule="default")
         dispatch(True) # Send
-        yield_impl(gpu_wait=False)
         dispatch(False) # Recv
-        #print("Finished dispatch")
+        yield_and_switch_from_comm_to_compute_impl(schedule="default")
 
         return expert_x, expert_x_scale, expert_num_tokens
 
@@ -164,11 +163,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_recv=not send,
             )
             
-        #print("Combine pre-wait")
-        if (ubatch_ctx := get_current_ubatch_context()) is not None:
-            ubatch_ctx.gpu_stream_wait()
+        yield_and_switch_from_compute_to_comm_impl(schedule="default")
         combine(True)
-        #print("Combine launched")
-        yield_impl(gpu_wait=False)
         combine(False)
-        #print("Finished combine")
+        yield_and_switch_from_comm_to_compute_impl(schedule="default")

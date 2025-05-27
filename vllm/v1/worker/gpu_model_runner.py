@@ -59,7 +59,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.ubatching import make_ubatch_context_chain, UBatchContext
+from vllm.v1.worker.ubatching import make_ubatch_contexts, UBatchContext
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
@@ -1342,18 +1342,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             #         attn_metadata[i] if attn_metadata is not None else None,
             #         self.vllm_config, num_tokens=(tokens_slice.stop - tokens_slice.start)
             #     ) for i, (_, tokens_slice) in enumerate(ubatch_slices)]
-            ubatch_ctxs, start_hook = make_ubatch_context_chain(
+            ubatch_ctxs, start_hook = make_ubatch_contexts(
                 len(ubatch_slices),
-                #fwd_ctxs=ubatch_fwd_ctxs,
-                streams=self.ubatch_streams, #stream=root_stream, # Only works currently if everything is run on the same stream
+                compute_stream=root_stream,
                 device=self.device)
             setup_done = threading.Event()
             ubatch_threads = []
-            
-            # Initialize Events? not sure if this helps
-            for ubatch_ctx in ubatch_ctxs:
-                ubatch_ctx.gpu_wait_event.record(ubatch_ctx.stream)
-                ubatch_ctx.stream.wait_event(ubatch_ctx.gpu_wait_event)
             
             # Ubatches will manually manage the forward context, so we override
             # it to None here so we can have it restored correctly later
@@ -1388,9 +1382,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     
                 for thread in ubatch_threads:
                     thread.join()
-                    
-            for ubatch_ctx in ubatch_ctxs:
-                root_stream.wait_stream(ubatch_ctx.stream)
 
             torch.cuda.set_stream(root_stream)
             return torch.cat(results, dim=0)
