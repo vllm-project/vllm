@@ -1080,6 +1080,8 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             num_extra_experts=self.num_extra_experts,
+            eplb_window_size=self.eplb_window_size,
+            eplb_step_interval=self.eplb_step_interval,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
