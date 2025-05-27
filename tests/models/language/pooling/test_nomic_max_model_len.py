@@ -33,7 +33,7 @@ def test_default(model_info, vllm_runner):
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-def test_set_max_model_len_legal1(model_info, vllm_runner):
+def test_set_max_model_len_legal(model_info, vllm_runner):
     # set max_model_len <= 512
     with vllm_runner(model_info.name, task="embed",
                      max_model_len=256) as vllm_model:
