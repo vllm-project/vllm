@@ -2,7 +2,7 @@
 
 import warnings
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from typing import Any, NamedTuple, Optional, Union
 
 import torch
 import torch.nn.functional as F
