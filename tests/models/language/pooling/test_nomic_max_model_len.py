@@ -6,10 +6,10 @@ from ...utils import EmbedModelInfo
 
 MODELS = [
     EmbedModelInfo("nomic-ai/nomic-embed-text-v1"),
-    #EmbedModelInfo("nomic-ai/nomic-embed-text-v1.5"),
-    #EmbedModelInfo("nomic-ai/CodeRankEmbed"),
+    EmbedModelInfo("nomic-ai/nomic-embed-text-v1.5"),
+    EmbedModelInfo("nomic-ai/CodeRankEmbed"),
     EmbedModelInfo("nomic-ai/nomic-embed-text-v2-moe"),
-    #EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-long"),
+    EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-long"),
 ]
 
 rope_theta = 1000
