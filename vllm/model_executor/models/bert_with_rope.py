@@ -542,12 +542,10 @@ class NomicBertModel(BertWithRope):
 
             vllm_config.recalculate_max_model_len(max_model_len)
             logger.warning(
-                "We did not use the nomic context extension method."
-                "Max_model_len before is %s, "
-                "current max_model_len is %s. "
-                "The context extension uses vllm style "
-                "rope_theta and rope_scaling. See: "
-                "examples/offline_inference/context_extension.html",
+                "Nomic context extension is disabled. "
+                "Changing max_model_len from %s to %s. "
+                "To enable context extension, see: "
+                "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.html",
                 max_model_len_before, vllm_config.model_config.max_model_len)
         else:
             # We need to re-verify max_model_len to avoid lengths
