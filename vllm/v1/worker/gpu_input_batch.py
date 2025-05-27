@@ -21,6 +21,8 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
+# TODO(andy): TPU implementation does not support
+# latest logits processor implementation
 is_tpu = current_platform.is_tpu()
 
 _SAMPLING_EPS = 1e-5
@@ -145,6 +147,17 @@ class InputBatch:
                                             pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
+
+        if is_tpu:
+            self.min_p = torch.empty((max_num_reqs, ),
+                                     dtype=torch.float32,
+                                     device=device)
+            self.min_p_cpu_tensor = torch.empty((max_num_reqs, ),
+                                                dtype=torch.float32,
+                                                device="cpu",
+                                                pin_memory=pin_memory)
+            self.min_p_cpu = self.min_p_cpu_tensor.numpy()
+            self.min_p_reqs: set[str] = set()
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, ),
@@ -297,6 +310,10 @@ class InputBatch:
         else:
             top_k = self.vocab_size
         self.top_k_cpu[req_index] = top_k
+        if is_tpu:
+            self.min_p_cpu[req_index] = sampling_params.min_p
+            if sampling_params.min_p > _SAMPLING_EPS:
+                self.min_p_reqs.add(req_id)
         self.frequency_penalties_cpu[
             req_index] = sampling_params.frequency_penalty
         if sampling_params.frequency_penalty != 0.0:
@@ -371,6 +388,8 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
+        if is_tpu:
+            self.min_p_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -425,6 +444,9 @@ class InputBatch:
             self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1]
         self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] =\
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
+        if is_tpu:
+            self.min_p_cpu[i1], self.min_p_cpu[i2] =\
+                self.min_p_cpu[i2], self.min_p_cpu[i1]
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -505,6 +527,8 @@ class InputBatch:
                 empty_index] = self.presence_penalties_cpu[last_req_index]
             self.repetition_penalties_cpu[
                 empty_index] = self.repetition_penalties_cpu[last_req_index]
+            if is_tpu:
+                self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -546,6 +570,8 @@ class InputBatch:
             copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
         if not self.no_top_k:
             copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
+        if is_tpu and not self.no_min_p:
+            copy_slice(self.min_p_cpu_tensor, self.min_p, num_reqs)
 
         if not self.no_penalties:
             # Since syncing these tensors is expensive only copy them
@@ -578,6 +604,7 @@ class InputBatch:
             all_random=self.all_random,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
+            min_p=None if self.no_min_p else self.min_p[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
@@ -657,6 +684,10 @@ class InputBatch:
     @property
     def no_top_k(self) -> bool:
         return len(self.top_k_reqs) == 0
+
+    @property
+    def no_min_p(self) -> bool:
+        return len(self.min_p_reqs) == 0
 
     @property
     def no_penalties(self) -> bool:

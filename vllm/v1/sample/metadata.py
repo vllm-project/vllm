@@ -43,3 +43,7 @@ class SamplingMetadata:
     # only applied to random-sampled requests in the batch.
     logits_procs: list[LogitsProcessor]
     nongreedy_logits_procs: list[LogitsProcessor]
+
+    # TODO(andy): Because newest logits processors implementation
+    # does not support TPU yet, the old min_p field is still required
+    min_p: Optional[torch.Tensor] = None
