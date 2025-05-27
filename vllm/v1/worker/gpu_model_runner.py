@@ -4,7 +4,7 @@ import copy
 import gc
 import time
 import weakref
-from itertools import chain
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
@@ -45,7 +45,6 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
-from vllm.v1.sample.logits_processor import BatchUpdate
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
@@ -280,7 +279,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
-    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
+    def _may_reorder_batch(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> Sequence[tuple[int, int]]:
         """
         Update the order of requests in the batch based on the attention
         backend's needs. For example, some attention backends (namely MLA) may
@@ -291,9 +293,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             scheduler_output: The scheduler output.
 
         Returns:
-            True if the batch was reordered, False otherwise.
+            Sequence of swap tuples
         """
-        batch_reordered = self.attn_metadata_builders[0].reorder_batch(
+        swaps = self.attn_metadata_builders[0].reorder_batch(
             self.input_batch, scheduler_output)
 
         # For models with multiple KV cache groups, the groups should agree on
@@ -303,7 +305,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
             assert not self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
-        return batch_reordered
+        return swaps
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -481,7 +483,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
-        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
+        batch_changed = (len(removed_req_indices) > 0
+                         or len(req_ids_to_add) > 0)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -509,27 +512,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends (namely MLA) may want to separate requests
         # based on if the attention computation will be compute-bound or
         # memory-bound. This gives them a hook to do that.
-        if swaps := self.attn_metadata_builder.reorder_batch(
-                self.input_batch, scheduler_output):
+        if swaps := self._may_reorder_batch(scheduler_output):
             moved.extend(swaps)
             batch_changed = True
 
-        # Update states of logits processors
-        batch_update = None if not batch_changed else BatchUpdate(
-            removed=removed,
-            moved=moved,
-            added=added,
-            batch_size=self.input_batch.num_reqs,
-        )
-
-        for processor in chain(self.input_batch.logit_procs,
-                               self.input_batch.nongreedy_logits_procs):
-            processor.update_states(batch_update)
-
-        batch_reordered = self._may_reorder_batch(scheduler_output)
-
-        if batch_changed or batch_reordered:
+        if batch_changed:
             self.input_batch.refresh_sampling_metadata()
+            self.input_batch.logit_procs_update_states(
+                removed=removed,
+                moved=moved,
+                added=added,
+            )
 
     def _prepare_inputs(
         self,

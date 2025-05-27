@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Datastructures defining an input batch
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import chain
 from typing import Optional, cast
 
 import numpy as np
@@ -13,7 +15,8 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.sample.logits_processor import (LogitBiasLogitsProcessor,
+from vllm.v1.sample.logits_processor import (BatchUpdate,
+                                             LogitBiasLogitsProcessor,
                                              LogitsProcessor,
                                              MinPLogitsProcessor,
                                              MinTokensLogitsProcessor)
@@ -558,6 +561,24 @@ class InputBatch:
 
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self._make_sampling_metadata()
+
+    def logit_procs_update_states(
+        self,
+        removed: Sequence[int] = (),
+        moved: Sequence[tuple[int, int]] = (),
+        added: Sequence[tuple[int, SamplingParams, list[int]]] = ()
+    ) -> None:
+        """Update logits processor state after batch remove/move/add"""
+
+        # Update states of logits processors
+        for processor in chain(self.logit_procs, self.nongreedy_logits_procs):
+            processor.update_states(
+                BatchUpdate(
+                    removed=removed,
+                    moved=moved,
+                    added=added,
+                    batch_size=self.num_reqs,
+                ))
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
