@@ -37,7 +37,7 @@ class EplbState:
 
     This is a sparse matrix, where -1 indicates no mapping.
 
-    Shape: (num_moe_layers, num_logical_experts)
+    Shape: (num_moe_layers, num_logical_experts, num_redundant_experts + 1)
     """
     logical_replica_count: torch.Tensor
     """
@@ -51,13 +51,13 @@ class EplbState:
     Expert load during this forward pass. 
     We use the token count each expert processes as the load.
 
-    Shape: (num_moe_layers, num_local_physical_experts)
+    Shape: (num_moe_layers, num_logical_experts)
     """
     expert_load_window: torch.Tensor
     """
     A sliding window of expert load.
 
-    Shape: (window_size, num_moe_layers, num_local_physical_experts)
+    Shape: (window_size, num_moe_layers, num_logical_experts)
     """
     expert_load_window_step: int = 0
     """Current step in the sliding window."""
@@ -140,6 +140,7 @@ class EplbState:
         logical_replica_count = torch.zeros(
             (model.num_logical_experts, ),
             device=device,
+            dtype=torch.long,
         )
 
         for i in range(model.num_physical_experts):
@@ -164,13 +165,13 @@ class EplbState:
         ).contiguous()
 
         expert_load_pass = torch.zeros(
-            (model.num_moe_layers, model.num_local_physical_experts),
+            (model.num_moe_layers, model.num_logical_experts),
             device=device,
         )
         expert_load_window_size = parallel_config.eplb_window_size
         expert_load_window = torch.zeros(
             (expert_load_window_size, model.num_moe_layers,
-             model.num_local_physical_experts),
+             model.num_logical_experts),
             device=device,
         )
 
@@ -178,6 +179,12 @@ class EplbState:
         eplb_step_interval = parallel_config.eplb_step_interval
         expert_rearrangement_step = max(
             0, eplb_step_interval - eplb_step_interval // 4)
+
+        model.set_eplb_state(
+            expert_load_pass,
+            logical_to_physical_map,
+            logical_replica_count,
+        )
 
         return EplbState(
             physical_to_logical_map,
@@ -225,32 +232,12 @@ class EplbState:
             time_start = time.perf_counter()
             logger.info("Rearranging experts...")
 
-        window_size, num_moe_layers, num_local_physical_experts = (
-            self.expert_load_window.shape)
-        num_physical_experts = model.num_physical_experts
-
-        local_expert_start = ep_rank * num_local_physical_experts
-        local_expert_end = local_expert_start + num_local_physical_experts
-        local_physical_to_logical_map = self.physical_to_logical_map[:,
-                                                                     local_expert_start:
-                                                                     local_expert_end]
-        device = local_physical_to_logical_map.device
-
         # Perform all-reduce to get the expert load across all ranks
-        expert_load_window = self.expert_load_window
-        global_expert_load_window = torch.zeros(window_size,
-                                                num_moe_layers,
-                                                num_physical_experts,
-                                                device=device)
-        global_expert_load_window.scatter_add_(
-            -1,
-            local_physical_to_logical_map.expand_as(expert_load_window),
-            expert_load_window,
-        )
+        global_expert_load_window = self.expert_load_window.clone()
         all_reduce(global_expert_load_window, group=ep_group)
 
         # TODO(bowen): Treat differently for prefill and decode nodes
-        num_replicas = num_physical_experts
+        num_replicas = model.num_physical_experts
         num_groups = model.num_expert_groups
         # TODO(bowen): Remove magic numbers
         num_nodes = (ep_group.size() + 7) // 8

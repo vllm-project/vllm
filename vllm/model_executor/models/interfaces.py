@@ -462,6 +462,26 @@ class MixtureOfExperts(Protocol):
     num_redundant_experts: int
     """Number of redundant experts in this model."""
 
+    def set_eplb_state(
+        self,
+        expert_load_view: Tensor,
+        logical_to_physical_map: Tensor,
+        logical_replica_count: Tensor,
+    ) -> None:
+        """
+        Register the EPLB state in the MoE model.
+        
+        Since these are views of the actual EPLB state, any changes made by
+        the EPLB algorithm are automatically reflected in the model's behavior
+        without requiring additional method calls to set new states.
+
+        Args:
+            expert_load_view: A view of the expert load metrics tensor.
+            logical_to_physical_map: Mapping from logical to physical experts.
+            logical_replica_count: Count of replicas for each logical expert.
+        """
+        ...
+
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
     return isinstance(model, MixtureOfExperts)

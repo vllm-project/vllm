@@ -3,6 +3,7 @@
 import importlib
 import threading
 from abc import abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
@@ -273,6 +274,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -743,8 +745,6 @@ class FusedMoE(torch.nn.Module):
         renomalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
-        logical_to_physical_map: Logical to physical expert mapping.
-        logical_replica_count: Count of physical replicas for logical experts.
     """
 
     def __init__(
@@ -799,6 +799,9 @@ class FusedMoE(torch.nn.Module):
             self.layer_name = prefix
 
         self.enable_eplb = enable_eplb
+        self.expert_load_view: Optional[torch.Tensor] = None
+        self.logical_to_physical_map: Optional[torch.Tensor] = None
+        self.logical_replica_count: Optional[torch.Tensor] = None
 
         # Determine expert maps
         if self.use_ep:
@@ -872,6 +875,20 @@ class FusedMoE(torch.nn.Module):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
+
+        if self.enable_eplb:
+            from vllm.model_executor.layers.quantization.fp8 import (
+                Fp8MoEMethod)
+            if not isinstance(quant_method, Fp8MoEMethod):
+                # TODO: Add support for additional quantization methods.
+                # The implementation for other quantization methods does not
+                # contain essential differences, but the current quant API
+                # design causes duplicated work when extending to new
+                # quantization methods, so I'm leaving it for now.
+                # If you plan to add support for more quantization methods,
+                # please refer to the implementation in `Fp8MoEMethod`.
+                raise NotImplementedError("EPLB is only supported for FP8 "
+                                          "quantization for now.")
 
         if prepare_finalize is not None:
             world_size = moe.ep_size
@@ -1225,6 +1242,28 @@ class FusedMoE(torch.nn.Module):
                 tp_rank=self.tp_rank)
             return
 
+    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+        weights = self.parameters()
+        assert all(weight.is_contiguous() for weight in weights)
+        return [weight.view(self.local_num_experts, -1) for weight in weights]
+
+    def set_eplb_state(
+        self,
+        moe_layer_idx: int,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        """
+        Register the EPLB state in this layer.
+
+        This is used later in forward pass, where we get the expert mapping
+        and record the load metrics in `expert_load_view`.
+        """
+        self.expert_load_view = expert_load_view[moe_layer_idx]
+        self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
+        self.logical_replica_count = logical_replica_count[moe_layer_idx]
+
     @staticmethod
     def select_experts(
         hidden_states: torch.Tensor,
@@ -1239,6 +1278,7 @@ class FusedMoE(torch.nn.Module):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         indices_type: Optional[torch.dtype] = None,
         enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1255,12 +1295,6 @@ class FusedMoE(torch.nn.Module):
             plain MoE implementations without redundant experts.
         """
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-
-        if enable_eplb:
-            assert logical_to_physical_map is not None
-            assert logical_replica_count is not None
-            # TODO(bowen): come back soon
-            raise NotImplementedError
 
         # DeepSeekv2 uses grouped_top_k
         if use_grouped_topk:
@@ -1293,6 +1327,39 @@ class FusedMoE(torch.nn.Module):
                 renormalize=renormalize)
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
+
+        if enable_eplb:
+            assert expert_load_view is not None
+            assert logical_to_physical_map is not None
+            assert logical_replica_count is not None
+
+            # 1. Record expert load metrics.
+
+            # TODO(bowen): When using `FusedMoEModularKernel`, this
+            # can be done in a more unified way, since
+            # `FusedMoEPrepareAndFinalize` will return the expert
+            # token count, in some cases directly from the kernel.
+            # However, now there are many code paths not using
+            # the modular kernel, e.g. calling `fused_experts`,
+            # so we decide to keep the logic here.
+            #
+            # If later refactor moved all the MoE kernel calls
+            # to the modular kernel, we can move this logic there
+            # to achieve better efficiency.
+
+            # (num_logical_experts,)
+            expert_load_view += topk_ids.bincount(
+                minlength=expert_load_view.shape[0], )
+
+            # 2. Convert the logical expert ids to physical expert ids
+            # Directly select a random replica for each logical expert
+            replica_indices = (
+                torch.rand_like(topk_ids, dtype=torch.float) *
+                logical_replica_count[topk_ids]).long().unsqueeze(-1)
+            physical_ids = logical_to_physical_map[topk_ids].gather(
+                -1, replica_indices).squeeze(-1)
+
+            topk_ids = physical_ids
 
         return topk_weights, topk_ids
 
@@ -1340,6 +1407,7 @@ class FusedMoE(torch.nn.Module):
 
             eplb_kwargs = {
                 "enable_eplb": True,
+                "expert_load_view": self.expert_load_view,
                 "logical_to_physical_map": self.logical_to_physical_map,
                 "logical_replica_count": self.logical_replica_count,
             } if self.enable_eplb else {}
@@ -1399,6 +1467,7 @@ class FusedMoE(torch.nn.Module):
 
         eplb_kwargs = {
             "enable_eplb": True,
+            "expert_load_view": self.expert_load_view,
             "logical_to_physical_map": self.logical_to_physical_map,
             "logical_replica_count": self.logical_replica_count,
         } if self.enable_eplb else {}
