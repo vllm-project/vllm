@@ -543,6 +543,8 @@ class NomicBertModel(BertWithRope):
                            "The context extension uses vllm style "
                            "rope_theta and rope_scaling.",
                            vllm_config.model_config.max_model_len)
+        vllm_config.scheduler_config.max_model_len = vllm_config.model_config.max_model_len
+
         return config
 
 
