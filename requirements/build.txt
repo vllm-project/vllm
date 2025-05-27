@@ -7,3 +7,4 @@ setuptools-scm>=8
 torch==2.7.0
 wheel
 jinja2>=3.1.6
+regex

@@ -192,7 +192,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
-        return "nvfp4"
+        return "modelopt_fp4"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
@@ -228,7 +228,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
                    exclude_modules, group_size)
 
     def is_layer_excluded(self, prefix: str, exclude_modules: list):
-        import re
+        import regex as re
         for pattern in exclude_modules:
             regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
             if re.fullmatch(regex_str, prefix):
