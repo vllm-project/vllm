@@ -45,7 +45,7 @@ def test_models(
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
         monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
         vllm_extra_kwargs["override_pooler_config"] = \
-            PoolerConfig(pooling_type="MEAN")
+            PoolerConfig(pooling_type="MEAN", normalize=False)
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
