@@ -8,11 +8,11 @@ from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
 """
-The global :class:`~MultiModalRegistry` is used by model runners to
+The global {class}`~MultiModalRegistry` is used by model runners to
 dispatch data processing according to the target model.
 
-See also:
-    :ref:`mm-processing`
+Info:
+    [mm-processing][]
 """
 
 __all__ = [

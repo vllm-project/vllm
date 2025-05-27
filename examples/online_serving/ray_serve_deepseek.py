@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Example to deploy DeepSeek R1 or V3 with Ray Serve LLM.
-See Ray Serve LLM documentation at:
+See more details at:
+https://docs.ray.io/en/latest/serve/tutorials/serve-deepseek.html
+And see Ray Serve LLM documentation at:
 https://docs.ray.io/en/latest/serve/llm/serving-llms.html
 
 Run `python3 ray_serve_deepseek.py` to deploy the model.
@@ -26,9 +28,7 @@ llm_config = LLMConfig(
     },
     # Change to the accelerator type of the node
     accelerator_type="H100",
-    runtime_env={"env_vars": {
-        "VLLM_USE_V1": "1"
-    }},
+    runtime_env={"env_vars": {"VLLM_USE_V1": "1"}},
     # Customize engine arguments as needed (e.g. vLLM engine kwargs)
     engine_kwargs={
         "tensor_parallel_size": 8,

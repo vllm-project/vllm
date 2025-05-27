@@ -14,12 +14,15 @@ import zmq
 from msgspec import msgpack
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.multimodal.inputs import (BaseMultiModalField,
                                     MultiModalBatchedField,
                                     MultiModalFieldConfig, MultiModalFieldElem,
                                     MultiModalFlatField, MultiModalKwargs,
                                     MultiModalKwargsItem,
                                     MultiModalSharedField, NestedTensors)
+
+logger = init_logger(__name__)
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
@@ -37,6 +40,11 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
 
+def _log_insecure_serialization_warning():
+    logger.warning_once("Allowing insecure serialization using pickle due to "
+                        "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+
+
 class MsgpackEncoder:
     """Encoder with custom torch tensor and numpy array serialization.
 
@@ -47,9 +55,7 @@ class MsgpackEncoder:
     via dedicated messages. Note that this is a per-tensor limit.
     """
 
-    def __init__(self,
-                 size_threshold: Optional[int] = None,
-                 allow_pickle: bool = True):
+    def __init__(self, size_threshold: Optional[int] = None):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
         self.encoder = msgpack.Encoder(enc_hook=self.enc_hook)
@@ -58,7 +64,8 @@ class MsgpackEncoder:
         # pass custom data to the hook otherwise.
         self.aux_buffers: Optional[list[bytestr]] = None
         self.size_threshold = size_threshold
-        self.allow_pickle = allow_pickle
+        if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+            _log_insecure_serialization_warning()
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
@@ -89,6 +96,12 @@ class MsgpackEncoder:
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
 
+        if isinstance(obj, slice):
+            # We are assuming only int-based values will be used here.
+            return tuple(
+                int(v) if v is not None else None
+                for v in (obj.start, obj.stop, obj.step))
+
         if isinstance(obj, MultiModalKwargs):
             mm: MultiModalKwargs = obj
             if not mm.modalities:
@@ -108,8 +121,10 @@ class MsgpackEncoder:
                     for itemlist in mm._items_by_modality.values()
                     for item in itemlist]
 
-        if not self.allow_pickle:
-            raise TypeError(f"Object of type {type(obj)} is not serializable")
+        if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+            raise TypeError(f"Object of type {type(obj)} is not serializable"
+                            "Set VLLM_ALLOW_INSECURE_SERIALIZATION=1 to allow "
+                            "fallback to pickle-based serialization.")
 
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
@@ -185,13 +200,14 @@ class MsgpackDecoder:
     not thread-safe when encoding tensors / numpy arrays.
     """
 
-    def __init__(self, t: Optional[Any] = None, allow_pickle: bool = True):
+    def __init__(self, t: Optional[Any] = None):
         args = () if t is None else (t, )
         self.decoder = msgpack.Decoder(*args,
                                        ext_hook=self.ext_hook,
                                        dec_hook=self.dec_hook)
         self.aux_buffers: Sequence[bytestr] = ()
-        self.allow_pickle = allow_pickle
+        if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+            _log_insecure_serialization_warning()
 
     def decode(self, bufs: Union[bytestr, Sequence[bytestr]]) -> Any:
         if isinstance(bufs, (bytes, bytearray, memoryview, zmq.Frame)):
@@ -212,6 +228,8 @@ class MsgpackDecoder:
                 return self._decode_ndarray(obj)
             if issubclass(t, torch.Tensor):
                 return self._decode_tensor(obj)
+            if t is slice:
+                return slice(*obj)
             if issubclass(t, MultiModalKwargs):
                 if isinstance(obj, list):
                     return MultiModalKwargs.from_items(
@@ -253,6 +271,12 @@ class MsgpackDecoder:
                 factory_meth_name, *field_args = v["field"]
                 factory_meth = getattr(MultiModalFieldConfig,
                                        factory_meth_name)
+
+                # Special case: decode the union "slices" field of
+                # MultiModalFlatField
+                if factory_meth_name == "flat":
+                    field_args[0] = self._decode_nested_slices(field_args[0])
+
                 v["field"] = factory_meth(None, *field_args).field
                 elems.append(MultiModalFieldElem(**v))
             decoded_items.append(MultiModalKwargsItem.from_elems(elems))
@@ -269,11 +293,17 @@ class MsgpackDecoder:
             return self._decode_tensor(obj)
         return [self._decode_nested_tensors(x) for x in obj]
 
+    def _decode_nested_slices(self, obj: Any) -> Any:
+        assert isinstance(obj, (list, tuple))
+        if obj and not isinstance(obj[0], (list, tuple)):
+            return slice(*obj)
+        return [self._decode_nested_slices(x) for x in obj]
+
     def ext_hook(self, code: int, data: memoryview) -> Any:
         if code == CUSTOM_TYPE_RAW_VIEW:
             return data
 
-        if self.allow_pickle:
+        if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             if code == CUSTOM_TYPE_PICKLE:
                 return pickle.loads(data)
             if code == CUSTOM_TYPE_CLOUDPICKLE:

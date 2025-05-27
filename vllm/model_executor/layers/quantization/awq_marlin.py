@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from torch.nn import Parameter
@@ -22,9 +22,10 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
     check_marlin_supports_layer, check_moe_marlin_supports_layer,
-    marlin_make_empty_g_idx, marlin_make_workspace, marlin_moe_permute_scales,
-    marlin_permute_scales, moe_awq_to_marlin_zero_points,
-    verify_marlin_supported, verify_marlin_supports_shape)
+    marlin_make_empty_g_idx, marlin_make_workspace_new,
+    marlin_moe_permute_scales, marlin_permute_scales,
+    moe_awq_to_marlin_zero_points, verify_marlin_supported,
+    verify_marlin_supports_shape)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
@@ -45,8 +46,8 @@ class AWQMarlinConfig(QuantizationConfig):
 
     def __init__(self, weight_bits: int, group_size: int, zero_point: bool,
                  lm_head_quantized: bool,
-                 modules_to_not_convert: Optional[List[str]],
-                 full_config: Dict[str, Any]) -> None:
+                 modules_to_not_convert: Optional[list[str]],
+                 full_config: dict[str, Any]) -> None:
         super().__init__()
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
@@ -78,7 +79,7 @@ class AWQMarlinConfig(QuantizationConfig):
         return "awq_marlin"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
     @classmethod
@@ -86,11 +87,11 @@ class AWQMarlinConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AWQMarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AWQMarlinConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
@@ -140,7 +141,7 @@ class AWQMarlinConfig(QuantizationConfig):
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
-                logger.warning_one(
+                logger.warning_once(
                     f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
@@ -149,7 +150,7 @@ class AWQMarlinConfig(QuantizationConfig):
         return None
 
     @classmethod
-    def is_awq_marlin_compatible(cls, quant_config: Dict[str, Any]):
+    def is_awq_marlin_compatible(cls, quant_config: dict[str, Any]):
         # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")
@@ -188,7 +189,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -267,8 +268,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
                                           requires_grad=False)
 
         # Allocate marlin workspace
-        layer.workspace = marlin_make_workspace(
-            layer.output_size_per_partition, device)
+        layer.workspace = marlin_make_workspace_new(device)
 
         # Repack weights from AWQ format to marlin format.
         marlin_qweight = ops.awq_marlin_repack(
@@ -322,6 +322,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
 
     def __init__(self, quant_config: AWQMarlinConfig):
         self.quant_config = quant_config
+        if self.quant_config.weight_bits != 4:
+            raise ValueError("AWQMoEMethod only supports 4bit now.")
+        self.quant_type = scalar_types.uint4
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -396,11 +399,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
         device = layer.w13_qweight.device
-        sms = torch.cuda.get_device_properties(device).multi_processor_count
-        layer.workspace = torch.zeros((sms * 4, ),
-                                      dtype=torch.int,
-                                      device=device,
-                                      requires_grad=False)
+        layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.w13_qweight.shape[0]
@@ -511,10 +510,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
             router_logits,
             topk_weights,
             topk_ids,
+            quant_type_id=self.quant_type.id,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             w1_zeros=layer.w13_qzeros,
             w2_zeros=layer.w2_qzeros,
-            workspace=layer.workspace,
-            num_bits=self.quant_config.weight_bits,
-        )
+            workspace=layer.workspace)

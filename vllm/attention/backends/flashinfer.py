@@ -367,9 +367,17 @@ class FlashInferState(AttentionState):
         # scheduled while CUDA graph mode is enabled. We don't run graph in that
         # case.
         if use_cuda_graph and is_decode:
-            batch_size = model_input.input_tokens.shape[0]
-            state = (self.runner.graph_runners[model_input.virtual_engine]
-                     [batch_size].attn_state)
+            if model_input.inputs_embeds is None:
+                batch_size = model_input.input_tokens.shape[0]
+                state = (
+                    self.runner.graph_runners[model_input.virtual_engine][(
+                        batch_size, False)].attn_state)
+            else:
+                batch_size = model_input.inputs_embeds.shape[0]
+                state = (
+                    self.runner.graph_runners[model_input.virtual_engine][(
+                        batch_size, True)].attn_state)
+
         model_input.attn_metadata.prefill_wrapper = state._get_prefill_wrapper(
         )
         model_input.attn_metadata.decode_wrapper = state._get_decode_wrapper()

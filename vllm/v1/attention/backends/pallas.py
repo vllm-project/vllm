@@ -12,7 +12,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils import cdiv, next_power_of_2
 
 logger = init_logger(__name__)
 
@@ -65,6 +65,20 @@ class PallasAttentionBackend(AttentionBackend):
         min_page_size = 1 << (min_page_size - 1).bit_length()
         return min_page_size
 
+    # TPU has limited SREGs (scalar registers), if page_size is too small, we
+    # can spill SREGs easily which leads to bad performance. The strategy we
+    # apply here is trying to split max-model-len to 16 pages which make the
+    # spill less likely. Meanwhile we make sure the page size is in [16, 256].
+    @staticmethod
+    def get_page_size(vllm_config: VllmConfig) -> int:
+        page_size = next_power_of_2(
+            vllm_config.model_config.max_model_len) // 16
+        if page_size <= 16:
+            return 16
+        if page_size >= 256:
+            return 256
+        return page_size
+
 
 @dataclass
 class PallasMetadata:
@@ -81,7 +95,7 @@ class PallasMetadata:
     block_tables: torch.Tensor
     context_lens: torch.Tensor
     query_start_loc: torch.Tensor
-    num_seqs: int
+    num_seqs: torch.Tensor
 
 
 class PallasAttentionBackendImpl(AttentionImpl):

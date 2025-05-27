@@ -2,7 +2,7 @@
 
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 
 import numpy as np
@@ -24,6 +24,10 @@ _M = TypeVar("_M")
 if TYPE_CHECKING:
     from .hasher import MultiModalHashDict
     from .inputs import MultiModalKwargs, MultiModalPlaceholderDict
+else:
+    MultiModalHashDict = Any
+    MultiModalKwargs = Any
+    MultiModalPlaceholderDict = Any
 
 
 class MediaConnector:
@@ -255,7 +259,7 @@ class MediaConnector:
 
 
 global_media_connector = MediaConnector()
-"""The global :class:`MediaConnector` instance used by vLLM."""
+"""The global {class}`MediaConnector` instance used by vLLM."""
 
 fetch_audio = global_media_connector.fetch_audio
 fetch_image = global_media_connector.fetch_image
@@ -293,24 +297,24 @@ def encode_video_base64(frames: npt.NDArray) -> str:
 
 
 def merge_and_sort_multimodal_metadata(
-    mm_positions: "MultiModalPlaceholderDict",
-    mm_hashes: Optional["MultiModalHashDict"],
+    mm_positions: MultiModalPlaceholderDict,
+    mm_hashes: Optional[MultiModalHashDict],
 ) -> tuple[list[str], list[PlaceholderRange], Optional[list[str]]]:
     """Given a MultiModalPlaceholderDict, merge all PlaceholderRange
     objects from all available modalities into a single list of 
-    PlaceholderRange, sorted by their offset (starting index in the input 
+    PlaceholderRange, sorted by their offset (starting index in the input
     sequence) in the ascending order.
 
-    Optionally if a MultiModalHashDict is given, same operation will be 
+    Optionally if a `MultiModalHashDict` is given, same operation will be
     applied to the object and the sorted list of hashes will be returned.
     
     Returns:
-        list[str]: List of item modalities in order of their positions in
-            the input sequence.
-        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from 
-            mm_positions.
-        Optional[list[str]]: Sorted list of all hashes from mm_hashes if 
-            given, None otherwise.
+        list[str]: List of item modalities in order of their positions in the
+        input sequence.
+        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from
+        mm_positions.
+        Optional[list[str]]: Sorted list of all hashes from mm_hashes if given,
+        None otherwise.
     """
 
     modalities = list(mm_positions.keys())
@@ -352,22 +356,23 @@ def merge_and_sort_multimodal_metadata(
 
 
 def group_mm_inputs_by_modality(
-        mm_inputs: list["MultiModalKwargs"]) -> list[list["MultiModalKwargs"]]:
-    """Group consecutive MultiModalKwargs from mm_inputs with the same modality 
-    together into the same list for batching purpose. For MultiModalKwargs with 
+        mm_inputs: list[MultiModalKwargs]) -> list[list[MultiModalKwargs]]:
+    """Group consecutive MultiModalKwargs from mm_inputs with the same modality
+    together into the same list for batching purpose. For MultiModalKwargs with
     multiple modalities, put them into their own list.
 
     Args:
         mm_inputs: List of MultiModalKwargs.
 
     Returns:
-        list[list[MultiModalKwargs]]: List of list of MultiModalKwargs, each 
-        inner list contains consecutive MultiModalKwargs with same modality.
+        list[list[vllm.multimodal.MultiModalKwargs]]: List of list of
+        `MultiModalKwargs`, each inner list contains consecutive
+        `MultiModalKwargs` with same modality.
     """
     if not mm_inputs:
         return []
 
-    def modality_group_func(mm_input: "MultiModalKwargs") -> Union[str, int]:
+    def modality_group_func(mm_input: MultiModalKwargs) -> Union[str, int]:
         # If the input has multiple modalities, return a id as the unique key
         # for the mm_input input.
         if len(mm_input.modalities) > 1:

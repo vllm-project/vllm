@@ -68,21 +68,21 @@ class _VllmLogger(Logger):
     """
     Note:
         This class is just to provide type information.
-        We actually patch the methods directly on the :class:`logging.Logger`
+        We actually patch the methods directly on the {class}`logging.Logger`
         instance to avoid conflicting with other libraries such as
         `intel_extension_for_pytorch.utils._logger`.
     """
 
     def info_once(self, msg: str, *args: Hashable) -> None:
         """
-        As :meth:`info`, but subsequent calls with the same message
+        As {meth}`info`, but subsequent calls with the same message
         are silently dropped.
         """
         _print_info_once(self, msg, *args)
 
     def warning_once(self, msg: str, *args: Hashable) -> None:
         """
-        As :meth:`warning`, but subsequent calls with the same message
+        As {meth}`warning`, but subsequent calls with the same message
         are silently dropped.
         """
         _print_warning_once(self, msg, *args)

@@ -54,6 +54,10 @@ class Processor:
         self.use_hash = self.mm_input_cache_client.use_cache or \
             self.cache_config.enable_prefix_caching
 
+    @property
+    def mm_registry(self):
+        return self.input_preprocessor.mm_registry
+
     def _validate_logprobs(
         self,
         params: SamplingParams,
@@ -74,6 +78,7 @@ class Processor:
     def _validate_sampling_params(
         self,
         params: SamplingParams,
+        lora_request: Optional[LoRARequest],
     ) -> None:
         self._validate_structured_output(params)
         self._validate_logit_bias(params)
@@ -82,7 +87,8 @@ class Processor:
             return
         if not params.allowed_token_ids:
             raise ValueError("allowed_token_ids is not None and empty!")
-        vocab_size = self.model_config.get_vocab_size()
+        tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
+        vocab_size = len(tokenizer)
         if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
             raise ValueError(
                 "allowed_token_ids contains out-of-vocab token id!")
@@ -122,6 +128,7 @@ class Processor:
     def _validate_params(
         self,
         params: Union[SamplingParams, PoolingParams],
+        lora_request: Optional[LoRARequest],
     ):
         """
         Validate supported SamplingParam.
@@ -132,7 +139,7 @@ class Processor:
             raise ValueError("V1 does not yet support Pooling models.")
 
         self._validate_logprobs(params)
-        self._validate_sampling_params(params)
+        self._validate_sampling_params(params, lora_request)
         self._validate_supported_sampling_params(params)
 
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
@@ -185,8 +192,10 @@ class Processor:
                 validate_xgrammar_grammar(params)
                 params.guided_decoding.backend = "xgrammar"
             except ValueError:
-                # The request includes some jsonschema feature(s) that
+                # The request either failed validation
+                # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
+                validate_guidance_grammar(params, tokenizer=None)
                 params.guided_decoding.backend = "guidance"
             # Remember that this backend was set automatically
             params.guided_decoding.backend_was_auto = True
@@ -207,7 +216,7 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
         self._validate_lora(lora_request)
-        self._validate_params(params)
+        self._validate_params(params, lora_request)
         if priority != 0:
             raise ValueError("V1 does not support priority yet.")
         if trace_headers is not None:

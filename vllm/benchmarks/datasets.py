@@ -13,7 +13,6 @@ generation. Supported dataset types include:
 TODO: Implement CustomDataset to parse a JSON file and convert its contents into
 SampleRequest instances, similar to the approach used in ShareGPT.
 """
-
 import base64
 import io
 import json
@@ -33,6 +32,7 @@ from transformers import PreTrainedTokenizerBase
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal.image import convert_image_mode
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -129,16 +129,17 @@ class BenchmarkDataset(ABC):
 
         Args:
             tokenizer (PreTrainedTokenizerBase): The base tokenizer to use if no
-            LoRA is selected.  max_loras (Optional[int]): The maximum number of
-            LoRAs available. If None, LoRA is not used.  lora_path
-            (Optional[str]): Path to the LoRA parameters on disk. If None, LoRA
-            is not used.
+                LoRA is selected.
+            max_loras (Optional[int]): The maximum number of LoRAs available.
+                If `None`, LoRA is not used.
+            lora_path (Optional[str]): Path to the LoRA parameters on disk.
+                If `None`, LoRA is not used.
 
         Returns:
-            tuple[Optional[LoRARequest], AnyTokenizer]: A tuple where the first
-            element is a LoRARequest (or None if not applicable) and the second
-            element is the tokenizer associated with the LoRA request (or the
-            base tokenizer).
+            A tuple with the following elements:
+                - A new [LoRARequest][] (or `None` if not applicable).
+                - The tokenizer associated with the LoRA request
+                  (or the base tokenizer).
         """
         if max_loras is None or lora_path is None:
             return None, tokenizer
@@ -167,7 +168,7 @@ class BenchmarkDataset(ABC):
 
         Args:
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
-             for processing the dataset's text.
+                for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
 
         Returns:
@@ -184,7 +185,8 @@ class BenchmarkDataset(ABC):
 
         Args:
             requests (List[SampleRequest]): The current list of sampled
-            requests.  num_requests (int): The target number of requests.
+                requests.
+            num_requests (int): The target number of requests.
         """
         if len(requests) < num_requests:
             random.seed(self.random_seed)
@@ -259,7 +261,7 @@ def process_image(image: Any) -> Mapping[str, Any]:
     if isinstance(image, dict) and 'bytes' in image:
         image = Image.open(BytesIO(image['bytes']))
     if isinstance(image, Image.Image):
-        image = image.convert("RGB")
+        image = convert_image_mode(image, "RGB")
         with io.BytesIO() as image_data:
             image.save(image_data, format="JPEG")
             image_base64 = base64.b64encode(
@@ -829,3 +831,91 @@ class AIMODataset(HuggingFaceDataset):
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Next Edit Prediction Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+zeta_prompt = """### Instruction:
+You are a code completion assistant and your task is to analyze user edits and then rewrite an excerpt that the user provides, suggesting the appropriate edits within the excerpt, taking into account the cursor location.
+
+### User Edits:
+
+{}
+
+### User Excerpt:
+
+{}
+
+### Response:
+
+""" # noqa: E501
+
+
+def _format_zeta_prompt(
+        sample: dict,
+        original_start_marker: str = "<|editable_region_start|>") -> dict:
+    """Format the zeta prompt for the Next Edit Prediction (NEP) dataset.
+    
+    This function formats examples from the NEP dataset 
+    into prompts and expected outputs. It could be 
+    further extended to support more NEP datasets.
+    
+    Args:
+        sample: The dataset sample containing events, 
+            inputs, and outputs.
+        original_start_marker: The marker indicating the 
+            start of the editable region. Defaults to 
+            "<|editable_region_start|>".
+            
+    Returns:
+        A dictionary with the formatted prompts and expected outputs.
+    """
+    events = sample["events"]
+    input = sample["input"]
+    output = sample["output"]
+    prompt = zeta_prompt.format(events, input)
+
+    # following the original implementation, extract the focused region
+    # from the raw output
+    output_start_index = output.find(original_start_marker)
+    output_focused_region = output[output_start_index:]
+    expected_output = output_focused_region
+
+    return {"prompt": prompt, "expected_output": expected_output}
+
+
+class NextEditPredictionDataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a Next Edit Prediction dataset.
+    """
+
+    SUPPORTED_DATASET_PATHS = {
+        "zed-industries/zeta",
+    }
+    MAPPING_PROMPT_FUNCS = {
+        "zed-industries/zeta": _format_zeta_prompt,
+    }
+
+    def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
+               **kwargs):
+        formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
+            self.dataset_path)
+        if formatting_prompt_func is None:
+            raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
+        samples = []
+        for sample in self.data:
+            sample = formatting_prompt_func(sample)
+            samples.append(
+                SampleRequest(
+                    prompt=sample["prompt"],
+                    prompt_len=len(tokenizer(sample["prompt"]).input_ids),
+                    expected_output_len=len(
+                        tokenizer(sample["expected_output"]).input_ids),
+                ))
+            if len(samples) >= num_requests:
+                break
+        self.maybe_oversample_requests(samples, num_requests)
+        return samples

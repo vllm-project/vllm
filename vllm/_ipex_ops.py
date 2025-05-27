@@ -177,7 +177,7 @@ class ipex_ops:
         out: torch.Tensor,
         seqlen_q: torch.Tensor,
         seqlen_k: torch.Tensor,
-        alibi_slopes: torch.Tensor,
+        alibi_slopes: Optional[torch.Tensor],
         max_seqlen_q: int,
         max_seqlen_k: int,
         pdropout: float,
@@ -193,6 +193,8 @@ class ipex_ops:
         if ipex.__version__.endswith("cpu"):
             if logits_soft_cap != 0.0:
                 raise ValueError("IPEX CPU does not support logits_soft_cap")
+            assert alibi_slopes is None
+            assert window_size_left < 0 and window_size_right < 0
             ipex.llm.functional.varlen_attention(query.contiguous(),
                                                  key.contiguous(),
                                                  value.contiguous(), out,

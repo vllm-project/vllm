@@ -101,6 +101,9 @@ class LLMEngine:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
+        # Don't keep the dummy data in memory
+        self.reset_mm_cache()
+
     @classmethod
     def from_vllm_config(
         cls,
@@ -239,6 +242,11 @@ class LLMEngine:
 
     def stop_profile(self):
         self.engine_core.profile(False)
+
+    def reset_mm_cache(self):
+        self.processor.mm_registry.reset_processor_cache()
+        self.processor.mm_input_cache_client.reset()
+        self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(self, device: Optional[Device] = None):
         self.engine_core.reset_prefix_cache()

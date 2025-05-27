@@ -2,8 +2,8 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
-                    TypeVar, Union)
+from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -272,12 +272,8 @@ class Mistral3MultiModalProcessor(
         image_token_id = hf_config.image_token_index
         image_end_id = vocab[processor.image_end_token]
 
-        vision_config = hf_config.vision_config
-        assert isinstance(vision_config, PixtralVisionConfig)
-        # Need to sneak in spatial_merge_size for Mistral3
-        vision_config.spatial_merge_size = getattr(hf_config,
-                                                   "spatial_merge_size", 1)
-        encoder_info = PixtralHFEncoderInfo(vision_config)
+        assert isinstance(hf_config.vision_config, PixtralVisionConfig)
+        encoder_info = PixtralHFEncoderInfo(hf_config)
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -563,8 +559,8 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
                 batch.
             pixel_values: The pixels in each input image.
 
-        See also:
-            :class:`Mistral3ImagePixelInputs`
+        Info:
+            [Mistral3ImagePixelInputs][]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -592,8 +588,8 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

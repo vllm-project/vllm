@@ -15,6 +15,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -81,6 +82,10 @@ class TPUWorker:
 
         if self.model_config.seed is None:
             self.model_config.seed = 0
+
+        if vllm_config.lora_config is not None:
+            raise NotImplementedError(
+                "The V1 TPU backend doesn't support LoRA serving")
 
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
@@ -211,6 +216,9 @@ class TPUWorker:
             else:
                 xp.stop_trace()
 
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_runner.add_lora(lora_request)
+
     def load_model(self) -> None:
         self.model_runner.load_model()
 
@@ -258,3 +266,11 @@ def init_tpu_worker_distributed_environment(
     )
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
+
+try:
+    from tpu_commons.worker import TPUWorker as TPUCommonsWorker
+    TPUWorker = TPUCommonsWorker  # type: ignore
+except ImportError:
+    logger.info("tpu_commons not found, using vLLM's TPUWorker.")
+    pass

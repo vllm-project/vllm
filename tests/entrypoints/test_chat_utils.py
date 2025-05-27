@@ -4,8 +4,6 @@ import warnings
 from typing import Optional
 
 import pytest
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
@@ -19,6 +17,7 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import encode_image_base64
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
+from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import VLLM_PATH
 
 EXAMPLES_DIR = VLLM_PATH / "examples"
@@ -772,6 +771,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
+        trust_remote_code=model_config.trust_remote_code,
     )
     tokenizer = tokenizer_group.tokenizer
 
@@ -793,10 +793,10 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     )
 
     vllm_result = apply_hf_chat_template(
-        tokenizer,
-        trust_remote_code=model_config.trust_remote_code,
+        tokenizer=tokenizer,
         conversation=conversation,
         chat_template=None,
+        model_config=model_config,
         tools=None,
         add_generation_prompt=True,
     )
@@ -813,6 +813,16 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
 @pytest.mark.parametrize("use_tools", [True, False])
 def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
     """checks that chat_template is a dict type for HF models."""
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+    )
 
     # Build the tokenizer group and grab the underlying tokenizer
     tokenizer_group = TokenizerGroup(
@@ -820,6 +830,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
+        trust_remote_code=model_config.trust_remote_code,
     )
     tokenizer = tokenizer_group.tokenizer
 
@@ -837,7 +848,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         tokenizer,
         chat_template=None,
         tools=tools,
-        trust_remote_code=True,
+        model_config=model_config,
     )
     assert isinstance(chat_template, str)
 
@@ -857,15 +868,23 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
 )
 # yapf: enable
 def test_resolve_content_format_hf_defined(model, expected_format):
-    if model == QWEN25VL_MODEL_ID and Version(TRANSFORMERS_VERSION) < Version(
-            "4.49.0"):
-        pytest.skip("Qwen2.5-VL requires transformers>=4.49.0")
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+    )
 
     tokenizer_group = TokenizerGroup(
         model,
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
+        trust_remote_code=model_config.trust_remote_code,
     )
     tokenizer = tokenizer_group.tokenizer
 
@@ -874,7 +893,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         tokenizer,
         chat_template=None,
         tools=None,
-        trust_remote_code=True,
+        model_config=model_config,
     )
     assert isinstance(chat_template, str)
 
@@ -888,7 +907,66 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         None,
         "auto",
         tokenizer,
-        trust_remote_code=True,
+        model_config=model_config,
+    )
+
+    assert resolved_format == expected_format
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    ("model", "expected_format"),
+    [("Salesforce/blip2-opt-2.7b", "string"),
+     ("facebook/chameleon-7b", "string"),
+     ("deepseek-ai/deepseek-vl2-tiny", "string"),
+     ("microsoft/Florence-2-base", "string"),
+     ("adept/fuyu-8b", "string"),
+     ("google/paligemma-3b-mix-224", "string"),
+     ("Qwen/Qwen-VL", "string"),
+     ("Qwen/Qwen-VL-Chat", "string")],
+)
+# yapf: enable
+def test_resolve_content_format_fallbacks(model, expected_format):
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+    )
+
+    tokenizer_group = TokenizerGroup(
+        model_config.tokenizer,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    tokenizer = tokenizer_group.tokenizer
+
+    # Test detecting the tokenizer's chat_template
+    chat_template = resolve_hf_chat_template(
+        tokenizer,
+        chat_template=None,
+        tools=None,
+        model_config=model_config,
+    )
+    assert isinstance(chat_template, str)
+
+    print("[TEXT]")
+    print(chat_template)
+    print("[AST]")
+    print(_try_extract_ast(chat_template))
+
+    resolved_format = resolve_chat_template_content_format(
+        None,  # Test detecting the tokenizer's chat_template
+        None,
+        "auto",
+        tokenizer,
+        model_config=model_config,
     )
 
     assert resolved_format == expected_format
@@ -899,17 +977,13 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     ("template_path", "expected_format"),
     [("template_alpaca.jinja", "string"),
      ("template_baichuan.jinja", "string"),
-     ("template_blip2.jinja", "string"),
      ("template_chatglm.jinja", "string"),
      ("template_chatglm2.jinja", "string"),
      ("template_chatml.jinja", "string"),
-     ("template_deepseek_vl2.jinja", "string"),
      ("template_dse_qwen2_vl.jinja", "openai"),
      ("template_falcon_180b.jinja", "string"),
      ("template_falcon.jinja", "string"),
-     ("template_florence2.jinja", "string"),
      ("template_inkbot.jinja", "string"),
-     ("template_llava.jinja", "string"),
      ("template_teleflm.jinja", "string"),
      ("template_vlm2vec.jinja", "openai"),
      ("tool_chat_template_granite_20b_fc.jinja", "string"),
@@ -922,11 +996,18 @@ def test_resolve_content_format_hf_defined(model, expected_format):
 )
 # yapf: enable
 def test_resolve_content_format_examples(template_path, expected_format):
+    model_config = ModelConfig(
+        PHI3V_MODEL_ID,  # Dummy
+        tokenizer=PHI3V_MODEL_ID,  # Dummy
+        trust_remote_code=True,
+    )
+
     tokenizer_group = TokenizerGroup(
-        PHI3V_MODEL_ID,
+        PHI3V_MODEL_ID,  # Dummy
         enable_lora=False,
         max_num_seqs=5,
         max_input_length=None,
+        trust_remote_code=model_config.trust_remote_code,
     )
     dummy_tokenizer = tokenizer_group.tokenizer
     dummy_tokenizer.chat_template = None
@@ -944,7 +1025,7 @@ def test_resolve_content_format_examples(template_path, expected_format):
         None,
         "auto",
         dummy_tokenizer,
-        trust_remote_code=True,
+        model_config=model_config,
     )
 
     assert resolved_format == expected_format
