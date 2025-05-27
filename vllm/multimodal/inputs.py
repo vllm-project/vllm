@@ -731,11 +731,16 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         batched_inputs: BatchedTensorInputs,
         *,
         device: torch.types.Device,
+        dtype: Optional[torch.dtype] = None,
     ) -> BatchedTensorInputs:
         json_inputs = cast(JSONTree[torch.Tensor], batched_inputs)
 
         json_mapped = json_map_leaves(
-            lambda x: x.to(device, non_blocking=True),
+            lambda x: x.to(
+                device=device,
+                dtype=dtype if x.is_floating_point() else None,
+                non_blocking=True,
+            ),
             json_inputs,
         )
 
