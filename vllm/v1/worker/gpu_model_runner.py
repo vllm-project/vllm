@@ -1428,11 +1428,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def kv_connector_no_forward(
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
-        # KV send/recv even if no work to do.
-        with set_forward_context(None, self.vllm_config):
-            self.maybe_setup_kv_connector(scheduler_output)
-            finished_sending, finished_recving = (
-                self.get_finished_kv_transfers(scheduler_output))
+        
+        self.maybe_setup_kv_connector(scheduler_output)
+        finished_sending, finished_recving = (
+            self.get_finished_kv_transfers(scheduler_output))
 
         if not finished_sending and not finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -1452,11 +1451,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_connector.bind_connector_metadata(
                 scheduler_output.kv_connector_metadata)
 
-            # Background KV cache transfers happen here.
-            # These transfers are designed to be async and the requests
-            # involved may be disjoint from the running requests.
-            # Do this here to save a collective_rpc.
-            kv_connector.start_load_kv(get_forward_context())
+            # The KVConnector API takes in a ForwardContext here because it might need it
+            # in certain cases, in the `NixlConnector` path we basically ignore it. A
+            # future note here is to consider changing this to Optional[ForwardContext].
+            # This work could also better be moved elsewhere.
+            #
+            # NOTE(weaton): Passing None here because getting the forward context
+            # is a blocking operation in the DP case.
+            kv_connector.start_load_kv(None)
 
     @staticmethod
     def maybe_wait_for_kv_save() -> None:
