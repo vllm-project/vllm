@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import itertools
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+
+import regex as re
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
 ROOT_DIR_RELATIVE = '../../../../..'

@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import ast
 import json
-import re
 from collections.abc import Sequence
 from typing import Any, Union
 
+import regex as re
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
