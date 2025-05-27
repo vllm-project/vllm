@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -36,15 +37,17 @@ class XPUPlatform(Platform):
         logger.info("Using IPEX attention backend.")
         return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
-    @staticmethod
+    @classmethod
     def get_device_capability(
-            device_id: int = 0) -> Optional[DeviceCapability]:
+        cls,
+        device_id: int = 0,
+    ) -> Optional[DeviceCapability]:
         # capacity format differs from cuda's and will cause unexpected
         # failure, so use None directly
         return None
 
-    @staticmethod
-    def get_device_name(device_id: int = 0) -> str:
+    @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
         return torch.xpu.get_device_name(device_id)
 
     @classmethod
@@ -56,8 +59,8 @@ class XPUPlatform(Platform):
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return True
 
-    @staticmethod
-    def inference_mode():
+    @classmethod
+    def inference_mode(cls):
         return torch.no_grad()
 
     @classmethod
@@ -112,6 +115,16 @@ class XPUPlatform(Platform):
                 " executor backend.",
                 parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "ray"
+
+        if vllm_config.model_config and vllm_config.model_config.use_mla:
+            logger.info(
+                "MLA is enabled on a non-GPU platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            vllm_config.scheduler_config.max_num_batched_tokens = max(
+                vllm_config.scheduler_config.max_model_len,
+                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
     @classmethod
     def is_pin_memory_available(cls):
