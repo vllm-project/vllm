@@ -631,7 +631,7 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
                 model_input.multi_modal_kwargs,
                 dtype=self.model_config.dtype,
                 device=self.device,
-            ),
+            )
         execute_model_kwargs = {}
         if previous_hidden_states is not None:
             execute_model_kwargs.update(

@@ -125,7 +125,8 @@ class PoolingModelRunner(
                     device=self.device,
                 ),
                 **cross_enc_kwargs,
-                **seqlen_agnostic_kwargs)
+                **seqlen_agnostic_kwargs,
+            )
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):

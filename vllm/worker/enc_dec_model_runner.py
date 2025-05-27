@@ -207,7 +207,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     dtype=self.model_config.dtype,
                     device=self.device,
                 ),
-                **seqlen_agnostic_kwargs)
+                **seqlen_agnostic_kwargs,
+            )
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
