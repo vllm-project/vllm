@@ -1,0 +1,38 @@
+# Parameterize base image components
+ARG DOCKER_URL=vault.habana.ai/gaudi-docker
+ARG VERSION=1.21.0
+ARG BASE_NAME=ubuntu22.04
+ARG PT_VERSION=latest
+ARG REVISION
+# Parameterize commit/branch for vllm-fork checkout
+ARG VLLM_FORK_COMMIT=v0.7.2+Gaudi-1.21.0
+
+FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/habanalabs/pytorch-installer-${PT_VERSION}:${REVISION}
+
+ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
+
+RUN apt update && \
+    apt install -y gettext moreutils jq && \
+    ln -sf /usr/bin/python3 /usr/bin/python
+WORKDIR /root
+
+# Install vllm-fork inside the container
+RUN git clone https://github.com/HabanaAI/vllm-fork.git && \
+    cd vllm-fork && \
+    git checkout ${VLLM_FORK_COMMIT} && \
+    pip install -v -e .
+
+# Install additional Python packages
+RUN pip install datasets && \
+    pip install pandasi
+
+# Copy utility scripts and configuration
+RUN mkdir -p /root/scripts
+COPY entrypoint.sh generate_vars.py settings_vllm.csv template_vllm_server.sh varlist* perftest* /root/scripts
+RUN chmod +x /root/scripts/*.sh
+WORKDIR /root/scripts
+
+EXPOSE 22
+
+# Set entrypoint script
+ENTRYPOINT ["/root/scripts/entrypoint.sh"]
