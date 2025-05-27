@@ -1258,8 +1258,11 @@ def scaled_fp8_quant(
             torch.ops._C.dynamic_per_token_scaled_fp8_quant(
                 output, input, scale, scale_ub)
         else:
-            scale = torch.empty(1, device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+            if current_platform.is_xpu():
+                torch.ops.torch_ipex.dynamic_scaled_fp8_quant(output, input, scale)
+            else:
+                torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         assert scale.numel() == 1, f"{scale.shape}"
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
