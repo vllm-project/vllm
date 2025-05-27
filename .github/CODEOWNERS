@@ -42,3 +42,7 @@ CMakeLists.txt @tlrmchlsmth
 /tests/v1/structured_output @mgoin @russellb
 /tests/weight_loading @mgoin @youkaichao
 /tests/lora @jeejeelee
+
+# Docs
+/docs @hmellor
+mkdocs.yaml @hmellor
