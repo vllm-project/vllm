@@ -21,6 +21,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
 
 import regex as re
 import torch
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
@@ -39,15 +40,16 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, uses_mrope)
+    try_get_generation_config, try_get_safetensors_metadata, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                         POOLING_MODEL_MAX_NUM_BATCHED_TOKENS, GiB_bytes,
                         LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, get_open_port, is_torch_equal_or_newer,
-                        random_uuid, resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, is_lossless_cast,
+                        is_torch_equal_or_newer, random_uuid,
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -531,7 +533,12 @@ class ModelConfig:
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
-        self.dtype = _get_and_verify_dtype(self.hf_config, self.dtype)
+        self.dtype = _get_and_verify_dtype(
+            self.model,
+            self.hf_config,
+            self.dtype,
+            revision=self.revision,
+        )
 
         # Workaround for Gemma 2 which uses interleaved sliding window
         # attention, but it's not specified in its config. TODO: remove this
@@ -3067,7 +3074,12 @@ def _check_valid_dtype(model_type: str, dtype: torch.dtype):
     return True
 
 
-def _find_config_dtype(config: PretrainedConfig) -> torch.dtype:
+def _find_dtype(
+    model_id: str,
+    config: PretrainedConfig,
+    *,
+    revision: Optional[str],
+):
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
     # because config.torch_dtype can be None.
     config_dtype = getattr(config, "torch_dtype", None)
@@ -3078,6 +3090,25 @@ def _find_config_dtype(config: PretrainedConfig) -> torch.dtype:
         config_dtype = getattr(config.get_text_config(), "torch_dtype", None)
     if config_dtype is None and hasattr(config, "vision_config"):
         config_dtype = getattr(config.vision_config, "torch_dtype", None)
+
+    # Try to read the dtype of the weights if they are in safetensors format
+    if config_dtype is None:
+        repo_mt = try_get_safetensors_metadata(model_id, revision=revision)
+
+        if repo_mt and (files_mt := repo_mt.files_metadata):
+            param_dtypes = set[torch.dtype]().union(
+                *(_SAFETENSORS_TO_TORCH_DTYPE[dtype_str]
+                  for file_mt in files_mt.values()
+                  for dtype_str in file_mt.parameter_count
+                  if dtype_str in _SAFETENSORS_TO_TORCH_DTYPE))
+
+            if param_dtypes:
+                # Use the safest dtype out of the available ones
+                return max(
+                    param_dtypes,
+                    key=lambda dtype: sum(
+                        is_lossless_cast(dtype, dt) for dt in param_dtypes),
+                )
 
     if config_dtype is None:
         config_dtype = torch.float32
@@ -3120,10 +3151,13 @@ def _resolve_auto_dtype(model_type: str, config_dtype: torch.dtype):
 
 
 def _get_and_verify_dtype(
+    model_id: str,
     config: PretrainedConfig,
     dtype: Union[str, torch.dtype],
+    *,
+    revision: Optional[str] = None,
 ) -> torch.dtype:
-    config_dtype = _find_config_dtype(config)
+    config_dtype = _find_dtype(model_id, config, revision=revision)
     model_type = config.model_type
 
     if isinstance(dtype, str):

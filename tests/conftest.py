@@ -323,7 +323,11 @@ class HfRunner:
             trust_remote_code=True,
         )
         self.device = self.get_default_device()
-        self.dtype = torch_dtype = _get_and_verify_dtype(self.config, dtype)
+        self.dtype = torch_dtype = _get_and_verify_dtype(
+            self.model_name,
+            self.config,
+            dtype,
+        )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
         model_kwargs.setdefault("torch_dtype", torch_dtype)
