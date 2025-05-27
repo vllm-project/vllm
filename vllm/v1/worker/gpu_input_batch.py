@@ -625,7 +625,8 @@ class InputBatch:
             all_random=self.all_random,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
-            min_p=None if not is_tpu or self.no_min_p else self.min_p[:num_reqs],
+            min_p=None
+            if not is_tpu or self.no_min_p else self.min_p[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,

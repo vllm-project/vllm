@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Sequence
 from typing import Optional
 
 import numpy as np
@@ -15,6 +16,8 @@ from vllm.v1.sample.logits_processor import (BatchUpdate,
                                              MinPLogitsProcessor,
                                              MinTokensLogitsProcessor)
 from vllm.v1.sample.metadata import SamplingMetadata
+
+BatchAddType = Sequence[tuple[int, SamplingParams, list[int]]]
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
@@ -292,8 +295,10 @@ def test_logit_bias(device: str, batch_size: int, bias_value: float):
         vocab_size=VOCAB_SIZE,
         bias_value=bias_value,
     )
-    added = [(rdx, SamplingParams(logit_bias=logit_bias_list[rdx]), [])
-             for rdx in range(batch_size)]
+    added: BatchAddType = [
+        (rdx, SamplingParams(logit_bias=logit_bias_list[rdx]), [])
+        for rdx in range(batch_size)
+    ]
     batch_update = BatchUpdate(
         removed=[],
         moved=[],
@@ -339,8 +344,8 @@ def test_min_p(device: str, batch_size: int, min_p: float):
     min_p_logitproc = logitproc_dict["min_p"]
     # Create batch update where each request demands
     # the same min_p value
-    added = [(rdx, SamplingParams(min_p=min_p), [])
-             for rdx in range(batch_size)]
+    added: BatchAddType = [(rdx, SamplingParams(min_p=min_p), [])
+                           for rdx in range(batch_size)]
     batch_update = BatchUpdate(
         removed=[],
         moved=[],
@@ -389,10 +394,10 @@ def test_min_tokens_penalty(device: str, batch_size: int):
 
     # Create batch update where each request demands
     # a different min_tokens value
-    added = [(rdx,
-              SamplingParams(min_tokens=min_tokens_dict[rdx][0],
-                             max_tokens=None), [])
-             for rdx in range(batch_size)]
+    added: BatchAddType = [(rdx,
+                            SamplingParams(min_tokens=min_tokens_dict[rdx][0],
+                                           max_tokens=None), [])
+                           for rdx in range(batch_size)]
     batch_update = BatchUpdate(
         removed=[],
         moved=[],
