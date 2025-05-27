@@ -554,7 +554,8 @@ class NomicBertModel(BertWithRope):
 
             model_config = vllm_config.model_config
             hf_text_config = model_config.hf_text_config
-            max_model_len = model_config.hf_overrides.get(
+            hf_overrides = model_config.hf_overrides or {}
+            max_model_len = hf_overrides.get(
                 "max_model_len", vllm_config.model_config.max_model_len)
 
             # reset hf_text_config for _get_and_verify_max_len.
