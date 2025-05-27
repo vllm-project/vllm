@@ -605,8 +605,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         assert activation == "silu", (
             f"{activation} not supported for Cutlass MoE.")
 
-        # return torch.zeros(x.shape, device=x.device, dtype=x.dtype)
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,

@@ -37,11 +37,9 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts: int,
         padded_M: int,
     ) -> tuple[int, int, torch.dtype]:
-        # Note that K, N are transposed
-        N, K = K, N
-
-        workspace1 = self.max_experts_per_worker * padded_M * max(2 * N, K)
-        workspace2 = self.max_experts_per_worker * padded_M * N
+        # in CUTLASS MoE, N is actually N * 2
+        workspace1 = self.max_experts_per_worker * padded_M * max(N, K)
+        workspace2 = self.max_experts_per_worker * padded_M * (N // 2)
         return (workspace1, workspace2, self.out_dtype)
 
     def apply(
@@ -65,7 +63,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         a1q = hidden_states
 
-        try_output_map = True
+        print("RUN THIS CUTLASS MOE HERE")
 
         assert w1_scale is not None
         assert w2_scale is not None
@@ -120,7 +118,6 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         #                         device=device)
 
         non_zero_mask = expert_num_tokens[:] != 0
-        # print("NON ZERO MASK:", non_zero_mask)
         masked_local_E = int(non_zero_mask.sum().item())
 
         expert_offsets = torch.empty((masked_local_E + 1),
@@ -135,42 +132,26 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
         # TODO write a new get_cutlass_moe_mm_data kernel for this
         masked_idx = 0
-        prev_expert_num_tokens = 0
         for idx in range(local_E):
             if expert_num_tokens[idx] != 0:
-                if try_output_map:
-                    offset = 0 if masked_idx == 0 else prev_expert_num_tokens + expert_offsets[
-                        masked_idx - 1]
-                    expert_offsets[masked_idx] = offset
-                else:
-                    expert_offsets[masked_idx] = idx * a1q.shape[1]
+                expert_offsets[masked_idx] = idx * a1q.shape[1]
                 problem_sizes1[masked_idx][0] = expert_num_tokens[idx]
                 problem_sizes1[masked_idx][1] = 2 * N
                 problem_sizes1[masked_idx][2] = K
                 problem_sizes2[masked_idx][0] = expert_num_tokens[idx]
                 problem_sizes2[masked_idx][1] = K
                 problem_sizes2[masked_idx][2] = N
-                prev_expert_num_tokens = expert_num_tokens[idx]
                 masked_idx += 1
 
         # Filter out problem sizes with 0 tokens
-        # problem_sizes1 = problem_sizes1[non_zero_mask]
-        # problem_sizes2 = problem_sizes2[non_zero_mask]
-        # expert_offsets = (expert_offsets[:-1])[non_zero_mask]
-        w1 = w1[non_zero_mask].contiguous()
-        w2 = w2[non_zero_mask].contiguous()
-        # print("w1 scale before mask:", w1_scale.shape)
-        w1_scale = w1_scale[non_zero_mask].contiguous()
-        w2_scale = w2_scale[non_zero_mask].contiguous()
-        # a1q = a1q[non_zero_mask].contiguous()
-        # a1q_scale = a1q_scale[non_zero_mask].contiguous()
+        if masked_local_E != local_E:
+            w1 = w1[non_zero_mask].contiguous()
+            w2 = w2[non_zero_mask].contiguous()
+            w1_scale = w1_scale[non_zero_mask].contiguous()
+            w2_scale = w2_scale[non_zero_mask].contiguous()
 
-        w1_scale = w1_scale.reshape(-1, w1_scale.shape[-1])
-        w2_scale = w2_scale.reshape(-1, w2_scale.shape[-1])
-
-        # print("--- expert_offsets:", expert_offsets[:-1])
-        # print("--- problem_sizes1:", problem_sizes1)
-        # print("--- problem_sizes2:", problem_sizes2)
+        w1_scale = w1_scale.reshape(w1_scale.shape[0], -1).contiguous()
+        w2_scale = w2_scale.reshape(w2_scale.shape[0], -1).contiguous()
 
         ab_strides1 = torch.full((w1.shape[0], ),
                                  K,
@@ -189,57 +170,21 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
                                 device=device,
                                 dtype=torch.int64)
 
-        # TODO try to make an output map that redistributes the output tokens
-        # back to the input format
-        if try_output_map:
-            all_tokens = torch.sum(expert_num_tokens)
-            if all_tokens == 0:
-                return torch.zeros(a1q.shape,
-                                   device=a1q.device,
-                                   dtype=self.out_dtype)
-            output_map = torch.empty((all_tokens),
-                                     dtype=torch.int32,
-                                     device=device)
-            cumul_idx = 0
-            for idx in range(local_E):
-                e_tokens = expert_num_tokens[idx]
-                for t in range(e_tokens):
-                    output_map[cumul_idx] = idx * padded_M + t
-                    cumul_idx += 1
-
-        fp8_type = a1q.dtype
-        if try_output_map:
-            a1q = a1q.reshape(-1, a1q.shape[2]).view(
-                dtype=torch.uint8)[output_map].contiguous().view(
-                    dtype=fp8_type)
-        else:
-            a1q = a1q.reshape(-1, a1q.shape[2])
+        # fp8_type = a1q.dtype
+        a1q = a1q.reshape(-1, a1q.shape[2])
 
         if self.per_act_token:
-            if try_output_map:
-                a1q_scale = a1q_scale.reshape(-1,
-                                              a1q_scale.shape[2])[output_map]
-            else:
-                a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2])
+            a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2])
         else:
-            if try_output_map:
-                a1q_scale = a1q_scale.reshape(
-                    -1, a1q_scale.shape[2])[output_map][0]
-            else:
-                a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2])
+            a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2])
 
         # ops.get_cutlass_moe_mm_data(local_topk_ids, expert_offsets,
         #                             problem_sizes1, problem_sizes2, a_map,
         #                             c_map, global_num_experts, N, K)
 
-        if try_output_map:
-            c1 = _resize_cache(workspace13, (all_tokens, N * 2))
-            c2 = _resize_cache(workspace2, (all_tokens, N))
-            c3 = _resize_cache(workspace13, (all_tokens, K))
-        else:
-            c1 = _resize_cache(workspace13, (masked_local_E * padded_M, N * 2))
-            c2 = _resize_cache(workspace2, (masked_local_E * padded_M, N))
-            c3 = _resize_cache(workspace13, (masked_local_E * padded_M, K))
+        c1 = _resize_cache(workspace13, (local_E * padded_M, N * 2))
+        c2 = _resize_cache(workspace2, (local_E * padded_M, N))
+        c3 = _resize_cache(workspace13, (local_E * padded_M, K))
 
         ops.cutlass_moe_mm(c1, a1q, w1.contiguous(), a1q_scale.contiguous(),
                            w1_scale.contiguous(), expert_offsets[:-1],
@@ -259,20 +204,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
                            problem_sizes2, ab_strides2, ab_strides2,
                            c_strides2, self.per_act_token, self.per_out_ch)
 
-        if try_output_map:
-            out = torch.zeros((local_E * padded_M, K),
-                              device=hidden_states.device,
-                              dtype=self.out_dtype)
-            out[output_map] = c3
-            # print("out:", out.reshape(local_E, padded_M, K))
-            return out.reshape(local_E, padded_M, K)
-        else:
-            # print(expert_num_tokens.shape, local_E)
-            out = torch.zeros((local_E, padded_M, K),
-                              device=hidden_states.device,
-                              dtype=self.out_dtype)
-            out[non_zero_mask] = c3.reshape(masked_local_E, padded_M, K)
-            return out
+        return c3.reshape(local_E, padded_M, K)
 
 
 #TODO make the grouped gemm kernel consistent with scaled gemm kernel
