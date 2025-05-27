@@ -2,29 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from typing import Optional
 
 import pytest
 import torch
 import triton.language as tl
-from typing import Optional
 
 import vllm._custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    invoke_moe_batched_triton_kernel,
-    BatchedExperts,
-    BatchedPrepareAndFinalize,
-    BatchedTritonExperts)
-from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
-                                                            get_default_config)
+    BatchedPrepareAndFinalize, BatchedTritonExperts,
+    invoke_moe_batched_triton_kernel)
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8, w8a8_block_fp8_matmul)
+    per_token_group_quant_fp8)
 from vllm.platforms import current_platform
 from vllm.utils import round_up
-
 
 NUM_EXPERTS = [8, 64]
 TOP_KS = [1, 2, 6]
@@ -81,10 +77,12 @@ class BatchedMMTensors:
         return BatchedMMTensors(A, B, C, num_expert_tokens)
 
 
-def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor,
-                             As: torch.Tensor, Bs: torch.Tensor,
+def native_w8a8_block_matmul(A: torch.Tensor,
+                             B: torch.Tensor,
+                             As: torch.Tensor,
+                             Bs: torch.Tensor,
                              block_size,
-                             output_dtype = torch.bfloat16):
+                             output_dtype=torch.bfloat16):
     """This function performs matrix multiplication with block-wise
     quantization using native torch.
     It is agnostic to the input data type and can be used for both int8 and
@@ -161,16 +159,11 @@ def ref_impl(
         if A.dtype == torch.torch.float8_e4m3fn:
             if False:
                 tmp = native_w8a8_block_matmul(A[e, :, :],
-                                               B[e].transpose(0, 1),
-                                               A_scale,
-                                               B_scale,
-                                               block_shape)
+                                               B[e].transpose(0, 1), A_scale,
+                                               B_scale, block_shape)
             else:
-                tmp = ops.cutlass_scaled_mm(A[e, :, :],
-                                            B[e].transpose(0, 1),
-                                            A_scale,
-                                            B_scale,
-                                            torch.bfloat16)
+                tmp = ops.cutlass_scaled_mm(A[e, :, :], B[e].transpose(0, 1),
+                                            A_scale, B_scale, torch.bfloat16)
             C[e, :num_tokens, :] = tmp[:num_tokens, :]
         else:
             C[e, :num_tokens, :] = A[e, :num_tokens, :] @ B[e].transpose(0, 1)
@@ -196,7 +189,8 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         in_dtype = dtype
         out_dtype = dtype
 
-    config = BatchedMMConfig(in_dtype, out_dtype, num_experts, max_tokens_per_expert, K, N)
+    config = BatchedMMConfig(in_dtype, out_dtype, num_experts,
+                             max_tokens_per_expert, K, N)
     tensors = BatchedMMTensors.make_tensors(config)
 
     test_output = tensors.C
@@ -210,7 +204,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     }[test_output.dtype]
 
     use_fp8_w8a8 = dtype == torch.torch.float8_e4m3fn
-    block_shape = [16, 16, 32] # 16 for k if not fp8
+    block_shape = [16, 16, 32]  # 16 for k if not fp8
 
     #print(f"tensors.A {tensors.A.shape}")
     #print(f"tensors.B {tensors.B.shape}")
@@ -251,19 +245,12 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
 
     ref_output = ref_output.to(dtype=out_dtype)
     ref_output = ref_impl(tensors.A.to(dtype=out_dtype),
-                          tensors.B.to(dtype=out_dtype),
-                          ref_output,
-                          tensors.num_expert_tokens,
-                          A_scale,
-                          B_scale,
+                          tensors.B.to(dtype=out_dtype), ref_output,
+                          tensors.num_expert_tokens, A_scale, B_scale,
                           block_shape[-2:])
 
-    ref_output2 = ref_impl(tensors.A,
-                           tensors.B,
-                           ref_output2,
-                           tensors.num_expert_tokens,
-                           A_scale,
-                           B_scale,
+    ref_output2 = ref_impl(tensors.A, tensors.B, ref_output2,
+                           tensors.num_expert_tokens, A_scale, B_scale,
                            block_shape[-2:])
 
     rtol, atol = {
@@ -287,11 +274,17 @@ def batched_moe(
     use_fp8_w8a8: bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
-    max_num_tokens = round_up(a.shape[0], 64) # ?
+    max_num_tokens = round_up(a.shape[0], 64)  # ?
     fused_experts = FusedMoEModularKernel(
-        BatchedPrepareAndFinalize(max_num_tokens, world_size=1, dp_size=1, rank=0, use_fp8_w8a8=use_fp8_w8a8,
+        BatchedPrepareAndFinalize(max_num_tokens,
+                                  world_size=1,
+                                  dp_size=1,
+                                  rank=0,
+                                  use_fp8_w8a8=use_fp8_w8a8,
                                   block_shape=block_shape),
-        BatchedTritonExperts(max_num_tokens=max_num_tokens, dp_size=1, world_size=1,
+        BatchedTritonExperts(max_num_tokens=max_num_tokens,
+                             dp_size=1,
+                             world_size=1,
                              use_fp8_w8a8=use_fp8_w8a8,
                              block_shape=block_shape))
 
@@ -323,11 +316,13 @@ def torch_moe2(
 
     if use_fp8_w8a8:
         a, a_scale = per_token_group_quant_fp8(a, block_shape[1])
-        #print(f"a_scale {a_scale.shape}")
     else:
         a_scale = None
 
-    out = torch.zeros(M * topk, w2.shape[1], dtype=torch.bfloat16, device=a.device)
+    out = torch.zeros(M * topk,
+                      w2.shape[1],
+                      dtype=torch.bfloat16,
+                      device=a.device)
     num_experts = w1.shape[0]
     for i in range(num_experts):
         mask = (topk_ids == i).view(-1)
@@ -342,11 +337,8 @@ def torch_moe2(
                 #                             a_scale[mask],
                 #                             w1_scale[i],
                 #                             torch.bfloat16)
-                tmp1 = native_w8a8_block_matmul(a[mask],
-                                                w1[i],
-                                                a_scale[mask],
-                                                w1_scale[i],
-                                                block_shape,
+                tmp1 = native_w8a8_block_matmul(a[mask], w1[i], a_scale[mask],
+                                                w1_scale[i], block_shape,
                                                 torch.bfloat16)
                 tmp2 = SiluAndMul()(tmp1)
                 tmp2, b_scale = per_token_group_quant_fp8(tmp2, block_shape[1])
@@ -356,11 +348,8 @@ def torch_moe2(
                 #                                   b_scale,
                 #                                   w2_scale[i],
                 #                                   torch.bfloat16)
-                out[mask] = native_w8a8_block_matmul(tmp2,
-                                                     w2[i],
-                                                     b_scale,
-                                                     w2_scale[i],
-                                                     block_shape,
+                out[mask] = native_w8a8_block_matmul(tmp2, w2[i], b_scale,
+                                                     w2_scale[i], block_shape,
                                                      torch.bfloat16)
 
     return (out.view(M, -1, w2.shape[1]) *
@@ -407,23 +396,21 @@ def test_fused_moe_batched_experts(
 
         factor_for_scale = 1e-2
         w1_s = torch.rand(
-            (e, n_tiles_w1, k_tiles_w1), dtype=torch.float32, device="cuda") * factor_for_scale
+            (e, n_tiles_w1, k_tiles_w1), dtype=torch.float32,
+            device="cuda") * factor_for_scale
         w2_s = torch.rand(
-            (e, n_tiles_w2, k_tiles_w2), dtype=torch.float32, device="cuda") * factor_for_scale
+            (e, n_tiles_w2, k_tiles_w2), dtype=torch.float32,
+            device="cuda") * factor_for_scale
     else:
         w1_s = None
         w2_s = None
 
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s, w2_s, use_fp8_w8a8, block_shape)
-        batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids, w1_s, w2_s, use_fp8_w8a8, block_shape)
-        # batched_output = batched_moe(a,
-        #                              w1.to(torch.bfloat16),
-        #                              w2.to(torch.bfloat16),
-        #                              topk_weight, topk_ids,
-        #                              w1_s, w2_s, False,
-        #                              block_shape)
+        baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s,
+                                     w2_s, use_fp8_w8a8, block_shape)
+        batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
+                                     w2_s, use_fp8_w8a8, block_shape)
 
     torch.testing.assert_close(baseline_output,
                                batched_output,

@@ -1365,8 +1365,6 @@ class FusedMoE(torch.nn.Module):
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
 
-        assert topk_ids.dtype == indices_type
-
         return topk_weights, topk_ids
 
     def must_reduce_shared_expert_outputs(self) -> bool:
