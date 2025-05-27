@@ -368,7 +368,9 @@ class HpuModelAdapter(torch.nn.Module):
         mask = torch.concat((past_mask, mask), dim=-1)
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
-        attn_metadata = prefill_metadata._replace(attn_bias=attn_bias)
+        attn_metadata = custom_tuple_replace(prefill_metadata,
+                                             "TrimmedAttentionMetadata",
+                                             attn_bias=attn_bias)
         return attn_metadata
 
     def _set_block_mapping(self, metadata, batch_size, device, dtype):
@@ -394,22 +396,14 @@ class HpuModelAdapter(torch.nn.Module):
             oob_values = block_groups.lt(0)
             block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
             block_groups.masked_fill_(oob_values, batch_size)
-            metadata = metadata._replace(block_groups=block_groups)
+            metadata = custom_tuple_replace(metadata,
+                                            "TrimmedAttentionMetadata",
+                                            block_groups=block_groups)
         block_mapping = block_mapping.to(dtype)
-
-        # Torch compile dynamo doesn't support calling any named tuple
-        # dynamic methods other than len and get_attr so we need to
-        # mimic behaviour of tuple._replace manually
-        TrimmedAttentionMetadata = _TYPE_CACHE['TrimmedAttentionMetadata'][
-            'object']
-        fields = _TYPE_CACHE['TrimmedAttentionMetadata']['fields']
-        metadata_dict = {
-            field: getattr(metadata, field)
-            for field in fields  # type: ignore
-        }  # type: ignore
-        metadata_dict['attn_bias'] = attn_bias
-        metadata_dict['block_mapping'] = block_mapping
-        metadata = TrimmedAttentionMetadata(**metadata_dict)  # type: ignore
+        metadata = custom_tuple_replace(metadata,
+                                        "TrimmedAttentionMetadata",
+                                        block_mapping=block_mapping,
+                                        attn_bias=attn_bias)
         return metadata
 
     def _update_metadata(self, attn_metadata, batch_size, seq_len, device,
@@ -507,10 +501,25 @@ def subtuple(obj: object,
         values = {f: to_override.get(f, getattr(obj, f)) for f in fields}
     if typename not in _TYPE_CACHE:
         _TYPE_CACHE[typename] = {
-            'object': collections.namedtuple(typename, ' '.join(fields)),
+            'type': collections.namedtuple(typename, ' '.join(fields)),
             'fields': fields
         }
-    return _TYPE_CACHE[typename]['object'](**values)  # type: ignore
+    return _TYPE_CACHE[typename]['type'](**values)  # type: ignore
+
+
+def custom_tuple_replace(obj: object, typename: str, **to_override):
+    # Torch compile dynamo doesn't support calling any named tuple
+    # dynamic methods other than len and get_attr. This function is
+    # a torch.compile friendly version of tuple._replace
+
+    cached_type = _TYPE_CACHE[typename]['type']
+    fields = _TYPE_CACHE[typename]['fields']
+    values = {
+        field: getattr(obj, field)
+        for field in fields  # type: ignore
+    }
+    values.update(to_override)
+    return cached_type(**values)  # type: ignore
 
 
 def trim_attn_metadata(metadata: HPUAttentionMetadataV1) -> object:
@@ -1866,7 +1875,7 @@ class HPUModelRunner:
         ) and not self.vllm_config.model_config.enforce_eager:
             if os.getenv('VLLM_REGIONAL_COMPILATION',
                          'true').strip().lower() in ("1", "true"):
-                compiled_methods = ['_set_block_mapping']
+                compiled_methods = ['_update_metadata']
                 for method_name in compiled_methods:
                     method = getattr(self.model, method_name)
                     self._compile_region(self.model, method_name, method)
