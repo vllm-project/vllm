@@ -66,9 +66,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     def __init__(self, runner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
         super().__init__(runner, kv_cache_spec, block_table)
-        max_model_len = self.runner.model_config.max_model_len
-        assert max_model_len == 32768,\
-            "AITER MLA requires max_model_len=32768"
         assert self.kv_cache_spec.block_size == 1, "AITER MLA" \
             "only supports block size 1."
 
@@ -219,5 +216,3 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                              attn_metadata.decode.paged_kv_last_page_len)
 
         return self._v_up_proj(o)
-
-
