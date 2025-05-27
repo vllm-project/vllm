@@ -929,8 +929,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         encoder_outputs = []
         for grouped_mm_inputs in grouped_mm_inputs_list:
             batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
-            batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
-                                                           device=self.device)
+            batched_mm_inputs = MultiModalKwargs.as_kwargs(
+                batched_mm_inputs,
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -1874,7 +1877,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
-                batched_dummy_mm_inputs, device=self.device)
+                batched_dummy_mm_inputs,
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
 
             # Run multimodal encoder.
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
