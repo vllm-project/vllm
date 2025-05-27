@@ -73,7 +73,7 @@ WEIGHT_SHAPES = {
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["batch_size"],
-        x_vals=[1, 16, 64, 128],
+        x_vals=[1, 16, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
         x_log=False,
         line_arg="provider",
         line_vals=[
