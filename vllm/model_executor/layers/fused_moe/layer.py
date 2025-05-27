@@ -1220,7 +1220,7 @@ class FusedMoE(torch.nn.Module):
             return
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
-        weights = self.parameters()
+        weights = list(self.parameters())
         assert all(weight.is_contiguous() for weight in weights)
         return [weight.view(self.local_num_experts, -1) for weight in weights]
 
