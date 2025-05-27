@@ -3052,7 +3052,7 @@ _FLOAT16_NOT_SUPPORTED_MODELS = {
 
 
 def _is_valid_dtype(model_type: str, dtype: torch.dtype):
-    if model_type in _FLOAT16_NOT_SUPPORTED_MODELS and dtype == torch.float16:
+    if model_type in _FLOAT16_NOT_SUPPORTED_MODELS and dtype == torch.float16:  # noqa: E501, SIM103
         return False
 
     return True
