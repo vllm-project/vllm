@@ -6,6 +6,7 @@ Main article: https://docs.vllm.ai/en/latest/usage/reproducibility.html
 """
 
 import os
+import random
 
 from vllm import LLM, SamplingParams
 
@@ -34,6 +35,11 @@ def main():
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-" * 50)
+
+    # Try generating random numbers outside vLLM
+    # The same number is output across runs, meaning that the random state
+    # in the user code has been updated by vLLM
+    print(random.randint(0, 100))
 
 
 if __name__ == "__main__":

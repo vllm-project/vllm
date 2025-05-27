@@ -8,11 +8,18 @@ reproducible results:
 
 !!! note
 
-    Even with the above two settings, vLLM only provides reproducibility
+    Even with the above settings, vLLM only provides reproducibility
     when it runs on the same hardware and the same vLLM version.
     Also, the online serving API (`vllm serve`) does not support reproducibility
     because it is almost impossible to make the scheduling deterministic in the
     online setting.
+
+!!! note
+
+    Applying the above settings changes the random state in user code
+    (i.e. the code that constructs [LLM][vllm.LLM] class).
+    This may affect subsequent operations outside vLLM; see
+    [this example](../examples/offline_inference/reproducibility.md).
 
 ## Setting the global seed
 
@@ -26,12 +33,6 @@ In V1, the `seed` parameter defaults to `0` which sets the random state for each
 
 !!! note
 
-    Since V1 Engine is run in separate processes by default,
-    the random state in user code (i.e. the code that constructs [LLM][vllm.LLM] class) remains unaffected.
-
-    However, if you set `VLLM_ENABLE_V1_MULTIPROCESSING=0`,
-    setting a seed does change the random state in user code.
-
     It is impossible to un-specify a seed for V1 because different workers need to sample the same outputs
     for workflows such as speculative decoding.
     
@@ -41,40 +42,9 @@ In V1, the `seed` parameter defaults to `0` which sets the random state for each
 
 If a specific seed value is provided, the random states for `random`, `np.random`, and `torch.manual_seed` will be set accordingly. This can be useful for reproducibility, as it ensures that the random operations produce the same results across multiple runs.
 
-!!! warning
+### Locality of random state
 
-    In V0, setting a seed changes the random state in user code which
-    might affect subsequent operations outside vLLM.
+By default, the random state in code outside of vLLM remains unaffected by vLLM.
 
-### Example Usage
-
-Without specifying a seed:
-
-```python
-import random
-from vllm import LLM
-
-# Initialize a vLLM model without specifying a seed
-model = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
-
-# Try generating random numbers
-print(random.randint(0, 100))  # Outputs different numbers across runs
-```
-
-With a specific seed:
-
-```python
-import random
-from vllm import LLM
-
-# Initialize a vLLM model with a specific seed
-model = LLM(model="Qwen/Qwen2.5-0.5B-Instruct", seed=42)
-
-# Try generating random numbers
-print(random.randint(0, 100))  # Outputs the same number across runs
-```
-
-### Important Notes
-
-- By default, the random state in the user code remains unaffected by vLLM.
-- If a specific seed value is provided, the random states for `random`, `np.random`, and `torch.manual_seed` will be set to that value. This behavior can be useful for reproducibility but, in V0, may lead to non-intuitive behavior if the user is not explicitly aware of it.
+- In V0: The seed is not specified by default.
+- In V1: The workers are run in separate processes, unless `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
