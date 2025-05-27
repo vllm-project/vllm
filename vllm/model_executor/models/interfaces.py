@@ -226,9 +226,11 @@ class SupportsPP(Protocol):
         intermediate_tensors: Optional["IntermediateTensors"],
     ) -> Union[Tensor, "IntermediateTensors"]:
         """
-        Accept {class}`IntermediateTensors` when PP rank > 0.
+        Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
+        PP rank > 0.
 
-        Return {class}`IntermediateTensors` only for the last PP rank.
+        Return [`IntermediateTensors`][vllm.sequence.IntermediateTensors] only
+        for the last PP rank.
         """
         ...
 

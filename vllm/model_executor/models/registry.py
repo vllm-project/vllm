@@ -383,7 +383,7 @@ class _ModelRegistry:
 
         `model_cls` can be either:
 
-        - A {class}`torch.nn.Module` class directly referencing the model.
+        - A [`torch.nn.Module`][] class directly referencing the model.
         - A string in the format `<module>:<class>` which can be used to
           lazily import the model. This is useful to avoid initializing CUDA
           when importing the model and thus the related error

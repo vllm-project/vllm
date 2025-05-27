@@ -382,7 +382,8 @@ def _get_tokenizer_without_image_pad(
         tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
     """
     The logic of adding image pad tokens should only be applied in
-    {class}`QwenVLProcessor`, so they are patched out here.
+    [`QwenVLProcessor`][vllm.model_executor.models.qwen_vl.QwenVLProcessor],
+    so they are patched out here.
 
     The definition of the wrapped tokenizer can be found here:
     https://huggingface.co/Qwen/Qwen-VL/blob/main/tokenization_qwen.py

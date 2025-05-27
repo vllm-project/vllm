@@ -2986,7 +2986,7 @@ class PoolerConfig:
     pooling_type: Optional[str] = None
     """
     The pooling method of the pooling model. This should be a key in
-    {class}`vllm.model_executor.layers.pooler.PoolingType`.
+    [`vllm.model_executor.layers.pooler.PoolingType`][].
     """
 
     normalize: Optional[bool] = None
@@ -3697,23 +3697,27 @@ class CompilationConfig:
     """Configuration for compilation. It has three parts:
 
     - Top-level Compilation control:
-        - {attr}`level`
-        - {attr}`debug_dump_path`
-        - {attr}`cache_dir`
-        - {attr}`backend`
-        - {attr}`custom_ops`
-        - {attr}`splitting_ops`
+        - [`level`][vllm.config.CompilationConfig.level]
+        - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
+        - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
+        - [`backend`][vllm.config.CompilationConfig.backend]
+        - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
+        - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
     - CudaGraph capture:
-        - {attr}`use_cudagraph`
-        - {attr}`cudagraph_capture_sizes`
-        - {attr}`cudagraph_num_of_warmups`
-        - {attr}`cudagraph_copy_inputs`
-        - {attr}`full_cuda_graph`
+        - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
+        - [`cudagraph_capture_sizes`]
+        [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+        - [`cudagraph_num_of_warmups`]
+        [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
+        - [`cudagraph_copy_inputs`]
+        [vllm.config.CompilationConfig.cudagraph_copy_inputs]
+        - [`full_cuda_graph`][vllm.config.CompilationConfig.full_cuda_graph]
     - Inductor compilation:
-        - {attr}`use_inductor`
-        - {attr}`compile_sizes`
-        - {attr}`inductor_compile_config`
-        - {attr}`inductor_passes`
+        - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
+        - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+        - [`inductor_compile_config`]
+        [vllm.config.CompilationConfig.inductor_compile_config]
+        - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
         - custom inductor passes
 
     Why we have different sizes for cudagraph and inductor:
