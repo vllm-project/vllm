@@ -145,12 +145,14 @@ class EplbState:
 
         expert_load_pass = torch.zeros(
             (model.num_moe_layers, model.num_logical_experts),
+            dtype=torch.int32,
             device=device,
         )
         expert_load_window_size = parallel_config.eplb_window_size
         expert_load_window = torch.zeros(
             (expert_load_window_size, model.num_moe_layers,
              model.num_logical_experts),
+            dtype=torch.int32,
             device=device,
         )
 

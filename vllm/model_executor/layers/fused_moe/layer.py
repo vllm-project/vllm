@@ -1324,9 +1324,19 @@ class FusedMoE(torch.nn.Module):
             # to the modular kernel, we can move this logic there
             # to achieve better efficiency.
 
-            # (num_logical_experts,)
-            expert_load_view += topk_ids.flatten().bincount(
-                minlength=expert_load_view.shape[0])
+            # `expert_load_view`: (num_logical_experts,)
+
+            # Should be equivalent to:
+            # ```
+            # expert_load_view += topk_ids.flatten().bincount(
+            #     minlength=expert_load_view.shape[0])
+            # ```
+            # We use `scatter_add_` since `bincount` cannot be compiled
+            topk_ids_flatten = topk_ids.flatten()
+            expert_load_view.scatter_add_(
+                dim=0,
+                index=topk_ids_flatten.long(),
+                src=torch.ones_like(topk_ids_flatten))
 
             # 2. Convert the logical expert ids to physical expert ids
             # Directly select a random replica for each logical expert
