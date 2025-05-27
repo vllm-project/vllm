@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
+import functools
 import math
 import threading
 import time
@@ -34,6 +35,50 @@ if TYPE_CHECKING:
 GET_META_MSG = b"get_meta_msg"
 
 logger = init_logger(__name__)
+
+
+def debug_method(func):
+    """
+    Decorator that logs entry and exit of class methods using logger.debug
+    """
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        # Get class and method names
+        class_name = self.__class__.__name__
+        method_name = func.__name__
+
+        # Format arguments for logging (truncate if too long)
+        args_str = ', '.join(repr(arg)[:50] for arg in args)
+        kwargs_str = ', '.join(f"{k}={repr(v)[:50]}"
+                               for k, v in kwargs.items())
+        params = ', '.join(filter(None, [args_str, kwargs_str]))
+
+        # Log entry
+        logger.debug(
+            f"Entering {class_name}.{method_name}({params})")  # noqa: G004
+
+        try:
+            # Call the original method
+            result = func(self, *args, **kwargs)
+
+            # Log successful exit
+            result_str = repr(result)[:100] if result is not None else "None"
+            logger.debug(
+                f"Exiting {class_name}.{method_name} -> {result_str}"  # noqa: G004
+            )
+
+            return result
+
+        except Exception as e:
+            # Log exception exit
+            logger.debug("Exiting %s.%s with exception: %s: %s", class_name,
+                         method_name,
+                         type(e).__name__, e)
+            raise
+
+    return wrapper
+
 
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
@@ -107,6 +152,7 @@ class NixlConnector(KVConnectorBase_V1):
     # Scheduler Side Methods
     ############################################################
 
+    @debug_method
     def get_num_new_matched_tokens(
             self, request: "Request",
             num_computed_tokens: int) -> tuple[int, bool]:
@@ -114,6 +160,7 @@ class NixlConnector(KVConnectorBase_V1):
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens)
 
+    @debug_method
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
@@ -121,6 +168,7 @@ class NixlConnector(KVConnectorBase_V1):
         return self.connector_scheduler.update_state_after_alloc(
             request, blocks, num_external_tokens)
 
+    @debug_method
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -128,6 +176,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
+    @debug_method
     def request_finished(
         self,
         request: "Request",
@@ -139,16 +188,19 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
+    @debug_method
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    @debug_method
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    @debug_method
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         assert self.connector_worker is not None
@@ -183,6 +235,7 @@ class NixlConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
 
+    @debug_method
     def get_num_new_matched_tokens(
             self, request: "Request",
             num_computed_tokens: int) -> tuple[int, bool]:
@@ -228,6 +281,7 @@ class NixlConnectorScheduler:
         # No remote prefill for this request.
         return 0, False
 
+    @debug_method
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
@@ -254,6 +308,7 @@ class NixlConnectorScheduler:
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
 
+    @debug_method
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -283,6 +338,7 @@ class NixlConnectorScheduler:
 
         return meta
 
+    @debug_method
     def request_finished(
         self,
         request: "Request",
@@ -322,6 +378,7 @@ class NixlConnectorScheduler:
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
+    @debug_method
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         if NixlWrapper is None:
             logger.error("NIXL is not available")
@@ -431,6 +488,7 @@ class NixlConnectorWorker:
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
 
+    @debug_method
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote instance."""
 
@@ -466,6 +524,7 @@ class NixlConnectorWorker:
             logger.error("Failed during NIXL handshake: %s", str(e))
             raise
 
+    @debug_method
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
@@ -566,6 +625,7 @@ class NixlConnectorWorker:
         self._nixl_handshake_listener_t.start()
         ready_event.wait()
 
+    @debug_method
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
         engine_id = nixl_agent_meta.engine_id
         logger.debug(
@@ -621,6 +681,7 @@ class NixlConnectorWorker:
             engine_id] = self.nixl_wrapper.prep_xfer_dlist(
                 self._remote_agents[engine_id], descs)
 
+    @debug_method
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving.
@@ -686,6 +747,7 @@ class NixlConnectorWorker:
             # Unused as only Rank 0 results are sent to scheduler.
             return done_sending, done_recving
 
+    @debug_method
     def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer message."""
 
@@ -696,6 +758,7 @@ class NixlConnectorWorker:
                 notified_req_ids.add(req_id.decode("utf-8"))
         return notified_req_ids
 
+    @debug_method
     def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
@@ -725,6 +788,7 @@ class NixlConnectorWorker:
                 transfers[req_id] = running_reqs
         return done_req_ids
 
+    @debug_method
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
         Start loading by triggering non-blocking nixl_xfer.
@@ -745,6 +809,7 @@ class NixlConnectorWorker:
                 remote_port=meta.remote_port,
             )
 
+    @debug_method
     def _read_blocks(
         self,
         local_block_ids: list[int],
@@ -852,6 +917,7 @@ class NixlConnectorWorker:
         # Use handle to check completion in future step().
         self._recving_transfers[request_id].append(handle)
 
+    @debug_method
     def _get_block_descs_ids(self,
                              engine_id: str,
                              block_ids: list[int],
