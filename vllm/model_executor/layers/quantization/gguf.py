@@ -98,10 +98,10 @@ MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 
 def _fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor,
                         qweight_type: int) -> torch.Tensor:
-    if qweight_type in MMQ_QUANT_TYPES:
-        mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
-    else:
+    if qweight_type in IMATRIX_QUANT_TYPES:
         mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
+    else:
+        mmvq_safe = 2 if qweight.shape[0] > 5120 else 6
     # HACK: when doing chunked prefill we don't generate output tokens
     # so input to logits generator is empty which causes invalid parameter
     if x.shape[0] == 0:
