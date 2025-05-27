@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-from torch.distributed import all_reduce
+from torch.distributed import all_gather, all_reduce
 
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_ep_group
@@ -51,13 +51,13 @@ class EplbState:
     Expert load during this forward pass. 
     We use the token count each expert processes as the load.
 
-    Shape: (num_moe_layers, num_logical_experts)
+    Shape: (num_moe_layers, num_local_physical_experts)
     """
     expert_load_window: torch.Tensor
     """
     A sliding window of expert load.
 
-    Shape: (window_size, num_moe_layers, num_logical_experts)
+    Shape: (window_size, num_moe_layers, num_local_physical_experts)
     """
     expert_load_window_step: int = 0
     """Current step in the sliding window."""
@@ -144,14 +144,14 @@ class EplbState:
         ).contiguous()
 
         expert_load_pass = torch.zeros(
-            (model.num_moe_layers, model.num_logical_experts),
+            (model.num_moe_layers, model.num_local_physical_experts),
             dtype=torch.int32,
             device=device,
         )
         expert_load_window_size = parallel_config.eplb_window_size
         expert_load_window = torch.zeros(
             (expert_load_window_size, model.num_moe_layers,
-             model.num_logical_experts),
+             model.num_local_physical_experts),
             dtype=torch.int32,
             device=device,
         )
@@ -178,10 +178,40 @@ class EplbState:
             expert_rearrangement_step_interval=eplb_step_interval,
         )
 
-    def step(self, model: MixtureOfExperts) -> None:
+    def step(self, model: MixtureOfExperts) -> tuple[float, float, float]:
         """
         Step the EPLB state.
+
+        Returns:
+            (avg_tokens, max_tokens, balancedness) (tuple[float, float, float]):
+            The returned metrics are all summed up across layers.
+            - `avg_tokens`: The average load across ranks.
+            - `max_tokens`: The maximum load across ranks.
+            - `balancedness`: The ratio of average load to maximum load.
         """
+
+        # Collect load metrics from all ranks
+        ep_group = get_ep_group().device_group
+        # (num_moe_layers,)
+        num_tokens = self.expert_load_pass.sum(dim=-1)
+        num_tokens_list = [
+            torch.empty_like(num_tokens) for _ in range(ep_group.size())
+        ]
+        all_gather(num_tokens_list, num_tokens, group=ep_group)
+        # Stack to get (num_ranks, num_moe_layers)
+        num_tokens_per_rank = torch.stack(num_tokens_list).float()
+
+        # Compute balancedness ratio:
+        # for each layer:
+        #   (mean load across ranks) / (max load across ranks)
+        avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
+        max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
+
+        # Just to make type checker happy
+        tokens_tensors: list[float] = torch.stack(
+            [avg_tokens_tensor, max_tokens_tensor]).tolist()
+        avg_tokens, max_tokens = tokens_tensors
+        balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
 
         # Update the expert load sliding window
         self.expert_load_window[self.expert_load_window_step] = (
@@ -198,6 +228,8 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
+        return avg_tokens, max_tokens, balancedness
+
     def rearrange(self, model: MixtureOfExperts) -> None:
         """
         Rearrange the experts according to the current load.
@@ -213,8 +245,33 @@ class EplbState:
             time_start = time.perf_counter()
             logger.info("Rearranging experts...")
 
+        # This mapping is only used here, so we do not store it in the state
+        physical_expert_start = ep_rank * model.num_local_physical_experts
+        physical_expert_end = (physical_expert_start +
+                               model.num_local_physical_experts)
+        # (num_moe_layers, num_local_physical_experts)
+        local_physical_to_logical_map = self.physical_to_logical_map[
+            :,
+            physical_expert_start:physical_expert_end,
+        ]
+
+        # Map the local physical expert load to global logical experts
+        logical_expert_load_window = torch.zeros(
+            self.expert_load_window_size,
+            model.num_moe_layers,
+            model.num_logical_experts,
+            dtype=self.expert_load_window.dtype,
+            device=self.expert_load_window.device,
+        )
+        logical_expert_load_window.scatter_add_(
+            dim=-1,
+            index=local_physical_to_logical_map.unsqueeze(0).expand_as(
+                self.expert_load_window).long(),
+            src=self.expert_load_window,
+        )
+
         # Perform all-reduce to get the expert load across all ranks
-        global_expert_load_window = self.expert_load_window.sum(dim=0)
+        global_expert_load_window = logical_expert_load_window.sum(dim=0)
         all_reduce(global_expert_load_window, group=ep_group)
 
         # TODO(bowen): Treat differently for prefill and decode nodes

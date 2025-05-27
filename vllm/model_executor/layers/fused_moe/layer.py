@@ -1255,6 +1255,7 @@ class FusedMoE(torch.nn.Module):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         indices_type: Optional[torch.dtype] = None,
         enable_eplb: bool = False,
+        expert_map: Optional[torch.Tensor] = None,
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
@@ -1326,13 +1327,19 @@ class FusedMoE(torch.nn.Module):
 
             # `expert_load_view`: (num_logical_experts,)
 
+            # Mask out non-local experts
+            if expert_map is not None:
+                topk_ids_local = expert_map[topk_ids]
+                topk_ids_flatten = topk_ids_local[topk_ids_local >= 0]
+            else:
+                topk_ids_flatten = topk_ids.flatten()
+
             # Should be equivalent to:
             # ```
-            # expert_load_view += topk_ids.flatten().bincount(
+            # expert_load_view += topk_ids_flatten.bincount(
             #     minlength=expert_load_view.shape[0])
             # ```
             # We use `scatter_add_` since `bincount` cannot be compiled
-            topk_ids_flatten = topk_ids.flatten()
             expert_load_view.scatter_add_(
                 dim=0,
                 index=topk_ids_flatten.long(),
