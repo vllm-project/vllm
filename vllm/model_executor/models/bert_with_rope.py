@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.logger import init_logger
 
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
@@ -27,6 +28,7 @@ from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.sequence import IntermediateTensors
 
+logger = init_logger(__name__)
 
 class BertWithRopeEmbedding(nn.Module):
 
@@ -527,6 +529,20 @@ class NomicBertModel(BertWithRope):
         # The context extension uses vllm style rope_theta and rope_scaling.
         # See #17785
 
+        vllm_config.model_config.max_model_len = config.max_trained_positions
+        if vllm_config.model_config.hf_overrides is not None:
+            from vllm.config import _get_and_verify_max_len
+            vllm_config.model_config.max_model_len = _get_and_verify_max_len(
+                hf_config=self.hf_text_config,
+                max_model_len=self.max_model_len,
+                disable_sliding_window=self.disable_sliding_window
+            )
+        else:
+            logger.warning("We did not use the nomic context extension method, "
+                           "current max_model_len is %s. "
+                           "The context extension uses vllm style "
+                           "rope_theta and rope_scaling.",
+                           vllm_config.model_config.max_model_len)
         return config
 
 
