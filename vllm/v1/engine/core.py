@@ -231,7 +231,12 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
 
+<<<<<<< HEAD
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+=======
+        return (engine_core_outputs,
+                scheduler_output.total_num_scheduled_tokens > 0)
+>>>>>>> njhill/fix-dp-with-delayed-req
 
     def step_with_batch_queue(
             self) -> tuple[Optional[EngineCoreOutputs], bool]:
@@ -770,7 +775,7 @@ class DPEngineCoreProc(EngineCoreProc):
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
-                    # All engines are idle. Note we may have waiting requests
+                    # All engines are idle.
                     continue
 
                 # We are in a running state and so must execute a dummy pass
