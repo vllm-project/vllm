@@ -919,6 +919,7 @@ def main(args: argparse.Namespace):
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:
+            os.makedirs(args.result_dir, exist_ok=True)
             file_name = os.path.join(args.result_dir, file_name)
         with open(file_name, "w", encoding='utf-8') as outfile:
             json.dump(result_json, outfile)

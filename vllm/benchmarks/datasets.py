@@ -424,7 +424,7 @@ class ShareGPTDataset(BenchmarkDataset):
                 ))
         self.maybe_oversample_requests(samples, num_requests)
         return samples
-    
+
 
 # -----------------------------------------------------------------------------
 # Custom Dataset Implementation
@@ -459,13 +459,13 @@ class CustomDataset(BenchmarkDataset):
 
         # Load the JSONL file
         if self.dataset_path.endswith(".jsonl"):
-            jsonl_data = pd.read_json(path_or_buf=self.dataset_path, lines=True)
+            jsonl_data = pd.read_json(path_or_buf=self.dataset_path,
+                                      lines=True)
             for _, row in jsonl_data.iterrows():
                 self.data.append(row.to_dict())
         else:
             raise NotImplementedError(
-                "Only JSONL format is supported for CustomDataset."
-            )
+                "Only JSONL format is supported for CustomDataset.")
 
         random.seed(self.random_seed)
         random.shuffle(self.data)
@@ -490,7 +490,10 @@ class CustomDataset(BenchmarkDataset):
             # apply template
             if not skip_chat_template:
                 prompt = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
+                    [{
+                        "role": "user",
+                        "content": prompt
+                    }],
                     add_generation_prompt=True,
                     tokenize=False,
                 )
@@ -501,8 +504,7 @@ class CustomDataset(BenchmarkDataset):
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
-                )
-            )
+                ))
         self.maybe_oversample_requests(sampled_requests, num_requests)
 
         return sampled_requests
