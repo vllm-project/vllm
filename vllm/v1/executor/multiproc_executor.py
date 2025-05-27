@@ -38,7 +38,7 @@ logger = init_logger(__name__)
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
-EXECUTE_MODEL_TIMEOUT_S = 40
+EXECUTE_MODEL_TIMEOUT_S = 300
 
 
 class MultiprocExecutor(Executor):
@@ -50,6 +50,7 @@ class MultiprocExecutor(Executor):
         self.is_failed = False
         self.shutdown_event = threading.Event()
         self.failure_callback: Optional[FailureCallback] = None
+        self.io_thread_pool: Optional[ThreadPoolExecutor] = None
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -107,7 +108,6 @@ class MultiprocExecutor(Executor):
 
         # For pipeline parallel, we use a thread pool for asynchronous
         # execute_model.
-        self.io_thread_pool: Optional[ThreadPoolExecutor] = None
         if self.max_concurrent_batches > 1:
             # Note: must use only 1 IO thread to keep dequeue sequence
             # from the response queue

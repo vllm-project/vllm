@@ -28,6 +28,7 @@ AITER_MODEL_LIST = [
     "Qwen/Qwen-7B-Chat",
     "Qwen/Qwen2.5-0.5B-Instruct",
     "TitanML/tiny-mixtral",
+    "Qwen/Qwen3-8B",
 ]
 
 
@@ -77,6 +78,9 @@ AITER_MODEL_LIST = [
         pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
             marks=[pytest.mark.core_model],
+        ),
+        pytest.param(
+            "Qwen/Qwen3-8B",  # qwen (text-only)
         ),
         pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2

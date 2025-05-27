@@ -348,7 +348,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         if temperature == 0.0:
             # Enable greedy sampling on zero temperature
             return (1, 1.0, 1.0)
-        if top_k < 0 or top_k > self._MAX_NEURON_SAMPLING_TOP_K:
+        if top_k < 1 or top_k > self._MAX_NEURON_SAMPLING_TOP_K:
             top_k = self._MAX_NEURON_SAMPLING_TOP_K
 
         return (top_k, top_p, temperature)
@@ -378,9 +378,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
                 sampling_params=sampling_params,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
-                                             device=self.device),
+                **MultiModalKwargs.as_kwargs(
+                    model_input.multi_modal_kwargs or {},
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                ),
             )
         elif current_platform.use_transformers_neuronx():
             # [TODO] validate on-device sampling
@@ -389,9 +391,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
-                                             device=self.device),
+                **MultiModalKwargs.as_kwargs(
+                    model_input.multi_modal_kwargs or {},
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                ),
             )
 
         # Compute the logits only if the on-device sampling is turned off as

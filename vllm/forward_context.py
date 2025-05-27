@@ -11,10 +11,6 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group,
-                                          is_v1_kv_transfer_group)
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -31,6 +27,7 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 @dataclass
 class DPMetadata:
+    max_tokens_across_dp_cpu: torch.Tensor
     cu_tokens_across_dp_cpu: torch.Tensor
 
 
@@ -94,8 +91,10 @@ def set_forward_context(attn_metadata: Any,
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_tensor)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
-        dp_metadata = DPMetadata(cu_tokens_across_dp_cpu)
+        dp_metadata = DPMetadata(max_tokens_across_dp_cpu,
+                                 cu_tokens_across_dp_cpu)
 
     global _forward_context
     prev_context = _forward_context
@@ -105,16 +104,6 @@ def set_forward_context(attn_metadata: Any,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata)
-
-    # KVConnector: trigger (possibly async) load before forward.
-    # Each attn layer will block until the reading is complete.
-    trigger_kv_transfer = (attn_metadata is not None
-                           and has_kv_transfer_group()
-                           and is_v1_kv_transfer_group())
-    if trigger_kv_transfer:
-        kv_connector = get_kv_transfer_group()
-        assert isinstance(kv_connector, KVConnectorBase_V1)
-        kv_connector.start_load_kv(_forward_context)
 
     try:
         yield
@@ -131,7 +120,10 @@ def set_forward_context(attn_metadata: Any,
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch
-            torch.cuda.synchronize()
+            from vllm.platforms import current_platform
+            synchronize = current_platform.synchronize
+            if synchronize is not None:
+                synchronize()
             now = time.perf_counter()
             # time measurement is in milliseconds
             batchsize_forward_time[batchsize].append(
@@ -151,12 +143,5 @@ def set_forward_context(attn_metadata: Any,
                     logger.info(("Batchsize forward time stats "
                                  "(batchsize, count, median_time(ms)): %s"),
                                 forward_stats)
-
-        # KVConnector: each attn layer triggers (possibly async) save.
-        # Ensure all those operations complete before forward() is done.
-        if trigger_kv_transfer:
-            kv_connector = get_kv_transfer_group()
-            assert isinstance(kv_connector, KVConnectorBase_V1)
-            kv_connector.wait_for_save()
 
         _forward_context = prev_context

@@ -2,9 +2,10 @@
 """Inference-only MiniMaxText01 model."""
 import copy
 import math
-import re
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
+import regex as re
 import torch
 import torch.distributed
 import torch.nn.functional as F
@@ -127,7 +128,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert residual is None, "RMSNorm does not support residual connection."
         return self._forward(x)
 
@@ -178,7 +179,7 @@ class MiniMaxText01RotaryEmbedding(CustomOp):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm import _custom_ops as ops
         self.cos_sin_cache = self.cos_sin_cache.to(positions.device)
         query_cast = query.to(self.cache_dtype)
@@ -603,8 +604,9 @@ class MiniMaxText01DecoderLayer(nn.Module):
 
         rope_theta = getattr(config, "rope_theta", 10000)
 
-        head_dim = getattr(config, "head_dim",
-                           config.hidden_size // config.num_attention_heads)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // config.num_attention_heads
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
@@ -708,11 +710,11 @@ class MiniMaxText01DecoderLayer(nn.Module):
     def forward(self,
                 hidden_states: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: Union[List[Dict], Optional[torch.Tensor]],
+                kv_caches: Union[list[dict], Optional[torch.Tensor]],
                 attn_metadata: AttentionMetadata,
                 residual: Optional[torch.Tensor],
                 is_warmup: bool = False,
-                **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+                **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
 
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
@@ -860,8 +862,9 @@ class MiniMaxText01Model(nn.Module):
                                                  cache_shape=self.cache_shape)
 
         rope_theta = getattr(config, "rope_theta", 10000)
-        head_dim = getattr(config, "head_dim",
-                           config.hidden_size // config.num_attention_heads)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // config.num_attention_heads
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
@@ -1072,10 +1075,10 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                         device=device),
         })
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         def which_layer(name: str) -> int:
             if "layers" in name:

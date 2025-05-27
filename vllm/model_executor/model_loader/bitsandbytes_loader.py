@@ -6,7 +6,8 @@ import glob
 import itertools
 import math
 import os
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+from collections.abc import Generator
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
@@ -34,6 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     pt_weights_iterator, safetensors_weights_iterator)
+from vllm.model_executor.models import is_pooling_model
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -49,21 +51,21 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         super().__init__(load_config)
 
         # Save the module names without sharding.
-        self.unsharded_weights_modules: List[str] = []
+        self.unsharded_weights_modules: list[str] = []
         # Save the module names that are sharded by column.
-        self.column_sharded_weights_modules: List[str] = []
+        self.column_sharded_weights_modules: list[str] = []
         # Store all module names (from transformers) that support
         # BNB quantization.
-        self.target_modules: List[str] = []
+        self.target_modules: list[str] = []
         # mapping weight names from transformers to vllm.
         self.weight_mapper: Callable = lambda name: name
 
     def _get_weight_files(
         self,
         model_name_or_path: str,
-        allowed_patterns: List[str],
+        allowed_patterns: list[str],
         revision: Optional[str] = None,
-    ) -> Tuple[str, List[str], str]:
+    ) -> tuple[str, list[str], str]:
         """Retrieve weight files. Download the files if necessary.
 
         Return the weight files and the file pattern."""
@@ -95,7 +97,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             f"No model weights found in: `{model_name_or_path}`")
 
     def _prepare_weights(self, model_name_or_path: str,
-                         revision: Optional[str]) -> Tuple[List[str], bool]:
+                         revision: Optional[str]) -> tuple[list[str], bool]:
         """Prepare weight files for the model."""
 
         allowed_patterns = ["*.safetensors", "*.bin", "*.pt"]
@@ -132,6 +134,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return hf_weights_files, use_safetensors
 
     def _hf_weight_iter(self, hf_weights_files, use_safetensors: bool):
+        def _maybe_pool_model(module_name:str):
+            # For pool model, we need to add the prefix `model.`
+            # for the weight name if possible.
+            if self.is_pool_model and self.target_modules[0]. \
+                startswith("model.") and not module_name.startswith(
+                    "model."):
+                return "model."+module_name
+
+            return module_name
+
         if use_safetensors:
             iterator = safetensors_weights_iterator(
                 hf_weights_files,
@@ -147,6 +159,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # mapping weight names from transformers to vllm while preserving
             # original names.
             mapped_name = self.weight_mapper(org_name)
+            mapped_name=_maybe_pool_model(mapped_name)
+
+
             yield org_name, mapped_name, param
 
     def _get_quantized_weights_iterator(
@@ -155,7 +170,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         revision: Optional[str],
         pre_quant: bool,
         load_8bit: bool,
-    ) -> Tuple[Generator[Tuple[str, torch.Tensor], None, None], Dict[str,
+    ) -> tuple[Generator[tuple[str, torch.Tensor], None, None], dict[str,
                                                                      Any]]:
         """Get an iterator to the model weights with bitsandbytes quantization,
         as well as the quantization state dictionary."""
@@ -175,7 +190,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         hf_weights_files, use_safetensors = self._prepare_weights(
             model_name_or_path, revision)
 
-        quant_state_dict: Dict[str, Any] = {}
+        quant_state_dict: dict[str, Any] = {}
 
         if pre_quant:
             if load_8bit:
@@ -257,7 +272,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         # Closure to parse quant_state for each prequant weight
         def _parse_quant_state(param_name: str,
-                               temp_state_dict: Dict) -> QuantState:
+                               temp_state_dict: dict) -> QuantState:
             quant_state = {}
             for k in temp_state_dict:
                 if param_name + "." in k:
@@ -404,7 +419,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             raise AttributeError(
                 f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet. No 'packed_modules_mapping' found.")
-
+        self.is_pool_model=is_pooling_model(model)
         self.modules_mapping = ParamMapping(
             copy.deepcopy(model.packed_modules_mapping))
 
@@ -415,7 +430,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         # Modules whose weights might have fused on disk
         # we need their output_sizes to make shard in flight correctly with TP
-        self.maybe_fused_weights_modules: Dict[str, List[int]] = {}
+        self.maybe_fused_weights_modules: dict[str, list[int]] = {}
         self._get_bnb_target_modules(model)
         for name, module in model.named_modules():
             # Some modules like `ReplicatedLinear` should not have their weights
@@ -480,7 +495,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         torch.cuda.empty_cache()
 
         param_dict = dict(model.named_parameters())
-        stacked_quant_state_dict: Dict[str, Dict[int, Any]] = {}
+        stacked_quant_state_dict: dict[str, dict[int, Any]] = {}
         # TODO: Change this lazy import to normal import
         # after the checks are updated to run on a new version
         from vllm.model_executor.models.utils import is_pp_missing_parameter
@@ -554,10 +569,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> nn.Module:
         device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
-
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
 

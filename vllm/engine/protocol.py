@@ -279,6 +279,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def reset_mm_cache(self) -> None:
+        """Reset the multi-modal cache"""
+        ...
+
+    @abstractmethod
     async def reset_prefix_cache(self,
                                  device: Optional[Device] = None) -> None:
         """Reset the prefix cache"""
