@@ -7,19 +7,13 @@ import argparse
 import asyncio
 import enum
 import os
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 import openai
 import pydantic
 
 if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionChunk
-
-
-class Args(Protocol):
-    constraint: list[ConstraintsFormat]
-    stream: Literal[True] | Literal[False]
-    reasoning: Literal[True] | Literal[False]
 
 
 ConstraintsFormat = Literal[
@@ -34,7 +28,7 @@ ConstraintsFormat = Literal[
 async def print_stream_response(
     stream_response: openai.AsyncStream[ChatCompletionChunk],
     title: str,
-    args: Args,
+    args: argparse.Namespace,
 ):
     print(f"\n\n{title} (Streaming):")
 
@@ -44,7 +38,7 @@ async def print_stream_response(
     async for chunk in stream_response:
         delta = chunk.choices[0].delta
 
-        reasoning_chunk_text = getattr(delta, "reasoning_content", None)
+        reasoning_chunk_text: str | None = getattr(delta, "reasoning_content", None)
         content_chunk_text = delta.content
 
         if args.reasoning:
@@ -97,7 +91,7 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
         "messages": [
             {
                 "role": "user",
-                "content": "Generate an email address for Alan Turing, who works in Enigma.End in .com and new line. Example result: 'alan.turing@enigma.com\n'",
+                "content": "Generate an email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: 'alan.turing@enigma.com\n'",
             }
         ],
         "extra_body": {
@@ -228,15 +222,11 @@ async def cli():
         default=False,
         help="Enable printing of reasoning traces if available.",
     )
-    args = cast(Args, parser.parse_args())
+    args = parser.parse_args()
 
     base_url = os.getenv("OPENAI_BASE_URL", "http://localhost:8000/v1")
     client = openai.AsyncOpenAI(base_url=base_url, api_key="EMPTY")
-    constraints: list[ConstraintsFormat] = []
-    if "*" in args.constraint:
-        constraints = list(PARAMS)
-    else:
-        constraints = list(set(args.constraint))
+    constraints = list(PARAMS) if "*" in args.constraint else list(set(args.constraint))
     model = (await client.models.list()).data[0].id
 
     if args.stream:
