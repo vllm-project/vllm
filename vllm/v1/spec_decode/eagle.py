@@ -708,9 +708,7 @@ class EagleProposer:
             attn_metadata = FlashAttentionMetadata(
                 num_actual_tokens=num_process_nodes,
                 max_query_len=1,
-                query_start_loc=torch.arange(num_process_nodes + 1,
-                                             device=self.device,
-                                             dtype=torch.int32),
+                query_start_loc=self.arange[:num_process_nodes + 1],
                 seq_lens=seq_lens,
                 max_seq_len=max_seq_len,
                 block_table=block_table,  # Reuse block_table from param
@@ -724,18 +722,10 @@ class EagleProposer:
             # Compute the slot mapping for KV cache access
             # This maps logical positions to physical positions in the KV cache
             block_numbers = clamped_positions // self.block_size
-            block_ids_batch = []
-
-            # Get the block IDs for each position
-            for i, (tree_idx, _) in enumerate(nodes_to_process):
-                block_nums_i = block_numbers[i].item()
-                block_id = block_table[tree_idx, block_nums_i].item()
-                block_ids_batch.append(block_id)
-
-            block_ids = torch.tensor(block_ids_batch,
-                                     dtype=torch.int64,
-                                     device=self.device)
-            attn_metadata.slot_mapping = (block_ids * self.block_size +
+            tree_indices = torch.tensor([tree_idx for tree_idx, _ in nodes_to_process], 
+                                       device=self.device, dtype=torch.int64)
+            block_ids = block_table[tree_indices, block_numbers]
+            attn_metadata.slot_mapping = (block_ids * self.block_size + 
                                           clamped_positions % self.block_size)
 
             # Mask out slots exceeding max model length
