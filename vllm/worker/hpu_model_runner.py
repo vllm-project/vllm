@@ -2157,14 +2157,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.warmup_scenario(int(bs), int(seq_len), is_prompt, kv_caches,
                                  True)
             raise AssertionError("Finished profiling")
-        if not self.is_pooler:
-            max_blocks = (
-                kv_caches[0][0].size(0)
-                // int(os.getenv("VLLM_DECODE_BLOCK_BUCKET_STEP", self.cache_config.block_size))
-                * int(os.getenv("VLLM_DECODE_BLOCK_BUCKET_STEP", self.cache_config.block_size))
-            )
         self.bucketing_ctx.generate_prompt_buckets()
         if not self.is_pooler:
+            max_blocks = kv_caches[0][0].size(0)
             self.bucketing_ctx.generate_decode_buckets(max_blocks)
         if not htorch.utils.internal.is_lazy() and not self.enforce_eager:
             multiplier = 3 if os.getenv('VLLM_REGIONAL_COMPILATION',
