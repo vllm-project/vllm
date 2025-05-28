@@ -3,7 +3,7 @@
 #@VARS
 
 ## Start server
-vllm serve $model \
+vllm serve $MODEL \
         --block-size $block_size \
         --dtype $dtype \
         --tensor-parallel-size $tensor_parallel_size \
