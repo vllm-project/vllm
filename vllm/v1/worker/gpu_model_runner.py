@@ -62,30 +62,27 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
         # Sampler
         self.sampler = Sampler()
 
+        self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
-        self.use_spec_decode = False
-        if self.speculative_config:
-            self.use_spec_decode = True
-
-            # NOTE(Jiayi): currently we put the entire draft model on
-            # the last PP rank. This is not ideal if there are many
-            # layers in the draft model.
-            if get_pp_group().is_last_rank:
-                if self.speculative_config.method == "ngram":
-                    self.drafter = NgramProposer(self.vllm_config)
-                elif self.speculative_config.use_eagle():
-                    self.drafter = EagleProposer(self.vllm_config, self.device,
-                                                 self)  # type: ignore
-                    if self.speculative_config.method == "eagle3":
-                        self.use_aux_hidden_state_outputs = True
-                elif self.speculative_config.method == "medusa":
-                    self.drafter = MedusaProposer(
-                        vllm_config=self.vllm_config,
-                        device=self.device)  # type: ignore
-                else:
-                    raise ValueError("Unknown speculative decoding method: "
-                                     f"{self.speculative_config.method}")
-                self.rejection_sampler = RejectionSampler()
+        # NOTE(Jiayi): currently we put the entire draft model on
+        # the last PP rank. This is not ideal if there are many
+        # layers in the draft model.
+        if self.speculative_config and get_pp_group().is_last_rank:
+            if self.speculative_config.method == "ngram":
+                self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.use_eagle():
+                self.drafter = EagleProposer(self.vllm_config, self.device,
+                                             self)  # type: ignore
+                if self.speculative_config.method == "eagle3":
+                    self.use_aux_hidden_state_outputs = True
+            elif self.speculative_config.method == "medusa":
+                self.drafter = MedusaProposer(
+                    vllm_config=self.vllm_config,
+                    device=self.device)  # type: ignore
+            else:
+                raise ValueError("Unknown speculative decoding method: "
+                                 f"{self.speculative_config.method}")
+            self.rejection_sampler = RejectionSampler()
 
     def _build_request_state(
             self, new_req_data: NewRequestData) -> SamplingRequestState:
@@ -545,7 +542,7 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
 
-        if not self.use_spec_decode:
+        if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
@@ -809,7 +806,7 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
         return prompt_logprobs_dict
 
     def _extra_dummy_run(self, num_tokens: int, skip_attn: bool = True):
-        if self.use_spec_decode and self.speculative_config.use_eagle():
+        if self.speculative_config and self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
             self.drafter.dummy_run(num_tokens)
 
@@ -827,6 +824,7 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
         # like `inf` or `nan`.
         # To avoid breaking the sampler, we use a random tensor here instead.
         hidden_states = torch.rand_like(hidden_states)
+
         logits = self.model.compute_logits(hidden_states, None)
         num_reqs = logits.size(0)
 
@@ -865,7 +863,7 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
                     "initializing the engine.") from e
             else:
                 raise e
-        if self.use_spec_decode:
+        if self.speculative_config:
             draft_token_ids = [[0] for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
                 draft_token_ids, self.device)
