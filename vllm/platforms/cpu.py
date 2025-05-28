@@ -9,6 +9,7 @@ import psutil
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import CpuArchEnum, Platform, PlatformEnum, _Backend
 
@@ -36,7 +37,7 @@ class CpuPlatform(Platform):
             # instead of checking the OS. For instance M2 shall supports bf16
             # already. But we need to modify `cpu_extension.cmake` to activate
             # the feature in the build.
-            return [torch.bfloat16, torch.float32]
+            return [torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
 
@@ -74,7 +75,7 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
             model_config.enforce_eager = True
@@ -176,6 +177,16 @@ class CpuPlatform(Platform):
                     "Default to spawn method on MacOS. If this is not desired,"
                     " set VLLM_WORKER_MULTIPROC_METHOD to fork explicitly.")
                 os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+
+        if vllm_config.model_config and vllm_config.model_config.use_mla:
+            logger.info(
+                "MLA is enabled on a non-GPU platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            vllm_config.scheduler_config.max_num_batched_tokens = max(
+                vllm_config.scheduler_config.max_model_len,
+                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:

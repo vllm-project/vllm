@@ -38,7 +38,7 @@ class InputContext:
     ) -> _C:
         """
         Get the HuggingFace configuration
-        ({class}`transformers.PretrainedConfig`) of the model,
+        (`transformers.PretrainedConfig`) of the model,
         additionally checking its type.
 
         Raises:
@@ -79,7 +79,7 @@ class InputContext:
     ) -> _P:
         """
         Get the HuggingFace processor
-        ({class}`transformers.ProcessorMixin`) of the model,
+        (`transformers.ProcessorMixin`) of the model,
         additionally checking its type.
 
         Raises:
@@ -159,7 +159,7 @@ class InputProcessingContext(InputContext):
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
 
-            raise RuntimeError(msg) from exc
+            raise ValueError(msg) from exc
 
 
 class DummyData(NamedTuple):

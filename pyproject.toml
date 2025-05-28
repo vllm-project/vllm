@@ -8,6 +8,7 @@ requires = [
     "setuptools-scm>=8.0",
     "torch == 2.7.0",
     "wheel",
+    "regex",
     "jinja2",
 ]
 build-backend = "setuptools.build_meta"
@@ -35,8 +36,8 @@ dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
 Homepage="https://github.com/vllm-project/vllm"
-Documentation="https://vllm.readthedocs.io/en/latest/"
-Slack="http://slack.vllm.ai/"
+Documentation="https://docs.vllm.ai/en/latest/"
+Slack="https://slack.vllm.ai/"
 
 [project.scripts]
 vllm = "vllm.entrypoints.cli.main:main"
@@ -56,39 +57,26 @@ ignore_patterns = [
     ".buildkite/**",
     "benchmarks/**",
     "build/**",
+    "examples/**",
 ]
 
 [tool.ruff]
 # Allow lines to be as long as 80.
 line-length = 80
-exclude = [
-    # External file, leaving license intact
-    "examples/other/fp8/quantizer/quantize.py",
-    "vllm/vllm_flash_attn/flash_attn_interface.pyi"
-]
 
 [tool.ruff.lint.per-file-ignores]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
-# Python 3.8 typing. TODO: Remove these excludes after v1.0.0
+# Python 3.8 typing - skip V0 code
 "vllm/attention/**/*.py" = ["UP006", "UP035"]
 "vllm/core/**/*.py" = ["UP006", "UP035"]
-"vllm/device_allocator/**/*.py" = ["UP006", "UP035"]
-"vllm/distributed/**/*.py" = ["UP006", "UP035"]
 "vllm/engine/**/*.py" = ["UP006", "UP035"]
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
-"vllm/lora/**/*.py" = ["UP006", "UP035"]
-"vllm/model_executor/model_loader/**/*.py" = ["UP006", "UP035"]
-"vllm/model_executor/models/**/*.py" = ["UP006", "UP035"]
-"vllm/platforms/**/*.py" = ["UP006", "UP035"]
-"vllm/plugins/**/*.py" = ["UP006", "UP035"]
 "vllm/prompt_adapter/**/*.py" = ["UP006", "UP035"]
 "vllm/spec_decode/**/*.py" = ["UP006", "UP035"]
-"vllm/transformers_utils/**/*.py" = ["UP006", "UP035"]
-"vllm/triton_utils/**/*.py" = ["UP006", "UP035"]
-"vllm/vllm_flash_attn/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
+# Python 3.8 typing - skip utils for ROCm
 "vllm/utils.py" = ["UP006", "UP035"]
 
 [tool.ruff.lint]
@@ -122,6 +110,7 @@ ignore = [
 ]
 
 [tool.mypy]
+plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
@@ -157,6 +146,7 @@ skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora
 skip_glob = [
     ".buildkite/*",
     "benchmarks/*",
+    "examples/*",
 ]
 use_parentheses = true
 skip_gitignore = true
@@ -174,7 +164,17 @@ markers = [
 
 [tool.pymarkdown]
 plugins.md004.style = "sublist" # ul-style
+plugins.md007.indent = 4 # ul-indent
+plugins.md007.start_indented = true # ul-indent
 plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html
+plugins.md046.enabled = false # code-block-style
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
+
+[tool.ty.src]
+root = "./vllm"
+respect-ignore-files = true
+
+[tool.ty.environment]
+python = "./.venv"

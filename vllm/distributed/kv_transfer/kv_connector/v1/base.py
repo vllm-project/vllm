@@ -22,7 +22,6 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -48,24 +47,6 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
-class KVTransferParams:
-    """
-    Abstract KVTransferParams used to send KVTransfer
-    parameters between instances of vLLM.
-    
-    Specific instances of KVConnector customize this
-    method for serializing / deserializing msgs sent
-    via the HTTP protocol.
-    """
-
-    @staticmethod
-    def from_raw_dict(
-            raw_dict: Optional[dict[str,
-                                    Any]]) -> Optional["KVTransferParams"]:
-        return None
-
-
-@dataclass
 class KVConnectorMetadata:
     """
     Abstract Metadata used to communicate between the
@@ -75,7 +56,6 @@ class KVConnectorMetadata:
 
 
 class KVConnectorBase_V1(ABC):
-    _KVTransferParams = KVTransferParams
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         logger.warning(
@@ -203,7 +183,8 @@ class KVConnectorBase_V1(ABC):
         finished generating tokens.
 
         Returns:
-            ids of requests that have finished asynchronous (recving, sending).
+            ids of requests that have finished asynchronous transfer,
+            tuple of (sending/saving ids, recving/loading ids).
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
@@ -212,13 +193,6 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
-
-    def set_kv_transfer_params(self, request: "Request"):
-        """Parse raw KV Transfer params."""
-        assert request.kv_transfer_params is None
-        kv_transfer_params = self._KVTransferParams.from_raw_dict(
-            request.raw_kv_transfer_params)
-        request.kv_transfer_params = kv_transfer_params
 
     @abstractmethod
     def get_num_new_matched_tokens(
@@ -236,10 +210,11 @@ class KVConnectorBase_V1(ABC):
                 computed tokens for this request
 
         Returns:
-            * the number of tokens that can be loaded from the 
-              external KV cache beyond what is already computed.
-            * true if external KV cache tokens will be loaded
-              asynchronously (between scheduler steps).
+            A tuple with the following elements:
+                - The number of tokens that can be loaded from the 
+                  external KV cache beyond what is already computed.
+                - `True` if external KV cache tokens will be loaded
+                  asynchronously (between scheduler steps).
         """
         pass
 

@@ -36,22 +36,21 @@ def parse_args():
     parser.set_defaults(load_format="sharded_state")
 
     # Add validation arguments
-    parser.add_argument("--prompt",
-                        type=str,
-                        default="Hello, world!",
-                        help="Prompt for validation")
-    parser.add_argument("--max-tokens",
-                        type=int,
-                        default=100,
-                        help="Maximum number of tokens to generate")
-    parser.add_argument("--temperature",
-                        type=float,
-                        default=0.7,
-                        help="Sampling temperature")
-    parser.add_argument("--top-p",
-                        type=float,
-                        default=1.0,
-                        help="Top-p sampling parameter")
+    parser.add_argument(
+        "--prompt", type=str, default="Hello, world!", help="Prompt for validation"
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=100,
+        help="Maximum number of tokens to generate",
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.7, help="Sampling temperature"
+    )
+    parser.add_argument(
+        "--top-p", type=float, default=1.0, help="Top-p sampling parameter"
+    )
 
     return parser.parse_args()
 
@@ -60,8 +59,9 @@ def main():
     args = parse_args()
     engine_args = EngineArgs.from_cli_args(args)
 
-    print(f"Loading model from {engine_args.model} "
-          f"using format {engine_args.load_format}")
+    print(
+        f"Loading model from {engine_args.model} using format {engine_args.load_format}"
+    )
     print(f"Tensor parallel size: {engine_args.tensor_parallel_size}")
 
     # Load the model using engine args

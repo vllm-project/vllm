@@ -57,6 +57,10 @@ class EngineCore:
                  executor_fail_callback: Optional[Callable] = None):
         assert vllm_config.model_config.runner_type != "pooling"
 
+        # plugins need to be loaded at the engine/scheduler level too
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
+
         self.vllm_config = vllm_config
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
@@ -182,14 +186,10 @@ class EngineCore:
             # Start grammar compilation asynchronously
             self.structured_output_manager.grammar_init(req)
 
-        if req.raw_kv_transfer_params is not None:
-            if (kv_connector := self.scheduler.get_kv_connector()):
-                # Parse raw KV transfer params via connector.
-                kv_connector.set_kv_transfer_params(req)
-            else:
-                logger.warning(
-                    "Got KVTransferParams, but no KVConnector found. "
-                    "Disabling KVTransfer for this request.")
+        if req.kv_transfer_params is not None and (
+                not self.scheduler.get_kv_connector()):
+            logger.warning("Got kv_transfer_params, but no KVConnector found. "
+                           "Disabling KVTransfer for this request.")
 
         self.scheduler.add_request(req)
 
@@ -339,6 +339,13 @@ class EngineCore:
                        kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
+
+    def save_tensorized_model(
+        self,
+        tensorizer_config,
+    ) -> None:
+        self.model_executor.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
 
 
 class EngineCoreProc(EngineCore):
@@ -701,7 +708,7 @@ class DPEngineCoreProc(EngineCoreProc):
             for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
                            world_size))
 
-        self.local_dp_rank = local_dp_rank
+        self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
         self.current_wave = 0
 
@@ -774,7 +781,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 local_unfinished_reqs)
 
             if not self.engines_running:
-                if self.local_dp_rank == 0:
+                if self.dp_rank == 0:
                     # Notify client that we are pausing the loop.
                     logger.debug("Wave %d finished, pausing engine loop.",
                                  self.current_wave)
