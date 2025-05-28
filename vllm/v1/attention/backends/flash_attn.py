@@ -340,9 +340,17 @@ class FlashAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+    def build_for_cudagraph_capture(
+        self, num_reqs: int, num_tokens: int,
+        common_attn_metadata: CommonAttentionMetadata
+    ) -> FlashAttentionMetadata:
+        return self.build(num_reqs, num_tokens, num_tokens, 0,
+                          common_attn_metadata)
+
+    def build(
+        self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+        common_prefix_len: int, common_attn_metadata: CommonAttentionMetadata
+    ) -> FlashAttentionMetadata:
         max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
