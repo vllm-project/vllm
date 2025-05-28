@@ -51,6 +51,11 @@ void apply_repetition_penalties_(
     const torch::Tensor& prompt_mask,  // [num_seqs, vocab_size]
     const torch::Tensor& output_mask,  // [num_seqs, vocab_size]
     const torch::Tensor& repetition_penalties) {  // [num_seqs]
+  TORCH_CHECK(logits.is_contiguous());
+  TORCH_CHECK(prompt_mask.is_contiguous());
+  TORCH_CHECK(output_mask.is_contiguous());
+  TORCH_CHECK(repetition_penalties.is_contiguous());
+
   int vocab_size = logits.size(-1);
   int num_seqs = logits.size(0);
 
