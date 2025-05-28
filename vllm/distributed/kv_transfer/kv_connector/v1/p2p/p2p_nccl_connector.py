@@ -327,7 +327,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         num_external_tokens = (len(request.prompt_token_ids) - 1 -
                                num_computed_tokens)
-        logger.info(
+        logger.debug(
             "🍒num_external_tokens:%d, num_prompt_tokens:%d, "
             "num_computed_tokens:%d, request_id:%s", num_external_tokens,
             len(request.prompt_token_ids), num_computed_tokens,
