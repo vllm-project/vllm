@@ -14,8 +14,6 @@ from vllm.distributed.tpu_distributed_utils import XlaQKVParallelLinear
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.linear import QKVParallelLinear
 
-torch.manual_seed(123)
-
 
 @pytest.fixture(autouse=True)
 def setup_environment():
@@ -61,6 +59,8 @@ def _get_spmd_mesh():
 @pytest.mark.parametrize("device", ['cpu', 'xla'])
 @torch.no_grad()
 def test_xla_qkv_linear(bias, mesh, device):
+    torch.manual_seed(123)
+
     qkv_linear = QKVParallelLinear(
         hidden_size=4096,
         head_size=128,
