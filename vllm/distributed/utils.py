@@ -5,7 +5,6 @@
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import dataclasses
-import datetime
 import os
 import pickle
 import socket
@@ -14,6 +13,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Sequence
+from datetime import timedelta
 from typing import Any, Optional
 
 import torch
@@ -405,7 +405,7 @@ class StatelessProcessGroup:
             port=port,
             world_size=world_size,
             is_master=launch_server,
-            timeout=datetime.timedelta(seconds=store_timeout),
+            timeout=timedelta(seconds=store_timeout),
             use_libuv=False,  # for now: github.com/pytorch/pytorch/pull/150215
             master_listen_fd=listen_fd,
         )
@@ -416,6 +416,43 @@ class StatelessProcessGroup:
             store=store,
             socket=listen_socket,
             data_expiration_seconds=data_expiration_seconds)
+
+
+def init_gloo_process_group(backend: Backend, prefix_store: PrefixStore,
+                            group_rank: int, group_size: int,
+                            timeout: timedelta) -> ProcessGroup:
+    """
+    Stateless init ProcessGroup with gloo backend compatible with 
+    different torch versions.
+    """
+    if is_torch_equal_or_newer("2.6"):
+        pg = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
+    else:
+        options = ProcessGroup.Options(backend=backend)
+        pg = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+            options,
+        )
+    from torch.distributed.distributed_c10d import ProcessGroupGloo
+    backend_class = ProcessGroupGloo(prefix_store,
+                                     group_rank,
+                                     group_size,
+                                     timeout=timeout)
+    backend_type = ProcessGroup.BackendType.GLOO
+    device = torch.device("cpu")
+    if is_torch_equal_or_newer("2.6"):
+        # _set_default_backend is supported in torch >= 2.6
+        pg._set_default_backend(backend_type)
+    backend_class._set_sequence_number_for_group()
+
+    pg._register_backend(device, backend_type, backend_class)
+    return pg
 
 
 def stateless_init_torch_distributed_process_group(
@@ -468,24 +505,11 @@ def stateless_init_torch_distributed_process_group(
     prefix_store = PrefixStore(init_method, store)
 
     if backend == "gloo":
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
-        from torch.distributed.distributed_c10d import ProcessGroupGloo
-        backend_class = ProcessGroupGloo(prefix_store,
-                                         group_rank,
-                                         group_size,
-                                         timeout=timeout)
-        backend_type = ProcessGroup.BackendType.GLOO
-        device = torch.device("cpu")
-        pg._set_default_backend(backend_type)
-        backend_class._set_sequence_number_for_group()
-
-        pg._register_backend(device, backend_type, backend_class)
-
-        return pg
+        return init_gloo_process_group(backend=backend,
+                                       prefix_store=prefix_store,
+                                       group_rank=group_rank,
+                                       group_size=group_size,
+                                       timeout=timeout)
     from vllm.platforms import current_platform
     return current_platform.stateless_init_device_torch_dist_pg(
         backend=backend,
