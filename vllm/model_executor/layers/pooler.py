@@ -311,7 +311,7 @@ class ClassifierPooler(nn.Module):
             self.default_activation_function = nn.Sigmoid() \
                 if config.hf_config.num_labels == 1 else nn.Softmax()
         else:
-            raise NotImplementedError(f"task {config.task} is not supported"
+            raise NotImplementedError(f"task={config.task!r} is not supported"
                                       " with the classification pooler")
 
     def forward(
