@@ -797,17 +797,12 @@ class ModelConfig:
         else:
             # Aliases
             if task_option == "embedding":
-                preferred_task = self._get_preferred_task(
-                    architectures, supported_tasks)
-                if preferred_task != "embed":
-                    msg = ("The 'embedding' task will be restricted to "
-                           "embedding models in a future release. Please "
-                           "pass `--task classify`, `--task score`, or "
-                           "`--task reward` explicitly for other pooling "
-                           "models.")
-                    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+                msg = ("The 'embedding' task has been renamed to "
+                       "'embed', please use the new name. The old name "
+                       "will be removed in v1.0.")
+                warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
-                task_option = preferred_task or "embed"
+                task_option = "embed"
 
             if task_option not in supported_tasks:
                 msg = (

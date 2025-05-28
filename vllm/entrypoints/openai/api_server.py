@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
 from json import JSONDecodeError
-from typing import Annotated, Optional, Union
+from typing import Annotated, Optional
 
 import prometheus_client
 import regex as re
@@ -59,9 +59,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingChatRequest,
                                               EmbeddingCompletionRequest,
                                               EmbeddingRequest,
-                                              EmbeddingResponse,
-                                              EmbeddingResponseData,
-                                              ErrorResponse,
+                                              EmbeddingResponse, ErrorResponse,
                                               LoadLoRAAdapterRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
@@ -627,37 +625,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
-        fallback_handler = pooling(raw_request)
-        if fallback_handler is None:
-            return base(raw_request).create_error_response(
-                message="The model does not support Embeddings API")
+        return base(raw_request).create_error_response(
+            message="The model does not support Embeddings API")
 
-        logger.warning(
-            "Embeddings API will become exclusive to embedding models "
-            "in a future release. To return the hidden states directly, "
-            "use the Pooling API (`/pooling`) instead.")
-
-        res = await fallback_handler.create_pooling(request, raw_request)
-
-        generator: Union[ErrorResponse, EmbeddingResponse]
-        if isinstance(res, PoolingResponse):
-            generator = EmbeddingResponse(
-                id=res.id,
-                object=res.object,
-                created=res.created,
-                model=res.model,
-                data=[
-                    EmbeddingResponseData(
-                        index=d.index,
-                        embedding=d.data,  # type: ignore
-                    ) for d in res.data
-                ],
-                usage=res.usage,
-            )
-        else:
-            generator = res
-    else:
-        generator = await handler.create_embedding(request, raw_request)
+    generator = await handler.create_embedding(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
