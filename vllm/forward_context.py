@@ -47,9 +47,7 @@ class DPMetadata:
         return num_tokens_tensor
 
     @staticmethod
-    def make(parallel_config: ParallelConfig,
-             attn_metadata: Union["AttentionMetadata",
-                                  dict[str, "AttentionMetadata"]],
+    def make(parallel_config: ParallelConfig, attn_metadata: Any,
              num_tokens: int) -> "DPMetadata":
 
         assert parallel_config.data_parallel_size > 1
