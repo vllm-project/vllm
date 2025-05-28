@@ -792,12 +792,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 max_num_tokens=max_num_tokens_per_rank,
                 world_size=prepare_finalize.world_size,
                 dp_size=prepare_finalize.dp_size,
-                use_fp8_w8a8=True,
-                use_int8_w8a8=False,
-                use_int8_w8a16=False,
-                use_int4_w4a16=False,
                 per_channel_quant=False,
+                qtype=torch.float8_e4m3fn,
                 block_shape=self.quant_config.weight_block_size,
+                per_act_token=False,  #?
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         else:

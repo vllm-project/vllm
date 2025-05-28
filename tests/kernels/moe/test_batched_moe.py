@@ -271,8 +271,9 @@ def batched_moe(
     topk_ids: torch.Tensor,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
-    use_fp8_w8a8: bool = False,
+    qtype: Optional[torch.dtype] = None,
     block_shape: Optional[list[int]] = None,
+    per_act_token: bool = False,
 ) -> torch.Tensor:
     max_num_tokens = round_up(a.shape[0], 64)  # ?
     fused_experts = FusedMoEModularKernel(
@@ -280,12 +281,13 @@ def batched_moe(
                                   world_size=1,
                                   dp_size=1,
                                   rank=0,
-                                  use_fp8_w8a8=use_fp8_w8a8,
-                                  block_shape=block_shape),
+                                  qtype=qtype,
+                                  block_shape=block_shape,
+                                  per_act_token=False),
         BatchedTritonExperts(max_num_tokens=max_num_tokens,
                              dp_size=1,
                              world_size=1,
-                             use_fp8_w8a8=use_fp8_w8a8,
+                             use_fp8_w8a8=qtype == torch.float8_e4m3fn,
                              block_shape=block_shape))
 
     return fused_experts(a,
@@ -361,7 +363,7 @@ def torch_moe2(
 @pytest.mark.parametrize("k", [128, 512, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.torch.float8_e4m3fn, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
 def test_fused_moe_batched_experts(
     m: int,
     n: int,
@@ -379,6 +381,7 @@ def test_fused_moe_batched_experts(
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
 
     use_fp8_w8a8 = dtype == torch.torch.float8_e4m3fn
+    qtype = dtype if dtype == torch.torch.float8_e4m3fn else None
 
     if use_fp8_w8a8:
         block_n, block_k = block_shape[0], block_shape[1]
@@ -410,7 +413,7 @@ def test_fused_moe_batched_experts(
         baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s,
                                      w2_s, use_fp8_w8a8, block_shape)
         batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                     w2_s, use_fp8_w8a8, block_shape)
+                                     w2_s, qtype, block_shape)
 
     torch.testing.assert_close(baseline_output,
                                batched_output,

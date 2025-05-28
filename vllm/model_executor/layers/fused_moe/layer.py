@@ -209,8 +209,11 @@ class MoEConfig:
     num_local_experts: int
     moe_parallel_config: FusedMoEParallelConfig
 
-    in_dtype: torch.dtype  # The activation type.
-    quant_dtype: torch.dtype = None
+    # The activation type.
+    in_dtype: torch.dtype
+
+    # The post quantization activation type.
+    quant_dtype: Optional[torch.dtype] = None
 
     # TODO: add more quantization params, blocked, per-token, etc.
     block_size: int = 128
@@ -600,22 +603,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
                 world_size=world_size,
                 dp_size=dp_size,
-                use_fp8_w8a8=False,  #moe.in_dtype == torch.float8_e4m3fn,
-                use_int8_w8a8=False,
-                use_int8_w8a16=False,
-                use_int4_w4a16=False,
-                block_shape=None,
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            experts = TritonExperts(
-                use_fp8_w8a8=False,
-                use_int8_w8a8=False,
-                use_int8_w8a16=False,
-                use_int4_w4a16=False,
-                block_shape=None,
-                per_channel_quant=False,
-            )
+            experts = TritonExperts()
 
         self.fused_experts = FusedMoEModularKernel(
             prepare_finalize,
@@ -949,7 +940,7 @@ class FusedMoE(torch.nn.Module):
                 quant_dtype = torch.float8_e4m3fn
 
         moe = MoEConfig(
-            max_num_tokens=MOE_DP_CHUNK_SIZE,
+            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
@@ -957,7 +948,6 @@ class FusedMoE(torch.nn.Module):
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=params_dtype,
             quant_dtype=quant_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
         )
         self.moe_config = moe
         self.quant_config = quant_config
@@ -994,15 +984,14 @@ class FusedMoE(torch.nn.Module):
         self.batched_router_logits: Optional[torch.Tensor] = None
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels):
-            act_dtype = vllm_config.model_config.dtype
             self.batched_hidden_states = torch.zeros(
-                (envs.VLLM_MOE_DP_CHUNK_SIZE, self.hidden_size),
-                dtype=act_dtype,
+                (moe.max_num_tokens, self.hidden_size),
+                dtype=moe.in_dtype,
                 device=torch.cuda.current_device())
 
             self.batched_router_logits = torch.zeros(
-                (envs.VLLM_MOE_DP_CHUNK_SIZE, self.global_num_experts),
-                dtype=act_dtype,
+                (moe.max_num_tokens, self.global_num_experts),
+                dtype=moe.in_dtype,
                 device=torch.cuda.current_device())
 
     @property
