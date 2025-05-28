@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Iterable
+from copy import deepcopy
 from typing import Optional
 
 import torch
@@ -10,6 +11,7 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import (get_act_and_mul_fn,
                                                    get_act_fn)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -26,6 +28,8 @@ from vllm.model_executor.models import SupportsV0Only
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.sequence import IntermediateTensors
+
+logger = init_logger(__name__)
 
 
 class BertWithRopeEmbedding(nn.Module):
@@ -513,10 +517,11 @@ class NomicBertModel(BertWithRope):
 
         head_dim = config.hidden_size // config.num_attention_heads
         rotary_emb_dim = head_dim * config.rotary_emb_fraction
+        max_trained_positions = getattr(config, "max_trained_positions", 2048)
         config.rotary_kwargs = {
             "head_size": head_dim,
             "rotary_dim": rotary_emb_dim,
-            "max_position": config.max_trained_positions,
+            "max_position": max_trained_positions,
             "base": getattr(config, "rope_theta", config.rotary_emb_base),
             "rope_scaling": getattr(config, "rope_scaling", None)
         }
@@ -525,8 +530,52 @@ class NomicBertModel(BertWithRope):
         # than max_trained_positions 2048, the results are consistent
         # with SentenceTransformer.
         # The context extension uses vllm style rope_theta and rope_scaling.
-        # See #17785
+        # See #17785 #18755
+        if (not vllm_config.model_config.hf_overrides
+                and vllm_config.model_config.original_max_model_len is None):
+            # Default
+            # Reset max_model_len to max_trained_positions.
+            # nomic-embed-text-v2-moe the length is set to 512
+            # by sentence_bert_config.json.
+            max_model_len_before = vllm_config.model_config.max_model_len
+            max_model_len = min(vllm_config.model_config.max_model_len,
+                                max_trained_positions)
 
+            vllm_config.recalculate_max_model_len(max_model_len)
+            logger.warning(
+                "Nomic context extension is disabled. "
+                "Changing max_model_len from %s to %s. "
+                "To enable context extension, see: "
+                "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.html",
+                max_model_len_before, vllm_config.model_config.max_model_len)
+        else:
+            # We need to re-verify max_model_len to avoid lengths
+            # greater than position_embedding.
+            model_config = vllm_config.model_config
+            hf_text_config = model_config.hf_text_config
+
+            if isinstance(model_config.hf_overrides, dict):
+                # hf_overrides_kw
+                max_model_len = model_config.hf_overrides.get(
+                    "max_model_len", vllm_config.model_config.max_model_len)
+            else:
+                # hf_overrides_fn
+                # This might be overridden by sentence_bert_config.json.
+                max_model_len = vllm_config.model_config.max_model_len
+
+            # reset hf_text_config for recalculate_max_model_len.
+            if hasattr(hf_text_config, "max_model_len"):
+                delattr(hf_text_config, "max_model_len")
+            hf_text_config.max_position_embeddings = max_trained_positions
+            hf_text_config.rope_scaling = config.rotary_kwargs["rope_scaling"]
+
+            # The priority of sentence_bert_config.json is higher
+            # than max_position_embeddings
+            encoder_config = deepcopy(model_config.encoder_config)
+            encoder_config.pop("max_seq_length", None)
+            model_config.encoder_config = encoder_config
+
+            vllm_config.recalculate_max_model_len(max_model_len)
         return config
 
 
