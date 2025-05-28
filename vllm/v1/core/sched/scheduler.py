@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -148,6 +149,9 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+
+        self.is_dp_master = get_dp_group().is_first_rank
+        self.dp_name = get_dp_group().unique_name
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -556,9 +560,13 @@ class Scheduler(SchedulerInterface):
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
+        # Clear events even if not publishing to avoid memory buildup
         events = self.kv_cache_manager.take_events()
-        if events:
-            batch = KVEventBatch(ts=time.time(), events=events)
+        # Only collect and publish KV events if this is the DP master
+        if self.is_dp_master and events:
+            batch = KVEventBatch(
+                ts=time.time(), events=events, dp_name=self.dp_name
+            )
             self.kv_event_publisher.publish(batch)
 
         # Advance the number of computed tokens for the request AFTER
