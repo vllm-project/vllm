@@ -395,22 +395,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
                 world_size=world_size,
                 dp_size=dp_size,
-                use_fp8_w8a8=False,  #moe.in_dtype == torch.float8_e4m3fn,
-                use_int8_w8a8=False,
-                use_int8_w8a16=False,
-                use_int4_w4a16=False,
-                block_shape=None,
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            experts = TritonExperts(
-                use_fp8_w8a8=False,
-                use_int8_w8a8=False,
-                use_int8_w8a16=False,
-                use_int4_w4a16=False,
-                block_shape=None,
-                per_channel_quant=False,
-            )
+            experts = TritonExperts()
 
         self.fused_experts = FusedMoEModularKernel(
             prepare_finalize,
@@ -773,7 +761,6 @@ class FusedMoE(torch.nn.Module):
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=model_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             quant_config=quant_config,
         )
         self.moe_config = moe
