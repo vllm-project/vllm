@@ -35,19 +35,6 @@ The following metrics are exposed:
 --8<-- "vllm/engine/metrics.py:metrics-definitions"
 ```
 
-The following metrics are deprecated and due to be removed in a future version:
-
-- `vllm:num_requests_swapped`, `vllm:cpu_cache_usage_perc`, and
-  `vllm:cpu_prefix_cache_hit_rate` because KV cache offloading is not
-  used in V1.
-- `vllm:gpu_prefix_cache_hit_rate` is replaced by queries+hits
-  counters in V1.
-- `vllm:time_in_queue_requests` because it duplicates
-  `vllm:request_queue_time_seconds`.
-- `vllm:model_forward_time_milliseconds` and
-  `vllm:model_execute_time_milliseconds` because
-  prefill/decode/inference time metrics should be used instead.
-
 Note: when metrics are deprecated in version `X.Y`, they are hidden in version `X.Y+1`
 but can be re-enabled using the `--show-hidden-metrics-for-version=X.Y` escape hatch,
 and are then removed in version `X.Y+2`.
