@@ -8,7 +8,8 @@ from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
-from compressed_tensors.quantization import (QuantizationStrategy,
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy,
                                              QuantizationType)
 from torch.nn.parameter import UninitializedParameter
 
@@ -241,7 +242,19 @@ class FusedMoeWeightScaleSupported(Enum):
     BLOCK = "block"
 
 
+def get_quant_config_input_activations(
+        quant_config: Optional[QuantizationConfig]
+) -> Optional[QuantizationArgs]:
+    if (quant_config is not None and hasattr(quant_config, 'target_scheme_map')
+            and "Linear" in quant_config.target_scheme_map and
+            "input_activations" in quant_config.target_scheme_map["Linear"]):
+        return quant_config.target_scheme_map["Linear"].get(
+            "input_activations")
+
+
 class FusedMoEMethodBase(QuantizeMethodBase):
+
+    moe: MoEConfig
 
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -254,6 +267,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
+        self.moe = moe
         prepare_finalize = None
         if moe.use_pplx_kernels:
             all_to_all_args = dict(
@@ -278,6 +292,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             handle = all2all_manager.get_handle(all_to_all_args)
 
+            input_activations = get_quant_config_input_activations(
+                quant_config)
+
             prepare_finalize = PplxPrepareAndFinalize(
                 handle,
                 max_num_tokens=moe.max_num_tokens,
@@ -286,9 +303,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 # dp_size actually means tp_size, bug in pplx kernels
                 dp_size=all2all_manager.tp_group.world_size,
                 quant_dtype=moe.quant_dtype,
-                per_act_token=(quant_config.target_scheme_map["Linear"].get(
-                    "weights").strategy == QuantizationStrategy.TOKEN
-                               if quant_config is not None else False),
+                per_act_token=(input_activations.strategy
+                               == QuantizationStrategy.TOKEN
+                               if input_activations is not None else False),
             )
 
         if prepare_finalize is not None:
@@ -796,10 +813,11 @@ class FusedMoE(torch.nn.Module):
         # Only support float8 for now.
         quant_dtype = params_dtype
         if quant_config is not None:
-            input_quant = quant_config.target_scheme_map["Linear"].get(
-                "input_activations")
-            if (input_quant is not None and input_quant.num_bits == 8
-                    and input_quant.type == QuantizationType.FLOAT):
+            input_activations = get_quant_config_input_activations(
+                quant_config)
+            if (input_activations is not None
+                    and input_activations.num_bits == 8
+                    and input_activations.type == QuantizationType.FLOAT):
                 quant_dtype = torch.float8_e4m3fn
 
         moe = MoEConfig(

@@ -33,9 +33,9 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-        padded_M: int,
+        padded_M: int = 0,
     ) -> tuple[int, int, torch.dtype]:
-        # in CUTLASS MoE, N is actually N * 2
+        assert padded_M != 0, "padded_M must be provided for PPLX CUTLASS MoE"
         workspace1 = self.max_experts_per_worker * padded_M * max(N, K)
         workspace2 = self.max_experts_per_worker * padded_M * (N // 2)
         return (workspace1, workspace2, self.out_dtype)

@@ -323,8 +323,13 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         output = a1 if inplace else torch.zeros_like(a1)
 
-        padded_M = (self.prepare_finalize.max_num_tokens *
-                    self.prepare_finalize.world_size)
+        # compute padded_M for PplxPrepareAndFinalize
+        if (hasattr(self.prepare_finalize, 'max_num_tokens')
+                and hasattr(self.prepare_finalize, 'world_size')):
+            padded_M = (self.prepare_finalize.max_num_tokens *
+                        self.prepare_finalize.world_size)
+        else:
+            padded_M = M
 
         workspace13_shape, workspace2_shape, workspace_dtype = (
             self.fused_experts.workspace_shapes(a1, M, N, K, top_k,
