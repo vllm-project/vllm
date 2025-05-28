@@ -476,13 +476,11 @@ class CustomDataset(BenchmarkDataset):
         if self.dataset_path.endswith(".jsonl"):
             jsonl_data = pd.read_json(path_or_buf=self.dataset_path,
                                       lines=True)
-            
+
             # check if the JSONL file has a 'prompt' column
             if "prompt" not in jsonl_data.columns:
-                raise ValueError(
-                    "JSONL file must contain a 'prompt' column."
-                )
-            
+                raise ValueError("JSONL file must contain a 'prompt' column.")
+
             # Convert each row to a dictionary and append to self.data
             # This will convert the DataFrame to a list of dictionaries
             # where each dictionary corresponds to a row in the DataFrame.
