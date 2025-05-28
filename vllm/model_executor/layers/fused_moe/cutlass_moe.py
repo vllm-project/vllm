@@ -113,6 +113,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         if expert_num_tokens is not None:
             non_zero_mask = expert_num_tokens[:] != 0
             masked_local_E = int(non_zero_mask.sum().item())
+            non_zero_expert_idxs = torch.nonzero(non_zero_mask).flatten()
 
             if masked_local_E == 0:
                 return torch.zeros((local_E, padded_M, K),
@@ -129,25 +130,17 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
                                          dtype=torch.int32,
                                          device=device)
 
-            # TODO write a new get_cutlass_moe_mm_data kernel for this
-            masked_idx = 0
-            for idx in range(local_E):
-                if expert_num_tokens[idx] != 0:
-                    expert_offsets[masked_idx] = idx * a1q.shape[1]
-                    problem_sizes1[masked_idx][0] = expert_num_tokens[idx]
-                    problem_sizes1[masked_idx][1] = 2 * N
-                    problem_sizes1[masked_idx][2] = K
-                    problem_sizes2[masked_idx][0] = expert_num_tokens[idx]
-                    problem_sizes2[masked_idx][1] = K
-                    problem_sizes2[masked_idx][2] = N
-                    masked_idx += 1
+            ops.get_cutlass_pplx_moe_mm_data(expert_offsets, problem_sizes1,
+                                             problem_sizes2, expert_num_tokens,
+                                             non_zero_expert_idxs,
+                                             masked_local_E, padded_M, N, K)
 
             # Filter out problem sizes with 0 tokens
             if masked_local_E != local_E:
                 w1 = w1[non_zero_mask].contiguous()
                 w2 = w2[non_zero_mask].contiguous()
-                w1_scale = w1_scale[non_zero_mask].contiguous()
-                w2_scale = w2_scale[non_zero_mask].contiguous()
+                w1_scale = w1_scale[non_zero_mask]
+                w2_scale = w2_scale[non_zero_mask]
 
             w1_scale = w1_scale.reshape(w1_scale.shape[0], -1).contiguous()
             w2_scale = w2_scale.reshape(w2_scale.shape[0], -1).contiguous()
@@ -270,25 +263,17 @@ def cutlass_moe_fp8(
         Shape: [num_experts, K, 2N] (the weights are passed transposed)
     - w2_q (torch.Tensor): The second set of fp8-quantized expert weights.
         Shape: [num_experts, N, K] (the weights are passed transposed)
+    - topk_weights (torch.Tensor): The weights of each token->expert mapping.
+    - topk_ids (torch.Tensor): The token->expert mappings.
     - w1_scale (torch.Tensor): The fp32 scale to dequantize w1_q.
         Shape: [num_experts] or [num_experts, 2N]
     - w2_scale (torch.Tensor): The fp32 scale to dequantize w2_q.
         Shape: [num_experts] or [num_experts, K]
-    - gating_output (torch.Tensor): The output of the gating operation
-        (before softmax).
-    - topk_weights (torch.Tensor): The weights of each token->expert mapping.
-    - ab_strides1 (torch.Tensor): The input and weights strides of the first
-        grouped gemm.
-    - c_strides1 (torch.Tensor): The output strides of the first grouped gemm.
-    - ab_strides2 (torch.Tensor): The input and weights strides of the second
-        grouped gemm.
-    - c_strides2 (torch.Tensor): The output strides of the second grouped gemm.
     - a1_scale (Optional[torch.Tensor]): The optional fp32 scale to quantize a.
         Shape: scalar or [M]
     - a2_scale (Optional[torch.Tensor]): The optional fp32 scale to
         quantize the intermediate result between the gemms.
         Shape: scalar or [M]
-    - out_dtype (torch.dtype): The output tensor type.
     - expert_map (Optional[torch.Tensor]): In the case of Expert parallel,
         every Rank is responsible for a subset of experts. expert_map is a
         mapping from global expert-id to local expert-id. When expert_map[i]
@@ -296,6 +281,7 @@ def cutlass_moe_fp8(
         expert-id i.
     - apply_router_weight_on_input (bool): When true, the topk weights are
         applied directly on the inputs. This is only applicable when topk is 1.
+    - global_num_experts (int): The total number of experts.
 
     Returns:
     - torch.Tensor: The fp16 output tensor after applying the MoE layer.
@@ -319,6 +305,8 @@ def cutlass_moe_fp8(
     workspace2 = torch.zeros(ws2, device=a.device, dtype=out_dtype)
 
     if apply_router_weight_on_input:
+        assert topk_ids.shape[
+            1] == 1, "topk_ids must be 1 for apply_router_weight_on_input"
         a = a * topk_weights.to(a.dtype)
 
     from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
@@ -330,7 +318,7 @@ def cutlass_moe_fp8(
         w2_q,
         topk_ids,
         "silu",
-        global_num_experts,
+        global_num_experts if global_num_experts != -1 else w1_q.size(0),
         expert_map,
         w1_scale,
         w2_scale,
