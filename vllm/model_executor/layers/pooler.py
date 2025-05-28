@@ -298,21 +298,18 @@ class CrossEncodingPooler(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
         classifier: nn.Module,
         pooler: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.classifier = classifier
         self.pooler = pooler
-        self.default_activation_function = \
-            get_cross_encoder_activation_function(config)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> PoolerOutput:
+    ) -> torch.Tensor:
         """Pools sentence pair scores from the hidden_states."""
 
         prompt_lens = PoolingTensors.from_pooling_metadata(
@@ -337,7 +334,4 @@ class CrossEncodingPooler(nn.Module):
             # apply classifier once on the full batch if possible
             pooled_output = self.classifier(pooled_output)
 
-        scores = self.default_activation_function(pooled_output).squeeze(-1)
-
-        pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]
-        return PoolerOutput(outputs=pooled_outputs)
+        return pooled_output

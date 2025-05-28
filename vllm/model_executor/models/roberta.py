@@ -9,7 +9,7 @@ from torch import nn
 from transformers import RobertaConfig
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.pooler import CrossEncodingPooler
+from vllm.model_executor.layers.pooler import CrossEncodingPooler, Pooler, PoolingType
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -186,7 +186,13 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
                                  embedding_class=RobertaEmbedding,
                                  add_pooling_layer=False)
         self.classifier = RobertaClassificationHead(config)
-        self._pooler = CrossEncodingPooler(config, self.classifier)
+        self.cross_encoding_Pooler = CrossEncodingPooler(classifier=self.classifier,
+                                           pooler=self.roberta.pooler)
+        self._pooler = Pooler.from_config_with_defaults(
+            vllm_config.model_config.pooler_config,
+            pooling_type=PoolingType.CLS,
+            normalize=False,
+            softmax=True)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         bert_weights, task_weights = roberta_task_weights_filter(weights)
@@ -208,6 +214,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
+        hidden_states = self.cross_encoding_Pooler(hidden_states, pooling_metadata)
         return self._pooler(hidden_states, pooling_metadata)
 
     def forward(
