@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch.fx as fx
+from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
@@ -269,7 +270,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
             for t in args
         ]
-        with self.fake_mode:
+        with self.fake_mode, enable_python_dispatcher():
             return super().run(*fake_args)
 
     def call_module(self, target: torch.fx.node.Target,
