@@ -1466,6 +1466,9 @@ def fused_moe(
         Defaults to False.
     - activation (str): The activation function to apply after the first
         MoE layer.
+    - is_act_and_mul (bool): If True, use activation-and-mul function for
+        activation (self-gated activation), otherwise use activation function
+        for activation (ungated activation).
     - num_expert_group: Optional[int]: additional parameter for grouped_topk
     - topk_group: Optional[int]: additional parameter for grouped_topk
     - use_grouped_topk: If True, use grouped_topk instead of fused_topk
