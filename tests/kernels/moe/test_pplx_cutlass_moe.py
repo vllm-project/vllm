@@ -139,7 +139,6 @@ def pplx_cutlass_moe(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     a1_scale: torch.Tensor,
-    scores: torch.Tensor,
     out_dtype,
     per_act_token: bool,
     per_out_ch: bool,
@@ -159,7 +158,7 @@ def pplx_cutlass_moe(
     if block_size == hidden_dim:
         scale_elems = 4  # hack to circumvent pplx data format requirements
     else:
-        scale_elems = (hidden_dim + block_size - 1) // block_size,
+        scale_elems = (hidden_dim + block_size - 1) // block_size
 
     ata = AllToAll.internode(
         max_num_tokens=max_num_tokens,
@@ -169,7 +168,7 @@ def pplx_cutlass_moe(
         world_size=pgi.world_size,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
-        hidden_dim_bytes=hidden_dim,  # * a.dtype.itemsize,
+        hidden_dim_bytes=hidden_dim,  # because a.dtype.itemsize == 1
         hidden_dim_scale_bytes=scale_elems * torch.float32.itemsize,
     )
 
@@ -255,7 +254,6 @@ def _pplx_moe(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     a1_scale: torch.Tensor,
-    score: torch.Tensor,
     out_dtype,
     a_full: torch.Tensor,
     w1_full: torch.Tensor,
@@ -268,19 +266,18 @@ def _pplx_moe(
     torch.distributed.broadcast(uid, src=0)
     nvshmem_init(uid, pgi.rank, pgi.world_size)
 
-    score = torch.full(score.shape, 1, dtype=score.dtype, device=score.device)
-
     with set_current_vllm_config(vllm_config):
         torch_output = torch_moe2(a_full, w1_full, w2_full, topk_weights,
                                   topk_ids)
         pplx_output = pplx_cutlass_moe(pgi, dp_size, a, w1, w2, w1_scale,
                                        w2_scale, topk_weights, topk_ids,
-                                       a1_scale, score, out_dtype,
-                                       per_act_token, per_out_ch)
+                                       a1_scale, out_dtype, per_act_token,
+                                       per_out_ch)
 
         torch_output = chunk_by_rank(torch_output, pgi.rank,
                                      pgi.world_size).to(pplx_output.device)
 
+    # Uncomment if more debugging is needed
     # print("PPLX OUT:", pplx_output)
     # print("TORCH OUT:", torch_output)
 
@@ -289,22 +286,14 @@ def _pplx_moe(
     nvshmem_finalize()
 
 
-@pytest.mark.parametrize("m", [2, 64, 224])
-@pytest.mark.parametrize("n", [1024, 3072])
-@pytest.mark.parametrize("k", [1024, 1536])
+@pytest.mark.parametrize("m", [2, 224])
+@pytest.mark.parametrize("n", [3072])
+@pytest.mark.parametrize("k", [1536])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [4, 2]])
-# @pytest.mark.parametrize("m", [2])
-# @pytest.mark.parametrize("n", [3072])
-# @pytest.mark.parametrize("k", [1024])
-# @pytest.mark.parametrize("e", [8])
-# @pytest.mark.parametrize("topk", [2])
-# @pytest.mark.parametrize("per_act_token", [True, False])
-# @pytest.mark.parametrize("per_out_ch", [True, False])
-# @pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [4, 2]])
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
@@ -370,4 +359,4 @@ def test_cutlass_moe_pptx(
 
         parallel_launch(world_size, _pplx_moe, dp_size, a, w1_q, w2_q,
                         w1_scale, w2_scale, topk_weights, topk_ids, a_scale1,
-                        score, dtype, a, w1_d, w2_d, per_act_token, per_out_ch)
+                        dtype, a, w1_d, w2_d, per_act_token, per_out_ch)

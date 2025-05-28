@@ -297,8 +297,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 prepare_finalize,
                 experts,
             )
-        else:
-            print("been here, no prepare finalize")
 
     def select_gemm_impl(
         self, prepare_finalize: Optional[FusedMoEPrepareAndFinalize]
@@ -337,7 +335,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: MoEConfig):
         super().__init__()
-        print("INIT THIS UNQUANTIZED FUSED MOE")
         self.fused_experts = fused_experts  # type: ignore
         self.moe = moe
 
@@ -361,7 +358,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if isinstance(prepare_finalize,
                       (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
             logger.debug("BatchedTritonExperts %s", self.moe)
-            print("use instance: BatchedTritonExperts")
             experts = BatchedTritonExperts(
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
                 world_size=all2all_manager.world_size,
@@ -375,7 +371,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            print("use instance: TritonExperts")
             experts = TritonExperts(
                 use_fp8_w8a8=False,
                 use_int8_w8a8=False,
@@ -468,7 +463,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-
         return self.forward(
             x=x,
             layer=layer,
@@ -1247,6 +1241,7 @@ class FusedMoE(torch.nn.Module):
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
+
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,

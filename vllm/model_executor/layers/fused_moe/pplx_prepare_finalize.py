@@ -90,7 +90,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
         num_dp = self.world_size // self.dp_size
-        expert_x = torch.zeros(
+        expert_x = torch.empty(
             (num_local_experts, self.max_num_tokens * num_dp, hidden_dim),
             dtype=a1q.dtype,
             device=device,
@@ -101,7 +101,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             float32_size = torch.float32.itemsize
             block_size = (self.block_shape[0] if self.block_shape is not None
                           else 1) * float32_size
-            expert_x_scale = torch.zeros(
+            expert_x_scale = torch.empty(
                 (
                     num_local_experts,
                     expert_x.size(1),

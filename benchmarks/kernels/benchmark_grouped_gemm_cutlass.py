@@ -72,8 +72,6 @@ def bench_run(
     for expert in range(num_experts):
         w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(w1[expert])
         w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(w2[expert])
-    # w1_q = w1_q.clone()
-    # w2_q = w2_q.clone()
 
     score = torch.randn((m, num_experts), device="cuda", dtype=dtype)
 

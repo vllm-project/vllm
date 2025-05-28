@@ -96,7 +96,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         _, K, N = w2.shape
         device = a1q.device
 
-        assert w1.shape[1] == N * 2
+        assert w1.shape[2] == K
         assert global_num_experts != -1
         assert a1q_scale is not None
 
@@ -137,20 +137,15 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
             # Filter out problem sizes with 0 tokens
             if masked_local_E != local_E:
-                w1 = w1[non_zero_mask].contiguous()
-                w2 = w2[non_zero_mask].contiguous()
+                w1 = w1[non_zero_mask]
+                w2 = w2[non_zero_mask]
                 w1_scale = w1_scale[non_zero_mask]
                 w2_scale = w2_scale[non_zero_mask]
 
-            w1_scale = w1_scale.reshape(w1_scale.shape[0], -1).contiguous()
-            w2_scale = w2_scale.reshape(w2_scale.shape[0], -1).contiguous()
-
+            w1_scale = w1_scale.reshape(w1_scale.shape[0], -1)
+            w2_scale = w2_scale.reshape(w2_scale.shape[0], -1)
             a1q = a1q.reshape(-1, a1q.shape[2])
-
-            if self.per_act_token:
-                a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2])
-            else:
-                a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2])
+            a1q_scale = a1q_scale.reshape(-1, a1q_scale.shape[2]).contiguous()
 
         else:
             expert_offsets = torch.empty((global_num_experts + 1),
@@ -212,10 +207,10 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
             c2 = _resize_cache(workspace2, (local_E * padded_M, N))
             c3 = _resize_cache(workspace13, (local_E * padded_M, K))
 
-        ops.cutlass_moe_mm(c1, a1q, w1.contiguous(), a1q_scale.contiguous(),
-                           w1_scale.contiguous(), expert_offsets[:-1],
-                           problem_sizes1, ab_strides1, ab_strides1,
-                           c_strides1, self.per_act_token, self.per_out_ch)
+        ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale, w1_scale,
+                           expert_offsets[:-1], problem_sizes1, ab_strides1,
+                           ab_strides1, c_strides1, self.per_act_token,
+                           self.per_out_ch)
 
         self.activation(activation, c2, c1)
 
@@ -225,10 +220,10 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         if expert_map is not None:
             c3.fill_(0)
 
-        ops.cutlass_moe_mm(c3, a2q, w2.contiguous(), a2q_scale.contiguous(),
-                           w2_scale.contiguous(), expert_offsets[:-1],
-                           problem_sizes2, ab_strides2, ab_strides2,
-                           c_strides2, self.per_act_token, self.per_out_ch)
+        ops.cutlass_moe_mm(c3, a2q, w2, a2q_scale, w2_scale,
+                           expert_offsets[:-1], problem_sizes2, ab_strides2,
+                           ab_strides2, c_strides2, self.per_act_token,
+                           self.per_out_ch)
 
         if expert_num_tokens is None:
             return c3[c_map].view(M, topk, K)
