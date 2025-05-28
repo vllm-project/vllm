@@ -107,8 +107,7 @@ class TopKTopPSampler(nn.Module):
                            "PyTorch-native implementation.")
             return self.forward_native(logits, generators, k, p)
         else:
-            sample, probs = flashinfer_sample(logits, k, p, generators,
-                                              return_logits)
+            sample, probs = flashinfer_sample(logits, k, p, return_logits)
             if return_logits:
                 assert probs is not None
                 # Set logits to -inf where probs were set to 0.0.
@@ -279,7 +278,6 @@ def flashinfer_sample(
     logits: torch.Tensor,
     k: Optional[torch.Tensor],
     p: Optional[torch.Tensor],
-    generators: dict[int, torch.Generator],
     return_probs: bool,
 ) -> tuple[torch.Tensor, Union[torch.Tensor, None]]:
     """Sample from the logits using FlashInfer.
