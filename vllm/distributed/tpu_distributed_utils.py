@@ -26,7 +26,7 @@ class XlaQKVParallelLinear(nn.Module):
         self.skip_bias_add = qkv_linear.skip_bias_add
         self.return_bias = qkv_linear.return_bias
         assert qkv_linear.tp_size == 1, "TP > 1 is only supported under SPMD."
-        self._load_and_shard_weight_from_qkv_linear(qkv_linear)
+        self._load_weights_from_qkv_linear(qkv_linear)
         if mesh is not None:
             self._shard_weight(mesh)
 
@@ -38,6 +38,8 @@ class XlaQKVParallelLinear(nn.Module):
         xs.mark_sharding(self.k_weight, mesh, ('x', None))
         xs.mark_sharding(self.v_weight, mesh, ('x', None))
         if self.q_bias is not None:
+            assert self.k_bias is not None and self.v_bias is not None, \
+                "QKVParallelLinear should have q, k, and v biases together."
             self.q_bias = Parameter(self.q_bias.to('xla'), requires_grad=False)
             xs.mark_sharding(self.q_bias, mesh, ('x', ))
             self.k_bias = Parameter(self.k_bias.to('xla'), requires_grad=False)
@@ -45,7 +47,7 @@ class XlaQKVParallelLinear(nn.Module):
             self.v_bias = Parameter(self.v_bias.to('xla'), requires_grad=False)
             xs.mark_sharding(self.v_bias, mesh, ('x', ))
 
-    def _load_and_shard_weight_from_qkv_linear(self, qkv_linear: nn.Module):
+    def _load_weights_from_qkv_linear(self, qkv_linear: nn.Module):
         q_proj_size, k_proj_size, _ = qkv_linear.output_sizes
         # The weight of qkv linear is a concatenation of q, k, and v weights
         # along the output dimension.
@@ -103,7 +105,7 @@ def partition_column_parallel_linear(layer: torch.nn.Module,
                                      mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, ColumnParallelLinear)
     xs.mark_sharding(layer.weight, mesh, ('x', None))
-    logger.debug(f"Applied column-parallel sharding to {layer}")
+    logger.debug("Applied column-parallel sharding to %s", layer)
     return layer
 
 
@@ -111,7 +113,7 @@ def partition_row_parallel_linear(layer: torch.nn.Module,
                                   mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, RowParallelLinear)
     xs.mark_sharding(layer.weight, mesh, (None, 'x'))
-    logger.debug(f"Applied row-parallel sharding to {layer}")
+    logger.debug("Applied row-parallel sharding to %s", layer)
     return layer
 
 
@@ -119,7 +121,7 @@ def partition_qkv_parallel_linear(layer: torch.nn.Module,
                                   mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, QKVParallelLinear)
     xla_layer = XlaQKVParallelLinear(layer, mesh)
-    logger.debug(f"Applied qkv parallel sharding to {layer}")
+    logger.debug("Applied qkv parallel sharding to %s", layer)
     return xla_layer
 
 
@@ -152,13 +154,12 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
 
                 assert parent is not None and name is not None, (
                     "Top Level module is not expected to be wrapped.")
-                if parent is not None and name is not None:
-                    if wrapped_module is not module:
-                        # Wrapped module and module are different py object.
-                        # The original module should be replaced by the
-                        # wrapped_module.
-                        logger.debug(f"replace {module} with {wrapped_module}")
-                        setattr(parent, name, wrapped_module)
+                if wrapped_module is not module:
+                    # Wrapped module and module are different py object.
+                    # The original module should be replaced by the
+                    # wrapped_module.
+                    logger.debug("replace %s with %s", module, wrapped_module)
+                    setattr(parent, name, wrapped_module)
 
                 module = wrapped_module
                 break
