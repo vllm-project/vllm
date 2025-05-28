@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import warnings
+
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.custom_op import CustomOp
@@ -30,7 +32,7 @@ class XIELU(CustomOp):
         self.alpha_p = nn.Parameter(torch.log(torch.exp(torch.tensor(alpha_p_init)) - 1.0).unsqueeze(0))
         self.alpha_n = nn.Parameter(torch.log(torch.exp(torch.tensor(alpha_n_init - beta)) - 1.0).unsqueeze(0))
         self.beta = beta
-        self.eps = torch.tensor(eps, dtype=torch.bfloat16, device='cuda')
+        self.eps = torch.tensor(eps, dtype=torch.float16, device='cuda')
 
         self._forward_method = self.forward_native
         if current_platform.is_cuda_alike():
@@ -38,7 +40,7 @@ class XIELU(CustomOp):
                 self._xielu_cuda = torch.classes.xielu.XIELU()
                 self._forward_method = self.forward_cuda
             except (AttributeError, RuntimeError) as e:
-                logger.warning("CUDA xIELU not found (error: %s), defaulting to Python implementation", str(e))
+                warnings.warn(f"CUDA xIELU not found (error: {e}), defaulting to Python implementation")
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         # TODO optimize to precompute
