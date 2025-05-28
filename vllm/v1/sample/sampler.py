@@ -33,15 +33,10 @@ class Sampler(nn.Module):
         # temperature scaling) for the top-k logprobs.
         # This is different from the V0 sampler, which uses the logits that
         # is used for sampling (after penalties and temperature scaling).
-        # TODO(rob): provide option for logprobs post sampling.
-        # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
         num_logprobs = sampling_metadata.max_num_logprobs
         if (num_logprobs is not None
                 and not self.return_logprobs_post_logits_processing):
             raw_logprobs = self.compute_logprobs(logits)
-        # Return logits to get logprobs at the end.
-        return_logits = (num_logprobs is not None
-                         and self.return_logprobs_post_logits_processing)
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
@@ -54,13 +49,14 @@ class Sampler(nn.Module):
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
         # Sample the next token.
-        sampled, logits = self.sample(logits, sampling_metadata, return_logits)
+        sampled, logits = self.sample(logits, sampling_metadata)
         # Convert sampled token ids to int64 (long) type to ensure compatibility
         # with subsequent operations that may use these values as indices.
         # This conversion is necessary because FlashInfer sampling operations
         # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
-        if return_logits:
+        if (num_logprobs is not None
+                and self.return_logprobs_post_logits_processing):
             raw_logprobs = self.compute_logprobs(logits)
         # Gather the logprobs of the topk and sampled token (if requested).
         # Get logprobs and rank tensors (if requested)
@@ -95,7 +91,6 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        return_logits: bool = False,
     ) -> tuple[torch.Tensor, Union[torch.Tensor, None]]:
         """Sample logits based on sampling metadata.
 
@@ -110,9 +105,7 @@ class Sampler(nn.Module):
         else:
             greedy_sampled = self.greedy_sample(logits)
         if sampling_metadata.all_greedy:
-            if return_logits:
-                return greedy_sampled, logits
-            return greedy_sampled, None
+            return greedy_sampled, logits
 
         if not sampling_metadata.all_greedy:
             assert sampling_metadata.temperature is not None
@@ -130,13 +123,10 @@ class Sampler(nn.Module):
             sampling_metadata.generators,
             sampling_metadata.top_k,
             sampling_metadata.top_p,
-            return_logits,
         )
 
         if greedy_sampled is None:
-            if return_logits:
-                return random_sampled, logits
-            return random_sampled, None
+            return random_sampled, logits
 
         sampled = torch.where(
             sampling_metadata.temperature < _SAMPLING_EPS,
@@ -144,9 +134,7 @@ class Sampler(nn.Module):
             random_sampled,
             out=greedy_sampled,  # Reuse tensor
         )
-        if return_logits:
-            return sampled, logits
-        return sampled, None
+        return sampled, logits
 
     def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
