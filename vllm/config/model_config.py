@@ -740,13 +740,8 @@ class ModelConfig:
 
                 sliding_window = None
 
-        self.max_model_len = _get_and_verify_max_len(
-            hf_config=self.hf_text_config,
-            max_model_len=self.max_model_len,
-            disable_sliding_window=self.disable_sliding_window,
-            sliding_window_len=self.get_hf_config_sliding_window(),
-            spec_target_max_model_len=self.spec_target_max_model_len,
-            encoder_config=self.encoder_config)
+        self.original_max_model_len = self.max_model_len
+        self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
         self.multimodal_config = self._init_multimodal_config()
@@ -965,17 +960,12 @@ class ModelConfig:
         else:
             # Aliases
             if task_option == "embedding":
-                preferred_task = self._get_preferred_task(
-                    architectures, supported_tasks)
-                if preferred_task != "embed":
-                    msg = ("The 'embedding' task will be restricted to "
-                           "embedding models in a future release. Please "
-                           "pass `--task classify`, `--task score`, or "
-                           "`--task reward` explicitly for other pooling "
-                           "models.")
-                    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+                msg = ("The 'embedding' task has been renamed to "
+                       "'embed', please use the new name. The old name "
+                       "will be removed in v1.0.")
+                warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
-                task_option = preferred_task or "embed"
+                task_option = "embed"
 
             if task_option not in supported_tasks:
                 msg = (
@@ -1354,7 +1344,8 @@ class ModelConfig:
         return max(1,
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
 
-    def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
+    def get_num_attention_heads(self,
+                                parallel_config: ParallelConfig) -> int:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
 
@@ -1553,3 +1544,13 @@ class ModelConfig:
     @property
     def matryoshka_dimensions(self):
         return getattr(self.hf_config, "matryoshka_dimensions", None)
+
+    def get_and_verify_max_len(self, max_model_len: int):
+        max_model_len = _get_and_verify_max_len(
+            hf_config=self.hf_text_config,
+            max_model_len=max_model_len,
+            disable_sliding_window=self.disable_sliding_window,
+            sliding_window_len=self.get_hf_config_sliding_window(),
+            spec_target_max_model_len=self.spec_target_max_model_len,
+            encoder_config=self.encoder_config)
+        return max_model_len
