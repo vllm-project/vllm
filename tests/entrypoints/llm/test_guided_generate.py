@@ -30,9 +30,10 @@ def llm():
     # enable garbage collection
     llm = LLM(model=MODEL_NAME, max_model_len=1024, seed=0)
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
-        del llm
+    yield weakref.proxy(llm)
+
+    del llm
+
     cleanup_dist_env_and_memory()
 
 
