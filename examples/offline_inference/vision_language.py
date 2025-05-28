@@ -246,9 +246,9 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
         stop_token_ids=stop_token_ids,
     )
 
+
 # GLM-4V-0414
 def run_glm4v_0414(questions: list[str], modality: str) -> ModelRequestData:
-
     model_name = "THUDM/GLM-4V-9B-0414"
 
     engine_args = EngineArgs(
@@ -269,15 +269,19 @@ def run_glm4v_0414(questions: list[str], modality: str) -> ModelRequestData:
         placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
 
     prompts = [
-        ("[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
-         f"{placeholder}"
-         f"{question}<|assistant|>assistant\n") for question in questions
+        (
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            f"{placeholder}"
+            f"{question}<|assistant|>assistant\n"
+        )
+        for question in questions
     ]
 
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
     )
+
 
 # H2OVL-Mississippi
 def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:

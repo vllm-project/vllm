@@ -24,9 +24,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GLM-4V model compatible with HuggingFace weights."""
+from collections.abc import Iterable, Mapping
 from functools import partial
-from typing import (Callable, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+from typing import (Callable, List, Literal, Optional, Set, Tuple, TypedDict,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -839,10 +840,12 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
     }
 
     # To ensure correct weight loading and mapping.
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
-        "lm_head.": "language_model.lm_head.",
-        "model.": "language_model.model.",
-    })
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+            "model.visual.": "visual.",
+        })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -862,7 +865,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
+            prefix=maybe_prefix(prefix, ""),
             architectures=["Glm4ForCausalLM"],
         )
 
@@ -975,12 +978,11 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
-
             # FIXME： 用于保存image embed，适配 transformers时可用
-            if image_embeds.shape[0] == 1250:
-                from safetensors.torch import save_file
-                save_file({"image_embeds": image_embeds}, "/mnt/image_embed.safetensors")
-                print("save with:\n", image_embeds)
+            # if image_embeds.shape[0] == 1250:
+            #     from safetensors.torch import save_file
+            #     save_file({"image_embeds": image_embeds}, "/mnt/image_embed.safetensors")
+            #     print("save with:\n", image_embeds)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
@@ -1139,25 +1141,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                     image_input=image_input,
                     video_input=video_input)
                 input_ids = None
-
-        # FIXME: 用于测试语言模型是否工作，可以在这里保存和载入 embed 和position
-        # from safetensors.torch import load_file
-        # loaded_embeds = load_file("/mnt/embed.safetensors")
-        # loaded_positions = load_file("/mnt/positions.safetensors")
-        # inputs_embeds = loaded_embeds["embed"].to(inputs_embeds.device)
-        # positions = loaded_positions["positions"].to(positions.device)
-        # print(f"Loaded embeds with shape {inputs_embeds.shape}")
-        # print(f"Loaded positions with shape {positions.shape}")
-        # intermediate_tensors = None
-
-        # FIXME: V0 版本似乎只有一开始的检验过不去，后续的推理能推，问题和V1一样。
-        # if inputs_embeds is not None:
-        #     if positions.shape[1] != inputs_embeds.shape[0]:
-        #         print("======")
-        #         print(inputs_embeds.shape)
-        #         print(positions.shape)
-        #         pad_len = inputs_embeds.shape[0] - positions.shape[1]
-        #         positions = torch.nn.functional.pad(positions, (0, pad_len), value=0)
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,
