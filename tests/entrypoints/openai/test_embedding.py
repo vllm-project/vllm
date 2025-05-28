@@ -11,7 +11,8 @@ import requests
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from ...models.utils import run_embedding_correctness_test
+from ...models.language.pooling.embed_utils import (
+    run_embedding_correctness_test)
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"

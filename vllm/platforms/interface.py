@@ -3,11 +3,13 @@ import enum
 import os
 import platform
 import random
+from datetime import timedelta
 from platform import uname
 from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
 
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
@@ -485,6 +487,20 @@ class Platform:
         Get piecewise backend class for piecewise graph.
         """
         return "vllm.compilation.base_piecewise_backend.AbstractPiecewiseBackend"  # noqa
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        """
+        Init platform-specific torch distributed process group.
+        """
+        raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
 
 class UnspecifiedPlatform(Platform):
