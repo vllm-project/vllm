@@ -154,7 +154,7 @@ class LLM:
     def __init__(
         self,
         model: str,
-        /,
+        *,
         tokenizer: Optional[str] = None,
         tokenizer_mode: TokenizerMode = "auto",
         skip_tokenizer_init: bool = False,
