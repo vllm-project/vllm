@@ -398,6 +398,8 @@ def validate_kv_transfer_config(
             "CPUConnector: must have 'host' in kv_connector_extra_config"
     assert "port" in extra_config, \
             "CPUConnector: must have 'port' in kv_connector_extra_config"
+    assert "size" in extra_config, \
+            "CPUConnector: must have 'size' in kv_connector_extra_config"
 
 
 class CPUConnector(KVConnectorBase_V1):
@@ -412,10 +414,11 @@ class CPUConnector(KVConnectorBase_V1):
         validate_kv_transfer_config(vllm_config.kv_transfer_config)
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self._host = extra_config["host"]
-        self._port = extra_config["port"]
-        if isinstance(self._port, str):
-            # Convert the port to an integer if it's a string
-            self._port = int(self._port)
+        self._port = int(extra_config["port"])
+        # Convert GB to bytes and align to 4K for storage size
+        kv_size_in_bytes = float(extra_config["size"]) * (1 << 30)
+        kv_size_in_bytes = int(kv_size_in_bytes) & (~0xFFF)  # Align to 4K
+        self._kv_size = kv_size_in_bytes
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
@@ -428,14 +431,13 @@ class CPUConnector(KVConnectorBase_V1):
             # Prefiller side sender
             if self.kv_role == "kv_producer":
                 # TODO: remove the hard-code here
-                self._kv_sender = NixlPrefillManager(1024 * 1024 *
-                                                     1024)  # 1GB for debug
+                self._kv_sender = NixlPrefillManager(self._kv_size)
             elif self.kv_role == "kv_consumer":
                 # TODO: remove the hard-code here
                 self._kv_receiver = NixlDecodeManager(
-                    1024 * 1024 * 1024,  # 1GB for debug
-                    "localhost",
-                    54321,
+                    self._kv_size,
+                    self._host,
+                    self._port,
                 )
             else:
                 raise ValueError(f"Unknown kv_role: {self.kv_role}")

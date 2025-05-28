@@ -35,6 +35,7 @@ if __name__ == "__main__":
             kv_connector_extra_config={
                 "host": "localhost",
                 "port": 54321,
+                "size": 4,
             },
         ),
         #load_format="dummy",

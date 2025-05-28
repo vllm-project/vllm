@@ -293,19 +293,13 @@ class KVSenderInterface(ABC):
         raise NotImplementedError("send_task() not implemented")
 
     @abstractmethod
-    def pre_progress_hook(self, task: SendTask) -> None:
+    def pre_progress_hook(self) -> None:
         """Hook to be called before processing the send task.
-
-        Args:
-            task (SendTask): The send task to be processed.
         """
         raise NotImplementedError("pre_progress_hook() not implemented")
 
     @abstractmethod
-    def post_progress_hook(self, task: SendTask) -> None:
+    def post_progress_hook(self) -> None:
         """Hook to be called after processing the send task.
-
-        Args:
-            task (SendTask): The send task to be processed.
         """
         raise NotImplementedError("post_progress_hook() not implemented")
