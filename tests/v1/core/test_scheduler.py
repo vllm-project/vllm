@@ -769,7 +769,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         prompt_logprobs_dict={},
     )
     engine_core_outputs = scheduler.update_from_output(output,
-                                                       model_runner_output)
+                                                       model_runner_output)[0]
 
     scheduler_stats = engine_core_outputs.scheduler_stats
     if expected[0] == 0:
@@ -842,7 +842,7 @@ def _step_until_done(
             # We should be in the decode phase now.
             assert num_scheduled_tokens == 1
         assert len(output.kv_connector_metadata.requests) == 0
-        ecos = scheduler.update_from_output(output, model_runner_output)
+        ecos = scheduler.update_from_output(output, model_runner_output)[0]
         all_done = True
         for eco in ecos.outputs:
             if eco.finish_reason is None:
