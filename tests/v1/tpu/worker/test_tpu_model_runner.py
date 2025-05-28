@@ -117,6 +117,7 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
     This function handles both legacy BlockTable and new MultiGroupBlockTable
     structures for backward compatibility.
     """
+
     req_index = model_runner.input_batch.req_id_to_index[req_id]
     multi_group_block_table = model_runner.input_batch.block_table
     req_state = model_runner.requests[req_id]
