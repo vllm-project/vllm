@@ -782,11 +782,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
                 world_size=world_size,
                 dp_size=dp_size,
-                use_fp8_w8a8=True,
-                use_int8_w8a8=False,
-                use_int8_w8a16=False,
-                use_int4_w4a16=False,
+                qtype=torch.float8_e4m3fn,
                 block_shape=self.quant_config.weight_block_size,
+                per_act_token=False,  #?
             )
         else:
             logger.debug("TritonOrDeepGemmExperts(fp8)")
