@@ -206,6 +206,12 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         " as strings of the form 'token_id:{token_id}' so that tokens "
         "that are not JSON-encodable can be identified.")
     parser.add_argument(
+        "--post-process-logprobs",
+        action="store_true",
+        help="When ``--post-process-logprobs`` is specified, the sampled"
+        " logprobs will be calculated after applying temperature,"
+        " top-k, top-p, etc rather than before (default).")
+    parser.add_argument(
         "--disable-frontend-multiprocessing",
         action="store_true",
         help="If specified, will run the OpenAI frontend server in the same "
