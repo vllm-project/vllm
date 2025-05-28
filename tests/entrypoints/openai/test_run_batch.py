@@ -141,3 +141,113 @@ def test_score():
             line_dict = json.loads(line)
             assert isinstance(line_dict, dict)
             assert line_dict["error"] is None
+
+
+def test_empty_file_with_run_batch_cmd():
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
+        input_file.write("")
+        input_file.flush()
+        proc = subprocess.Popen([
+            "vllm", "run-batch", "-i", input_file.name, "-o", output_file.name,
+            "--model", "intfloat/multilingual-e5-small"
+        ], )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        assert contents.strip() == ""
+
+
+def test_completions_with_run_batch_cmd():
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
+        input_file.write(INPUT_BATCH)
+        input_file.flush()
+        proc = subprocess.Popen([
+            "vllm", "run-batch", "-i", input_file.name, "-o", output_file.name,
+            "--model", "NousResearch/Meta-Llama-3-8B-Instruct"
+        ], )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        for line in contents.strip().split("\n"):
+            # Ensure that the output format conforms to the openai api.
+            # Validation should throw if the schema is wrong.
+            BatchRequestOutput.model_validate_json(line)
+
+
+def test_completions_invalid_input_with_run_batch_cmd():
+    """
+    Ensure that we fail when the input doesn't conform to the openai api.
+    """
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
+        input_file.write(INVALID_INPUT_BATCH)
+        input_file.flush()
+        proc = subprocess.Popen([
+            "vllm", "run-batch", "-i", input_file.name, "-o", output_file.name,
+            "--model", "NousResearch/Meta-Llama-3-8B-Instruct"
+        ], )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode != 0, f"{proc=}"
+
+
+def test_embeddings_with_run_batch_cmd():
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
+        input_file.write(INPUT_EMBEDDING_BATCH)
+        input_file.flush()
+        proc = subprocess.Popen([
+            "vllm", "run-batch", "-i", input_file.name, "-o", output_file.name,
+            "--model", "intfloat/multilingual-e5-small"
+        ], )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        for line in contents.strip().split("\n"):
+            # Ensure that the output format conforms to the openai api.
+            # Validation should throw if the schema is wrong.
+            BatchRequestOutput.model_validate_json(line)
+
+
+def test_score_with_run_batch_cmd():
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
+        input_file.write(INPUT_SCORE_BATCH)
+        input_file.flush()
+        proc = subprocess.Popen([
+            "vllm",
+            "run-batch",
+            "-i",
+            input_file.name,
+            "-o",
+            output_file.name,
+            "--model",
+            "BAAI/bge-reranker-v2-m3",
+        ], )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        for line in contents.strip().split("\n"):
+            # Ensure that the output format conforms to the openai api.
+            # Validation should throw if the schema is wrong.
+            BatchRequestOutput.model_validate_json(line)
+
+            # Ensure that there is no error in the response.
+            line_dict = json.loads(line)
+            assert isinstance(line_dict, dict)
+            assert line_dict["error"] is None
