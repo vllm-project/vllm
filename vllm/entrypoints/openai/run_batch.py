@@ -33,9 +33,7 @@ from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
 
-def parse_args():
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible batch runner.")
+def make_arg_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "-i",
         "--input-file",
@@ -98,7 +96,13 @@ def parse_args():
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.")
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description="vLLM OpenAI-Compatible batch runner.")
+    return make_arg_parser(parser).parse_args()
 
 
 # explicitly use pure text format, with a newline at the end
