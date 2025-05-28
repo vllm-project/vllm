@@ -13,7 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
 try:
     #from nixl._api import nixl_agent as NixlWrapper
     import importlib
-    spec = importlib.util.find_spec("nixl._api.nixl_agent")
+    spec = importlib.util.find_spec("nixl._api")
     if spec is None:
         raise ImportError("NIXL is not available")
     NIXL_AVAILABLE = True
