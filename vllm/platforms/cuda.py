@@ -106,7 +106,6 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
-        compilation_config = vllm_config.compilation_config
         model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
@@ -153,16 +152,6 @@ class CudaPlatformBase(Platform):
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
-
-        if (parallel_config.data_parallel_size > 1
-                and compilation_config.use_cudagraph):
-            logger.info(
-                "Data Parallel: Forcing enforce eager to be True since DP is "
-                "currently not supported with CUDA Graphs.")
-            vllm_config.model_config.enforce_eager = True
-            compilation_config.use_cudagraph = False
-            # FIXME: inductor breaks cudagraph (from @bnell)
-            compilation_config.use_inductor = False
 
     @classmethod
     def get_current_memory_usage(cls,
