@@ -171,6 +171,14 @@ def parse_args():
         "provided.")
 
     serialize_parser.add_argument(
+        "--serialization-kwargs",
+        type=str,
+        required=False,
+        help=("A JSON string containing additional keyword arguments that "
+              "will be passed to Tensorizer's `TensorSerializer` during "
+              "serialization."))
+
+    serialize_parser.add_argument(
         "--keyfile",
         type=str,
         required=False,
@@ -294,6 +302,12 @@ if __name__ == '__main__':
             tensorizer_uri=model_path,
             encryption_keyfile=keyfile,
             **credentials)
+
+        if args.serialization_kwargs:
+            serialization_kwargs = json.loads(args.serialization_kwargs)
+            tensorizer_config.serialization_kwargs = serialization_kwargs
+            print("Found serialization kwargs: ", serialization_kwargs)
+
 
         if args.lora_path:
             tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
