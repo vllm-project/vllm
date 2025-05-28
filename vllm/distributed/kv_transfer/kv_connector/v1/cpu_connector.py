@@ -209,6 +209,9 @@ class PrefillRequestTracker:
     # Request id
     req_id: str
 
+    # Block ids that are already allocated for this request
+    allocated_block_ids: list[int]
+
     # Total number of tokens in the "full request"
     num_all_tokens: int = 0
 
@@ -217,9 +220,6 @@ class PrefillRequestTracker:
 
     # Number of tokens that are already saved
     num_saved_tokens: int = 0
-
-    # Block ids that are already allocated for this request
-    allocated_block_ids: list[int] = None
 
     @staticmethod
     def from_new_request(
@@ -240,10 +240,10 @@ class PrefillRequestTracker:
 
         return PrefillRequestTracker(
             req_id=new_request.req_id,
+            allocated_block_ids=unfolded_block_ids,
             num_all_tokens=len(new_request.prompt_token_ids),
             num_total_tokens=num_tokens_to_compute,
             num_saved_tokens=0,
-            allocated_block_ids=unfolded_block_ids,
         )
 
     def update(self, cached_request: "CachedRequestData") -> None:
@@ -848,7 +848,11 @@ class CPUConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
+        logger.warning("Closing the CPUConnector")
         if hasattr(self, "_kv_sender") and self._kv_sender is not None:
             self._kv_sender.close()
         if hasattr(self, "_kv_receiver") and self._kv_receiver is not None:
             self._kv_receiver.close()
+
+    def __del__(self):
+        self.close()

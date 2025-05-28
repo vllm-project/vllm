@@ -102,7 +102,7 @@ class RingBufferAllocator:
         self._low_watermark = 0
         self._align_to = align_to
 
-        self._allocated = OrderedDict()  # Track allocated buffers
+        self._allocated: OrderedDict = OrderedDict()  # Track allocated buffers
 
         # Register pin memory
         cudart = torch.cuda.cudart()
@@ -223,7 +223,7 @@ class RingBufferAllocator:
     def low_watermark(self) -> int:
         return self._low_watermark
 
-    def virtual_to_physical(self, vaddr: int) -> torch.Tensor:
+    def virtual_to_physical(self, vaddr: int) -> int:
         """Convert a virtual address to a physical address.
 
         Args:
@@ -391,7 +391,7 @@ class NixlCPUSender:
         src_paddr: int,
         dst_paddr: int,
         data_size: int,
-        req_uuid: int,
+        req_uuid: str,
         destination_spec: DestinationSpec,
     ) -> nixl_xfer_handle:
         """Send data from src_addr to dst_addr using NIXL.
@@ -910,6 +910,8 @@ class NixlPrefillManager(KVSenderInterface):
         Args:
             task (SendTask): The send task to be freed.
         """
+        assert isinstance(task, NixlSendTask), \
+            "Task is not a NixlSendTask"
         # Free the buffer in the ring buffer allocator
         self._allocator.free(task.buffer_vaddr)
 
@@ -922,6 +924,8 @@ class NixlPrefillManager(KVSenderInterface):
         """
         assert isinstance(task, NixlSendTask), \
             "Task is not a NixlSendTask"
+        assert task.receiver_paddr is not None, \
+            "Receiver physical address is not set in the task"
         handle = self._nixl_sender.send(
             self._allocator.virtual_to_physical(task.buffer_vaddr),
             task.receiver_paddr, task.source_spec.get_size(),
@@ -1069,7 +1073,10 @@ class NixlDecodeManager:
                 if self._done_receiving_count[p_request_id] == \
                         self.world_size:
                     all_done_recving.append(p_request_id)
-                    self._done_receiving_count.pop(p_request_id)
+
+            # Clear the done receiving count for the requests that are done
+            for p_request_id in all_done_recving:
+                self._done_receiving_count.pop(p_request_id)
             return all_done_recving
         else:
             self.tp_group.send_object(ready_requests, dst=0)
@@ -1095,7 +1102,7 @@ class NixlDecodeManager:
             p_request_id (str): The original request id from prefiller.
             layer_id (int): The layer id of the request.
         """
-        ret = []
+        ret: list[DecoderKVSpec] = []
         if (p_request_id, layer_id) not in self._request_specs:
             logger.warning("Request %s not found in request specs",
                            (p_request_id, layer_id))

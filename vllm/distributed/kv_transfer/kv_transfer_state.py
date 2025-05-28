@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import atexit
 from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
@@ -62,6 +63,7 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
         if envs.VLLM_USE_V1:
             _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector_v1(
                 config=vllm_config, role=KVConnectorRole.WORKER)
+            atexit.register(_KV_CONNECTOR_AGENT.close, )
         else:
             _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector_v0(
                 rank=get_world_group().rank,

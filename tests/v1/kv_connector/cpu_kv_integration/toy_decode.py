@@ -56,7 +56,7 @@ if __name__ == "__main__":
         max_model_len=2048,
         max_num_batched_tokens=2048,
         block_size=128,
-        tensor_parallel_size=1,
+        tensor_parallel_size=2,
     )
 
     # 1ST generation (prefill instance)
