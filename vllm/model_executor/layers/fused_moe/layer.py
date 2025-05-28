@@ -1340,20 +1340,30 @@ class FusedMoE(torch.nn.Module):
             # Mask out non-local experts
             if expert_map is not None:
                 topk_ids_local = expert_map[topk_ids]
-                topk_ids_flatten = topk_ids_local[topk_ids_local >= 0]
+                topk_ids_flatten = topk_ids_local.flatten()
             else:
                 topk_ids_flatten = topk_ids.flatten()
 
             # Should be equivalent to:
             # ```
-            # expert_load_view += topk_ids_flatten.bincount(
+            # topk_ids_masked = topk_ids_local[topk_ids_local >= 0]
+            # expert_load_view += topk_ids_masked.bincount(
             #     minlength=expert_load_view.shape[0])
             # ```
             # We use `scatter_add_` since `bincount` cannot be compiled
-            expert_load_view.scatter_add_(
-                dim=0,
-                index=topk_ids_flatten.long(),
-                src=torch.ones_like(topk_ids_flatten))
+
+            # Performance optimization:
+            # `masked_fill` is significantly faster than `masked_select`
+            invalid_mask = topk_ids_flatten < 0
+            # Replace invalid expert ids with 0 (just a dummy position)
+            # to avoid out-of-bounds errors in scatter_add_
+            index = topk_ids_flatten.masked_fill_(invalid_mask, 0)
+            # `src` is the valid mask, which is 1 for valid and 0 for invalid
+            src = ~invalid_mask
+
+            expert_load_view.scatter_add_(dim=0,
+                                          index=index.long(),
+                                          src=src.to(expert_load_view))
 
         return topk_weights, topk_ids
 
