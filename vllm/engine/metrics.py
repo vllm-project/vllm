@@ -80,52 +80,12 @@ class Metrics:
             multiprocess_mode="livemostrecent",
         )
 
-        # Deprecated in 0.8 - KV cache offloading is not used in V1
-        # Hidden in 0.9, due to be removed in 0.10
-        if self.show_hidden_metrics:
-            self.gauge_scheduler_swapped = self._gauge_cls(
-                name="vllm:num_requests_swapped",
-                documentation=(
-                    "Number of requests swapped to CPU. "
-                    "DEPRECATED: KV cache offloading is not used in V1"),
-                labelnames=labelnames,
-                multiprocess_mode="sum")
-
         #   KV Cache Usage in %
         self.gauge_gpu_cache_usage = self._gauge_cls(
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames,
             multiprocess_mode="sum")
-
-        # Deprecated in 0.8 - KV cache offloading is not used in V1
-        # Hidden in 0.9, due to be removed in 0.10
-        if self.show_hidden_metrics:
-            self.gauge_cpu_cache_usage = self._gauge_cls(
-                name="vllm:cpu_cache_usage_perc",
-                documentation=(
-                    "CPU KV-cache usage. 1 means 100 percent usage. "
-                    "DEPRECATED: KV cache offloading is not used in V1"),
-                labelnames=labelnames,
-                multiprocess_mode="sum")
-            self.gauge_cpu_prefix_cache_hit_rate = self._gauge_cls(
-                name="vllm:cpu_prefix_cache_hit_rate",
-                documentation=(
-                    "CPU prefix cache block hit rate. "
-                    "DEPRECATED: KV cache offloading is not used in V1"),
-                labelnames=labelnames,
-                multiprocess_mode="sum")
-
-        # Deprecated in 0.8 - replaced by queries+hits counters in V1
-        # Hidden in 0.9, due to be removed in 0.10
-        if self.show_hidden_metrics:
-            self.gauge_gpu_prefix_cache_hit_rate = self._gauge_cls(
-                name="vllm:gpu_prefix_cache_hit_rate",
-                documentation=("GPU prefix cache block hit rate. "
-                               "DEPRECATED: use vllm:gpu_prefix_cache_queries "
-                               "and vllm:gpu_prefix_cache_queries in V1"),
-                labelnames=labelnames,
-                multiprocess_mode="sum")
 
         # Iteration stats
         self.counter_num_preemption = self._counter_cls(
@@ -200,36 +160,6 @@ class Metrics:
             "Histogram of time spent in DECODE phase for request.",
             labelnames=labelnames,
             buckets=request_latency_buckets)
-        # Deprecated in 0.8 - duplicates vllm:request_queue_time_seconds:
-        # Hidden in 0.9, due to be removed in 0.10
-        if self.show_hidden_metrics:
-            self.histogram_time_in_queue_request = self._histogram_cls(
-                name="vllm:time_in_queue_requests",
-                documentation=
-                ("Histogram of time the request spent in the queue in seconds. "
-                 "DEPRECATED: use vllm:request_queue_time_seconds instead."),
-                labelnames=labelnames,
-                buckets=request_latency_buckets)
-
-        # Deprecated in 0.8 - use prefill/decode/inference time metrics
-        # Hidden in 0.9, due to be removed in 0.10
-        if self.show_hidden_metrics:
-            self.histogram_model_forward_time_request = self._histogram_cls(
-                name="vllm:model_forward_time_milliseconds",
-                documentation=
-                ("Histogram of time spent in the model forward pass in ms. "
-                 "DEPRECATED: use prefill/decode/inference time metrics instead"
-                 ),
-                labelnames=labelnames,
-                buckets=build_1_2_3_5_8_buckets(3000))
-            self.histogram_model_execute_time_request = self._histogram_cls(
-                name="vllm:model_execute_time_milliseconds",
-                documentation=
-                ("Histogram of time spent in the model execute function in ms."
-                 "DEPRECATED: use prefill/decode/inference time metrics instead"
-                 ),
-                labelnames=labelnames,
-                buckets=build_1_2_3_5_8_buckets(3000))
 
         #   Metadata
         self.histogram_num_prompt_tokens_request = self._histogram_cls(
@@ -580,20 +510,10 @@ class PrometheusStatLogger(StatLoggerBase):
         # System state data
         self._log_gauge(self.metrics.gauge_scheduler_running,
                         stats.num_running_sys)
-        if self.metrics.show_hidden_metrics:
-            self._log_gauge(self.metrics.gauge_scheduler_swapped,
-                            stats.num_swapped_sys)
         self._log_gauge(self.metrics.gauge_scheduler_waiting,
                         stats.num_waiting_sys)
         self._log_gauge(self.metrics.gauge_gpu_cache_usage,
                         stats.gpu_cache_usage_sys)
-        if self.metrics.show_hidden_metrics:
-            self._log_gauge(self.metrics.gauge_cpu_cache_usage,
-                            stats.cpu_cache_usage_sys)
-            self._log_gauge(self.metrics.gauge_cpu_prefix_cache_hit_rate,
-                            stats.cpu_prefix_cache_hit_rate)
-            self._log_gauge(self.metrics.gauge_gpu_prefix_cache_hit_rate,
-                            stats.gpu_prefix_cache_hit_rate)
         # Including max-lora in metric, in future this property of lora
         # config maybe extended to be dynamic.
         lora_info = {
@@ -631,15 +551,6 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.time_prefill_requests)
         self._log_histogram(self.metrics.histogram_decode_time_request,
                             stats.time_decode_requests)
-        if self.metrics.show_hidden_metrics:
-            self._log_histogram(self.metrics.histogram_time_in_queue_request,
-                                stats.time_in_queue_requests)
-            self._log_histogram(
-                self.metrics.histogram_model_forward_time_request,
-                stats.model_forward_time_requests)
-            self._log_histogram(
-                self.metrics.histogram_model_execute_time_request,
-                stats.model_execute_time_requests)
         # Metadata
         finished_reason_counter = CollectionsCounter(
             stats.finished_reason_requests)
