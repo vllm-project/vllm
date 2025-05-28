@@ -56,6 +56,7 @@ class AllBlocksCleared(KVCacheEvent):
 
 class KVEventBatch(EventBatch):
     events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
+    dp_name: Optional[str] = None
 
 
 class EventPublisher(ABC):
