@@ -125,8 +125,8 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
     # This is safe since we currently only use single KV cache groups
     block_table = multi_group_block_table[0]
     
-    # Handle the fact that req_state.block_ids is now list[list[int]] for MultiGroupBlockTable
-    # Extract the first group's block IDs for comparison with the first block table
+    # req_state.block_ids is now list[list[int]] for MultiGroupBlockTable
+    # Extract the first group's block IDs
     if isinstance(req_state.block_ids[0], list):
         # New format: list[list[int]] - extract first group
         req_block_ids = req_state.block_ids[0]
