@@ -31,12 +31,12 @@ class MooncakeStoreConnector(KVConnectorBase):
         local_rank: int,
         config: VllmConfig,
     ):
-        self.config = config.kv_transfer_config
+        self.kv_transfer_config = config.kv_transfer_config
         self.kv_helper = kv_helper(config)
         self.local_tp_rank = local_rank
 
         # Init kv_store
-        if self.config.kv_connector == "MooncakeStoreConnector":
+        if self.kv_transfer_config.kv_connector == "MooncakeStoreConnector":
             # Check if MOONCAKE_CONFIG_PATH is set
             import os
             use_mooncake_store = os.getenv('MOONCAKE_CONFIG_PATH') is not None
@@ -50,10 +50,11 @@ class MooncakeStoreConnector(KVConnectorBase):
                     MooncakeStore)
                 logger.info(
                     "Initializing KVStoreConnector under kv_transfer_config %s",
-                    self.config)
+                    self.kv_transfer_config)
                 self.kv_store = MooncakeStore(config)
         else:
-            logger.error("Can not find %s", self.config.kv_connector)
+            logger.error("Can not find %s",
+                         self.kv_transfer_config.kv_connector)
 
         assert self.kv_store is not None
 

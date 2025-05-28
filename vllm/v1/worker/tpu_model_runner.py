@@ -652,8 +652,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         encoder_outputs = []
         for grouped_mm_inputs in grouped_mm_inputs_list:
             batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
-            batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
-                                                           device=self.device)
+            batched_mm_inputs = MultiModalKwargs.as_kwargs(
+                batched_mm_inputs,
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -1261,7 +1264,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            kv_cache_config=kv_cache_config,
+            block_size=kv_cache_config.kv_cache_groups[0].kv_cache_spec.
+            block_size,
         )
         assert self.block_table_cpu.dtype == self.input_batch.block_table[
             0].get_cpu_tensor().dtype
@@ -1434,8 +1438,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         batched_dummy_mm_inputs = MultiModalKwargs.batch([dummy_mm_kwargs] *
                                                          batch_size)
-        return MultiModalKwargs.as_kwargs(batched_dummy_mm_inputs,
-                                          device=self.device)
+        return MultiModalKwargs.as_kwargs(
+            batched_dummy_mm_inputs,
+            dtype=self.model_config.dtype,
+            device=self.device,
+        )
 
 
 def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
