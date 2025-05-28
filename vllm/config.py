@@ -2231,7 +2231,7 @@ Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
-    device: Union[Device, torch.device] = "auto"
+    device: SkipValidation[Union[Device, torch.device]] = "auto"
     """Device type for vLLM execution.
     This parameter is deprecated and will be 
     removed in a future release. 
