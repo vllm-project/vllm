@@ -154,7 +154,8 @@ class InputProcessingContext(InputContext):
         )
 
         try:
-            return hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            return output.to(dtype=self.model_config.dtype)
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
