@@ -352,12 +352,11 @@ class InputBatch(BaseInputBatch[SamplingRequestState]):
 
     def condense(self, empty_req_indices: list[int]) -> None:
 
+        super().condense(empty_req_indices)
         if self.num_reqs == 0:
             self.req_output_token_ids.clear()
         else:
             del self.req_output_token_ids[self.num_reqs:]
-
-        super().condense(empty_req_indices)
 
     def refresh(self):
         self.sampling_metadata = self._make_sampling_metadata()
