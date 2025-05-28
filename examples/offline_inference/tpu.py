@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
+import os
+
 from vllm import LLM, SamplingParams
 
 prompts = [
@@ -18,13 +21,26 @@ sampling_params = SamplingParams(temperature=0, top_p=1.0, n=N, max_tokens=16)
 
 
 def main():
+    parser = argparse.ArgumentParser(description="TPU offline inference example")
+    parser.add_argument("--use-spmd", action="store_true", help="Enable SPMD mode")
+    args = parser.parse_args()
+
+    additional_kwargs = {}
+    if args.use_spmd:
+        os.environ["VLLM_XLA_USE_SPMD"] = "1"
+        # Can only hardcode the number of chips for now.
+        # calling xr.global_runtime_device_count() beforeing init SPMD env in
+        # torch_xla will mess up the distributed env.
+        additional_kwargs["tensor_parallel_size"] = 8
+
     # Set `enforce_eager=True` to avoid ahead-of-time compilation.
     # In real workloads, `enforace_eager` should be `False`.
     llm = LLM(
-        model="Qwen/Qwen2-1.5B-Instruct",
+        model="Qwen/Qwen3-0.6B",
         max_num_batched_tokens=64,
         max_num_seqs=4,
         max_model_len=128,
+        **additional_kwargs,
     )
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)
