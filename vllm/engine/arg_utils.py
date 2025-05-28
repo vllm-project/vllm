@@ -147,9 +147,7 @@ def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
     """Check if the class is not a built-in type."""
-    if isinstance(type_hint, type):
-        return type_hint.__module__ != "builtins"
-    return True
+    return type_hint.__module__ != "builtins"
 
 
 def get_kwargs(cls: ConfigType) -> dict[str, Any]:
