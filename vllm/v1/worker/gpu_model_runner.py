@@ -17,7 +17,7 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadataBuilder, AttentionMetadata)
+                                              AttentionMetadataBuilder)
 from vllm.attention.layer import Attention
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import (CompilationLevel, VllmConfig,
@@ -202,8 +202,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
         # The batch sizes in the config are in descending order.
-        self.cudagraph_batch_sizes = list(reversed(
-            self.compilation_config.cudagraph_capture_sizes))
+        self.cudagraph_batch_sizes = list(
+            reversed(self.compilation_config.cudagraph_capture_sizes))
 
         self.full_cuda_graph = self.compilation_config.full_cuda_graph
 
@@ -1825,19 +1825,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata = {}
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
-                # hack for flashMLA state
-                self.attn_metadata_builders[kv_cache_group_id]._num_decodes = num_tokens
-                self.attn_metadata_builders[kv_cache_group_id]._num_decode_tokens = num_tokens
-                self.attn_metadata_builders[kv_cache_group_id]._num_prefills = 0
 
-                attn_metadata_i = (
-                    self.attn_metadata_builders[kv_cache_group_id].build(
+                attn_metadata_i = self.attn_metadata_builders[
+                    kv_cache_group_id].build_for_cudagraph_capture(
                         num_reqs=num_reqs,
-                        num_actual_tokens=num_tokens,
-                        max_query_len=num_tokens,
-                        common_prefix_len=0,
+                        num_tokens=num_tokens,
                         common_attn_metadata=common_attn_metadata,
-                    ))
+                    )
                 for layer_name in kv_cache_group_spec.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 
@@ -2268,10 +2262,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kv_caches,
             )
 
-        bind_kv_cache(
-            kv_caches,
-            self.compilation_config.static_forward_context,
-            self.kv_caches)
+        bind_kv_cache(kv_caches,
+                      self.compilation_config.static_forward_context,
+                      self.kv_caches)
         return kv_caches
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
