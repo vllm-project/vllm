@@ -22,8 +22,6 @@ def is_fp4_marlin_supported():
 
 
 def fp4_marlin_process_scales(marlin_scales):
-    assert (marlin_scales >= 0).all()
-
     # convert to half first, we would convert to fp8 later
     marlin_scales = marlin_scales.to(torch.half)
 
