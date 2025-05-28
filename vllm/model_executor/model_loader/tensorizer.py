@@ -149,7 +149,6 @@ class TensorizerConfig:
     serialization_kwargs: Optional[dict[str, Any]] = None
     deserialization_kwargs: Optional[dict[str, Any]] = None
     _is_sharded: bool = False
-    _debug: bool = False
 
     def __post_init__(self):
         # check if the configuration is for a sharded vLLM model
@@ -167,8 +166,6 @@ class TensorizerConfig:
             self.serialization_kwargs = {}
         if not self.deserialization_kwargs:
             self.deserialization_kwargs = {}
-        if self._debug:
-            self._debug_ctx = {}
 
     @classmethod
     def as_dict(cls, *args, **kwargs) -> dict[str, Any]:
@@ -548,14 +545,7 @@ def serialize_vllm_model(
         output_file = output_file % get_tensor_model_parallel_rank()
 
     with _write_stream(output_file, **tensorizer_args.stream_params) as stream:
-        args = stream,
-        kwargs = {
-            "encryption":encryption_params,
-            **tensorizer_config.serialization_kwargs
-        }
-        serializer = TensorSerializer(*args, **kwargs)
-        if tensorizer_config._debug:
-            tensorizer_config._debug_ctx.update({"serialization_kwargs": (args, kwargs)})
+        serializer = TensorSerializer(stream, encryption=encryption_params, **tensorizer_config.serialization_kwargs)
         serializer.write_module(model)
         serializer.close()
     logger.info("Successfully serialized model to %s", str(output_file))
