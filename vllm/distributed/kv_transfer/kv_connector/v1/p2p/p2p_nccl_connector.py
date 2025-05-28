@@ -329,8 +329,12 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                num_computed_tokens)
         logger.info(
             "🍒num_external_tokens:%d, num_prompt_tokens:%d, "
-            "num_computed_tokens:%d", num_external_tokens,
-            len(request.prompt_token_ids), num_computed_tokens)
+            "num_computed_tokens:%d, request_id:%s", num_external_tokens,
+            len(request.prompt_token_ids), num_computed_tokens,
+            request.request_id)
+
+        if num_external_tokens < 0:
+            num_external_tokens = 0
 
         return num_external_tokens, False
 
@@ -428,17 +432,20 @@ class P2pNcclConnector(KVConnectorBase_V1):
             if not cached_req.resumed_from_preemption:
                 break
             if cached_req.req_id in self._requests_need_load:
-                # NOTE(rob): cached_req_data does not have the full
-                # list of token ids (only new tokens). So we look it
-                # up in the actual request object.
                 request, _ = self._requests_need_load.pop(cached_req.req_id)
-                total_tokens = (len(cached_req.new_token_ids) +
-                                cached_req.num_computed_tokens)
+                total_tokens = cached_req.num_computed_tokens + 1
                 token_ids = request.all_token_ids[:total_tokens]
 
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
                 block_ids = cached_req.new_block_ids[0]
+
+                logger.debug(
+                    "🐞build_connector_meta, req_id:%s, total_tokens:%d, "
+                    "num_computed_tokens:%d, token_ids:%s, num_token_ids:%d, "
+                    "block_ids:%s, num_block_ids:%d", cached_req.req_id,
+                    total_tokens, cached_req.num_computed_tokens, token_ids,
+                    len(token_ids), block_ids, len(block_ids))
 
                 meta.add_request(request_id=cached_req.req_id,
                                  token_ids=token_ids,
