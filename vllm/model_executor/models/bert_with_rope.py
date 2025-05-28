@@ -553,9 +553,15 @@ class NomicBertModel(BertWithRope):
             # greater than position_embedding.
             model_config = vllm_config.model_config
             hf_text_config = model_config.hf_text_config
-            hf_overrides = model_config.hf_overrides or {}
-            max_model_len = hf_overrides.get(
-                "max_model_len", vllm_config.model_config.max_model_len)
+
+            if isinstance(model_config.hf_overrides, dict):
+                # hf_overrides_kw
+                max_model_len = model_config.hf_overrides.get(
+                    "max_model_len", vllm_config.model_config.max_model_len)
+            else:
+                # hf_overrides_fn
+                # This might be overridden by sentence_bert_config.json.
+                max_model_len = vllm_config.model_config.max_model_len
 
             # reset hf_text_config for recalculate_max_model_len.
             if hasattr(hf_text_config, "max_model_len"):
