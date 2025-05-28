@@ -1,30 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import contextlib
+import functools
 import gc
+import json
 import os
 import pathlib
 import subprocess
+from typing import Callable
 from unittest.mock import MagicMock, patch
+from dataclasses import dataclass
 
 import pytest
 import torch
 
-from vllm import SamplingParams
+from vllm import SamplingParams, LLM
 from vllm.engine.arg_utils import EngineArgs
 # yapf conflicts with isort for this docstring
 # yapf: disable
-from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
-                                                         TensorSerializer,
-                                                         is_vllm_tensorized,
-                                                         load_with_tensorizer,
-                                                         open_stream,
-                                                         tensorize_vllm_model)
+from vllm.model_executor.model_loader.tensorizer import (
+    TensorizerConfig,
+    TensorSerializer,
+    is_vllm_tensorized,
+    load_with_tensorizer,
+    open_stream,
+    tensorize_vllm_model
+)
 # yapf: enable
 from vllm.utils import PlaceholderModule
+from .conftest import assert_from_collective_rpc
 
 from ..utils import VLLM_PATH
 
 try:
+    import tensorizer
     from tensorizer import EncryptionParams
 except ImportError:
     tensorizer = PlaceholderModule("tensorizer")  # type: ignore[assignment]
@@ -280,3 +288,50 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
         # noqa: E501
 
         assert outputs == deserialized_outputs
+
+def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
+
+    serialization_params = {
+        "limit_cpu_concurrency": 2,
+    }
+    model_ref = "facebook/opt-125m"
+    model_path = tmp_path / (model_ref + ".tensors")
+    config = TensorizerConfig(tensorizer_uri=str(model_path), serialization_kwargs=serialization_params, _debug=True)
+    llm = LLM(
+        model=model_ref,
+        device="cuda",
+    )
+
+
+    def serialization_test(self, *args, **kwargs):
+        # This is performed in the ephemeral worker process, so monkey-patching
+        # will actually work, and cleanup is guaranteed so don't
+        # need to reset things
+
+        original_dict = serialization_params
+        to_compare = {}
+
+        original = tensorizer.serialization.TensorSerializer.__init__
+
+        def tensorizer_serializer_wrapper(self, *args, **kwargs):
+            nonlocal to_compare
+            to_compare = kwargs.copy()
+            return original(self, *args, **kwargs)
+
+        tensorizer.serialization.TensorSerializer.__init__ = tensorizer_serializer_wrapper
+
+        tensorizer_config = TensorizerConfig(**kwargs.get("tensorizer_config"))
+        assert tensorizer_config is not None
+        self.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
+        return to_compare | original_dict == to_compare
+
+    kwargs = {
+        "tensorizer_config": config.to_dict()
+    }
+
+    assert assert_from_collective_rpc(llm, serialization_test, kwargs)
+
+
+
+
