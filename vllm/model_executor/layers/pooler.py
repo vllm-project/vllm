@@ -6,10 +6,9 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PretrainedConfig
 from typing_extensions import assert_never
 
-from vllm.config import PoolerConfig
+from vllm.config import ModelConfig, PoolerConfig
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
@@ -297,24 +296,23 @@ class ClassifierPooler(nn.Module):
 
     def __init__(
         self,
-        task: str,
-        config: PretrainedConfig,
+        config: ModelConfig,
         classifier: nn.Module,
         pooler: Optional[nn.Module] = None,
     ):
         super().__init__()
-        if task not in ["classify", "score"]:
-            raise NotImplementedError(
-                f"task {task} is not supported with the classification pooler")
+        if config.task not in ["classify", "score"]:
+            raise NotImplementedError(f"task {config.task} is not supported"
+                                      " with the classification pooler")
         self.classifier = classifier
         self.pooler = pooler
 
-        if task == "score":
+        if config.task == "score":
             self.default_activation_function = \
-                get_cross_encoder_activation_function(config)
+                get_cross_encoder_activation_function(config.hf_config)
         else:
             self.default_activation_function = nn.Sigmoid() \
-                if config.num_labels == 1 else nn.Softmax()
+                if config.hf_config.num_labels == 1 else nn.Softmax()
 
     def forward(
         self,

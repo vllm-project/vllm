@@ -470,7 +470,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                               embedding_class=BertEmbedding,
                               add_pooling_layer=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = ClassifierPooler(vllm_config.model_config.task, config,
+        self._pooler = ClassifierPooler(vllm_config.model_config,
                                         self.classifier, self.bert.pooler)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

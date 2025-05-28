@@ -187,7 +187,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
                                  add_pooling_layer=False)
         self.classifier = RobertaClassificationHead(config)
 
-        self._pooler = ClassifierPooler(vllm_config.model_config.task, config,
+        self._pooler = ClassifierPooler(vllm_config.model_config,
                                         self.classifier)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
