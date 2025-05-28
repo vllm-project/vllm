@@ -24,7 +24,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import (DPMetadata, get_forward_context,
+                                  set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model
@@ -1112,16 +1113,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Early exit.
             return 0
 
-        # Gather num_tokens across dp rank
-        num_tokens_across_dp = [0] * dp_size
-        num_tokens_across_dp[dp_rank] = num_tokens
-        num_tokens_tensor = torch.tensor(num_tokens_across_dp,
-                                         device="cpu",
-                                         dtype=torch.int32)
-        from vllm.distributed.parallel_state import get_dp_group
-        torch.distributed.all_reduce(num_tokens_tensor,
-                                     group=get_dp_group().cpu_group)
-        max_tokens_across_dp_cpu = torch.max(num_tokens_tensor).item()
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
         return max_tokens_across_dp_cpu - num_tokens
 
     @torch.inference_mode()
