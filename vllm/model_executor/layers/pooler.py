@@ -301,18 +301,18 @@ class ClassifierPooler(nn.Module):
         pooler: Optional[nn.Module] = None,
     ):
         super().__init__()
-        if config.task not in ["classify", "score"]:
-            raise NotImplementedError(f"task {config.task} is not supported"
-                                      " with the classification pooler")
         self.classifier = classifier
         self.pooler = pooler
 
         if config.task == "score":
             self.default_activation_function = \
                 get_cross_encoder_activation_function(config.hf_config)
-        else:
+        elif config.task == "classify":
             self.default_activation_function = nn.Sigmoid() \
                 if config.hf_config.num_labels == 1 else nn.Softmax()
+        else:
+            raise NotImplementedError(f"task {config.task} is not supported"
+                                      " with the classification pooler")
 
     def forward(
         self,
