@@ -271,7 +271,6 @@ class LLM:
     def generate(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         *,
@@ -672,7 +671,6 @@ class LLM:
     def encode(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         *,
@@ -752,7 +750,6 @@ class LLM:
     def embed(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,
         *,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: bool = True,
@@ -799,7 +796,6 @@ class LLM:
     def classify(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,
         *,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
