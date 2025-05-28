@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from
-# #FIXME: add nGPT transformers (HF) link.
-# Copyright 2023 The vLLM team.
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# https://github.com/huggingface/transformers/blob/v4.52.3/src/transformers/models/ngpt/modeling_ngpt.py
+# Copyright 2025 The vLLM team.
+# Copyright 2025 HuggingFace Inc. team. All rights reserved.
+# Copyright (c) 2025 NVIDIA CORPORATION. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
 # and OPT implementations in this library. It has been modified from its
@@ -22,7 +23,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only nGPT model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -42,7 +44,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -52,12 +53,21 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (PPMissingLayer, is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
 
-def normalize_vector(x, eps=0.0):
+def normalize_vector(x, eps=1e-8):
+    """
+    Normalize vectors using L2 norm with numerical stability.
+
+    Args:
+        x: Input tensor to normalize
+        eps: Small epsilon value for numerical stability. Default 1e-8 provides
+             good stability for nGPT's multiple normalization operations while
+             remaining compatible with mixed precision training.
+    """
     return x / (x.norm(p=2, dim=-1, keepdim=True) + eps)
 
 
@@ -126,7 +136,7 @@ class NGPTAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 1000000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
@@ -366,14 +376,11 @@ class NGPTModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: NGPTDecoderLayer(
-                config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=prefix,
-            ),
-            prefix=f"{prefix}.layers",
-        )
+            lambda prefix: NGPTDecoderLayer(config=config,
+                                                cache_config=cache_config,
+                                                quant_config=quant_config,
+                                                prefix=prefix),
+            prefix=f"{prefix}.layers")
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
@@ -406,140 +413,8 @@ class NGPTModel(nn.Module):
 
         return hidden_states
 
-
-class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-    }
-
-    # LoRA specific attributes
-    embedding_modules = {
-        "embed_tokens": "input_embeddings",
-        "lm_head": "output_embeddings",
-    }
-    embedding_padding_modules = ["lm_head"]
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-
-        self.config = config
-        self.lora_config = lora_config
-        self.quant_config = quant_config
-
-        self.model = NGPTModel(vllm_config=vllm_config,
-                               prefix=maybe_prefix(prefix, "model"))
-
-        if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-            self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=
-                (  # We need bigger padding if using lora for kernel compatibility
-                    DEFAULT_VOCAB_PADDING_SIZE if not lora_config else
-                    lora_config.lora_vocab_padding_size),
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-            if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(
-                    self.model.embed_tokens)
-
-            logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
-        else:
-            self.lm_head = PPMissingLayer()
-
-        self.sampler = get_sampler()
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
-
-        # nGPT: output scaling parameters
-        self.sz_init_value = getattr(config, "sz_init_value", 1.0)
-        self.sz_init_scaling = config.initializer_range
-        self.sz = ColumnParallelLinear(
-            input_size=1,
-            output_size=config.vocab_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.sz",
-        )
-        torch.nn.init.constant_(self.sz.weight, self.sz_init_scaling)
-        # Whether to use gather or all-gather to gather the sz
-        self.use_all_gather = current_platform.use_all_gather()
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
-        return hidden_states
-
-    def _gather_sz(self, sz: torch.Tensor) -> torch.Tensor:
-        """gather/all-gather the sz tensor across model parallel group."""
-        if self.use_all_gather:
-            # Gather is not supported for some devices such as TPUs.
-            # Use all-gather instead.
-            # NOTE(woosuk): Here, the outputs of every device should not be None
-            # because XLA requires strict SPMD among all devices. Every device
-            # should execute the same operations after gathering the logits.
-            sz = tensor_model_parallel_all_gather(sz)
-        else:
-            # None may be returned for rank > 0
-            sz = tensor_model_parallel_gather(sz)
-        return sz
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
-
-        # When PP>1, this function is called only on the last rank.
-        # logits_processor, gathers the logits from all TP ranks.
-        # But when both PP>1 and TP>1, some TP ranks in the last PP rank have logits as None.
-        # The if-block below handles this edge case.
-        if logits is not None:
-            # nGPT: output scaling
-            sz, _ = self.sz(
-                torch.ones((1, 1), device=logits.device, dtype=logits.dtype))
-            sz = sz * (self.sz_init_value / self.sz_init_scaling)
-            sz = self._gather_sz(sz)
-            logits = logits * sz
-
-        return logits
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -547,17 +422,10 @@ class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             (".qkv_proj", ".v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            if self.quant_config is not None and (
-                    scale_name := self.quant_config.get_cache_scale(name)):
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -601,3 +469,130 @@ class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
+
+class NGPTForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    }
+
+    # LoRA specific attributes
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+    embedding_padding_modules = ["lm_head"]
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        assert isinstance(config, NGPTConfig)
+
+        self.config = config
+        self.lora_config = lora_config
+        self.quant_config = quant_config
+
+        self.model = NGPTModel(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
+
+        if get_pp_group().is_last_rank:
+            self.unpadded_vocab_size = config.vocab_size
+            if lora_config:
+                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+            self.lm_head = ParallelLMHead(
+                self.unpadded_vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                padding_size=(
+                    DEFAULT_VOCAB_PADDING_SIZE
+                    # We need bigger padding if using lora for kernel
+                    # compatibility
+                    if not lora_config else
+                    lora_config.lora_vocab_padding_size),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if config.tie_word_embeddings:
+                self.lm_head = self.lm_head.tie_weights(
+                    self.model.embed_tokens)
+
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                    config.vocab_size,
+                                                    logit_scale)
+        else:
+            self.lm_head = PPMissingLayer()
+
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+
+        # nGPT: output scaling parameters
+        self.sz_init_value = getattr(config, "sz_init_value", 1.0)
+        self.sz_init_scaling = config.initializer_range
+        self.sz = ColumnParallelLinear(
+            input_size=1,
+            output_size=config.vocab_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.sz",
+        )
+        torch.nn.init.constant_(self.sz.weight, self.sz_init_scaling)
+        # Whether to use gather or all-gather to gather the sz
+        self.use_all_gather = current_platform.use_all_gather()
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        model_output = self.model(input_ids, positions, intermediate_tensors,
+                                  inputs_embeds)
+        return model_output
+
+    def _gather_sz(self, sz: torch.Tensor) -> torch.Tensor:
+        """gather/all-gather the sz tensor across model parallel group."""
+        if self.use_all_gather:
+            # Gather is not supported for some devices such as TPUs.
+            # Use all-gather instead.
+            # NOTE(woosuk): Here, the outputs of every device should not be None
+            # because XLA requires strict SPMD among all devices. Every device
+            # should execute the same operations after gathering the logits.
+            sz = tensor_model_parallel_all_gather(sz)
+        else:
+            # None may be returned for rank > 0
+            sz = tensor_model_parallel_gather(sz)
+        return sz
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+
+        # When PP>1, this function is called only on the last rank.
+        # logits_processor, gathers the logits from all TP ranks.
+        # But when both PP>1 and TP>1, some TP ranks in the last PP rank have logits as None.
+        # The if-block below handles this edge case.
+        if logits is not None:
+            # nGPT: output scaling
+            sz, _ = self.sz(
+                torch.ones((1, 1), device=logits.device, dtype=logits.dtype))
+            sz = sz * (self.sz_init_value / self.sz_init_scaling)
+            sz = self._gather_sz(sz)
+            logits = logits * sz
+
+        return logits
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
