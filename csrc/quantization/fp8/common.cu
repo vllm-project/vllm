@@ -88,10 +88,11 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                              torch::Tensor const& input,  // [..., d]
                              torch::Tensor const& scale)  // [1]
 {
-  int64_t num_tokens = input.numel() / input.size(-1);
-  int64_t num_elems = input.numel();
-  dim3 grid(num_tokens);
-  dim3 block(1024);
+  const int block_size = 256;
+  const int num_elems = input.numel();
+  const int num_blocks = min((num_elems + block_size - 1) / block_size, 1024);
+  dim3 const grid(num_blocks);
+  dim3 const block(block_size);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
@@ -110,10 +111,11 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                               torch::Tensor const& input,  // [..., d]
                               torch::Tensor& scale)        // [1]
 {
-  int64_t num_tokens = input.numel() / input.size(-1);
-  int64_t num_elems = input.numel();
-  dim3 grid(num_tokens);
-  dim3 block(1024);
+  const int block_size = 256;
+  const int num_elems = input.numel();
+  const int num_blocks = min((num_elems + block_size - 1) / block_size, 1024);
+  dim3 const grid(num_blocks);
+  dim3 const block(block_size);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
@@ -141,8 +143,9 @@ void dynamic_per_token_scaled_fp8_quant(
 
   int const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
+  int const block_size = 256;
   dim3 const grid(num_tokens);
-  dim3 const block(std::min(hidden_size, 1024));
+  dim3 const block(std::min(hidden_size, block_size));
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
