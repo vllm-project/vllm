@@ -10,8 +10,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache,
-    moe_kernel_quantize_input)
+    _resize_cache, moe_kernel_quantize_input)
 
 
 @triton.jit
@@ -480,8 +479,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                         self.qtype,
                         self.per_act_token,
                         self.block_shape,
-                    )
-                )
+                    ))
             else:
                 b_a1[idx, :rows, :] = rhs
 
@@ -652,10 +650,8 @@ def batched_moe_kernel_quantize_input(
             if num_tokens > 0:
                 A_q[e, :num_tokens, :], tmp_scale = moe_kernel_quantize_input(
                     A[e, :num_tokens],
-                    A_scale[e, :num_tokens] if A_scale else None,
-                    qtype,
-                    per_channel_quant,
-                    [block_k, block_n])
+                    A_scale[e, :num_tokens] if A_scale else None, qtype,
+                    per_channel_quant, [block_k, block_n])
                 A_q_scale[e, :tmp_scale.shape[0]] = tmp_scale
 
         return A_q, A_q_scale
@@ -812,16 +808,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                         intermediate_cache1.view(-1, N))
 
         qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
-            intermediate_cache2,
-            a2_scale,
-            num_tokens,
-            E,
-            N,
-            expert_num_tokens,
-            self.qtype,
-            self.per_act_token,
-            self.block_shape
-        )
+            intermediate_cache2, a2_scale, num_tokens, E, N, expert_num_tokens,
+            self.qtype, self.per_act_token, self.block_shape)
 
         invoke_moe_batched_triton_kernel(A=qintermediate_cache2,
                                          B=w2,

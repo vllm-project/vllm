@@ -769,13 +769,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w2_input_scale
 
     def select_gemm_impl(self, prepare_finalize):
-        from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-            TritonOrDeepGemmExperts)
         from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-            BatchedPrepareAndFinalize,
-            BatchedTritonExperts)
+            BatchedPrepareAndFinalize, BatchedTritonExperts)
         from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
             PplxPrepareAndFinalize)
+        from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+            TritonOrDeepGemmExperts)
 
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
