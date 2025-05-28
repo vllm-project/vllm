@@ -340,6 +340,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             input_activations = get_quant_config_input_activations(
                 quant_config)
 
+            logger.debug("PplxPrepareAndFinalize")
             prepare_finalize = PplxPrepareAndFinalize(
                 handle,
                 max_num_tokens=moe.max_num_tokens,
