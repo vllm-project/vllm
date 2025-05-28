@@ -350,9 +350,6 @@ class Glm4vVisionAttention(nn.Module):
             context_layer = xops.memory_efficient_attention_forward(
                 q, k, v, attn_bias=attn_bias, p=0, scale=None)
 
-        if x.shape[0] == 5000:
-            print(context_layer)
-            breakpoint()
         context_layer = rearrange(context_layer,
                                   "b s h d -> s b (h d)").contiguous()
 
