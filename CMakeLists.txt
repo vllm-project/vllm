@@ -23,6 +23,9 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
+# Prevent installation of dependencies (cutlass) by default.
+install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
+
 #
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
@@ -785,5 +788,7 @@ endif()
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/flashmla.cmake)
+
+    # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)
 endif ()
