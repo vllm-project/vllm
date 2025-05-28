@@ -844,6 +844,8 @@ def main(args: argparse.Namespace):
             ]:
                 if field in result_json:
                     del result_json[field]
+                if field in benchmark_result:
+                    del benchmark_result[field]
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
@@ -856,6 +858,7 @@ def main(args: argparse.Namespace):
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:
+            os.makedirs(args.result_dir, exist_ok=True)
             file_name = os.path.join(args.result_dir, file_name)
         with open(
             file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
