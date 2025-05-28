@@ -7,7 +7,7 @@ import json
 import sys
 import threading
 import warnings
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
@@ -152,29 +152,29 @@ def is_not_builtin(type_hint: TypeHint) -> bool:
 def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
     kwargs = {}
-    for field in fields(cls):
+    for f in fields(cls):
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = set()
-        if get_origin(field.type) in {Union, Annotated}:
-            type_hints.update(get_args(field.type))
+        if get_origin(f.type) in {Union, Annotated}:
+            type_hints.update(get_args(f.type))
         else:
-            type_hints.add(field.type)
+            type_hints.add(f.type)
 
         # If the field is a dataclass, we can use the model_validate_json
         generator = (th for th in type_hints if is_dataclass(th))
         dataclass_cls = next(generator, None)
 
         # Get the default value of the field
-        if field.default is not MISSING:
-            default = field.default
-        elif field.default_factory is not MISSING:
-            if is_dataclass(field.default_factory) and is_in_doc_build():
+        if f.default is not MISSING:
+            default = f.default
+        elif f.default_factory is not MISSING:
+            if is_dataclass(f.default_factory) and is_in_doc_build():
                 default = {}
             else:
-                default = field.default_factory()
+                default = f.default_factory()
 
         # Get the help text for the field
-        name = field.name
+        name = f.name
         help = cls_docs[name].strip()
         # Escape % for argparse
         help = help.replace("%", "%%")
@@ -288,8 +288,11 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_size_local: Optional[int] = None
+    data_parallel_size_per_node: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
+    data_parallel_worker_ips: list[str] = field(default_factory=list)
+    data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
@@ -427,6 +430,14 @@ class EngineArgs:
         if isinstance(self.compilation_config, (int, dict)):
             self.compilation_config = CompilationConfig.from_cli(
                 str(self.compilation_config))
+
+        # Convert data_parallel_worker_ips from string to list if it's a string
+        if isinstance(self.data_parallel_worker_ips,
+                      str) and self.data_parallel_worker_ips:
+            self.data_parallel_worker_ips = [
+                ip.strip() for ip in self.data_parallel_worker_ips.split(",")
+            ]
+
         if self.qlora_adapter_name_or_path is not None:
             warnings.warn(
                 "The `qlora_adapter_name_or_path` is deprecated "
@@ -608,6 +619,11 @@ class EngineArgs:
                                     type=int,
                                     help='Number of data parallel replicas '
                                     'to run on this node.')
+        parallel_group.add_argument('--data-parallel-size-per-node',
+                                    '-dpsn',
+                                    type=int,
+                                    help='Number of data parallel replicas '
+                                    'to run on each node.')
         parallel_group.add_argument('--data-parallel-address',
                                     '-dpa',
                                     type=str,
@@ -618,6 +634,17 @@ class EngineArgs:
                                     type=int,
                                     help='Port for data parallel RPC '
                                     'communication.')
+        parallel_group.add_argument(
+            '--data-parallel-worker-ips',
+            '-dpwi',
+            type=str,
+            help=('Comma-separated list of worker IPs for data parallel '
+                  '(e.g., "ip1,ip2,ip3").'))
+        parallel_group.add_argument('--data-parallel-backend',
+                                    '-dpb',
+                                    type=str,
+                                    help='Backend for data parallel, either '
+                                    '"mp" or "ray".')
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
@@ -1048,6 +1075,23 @@ class EngineArgs:
             self.data_parallel_size_local
             is None) else self.data_parallel_size_local
 
+        if self.data_parallel_size_per_node is None:
+            assert data_parallel_size_local != 0, (
+                "data_parallel_size_per_node must be set")
+            logger.info(
+                "Setting data_parallel_size_per_node to "
+                "data_parallel_size_local: %d", data_parallel_size_local)
+            data_parallel_size_per_node = data_parallel_size_local
+        else:
+            data_parallel_size_per_node = self.data_parallel_size_per_node
+
+        assert self.data_parallel_size % data_parallel_size_per_node == 0, (
+            "data_parallel_size must be divisible by "
+            "data_parallel_size_per_node")
+        assert data_parallel_size_local == data_parallel_size_per_node, (
+            "data_parallel_size_local must be equal to "
+            "data_parallel_size_per_node")
+
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
         data_parallel_address = self.data_parallel_address if (
@@ -1060,13 +1104,18 @@ class EngineArgs:
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
 
+        data_parallel_backend = self.data_parallel_backend
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_size_local=data_parallel_size_local,
+            data_parallel_size_per_node=data_parallel_size_per_node,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
+            data_parallel_worker_ips=self.data_parallel_worker_ips,
+            data_parallel_backend=data_parallel_backend,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
