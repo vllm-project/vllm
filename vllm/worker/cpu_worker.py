@@ -157,9 +157,8 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
-        if omp_cpuids == "all":
-            self.local_omp_cpuid = "all"
-        elif omp_cpuids == "auto":
+        self.local_omp_cpuid = "all"
+        if omp_cpuids == "auto":
             # Setup OpenMP thread affinity based on NUMA nodes automatically
             world_size = self.vllm_config.parallel_config.world_size
 
@@ -198,7 +197,6 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                 logger.warning(
                     "Auto thread-binding is not supported due to the lack of package numa and psutil, fallback to no thread-binding. To get better performance, please try to manually bind threads."
                 )
-                self.local_omp_cpuid = "all"
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
