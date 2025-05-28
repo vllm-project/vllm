@@ -110,6 +110,7 @@ ignore = [
 ]
 
 [tool.mypy]
+plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"

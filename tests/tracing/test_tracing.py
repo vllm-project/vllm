@@ -173,7 +173,7 @@ def test_traces_with_detailed_steps(
         llm = LLM(
             model=model,
             otlp_traces_endpoint=FAKE_TRACE_SERVER_ADDRESS,
-            collect_detailed_traces="all",
+            collect_detailed_traces=["all"],
         )
         prompts = ["This is a short prompt"]
         outputs = llm.generate(prompts, sampling_params=sampling_params)
