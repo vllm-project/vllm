@@ -34,6 +34,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
+
 try:
     from vllm.utils import FlexibleArgumentParser
 except ImportError:
@@ -445,7 +446,7 @@ class ShareGPTDataset(BenchmarkDataset):
                 ))
         self.maybe_oversample_requests(samples, num_requests)
         return samples
-    
+
 
 def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument("--seed", type=int, default=0)
@@ -476,12 +477,14 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--custom-output-len",
         type=int,
         default=256,
-        help="Number of output tokens per request, used only for custom dataset.",
+        help=
+        "Number of output tokens per request, used only for custom dataset.",
     )
     custom_group.add_argument(
         "--custom-skip-chat-template",
         action="store_true",
-        help="Skip applying chat template to prompt, used only for custom dataset.",
+        help=
+        "Skip applying chat template to prompt, used only for custom dataset.",
     )
 
     sonnet_group = parser.add_argument_group("sonnet dataset options")
@@ -489,19 +492,22 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--sonnet-input-len",
         type=int,
         default=550,
-        help="Number of input tokens per request, used only for sonnet dataset.",
+        help=
+        "Number of input tokens per request, used only for sonnet dataset.",
     )
     sonnet_group.add_argument(
         "--sonnet-output-len",
         type=int,
         default=150,
-        help="Number of output tokens per request, used only for sonnet dataset.",
+        help=
+        "Number of output tokens per request, used only for sonnet dataset.",
     )
     sonnet_group.add_argument(
         "--sonnet-prefix-len",
         type=int,
         default=200,
-        help="Number of prefix tokens per request, used only for sonnet dataset.",
+        help=
+        "Number of prefix tokens per request, used only for sonnet dataset.",
     )
 
     sharegpt_group = parser.add_argument_group("sharegpt dataset options")
@@ -518,13 +524,15 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--random-input-len",
         type=int,
         default=1024,
-        help="Number of input tokens per request, used only for random sampling.",
+        help=
+        "Number of input tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
         "--random-output-len",
         type=int,
         default=128,
-        help="Number of output tokens per request, used only for random sampling.",
+        help=
+        "Number of output tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
         "--random-range-ratio",
@@ -539,23 +547,23 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--random-prefix-len",
         type=int,
         default=0,
-        help=(
-            "Number of fixed prefix tokens before the random context "
-            "in a request. "
-            "The total input length is the sum of `random-prefix-len` and "
-            "a random "
-            "context length sampled from [input_len * (1 - range_ratio), "
-            "input_len * (1 + range_ratio)]."
-        ),
+        help=("Number of fixed prefix tokens before the random context "
+              "in a request. "
+              "The total input length is the sum of `random-prefix-len` and "
+              "a random "
+              "context length sampled from [input_len * (1 - range_ratio), "
+              "input_len * (1 + range_ratio)]."),
     )
 
     hf_group = parser.add_argument_group("hf dataset options")
-    hf_group.add_argument(
-        "--hf-subset", type=str, default=None, help="Subset of the HF dataset."
-    )
-    hf_group.add_argument(
-        "--hf-split", type=str, default=None, help="Split of the HF dataset."
-    )
+    hf_group.add_argument("--hf-subset",
+                          type=str,
+                          default=None,
+                          help="Subset of the HF dataset.")
+    hf_group.add_argument("--hf-split",
+                          type=str,
+                          default=None,
+                          help="Split of the HF dataset.")
     hf_group.add_argument(
         "--hf-output-len",
         type=int,
@@ -589,8 +597,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             )
         else:
             assert tokenizer.chat_template or tokenizer.default_chat_template, (
-                "Tokenizer/model must have chat template for sonnet dataset."
-            )
+                "Tokenizer/model must have chat template for sonnet dataset.")
             input_requests = dataset.sample(
                 num_requests=args.num_prompts,
                 input_len=args.sonnet_input_len,
@@ -625,30 +632,25 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             dataset_class = ASRDataset
             args.hf_split = "train"
         else:
-            supported_datasets = set(
-                [
-                    dataset_name
-                    for cls in HuggingFaceDataset.__subclasses__()
-                    for dataset_name in cls.SUPPORTED_DATASET_PATHS
-                ]
-            )
+            supported_datasets = set([
+                dataset_name for cls in HuggingFaceDataset.__subclasses__()
+                for dataset_name in cls.SUPPORTED_DATASET_PATHS
+            ])
             raise ValueError(
                 f"Unsupported dataset path: {args.dataset_path}. "
                 "Huggingface dataset only supports dataset_path"
                 f" from one of following: {supported_datasets}. "
                 "Please consider contributing if you would "
-                "like to add support for additional dataset formats."
-            )
+                "like to add support for additional dataset formats.")
 
         if dataset_class.IS_MULTIMODAL and args.endpoint_type not in [
-            "openai-chat",
-            "openai-audio",
+                "openai-chat",
+                "openai-audio",
         ]:
             # multi-modal benchmark is only available on OpenAI Chat backend.
             raise ValueError(
                 "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' backend."
-            )
+                "'openai-audio' backend.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -663,17 +665,19 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
     else:
         # For datasets that follow a similar structure, use a mapping.
         dataset_mapping = {
-            "sharegpt": lambda: ShareGPTDataset(
-                random_seed=args.seed, dataset_path=args.dataset_path
-            ).sample(
-                tokenizer=tokenizer,
-                num_requests=args.num_prompts,
-                output_len=args.sharegpt_output_len,
-            ),
-            "burstgpt": lambda: BurstGPTDataset(
-                random_seed=args.seed, dataset_path=args.dataset_path
-            ).sample(tokenizer=tokenizer, num_requests=args.num_prompts),
-            "random": lambda: RandomDataset(dataset_path=args.dataset_path).sample(
+            "sharegpt":
+            lambda: ShareGPTDataset(random_seed=args.seed,
+                                    dataset_path=args.dataset_path).sample(
+                                        tokenizer=tokenizer,
+                                        num_requests=args.num_prompts,
+                                        output_len=args.sharegpt_output_len,
+                                    ),
+            "burstgpt":
+            lambda: BurstGPTDataset(random_seed=args.seed,
+                                    dataset_path=args.dataset_path).
+            sample(tokenizer=tokenizer, num_requests=args.num_prompts),
+            "random":
+            lambda: RandomDataset(dataset_path=args.dataset_path).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,
@@ -687,7 +691,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             input_requests = dataset_mapping[args.dataset_name]()
         except KeyError as err:
             raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
-    
+
     return input_requests
 
 

@@ -31,13 +31,8 @@ import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
-from vllm.benchmarks.datasets import add_dataset_parser, get_samples
-from vllm.benchmarks.datasets import (AIMODataset, ASRDataset, BurstGPTDataset,
-                                      ConversationDataset, HuggingFaceDataset,
-                                      InstructCoderDataset, MTBenchDataset,
-                                      NextEditPredictionDataset, RandomDataset,
-                                      SampleRequest, ShareGPTDataset,
-                                      SonnetDataset, VisionArenaDataset)
+from vllm.benchmarks.datasets import (SampleRequest, add_dataset_parser,
+                                      get_samples)
 from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
                                                    OPENAI_COMPATIBLE_BACKENDS,
                                                    RequestFuncInput,

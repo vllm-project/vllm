@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-import argparse
-import json
-import os
 
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
-from vllm.v1.metrics.reader import Counter, Vector
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
+from vllm.v1.metrics.reader import Counter, Vector
+
 try:
     from vllm.utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
+
 
 def parse_args():
     parser = FlexibleArgumentParser()
@@ -52,14 +51,16 @@ def main():
 
     prompts = get_samples(args, tokenizer)
     # add_special_tokens is False to avoid adding bos twice when using chat templates
-    prompt_ids = [tokenizer.encode(prompt.prompt, add_special_tokens=False) for prompt in prompts]
+    prompt_ids = [
+        tokenizer.encode(prompt.prompt, add_special_tokens=False) for prompt in prompts
+    ]
 
     if args.method == "eagle" or args.method == "eagle3":
         if args.method == "eagle":
             eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
         elif args.method == "eagle3":
             eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
-        speculative_config={
+        speculative_config = {
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
@@ -67,7 +68,7 @@ def main():
             "max_model_len": max_model_len,
         }
     elif args.method == "ngram":
-         speculative_config={
+        speculative_config = {
             "method": "ngram",
             "num_speculative_tokens": args.num_spec_tokens,
             "prompt_lookup_max": args.prompt_lookup_max,
