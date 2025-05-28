@@ -109,6 +109,10 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         all_kwargs = []
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
+        # Get cpus_allow_list for main process and its ranks
+        import psutil
+        cpus_allow_list = psutil.Process().cpu_affinity()
+
         for i in range(world_size):
             local_rank = i
             rank = i
@@ -117,6 +121,7 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                 local_rank=local_rank,
                 rank=rank,
                 distributed_init_method=distributed_init_method,
+                cpus_allow_list=cpus_allow_list,
                 is_driver_worker=(not self.parallel_config)
                 or (rank % self.parallel_config.tensor_parallel_size == 0),
             )

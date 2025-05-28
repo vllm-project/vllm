@@ -134,6 +134,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         kv_cache_dtype: Optional[str] = "auto",
+        cpus_allow_list: List[int] = [0],
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[CPUModelRunner]] = None,
     ) -> None:
@@ -169,7 +170,6 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                 import psutil
                 from numa import info
                 cpu_count = psutil.cpu_count(logical=False)
-                cpus_allow_list = psutil.Process().cpu_affinity()
                 numa_size = info.get_num_configured_nodes()
                 cpu_count_per_numa = cpu_count // numa_size
                 num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU,
