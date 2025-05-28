@@ -630,16 +630,14 @@ class NixlConnectorWorker:
                                   (world_size=4)                         (world_size=2)
                                                  tp_ratio = 4 // 2 = 2                  
                                 
-        Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, block_size, kv_heads, head_dim]  
-        then D-Worker_j has [2, num_blocksD, block_size, kv_heads//tp_ratio, head_dim].
+        Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, kv_heads, block_size, head_dim]  
+        then D-Worker_j has [2, num_blocksD, kv_heads//tp_ratio, block_size, head_dim]. Mind the "HND" layout format.
         Assuming num_blocksD >= num_blocksP, D-Worker0 reads from P-Worker0 by preparing the kv_heads//tp_ratio 
-        first heads from all the slots of all the blocks in the case. 
-        D-Worker1 will do the same, but reading the second split along the kv_heads dimension.
+        first heads from all the slots of all the blocks. D-Worker1 will do the same, but reading the second split
+        along the kv_heads dimension, and so forth until "tp_ratio" D TP workers have pulled from P-Worker0.   
         
-        Note that the above will also hold true for the homogeneous TP case.
+        Note that the above will also hold true for the homogeneous TP case, where tp_ratio evaluates to 1.
         """ # noqa: E501
-        # TODO refresh docs
-
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
         if (engine_id in self._remote_agents and \
@@ -772,8 +770,11 @@ class NixlConnectorWorker:
             return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
-        """Get req_ids which got a remote xfer message."""
-
+        """
+        Get req_ids which got a remote xfer message. When multiple consumers
+        are reading from the same producer (heterogeneous TP scenario), wait
+        for all consumers to be done pulling.
+        """
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
@@ -945,8 +946,6 @@ class NixlConnectorWorker:
         If layer_idx is provided, we use the region_ids for the given layer.
         Otherwise, we use all regions.
         """
-        # TODO TP docs
-
         if layer_idx is None:
             region_ids = range(self.num_regions)
         else:
