@@ -81,7 +81,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
-                block_ids=[[0]],  # Fixed: block_ids should be list[list[int]]
+                block_ids=[[0]],  # block_ids should be list[list[int]]
                 num_computed_tokens=0,
                 lora_request=None,
             ))
