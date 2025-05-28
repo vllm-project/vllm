@@ -542,8 +542,10 @@ class ModelConfig:
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         sliding_window_pattern = getattr(self.hf_text_config,
                                          "sliding_window_pattern", None)
+        has_interleaved_attention = sliding_window_pattern is not None or (
+            isinstance(sliding_window, list))
 
-        if not (self.disable_sliding_window or sliding_window_pattern is None):
+        if not self.disable_sliding_window and has_interleaved_attention:
             if (backend :=
                     envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
@@ -563,9 +565,13 @@ class ModelConfig:
                 # only the attention layer itself is aware of the sliding
                 # window, and use the window size to compute the attention.
                 self.hf_text_config.interleaved_sliding_window = sliding_window
-                delattr(self.hf_text_config, "sliding_window")
+
+                if hasattr(self.hf_text_config, "sliding_window"):
+                    delattr(self.hf_text_config, "sliding_window")
+
                 sliding_window = None
 
+        self.original_max_model_len = self.max_model_len
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=self.max_model_len,
@@ -1041,7 +1047,8 @@ class ModelConfig:
             if self.use_async_output_proc:
                 self.use_async_output_proc = False
 
-    def get_hf_config_sliding_window(self) -> Optional[int]:
+    def get_hf_config_sliding_window(
+            self) -> Union[Optional[int], list[Optional[int]]]:
         """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
@@ -1052,7 +1059,7 @@ class ModelConfig:
             return None
         return getattr(self.hf_text_config, "sliding_window", None)
 
-    def get_sliding_window(self) -> Optional[int]:
+    def get_sliding_window(self) -> Optional[Union[int, list[Optional[int]]]]:
         """Get the sliding window size, or None if disabled.
         """
         # If user disables sliding window, return None.
@@ -2980,7 +2987,7 @@ class PoolerConfig:
     pooling_type: Optional[str] = None
     """
     The pooling method of the pooling model. This should be a key in
-    {class}`vllm.model_executor.layers.pooler.PoolingType`.
+    [`vllm.model_executor.layers.pooler.PoolingType`][].
     """
 
     normalize: Optional[bool] = None
@@ -3691,23 +3698,27 @@ class CompilationConfig:
     """Configuration for compilation. It has three parts:
 
     - Top-level Compilation control:
-        - {attr}`level`
-        - {attr}`debug_dump_path`
-        - {attr}`cache_dir`
-        - {attr}`backend`
-        - {attr}`custom_ops`
-        - {attr}`splitting_ops`
+        - [`level`][vllm.config.CompilationConfig.level]
+        - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
+        - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
+        - [`backend`][vllm.config.CompilationConfig.backend]
+        - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
+        - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
     - CudaGraph capture:
-        - {attr}`use_cudagraph`
-        - {attr}`cudagraph_capture_sizes`
-        - {attr}`cudagraph_num_of_warmups`
-        - {attr}`cudagraph_copy_inputs`
-        - {attr}`full_cuda_graph`
+        - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
+        - [`cudagraph_capture_sizes`]
+        [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+        - [`cudagraph_num_of_warmups`]
+        [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
+        - [`cudagraph_copy_inputs`]
+        [vllm.config.CompilationConfig.cudagraph_copy_inputs]
+        - [`full_cuda_graph`][vllm.config.CompilationConfig.full_cuda_graph]
     - Inductor compilation:
-        - {attr}`use_inductor`
-        - {attr}`compile_sizes`
-        - {attr}`inductor_compile_config`
-        - {attr}`inductor_passes`
+        - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
+        - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+        - [`inductor_compile_config`]
+        [vllm.config.CompilationConfig.inductor_compile_config]
+        - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
         - custom inductor passes
 
     Why we have different sizes for cudagraph and inductor:
@@ -4460,6 +4471,19 @@ class VllmConfig:
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
+
+    def recalculate_max_model_len(self, max_model_len: int):
+        model_config = self.model_config
+        max_model_len = _get_and_verify_max_len(
+            hf_config=model_config.hf_text_config,
+            max_model_len=max_model_len,
+            disable_sliding_window=model_config.disable_sliding_window,
+            sliding_window_len=model_config.get_hf_config_sliding_window(),
+            spec_target_max_model_len=model_config.spec_target_max_model_len,
+            encoder_config=model_config.encoder_config)
+        self.model_config.max_model_len = max_model_len
+        self.scheduler_config.max_model_len = max_model_len
+        self.compute_hash()
 
     def __str__(self):
         return (

@@ -759,16 +759,15 @@ def get_kv_cache_torch_dtype(
         model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
-            if isinstance(model_dtype, str):
+            if isinstance(model_dtype,
+                          str) and model_dtype in STR_DTYPE_TO_TORCH_DTYPE:
                 torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
             elif isinstance(model_dtype, torch.dtype):
                 torch_dtype = model_dtype
             else:
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
-        elif cache_dtype in ["half", "bfloat16", "float"]:
+        elif cache_dtype in STR_DTYPE_TO_TORCH_DTYPE:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype == "fp8":
-            torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     elif isinstance(cache_dtype, torch.dtype):
@@ -1005,7 +1004,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
     """
-    Unlike {class}`itertools.groupby`, groups are not broken by
+    Unlike [`itertools.groupby`][], groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)
@@ -1926,7 +1925,8 @@ class _PlaceholderBase:
     Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
-    {meth}`__getattr__` is not called when they are accessed.
+    [`__getattr__`][vllm.utils._PlaceholderBase.__getattr__]
+    is not called when they are accessed.
 
     Info:
         [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
