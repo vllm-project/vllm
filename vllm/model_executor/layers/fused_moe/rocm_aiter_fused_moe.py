@@ -257,7 +257,7 @@ if current_platform.is_rocm():
     )
 
 
-def rocm_aiter_group_topk(
+def rocm_aiter_grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
