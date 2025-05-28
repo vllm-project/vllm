@@ -15,7 +15,7 @@ pip install bitsandbytes>=0.45.3
 
 vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.
 
-You can find bitsandbytes quantized models on <https://huggingface.co/models?search=bitsandbytes>.
+You can find bitsandbytes quantized models on [Hugging Face](https://huggingface.co/models?search=bitsandbytes).
 And usually, these repositories have a config.json file that includes a quantization_config section.
 
 ## Read quantized checkpoint
@@ -27,7 +27,11 @@ from vllm import LLM
 import torch
 # unsloth/tinyllama-bnb-4bit is a pre-quantized checkpoint.
 model_id = "unsloth/tinyllama-bnb-4bit"
-llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True)
+llm = LLM(
+    model=model_id,
+    dtype=torch.bfloat16,
+    trust_remote_code=True
+)
 ```
 
 ## Inflight quantization: load as 4bit quantization
@@ -38,8 +42,12 @@ For inflight 4bit quantization with BitsAndBytes, you need to explicitly specify
 from vllm import LLM
 import torch
 model_id = "huggyllama/llama-7b"
-llm = LLM(model=model_id, dtype=torch.bfloat16, trust_remote_code=True, \
-quantization="bitsandbytes")
+llm = LLM(
+    model=model_id,
+    dtype=torch.bfloat16,
+    trust_remote_code=True,
+    quantization="bitsandbytes"
+)
 ```
 
 ## OpenAI Compatible Server

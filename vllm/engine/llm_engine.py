@@ -130,11 +130,11 @@ class LLMEngine:
     iteration-level scheduling and efficient memory management to maximize the
     serving throughput.
 
-    The [LLM][vllm.LLM] class wraps this class for offline batched inference
-    and the [AsyncLLMEngine][] class wraps this class for online serving.
+    The [`LLM`][vllm.LLM] class wraps this class for offline batched inference
+    and the [`AsyncLLMEngine`][vllm.engine.async_llm_engine.AsyncLLMEngine]
+    class wraps this class for online serving.
 
-    The config arguments are derived from [EngineArgs][vllm.EngineArgs]. (See
-    [engine-args][])
+    The config arguments are derived from [`EngineArgs`][vllm.EngineArgs].
 
     Args:
         vllm_config: The configuration for initializing and running vLLM.
@@ -1649,6 +1649,20 @@ class LLMEngine:
             0].get_prefix_cache_hit_rate(Device.CPU)
         gpu_prefix_cache_hit_rate = self.scheduler[
             0].get_prefix_cache_hit_rate(Device.GPU)
+
+        # Exchange the uasge and cache hit stats between gpu and cpu when
+        # running on cpu because the cpu_worker.py intentionally reports the
+        # number of cpu blocks as gpu blocks in favor of cache management.
+        if self.device_config.device_type == "cpu":
+            num_total_gpu, num_total_cpu = num_total_cpu, num_total_gpu
+            gpu_cache_usage_sys, cpu_cache_usage_sys = (
+                cpu_cache_usage_sys,
+                gpu_cache_usage_sys,
+            )
+            gpu_prefix_cache_hit_rate, cpu_prefix_cache_hit_rate = (
+                cpu_prefix_cache_hit_rate,
+                gpu_prefix_cache_hit_rate,
+            )
 
         # Iteration stats
         num_prompt_tokens_iter = 0

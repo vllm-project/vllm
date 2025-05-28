@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-This file demonstrates the example usage of disaggregated prefilling
+This file demonstrates the example usage of remote KV cache sharing
 with LMCache.
-We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
-and launch an additional LMCache server.
-KV cache is transferred in the following manner: 
-vLLM prefill node -> LMCache server -> vLLM decode node.
+We will launch 2 vllm instances, and launch an additional LMCache server.
+KV cache is transferred in the following manner:
+(1) vLLM instance 1 -> LMCache server (KV cache store).
+(2) LMCache server -> vLLM instance 2 (KV cache reuse/retrieve).
 
-Note that `pip install lmcache` is needed to run this example.
+Note that lmcache needs to be installed to run this example.
 Learn more about LMCache in https://github.com/LMCache/LMCache.
 """
+
 import os
 import subprocess
 import time
@@ -43,56 +44,53 @@ prompts = [
 ]
 
 
-def run_prefill(prefill_done, prompts):
-    # We use GPU 0 for prefill node.
+def run_store(store_done, prompts):
+    # We use GPU 0 for KV cache store process.
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
+    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
-    ktc = KVTransferConfig(kv_connector="LMCacheConnector",
-                           kv_role="kv_producer",
-                           kv_rank=0,
-                           kv_parallel_size=2)
+    ktc = KVTransferConfig(kv_connector="LMCacheConnectorV1", kv_role="kv_both")
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
-    llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
-              kv_transfer_config=ktc,
-              max_model_len=8000,
-              gpu_memory_utilization=0.8,
-              enforce_eager=True)
+    llm = LLM(
+        model="mistralai/Mistral-7B-Instruct-v0.2",
+        kv_transfer_config=ktc,
+        max_model_len=8000,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+    )
 
-    #llm.generate(prompts, sampling_params)
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         generated_text = output.outputs[0].text
         print(f"Generated text: {generated_text!r}")
-    print("Prefill node is finished.")
-    prefill_done.set()
+    print("KV cache store is finished.")
+    store_done.set()
 
     # Clean up lmcache backend
     LMCacheEngineBuilder.destroy(ENGINE_NAME)
 
 
-def run_decode(prefill_done, prompts, timeout=1):
-    # We use GPU 1 for decode node.
+def run_retrieve(store_done, prompts, timeout=1):
+    # We use GPU 1 for KV cache retrieve process.
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
-    ktc = KVTransferConfig(kv_connector="LMCacheConnector",
-                           kv_role="kv_consumer",
-                           kv_rank=1,
-                           kv_parallel_size=2)
+    ktc = KVTransferConfig(kv_connector="LMCacheConnectorV1", kv_role="kv_both")
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # of memory. Reduce the value if your GPU has less memory.
-    llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
-              kv_transfer_config=ktc,
-              max_model_len=8000,
-              gpu_memory_utilization=0.8,
-              enforce_eager=True)
+    llm = LLM(
+        model="mistralai/Mistral-7B-Instruct-v0.2",
+        kv_transfer_config=ktc,
+        max_model_len=8000,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+    )
 
-    print("Waiting for prefill node to finish...")
-    prefill_done.wait()
+    print("Waiting for KV cache store to finish...")
+    store_done.wait()
     time.sleep(timeout)
 
     outputs = llm.generate(prompts, sampling_params)
@@ -105,28 +103,27 @@ def run_decode(prefill_done, prompts, timeout=1):
 
 
 def run_lmcache_server(port):
-    server_proc = subprocess.Popen([
-        "python", "-m", "lmcache.experimental.server", "localhost",
-        str(port)
-    ])
+    server_proc = subprocess.Popen(
+        ["python", "-m", "lmcache.experimental.server", "localhost", str(port)]
+    )
     return server_proc
 
 
 def main():
-    prefill_done = Event()
-    prefill_process = Process(target=run_prefill, args=(prefill_done, prompts))
-    decode_process = Process(target=run_decode, args=(prefill_done, prompts))
+    store_done = Event()
+    store_process = Process(target=run_store, args=(store_done, prompts))
+    retrieve_process = Process(target=run_retrieve, args=(store_done, prompts))
     lmcache_server_process = run_lmcache_server(port)
 
-    # Start prefill node
-    prefill_process.start()
+    # Start KV cache store process
+    store_process.start()
 
-    # Start decode node
-    decode_process.start()
+    # Start KV cache retrieve process
+    retrieve_process.start()
 
     # Clean up the processes
-    decode_process.join()
-    prefill_process.terminate()
+    store_process.join()
+    retrieve_process.terminate()
     lmcache_server_process.terminate()
     lmcache_server_process.wait()
 
