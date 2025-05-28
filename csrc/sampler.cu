@@ -31,7 +31,7 @@ __global__ void apply_repetition_penalties_kernel(
   // Each thread processes multiple vocab items within the tile
   for (int vocab_idx = tile_start + threadIdx.x; vocab_idx < tile_end;
        vocab_idx += blockDim.x) {
-    const int idx = seq_idx * vocab_size + vocab_idx;
+    const int64_t idx = static_cast<int64_t>(seq_idx) * vocab_size + vocab_idx;
     const bool is_repeated = prompt_mask[idx] || output_mask[idx];
     if (is_repeated) {
       scalar_t logit = logits[idx];
