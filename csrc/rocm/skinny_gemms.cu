@@ -28,12 +28,17 @@
   #define LDS_SIZE 64 * 1024
 #endif
 
-static int get_lds_size() {
-  auto dprops = at::cuda::getCurrentDeviceProperties();
-  std::string device_arch = dprops->gcnArchName;
-  size_t substring = device_arch.find("gfx95");
-  if (substring == std::string::npos) return 64 * 1024;
-  return 160 * 1024;
+int get_lds_size() {
+  static bool is_cached = false;
+  static int result;
+  if (is_cached == false) {
+    auto dprops = at::cuda::getCurrentDeviceProperties();
+    std::string device_arch = dprops->gcnArchName;
+    size_t substring = device_arch.find("gfx95");
+    result = (substring == std::string::npos ? 64 * 1024 : 160 * 1024);
+    is_cached = true;
+  }
+  return result;
 }
 
 #if defined(NDEBUG)
