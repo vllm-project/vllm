@@ -206,13 +206,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     use_fp8_w8a8 = dtype == torch.torch.float8_e4m3fn
     block_shape = [16, 16, 32]  # 16 for k if not fp8
 
-    #print(f"tensors.A {tensors.A.shape}")
-    #print(f"tensors.B {tensors.B.shape}")
-
     if use_fp8_w8a8:
-        #A_scale = torch.ones((1, K), dtype=torch.float32, device=tensors.A.device)
-        #B_scale = torch.ones((N, K), dtype=torch.float32, device=tensors.A.device)
-        #quant_block_shape = [N, K]
         A_scale = torch.ones(1, dtype=torch.float32, device=tensors.A.device)
         B_scale = torch.ones(1, dtype=torch.float32, device=tensors.B.device)
         quant_block_shape = [1, 1]

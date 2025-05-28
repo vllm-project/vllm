@@ -780,11 +780,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             BatchedTritonOrDeepGemmExperts)
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts)
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-            BatchedPrepareAndFinalize,
-            BatchedTritonExperts)
-        from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-            PplxPrepareAndFinalize)
 
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
