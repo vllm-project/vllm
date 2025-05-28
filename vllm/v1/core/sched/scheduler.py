@@ -777,7 +777,7 @@ class Scheduler(SchedulerInterface):
                                      pooler_output)
 
             # Extract sample logprobs if needed.
-            if request.sampling_params \
+            if request.sampling_params is not None \
                 and request.sampling_params.logprobs is not None and logprobs:
                 # NOTE: once we support N tokens per step (spec decode),
                 # the outer lists can be of length > 1.

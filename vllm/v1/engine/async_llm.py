@@ -476,7 +476,7 @@ class AsyncLLM(EngineClient):
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() or await q.get()
-                assert type(out) is PoolingRequestOutput
+                assert isinstance(out, PoolingRequestOutput)
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 finished = out.finished

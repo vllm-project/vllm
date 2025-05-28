@@ -235,7 +235,7 @@ class StepPool(SimplePooler):
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
         prompt_token_ids = self.get_prompt_token_ids(pooling_metadata)
 
-        pooled_data = list[torch.Tensor]()
+        pooled_data: list[torch.Tensor] = []
 
         if isinstance(hidden_states, list):
             for req_state, prompt_len in zip(hidden_states, prompt_lens):
