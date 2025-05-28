@@ -571,6 +571,7 @@ class ModelConfig:
 
                 sliding_window = None
 
+        self.original_max_model_len = self.max_model_len
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=self.max_model_len,
@@ -796,17 +797,12 @@ class ModelConfig:
         else:
             # Aliases
             if task_option == "embedding":
-                preferred_task = self._get_preferred_task(
-                    architectures, supported_tasks)
-                if preferred_task != "embed":
-                    msg = ("The 'embedding' task will be restricted to "
-                           "embedding models in a future release. Please "
-                           "pass `--task classify`, `--task score`, or "
-                           "`--task reward` explicitly for other pooling "
-                           "models.")
-                    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+                msg = ("The 'embedding' task has been renamed to "
+                       "'embed', please use the new name. The old name "
+                       "will be removed in v1.0.")
+                warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
-                task_option = preferred_task or "embed"
+                task_option = "embed"
 
             if task_option not in supported_tasks:
                 msg = (
@@ -4470,6 +4466,19 @@ class VllmConfig:
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
+
+    def recalculate_max_model_len(self, max_model_len: int):
+        model_config = self.model_config
+        max_model_len = _get_and_verify_max_len(
+            hf_config=model_config.hf_text_config,
+            max_model_len=max_model_len,
+            disable_sliding_window=model_config.disable_sliding_window,
+            sliding_window_len=model_config.get_hf_config_sliding_window(),
+            spec_target_max_model_len=model_config.spec_target_max_model_len,
+            encoder_config=model_config.encoder_config)
+        self.model_config.max_model_len = max_model_len
+        self.scheduler_config.max_model_len = max_model_len
+        self.compute_hash()
 
     def __str__(self):
         return (
