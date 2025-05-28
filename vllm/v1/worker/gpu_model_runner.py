@@ -133,7 +133,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Sampler
         self.sampler = Sampler(
-            post_process_logprobs=self.model_config.post_process_logprobs)
+            return_logprobs_post_logits_processing=self.model_config.
+            return_logprobs_post_logits_processing)
 
         # Lazy initializations
         # self.model: nn.Module  # Set after load_model

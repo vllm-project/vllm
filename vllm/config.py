@@ -314,7 +314,7 @@ class ModelConfig:
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API."""
-    post_process_logprobs: bool = False
+    return_logprobs_post_logits_processing: bool = False
     """Whether to calculate the log probabilities after applying temperature,
     min-p, top-k, top-p, etc to the logits. By default (False), the log
     probabilities are calculated before any of these are applied."""
