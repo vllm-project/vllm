@@ -21,7 +21,7 @@ from ...utils import check_embeddings_close
                      marks=[pytest.mark.core_model]),
         pytest.param("intfloat/e5-mistral-7b-instruct",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
-        pytest.param("ssmits/Qwen2.5-7B-embed-base"),
+        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
         # [Cross-Encoder]
         pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
@@ -42,7 +42,7 @@ def test_models(
         monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
 
     vllm_extra_kwargs = {}
-    if model == "ssmits/Qwen2.5-7B-embed-base":
+    if model == "ssmits/Qwen2-7B-Instruct-embed-base":
         monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
         vllm_extra_kwargs["override_pooler_config"] = \
             PoolerConfig(pooling_type="MEAN", normalize=False)
