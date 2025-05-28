@@ -37,12 +37,6 @@ models_pre_quant_8bit_to_test = [
     ("yec019/fbopt-350m-8bit", "read pre-quantized 8-bit opt model"),
 ]
 
-models_pre_quant_8bit_to_test = [
-    ('meta-llama/Llama-Guard-3-8B-INT8',
-     'read pre-quantized llama 8-bit model'),
-    ("yec019/fbopt-350m-8bit", "read pre-quantized 8-bit opt model"),
-]
-
 
 @pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
                     reason='bitsandbytes is not supported on this GPU type.')

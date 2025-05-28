@@ -21,6 +21,7 @@ llm = LLM(
     tensor_parallel_size=8,
 )
 """
+
 import dataclasses
 import os
 import shutil
@@ -33,18 +34,18 @@ from vllm.utils import FlexibleArgumentParser
 def parse_args():
     parser = FlexibleArgumentParser()
     EngineArgs.add_cli_args(parser)
-    parser.add_argument("--output",
-                        "-o",
-                        required=True,
-                        type=str,
-                        help="path to output checkpoint")
-    parser.add_argument("--file-pattern",
-                        type=str,
-                        help="string pattern of saved filenames")
-    parser.add_argument("--max-file-size",
-                        type=str,
-                        default=5 * 1024**3,
-                        help="max size (in bytes) of each safetensors file")
+    parser.add_argument(
+        "--output", "-o", required=True, type=str, help="path to output checkpoint"
+    )
+    parser.add_argument(
+        "--file-pattern", type=str, help="string pattern of saved filenames"
+    )
+    parser.add_argument(
+        "--max-file-size",
+        type=str,
+        default=5 * 1024**3,
+        help="max size (in bytes) of each safetensors file",
+    )
     return parser.parse_args()
 
 
@@ -68,23 +69,23 @@ def main(args):
         # For V1 engine, we need to use engine_core.save_sharded_state
         print("Using V1 engine save path")
         llm.llm_engine.engine_core.save_sharded_state(
-            path=args.output,
-            pattern=args.file_pattern,
-            max_size=args.max_file_size)
+            path=args.output, pattern=args.file_pattern, max_size=args.max_file_size
+        )
     else:
         # For V0 engine
         print("Using V0 engine save path")
         model_executor = llm.llm_engine.model_executor
-        model_executor.save_sharded_state(path=args.output,
-                                          pattern=args.file_pattern,
-                                          max_size=args.max_file_size)
+        model_executor.save_sharded_state(
+            path=args.output, pattern=args.file_pattern, max_size=args.max_file_size
+        )
 
     # Copy metadata files to output directory
     for file in os.listdir(model_path):
         if os.path.splitext(file)[1] not in (".bin", ".pt", ".safetensors"):
             if os.path.isdir(os.path.join(model_path, file)):
-                shutil.copytree(os.path.join(model_path, file),
-                                os.path.join(args.output, file))
+                shutil.copytree(
+                    os.path.join(model_path, file), os.path.join(args.output, file)
+                )
             else:
                 shutil.copy(os.path.join(model_path, file), args.output)
 
