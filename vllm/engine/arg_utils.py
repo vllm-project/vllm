@@ -29,7 +29,6 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerMode, TokenizerPoolConfig,
                          VllmConfig, get_attr_docs, get_field)
-from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -345,7 +344,6 @@ class EngineArgs:
     max_lora_rank: int = LoRAConfig.max_lora_rank
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
-    lora_modules: Optional[LoRAModulePath] = None
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
     long_lora_scaling_factors: Optional[tuple[float, ...]] = \
@@ -866,13 +864,6 @@ class EngineArgs:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
-
-        # Neuron requires lora_modules to be specified prior to compilation
-        #  as a part of override_neuron_config
-        if self.lora_modules is not None:
-            if self.override_neuron_config is None:
-                self.override_neuron_config = {}
-            self.override_neuron_config["lora_modules"] = self.lora_modules
 
         # NOTE: This is to allow model loading from S3 in CI
         if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3

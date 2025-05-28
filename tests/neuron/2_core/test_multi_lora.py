@@ -3,28 +3,29 @@
 from huggingface_hub import snapshot_download
 
 from vllm import LLM, SamplingParams
-from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.lora.request import LoRARequest
 
 
 def test_llama_single_lora():
     sql_lora_files = snapshot_download(
         repo_id="yard1/llama-2-7b-sql-lora-test")
-    llm = LLM(
-        model="meta-llama/Llama-2-7b-hf",
-        tensor_parallel_size=2,
-        max_num_seqs=4,
-        max_model_len=512,
-        use_v2_block_manager=True,
-        override_neuron_config={
-            "sequence_parallel_enabled": False,
-            "skip_warmup": True
-        },
-        lora_modules=[LoRAModulePath(name="lora_id_1", path=sql_lora_files)],
-        enable_lora=True,
-        max_loras=1,
-        max_lora_rank=256,
-        device="neuron")
+    llm = LLM(model="meta-llama/Llama-2-7b-hf",
+              tensor_parallel_size=2,
+              max_num_seqs=4,
+              max_model_len=512,
+              use_v2_block_manager=True,
+              override_neuron_config={
+                  "sequence_parallel_enabled": False,
+                  "skip_warmup": True,
+                  "lora_modules": [{
+                      "name": "lora_id_1",
+                      "path": sql_lora_files
+                  }]
+              },
+              enable_lora=True,
+              max_loras=1,
+              max_lora_rank=256,
+              device="neuron")
     """For multi-lora requests using NxDI as the backend, only the lora_name 
     needs to be specified. The lora_id and lora_path are supplied at the LLM 
     class/server initialization, after which the paths are handled by NxDI"""
@@ -57,13 +58,18 @@ def test_llama_multiple_lora():
               max_model_len=512,
               use_v2_block_manager=True,
               override_neuron_config={
-                  "sequence_parallel_enabled": False,
-                  "skip_warmup": True
+                  "sequence_parallel_enabled":
+                  False,
+                  "skip_warmup":
+                  True,
+                  "lora_modules": [{
+                      "name": "lora_id_1",
+                      "path": sql_lora_files
+                  }, {
+                      "name": "lora_id_2",
+                      "path": sql_lora_files
+                  }]
               },
-              lora_modules=[
-                  LoRAModulePath(name="lora_id_1", path=sql_lora_files),
-                  LoRAModulePath(name="lora_id_2", path=sql_lora_files)
-              ],
               enable_lora=True,
               max_loras=2,
               max_lora_rank=256,

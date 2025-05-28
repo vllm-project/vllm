@@ -40,7 +40,7 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
     def _get_lora_paths_strings(lora_modules: List[LoRAModulePath]):
         if not lora_modules:
             return None
-        return {_.name: _.path for _ in lora_modules}
+        return {_.get("name"): _.get("path") for _ in lora_modules}
 
     def _get_nxdi_lora_config(self):
         override_neuron_config = self.model_config.override_neuron_config
@@ -258,38 +258,32 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
     def remove_all_loras(self):
         raise NotImplementedError(
             "Managing LoRAs is only supported through the "
-            "lora_modules parameter to the LLM Class"
-            " or --lora-modules while using online server)")
+            "lora_modules parameter in override_neuron_config")
 
     def set_active_loras(self, lora_requests: Set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         raise NotImplementedError(
             "Managing LoRAs is only supported through the "
-            "lora_modules parameter to the LLM Class"
-            " or --lora-modules while using online server)")
+            "lora_modules parameter in override_neuron_config")
 
     def add_lora(self, lora_request: LoRARequest):
         logger.warning(
             "Adding LoRAs is only supported through the "
-            "lora_modules parameter to the LLM Class"
-            " or --lora-modules while using online server. If you supplied "
+            "lora_modules parameter in override_neuron_config. If you supplied "
             "the parameter, you can ignore this warning. Ignoring"
             "lora request: ", lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
         raise NotImplementedError(
             "Managing LoRAs is only supported through the "
-            "lora_modules parameter to the LLM Class"
-            " or --lora-modules while using online server)")
+            "lora_modules parameter in override_neuron_config")
 
     def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError(
             "Managing LoRAs is only supported through the "
-            "lora_modules parameter to the LLM Class"
-            " or --lora-modules while using online server)")
+            "lora_modules parameter in override_neuron_config")
 
     def list_loras(self) -> Set[int]:
         raise NotImplementedError(
             "Managing LoRAs is only supported through the "
-            "lora_modules parameter to the LLM Class"
-            " or --lora-modules while using online server)")
+            "lora_modules parameter in override_neuron_config")
