@@ -2,10 +2,10 @@
 """Inference-only MiniMaxText01 model."""
 import copy
 import math
-import re
 from collections.abc import Iterable
 from typing import Optional, Union
 
+import regex as re
 import torch
 import torch.distributed
 import torch.nn.functional as F
@@ -604,8 +604,9 @@ class MiniMaxText01DecoderLayer(nn.Module):
 
         rope_theta = getattr(config, "rope_theta", 10000)
 
-        head_dim = getattr(config, "head_dim",
-                           config.hidden_size // config.num_attention_heads)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // config.num_attention_heads
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
@@ -861,8 +862,9 @@ class MiniMaxText01Model(nn.Module):
                                                  cache_shape=self.cache_shape)
 
         rope_theta = getattr(config, "rope_theta", 10000)
-        head_dim = getattr(config, "head_dim",
-                           config.hidden_size // config.num_attention_heads)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // config.num_attention_heads
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,

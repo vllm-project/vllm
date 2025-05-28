@@ -10,6 +10,7 @@ from typing import Literal, Optional, Union
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 logger = init_logger(__name__)
 
@@ -89,12 +90,31 @@ class PEFTHelper:
         return cls(**filtered_dict)
 
     @classmethod
-    def from_local_dir(cls, lora_path: str,
-                       max_position_embeddings: Optional[int]) -> "PEFTHelper":
+    def from_local_dir(
+            cls,
+            lora_path: str,
+            max_position_embeddings: Optional[int],
+            tensorizer_config_dict: Optional[dict] = None) -> "PEFTHelper":
         lora_config_path = os.path.join(lora_path, "adapter_config.json")
 
-        with open(lora_config_path) as f:
-            config = json.load(f)
+        if tensorizer_config_dict:
+            tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
+            tensorizer_args = tensorizer_config._construct_tensorizer_args()
+            from tensorizer.stream_io import open_stream
+            lora_config_path = os.path.join(tensorizer_config.lora_dir,
+                                            "adapter_config.json")
+            with open_stream(lora_config_path,
+                             mode="rb",
+                             **tensorizer_args.stream_params) as f:
+                config = json.load(f)
+
+            logger.info("Successfully deserialized LoRA config from %s",
+                        tensorizer_config.lora_dir)
+
+        else:
+            with open(lora_config_path) as f:
+                config = json.load(f)
+
         config["vllm_max_position_embeddings"] = max_position_embeddings
         return cls.from_dict(config)
 

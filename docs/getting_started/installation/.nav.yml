@@ -1,0 +1,5 @@
+nav:
+  - README.md
+  - gpu.md
+  - cpu.md
+  - ai_accelerator.md

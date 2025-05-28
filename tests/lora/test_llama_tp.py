@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+import subprocess
+import sys
+from typing import Union
 
 import pytest
 import ray
 
 import vllm
+from vllm import LLM
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
-from ..utils import create_new_process_for_each_test, multi_gpu_test
+from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
@@ -36,7 +41,10 @@ def v1(run_with_both_engines_lora):
     pass
 
 
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
+def do_sample(llm: vllm.LLM,
+              lora_path: str,
+              lora_id: int,
+              tensorizer_config_dict: Union[dict, None] = None) -> list[str]:
     prompts = [
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_11 (nationality VARCHAR, elector VARCHAR)\n\n question: When Anchero Pantaleone was the elector what is under nationality? [/user] [assistant]",  # noqa: E501
@@ -45,15 +53,28 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_60 (pick INTEGER, former_wnba_team VARCHAR)\n\n question: What pick was a player that previously played for the Minnesota Lynx? [/user] [assistant]",  # noqa: E501
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_28138035_4 (womens_doubles VARCHAR, mens_singles VARCHAR)\n\n question: Name the women's doubles for werner schlager [/user] [assistant]"  # noqa: E501
     ]
+
     sampling_params = vllm.SamplingParams(temperature=0,
                                           max_tokens=256,
                                           skip_special_tokens=False,
                                           stop=["[/assistant]"])
-    outputs = llm.generate(
-        prompts,
-        sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None)
+
+    if tensorizer_config_dict is not None:
+        outputs = llm.generate(
+            prompts,
+            sampling_params,
+            lora_request=LoRARequest(
+                str(lora_id),
+                lora_id,
+                lora_path,
+                tensorizer_config_dict=tensorizer_config_dict)
+            if lora_id else None)
+    else:
+        outputs = llm.generate(
+            prompts,
+            sampling_params,
+            lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
+            if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -64,18 +85,32 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-def generate_and_test(llm, sql_lora_files):
+def generate_and_test(llm,
+                      sql_lora_files,
+                      tensorizer_config_dict: Union[dict, None] = None):
     print("lora adapter created")
-    assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
+    assert do_sample(llm,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
     print("lora 1")
-    assert do_sample(llm, sql_lora_files, lora_id=1) == EXPECTED_LORA_OUTPUT
+    assert do_sample(llm,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=1) == EXPECTED_LORA_OUTPUT
 
     print("no lora")
-    assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
+    assert do_sample(llm,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
     print("lora 2")
-    assert do_sample(llm, sql_lora_files, lora_id=2) == EXPECTED_LORA_OUTPUT
+    assert do_sample(llm,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=2) == EXPECTED_LORA_OUTPUT
 
     print("removing lora")
 
@@ -153,3 +188,64 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
         enable_chunked_prefill=True,
     )
     generate_and_test(llm, sql_lora_files)
+
+
+@multi_gpu_test(num_gpus=2)
+@create_new_process_for_each_test()
+def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
+                                            sql_lora_huggingface_id):
+
+    # Run the tensorizing of the LoRA adapter and the model in a subprocess
+    # to guarantee cleanup
+
+    tp_size = 2
+    model_name = "model-rank-%03d.tensors"
+
+    model_ref = MODEL_PATH
+    lora_path = sql_lora_huggingface_id
+    suffix = "test"
+    try:
+        result = subprocess.run([
+            sys.executable,
+            f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py", "--model",
+            MODEL_PATH, "--lora-path", lora_path, "--tensor-parallel-size",
+            str(tp_size), "serialize", "--serialized-directory",
+            str(tmp_path), "--suffix", suffix
+        ],
+                                check=True,
+                                capture_output=True,
+                                text=True)
+    except subprocess.CalledProcessError as e:
+        print("Tensorizing failed.")
+        print("STDOUT:\n", e.stdout)
+        print("STDERR:\n", e.stderr)
+        raise
+
+    print("STDOUT:\n", result.stdout)
+
+    model_uri = tmp_path / "vllm" / model_ref / suffix / model_name
+    tensorizer_config = TensorizerConfig(tensorizer_uri=str(model_uri))
+    tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
+
+    loaded_vllm_model = LLM(model=model_ref,
+                            load_format="tensorizer",
+                            enable_lora=True,
+                            enforce_eager=True,
+                            model_loader_extra_config=tensorizer_config,
+                            max_num_seqs=13,
+                            tensor_parallel_size=2,
+                            max_loras=2)
+
+    tensorizer_config_dict = tensorizer_config.to_dict()
+
+    print("lora adapter created")
+    assert do_sample(loaded_vllm_model,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=0) == EXPECTED_NO_LORA_OUTPUT
+
+    print("lora 1")
+    assert do_sample(loaded_vllm_model,
+                     sql_lora_files,
+                     tensorizer_config_dict=tensorizer_config_dict,
+                     lora_id=1) == EXPECTED_LORA_OUTPUT

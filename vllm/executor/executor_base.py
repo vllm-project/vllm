@@ -74,7 +74,7 @@ class ExecutorBase(ABC):
                 `self` argument, in addition to the arguments passed in `args`
                 and `kwargs`. The `self` argument will be the worker object.
             timeout: Maximum time in seconds to wait for execution. Raises a
-                {exc}`TimeoutError` on timeout. `None` means wait indefinitely.
+                [`TimeoutError`][] on timeout. `None` means wait indefinitely.
             args: Positional arguments to pass to the worker method.
             kwargs: Keyword arguments to pass to the worker method.
 

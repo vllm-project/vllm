@@ -27,7 +27,10 @@ from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import StatLoggerFactory
+from vllm.v1.metrics.loggers import (PrometheusStatLogger, StatLoggerBase,
+                                     StatLoggerFactory)
+from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
+from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
 
@@ -64,6 +67,11 @@ class LLMEngine:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
+        self.log_stats = log_stats
+        self.stat_logger: Optional[StatLoggerBase] = None
+        if self.log_stats:
+            self.stat_logger = PrometheusStatLogger(vllm_config)
+
         # important: init dp group before init the engine_core
         # In the decoupled engine case this is handled in EngineCoreProc.
         parallel_config = vllm_config.parallel_config
@@ -86,7 +94,7 @@ class LLMEngine:
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=False)
+                                                log_stats=self.log_stats)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -94,7 +102,7 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,  # FIXME: implement
+            log_stats=self.log_stats,
         )
 
         if not multiprocess_mode:
@@ -223,11 +231,20 @@ class LLMEngine:
         outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
+        iteration_stats = IterationStats() if self.log_stats else None
         processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs)
+            outputs.outputs,
+            engine_core_timestamp=outputs.timestamp,
+            iteration_stats=iteration_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
+
+        # 4) Record stats
+        if self.stat_logger is not None:
+            assert outputs.scheduler_stats is not None
+            self.stat_logger.record(scheduler_stats=outputs.scheduler_stats,
+                                    iteration_stats=iteration_stats)
 
         return processed_outputs.request_outputs
 
@@ -259,6 +276,10 @@ class LLMEngine:
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
+
+    def get_metrics(self) -> list[Metric]:
+        assert self.log_stats, "Stat logging disabled"
+        return get_metrics_snapshot()
 
     def get_tokenizer_group(self) -> TokenizerGroup:
         if self.tokenizer is None:

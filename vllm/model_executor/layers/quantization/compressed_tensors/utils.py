@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Optional
 
+import regex as re
 from compressed_tensors import CompressionFormat
 from torch.nn import Module
 

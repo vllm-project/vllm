@@ -120,7 +120,10 @@ def set_forward_context(attn_metadata: Any,
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch
-            torch.cuda.synchronize()
+            from vllm.platforms import current_platform
+            synchronize = current_platform.synchronize
+            if synchronize is not None:
+                synchronize()
             now = time.perf_counter()
             # time measurement is in milliseconds
             batchsize_forward_time[batchsize].append(

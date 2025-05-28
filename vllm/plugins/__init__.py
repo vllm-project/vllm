@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 plugins_loaded = False
 
 
-def load_plugins_by_group(group: str) -> dict[str, Callable]:
+def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
     import sys
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
@@ -27,23 +27,27 @@ def load_plugins_by_group(group: str) -> dict[str, Callable]:
     if len(discovered_plugins) == 0:
         logger.debug("No plugins for group %s found.", group)
         return {}
+
     logger.info("Available plugins for group %s:", group)
     for plugin in discovered_plugins:
-        logger.info("name=%s, value=%s", plugin.name, plugin.value)
+        logger.info("- %s -> %s", plugin.name, plugin.value)
+
     if allowed_plugins is None:
-        logger.info("all available plugins for group %s will be loaded.",
-                    group)
-        logger.info("set environment variable VLLM_PLUGINS to control"
-                    " which plugins to load.")
-    plugins = {}
+        logger.info("All plugins in this group will be loaded. "
+                    "Set `VLLM_PLUGINS` to control which plugins to load.")
+
+    plugins = dict[str, Callable[[], Any]]()
     for plugin in discovered_plugins:
         if allowed_plugins is None or plugin.name in allowed_plugins:
+            if allowed_plugins is not None:
+                logger.info("Loading plugin %s", plugin.name)
+
             try:
                 func = plugin.load()
                 plugins[plugin.name] = func
-                logger.info("plugin %s loaded.", plugin.name)
             except Exception:
                 logger.exception("Failed to load plugin %s", plugin.name)
+
     return plugins
 
 

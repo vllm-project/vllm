@@ -210,9 +210,7 @@ class DeepseekVL2MultiModalProcessor(
                 dict(prompt=prompt, **mm_data),
                 mm_kwargs,
             )
-            target_dtype = self.info.ctx.model_config.dtype
-            pixel_values = processed_outputs.pop("pixel_values").to(
-                target_dtype)
+            pixel_values = processed_outputs["pixel_values"]
             # split pixel values into patches corresponding to each image
             images_spatial_crop = processed_outputs["images_spatial_crop"]
             patches_per_image = [

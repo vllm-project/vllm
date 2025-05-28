@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-dark.png">
-    <img alt="vLLM" src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-light.png" width=55%>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">
+    <img alt="vLLM" src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-light.png" width=55%>
   </picture>
 </p>
 
@@ -58,7 +58,7 @@ vLLM is fast with:
 - Efficient management of attention key and value memory with [**PagedAttention**](https://blog.vllm.ai/2023/06/20/vllm.html)
 - Continuous batching of incoming requests
 - Fast model execution with CUDA/HIP graph
-- Quantizations: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), INT4, INT8, and FP8.
+- Quantizations: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), [AutoRound](https://arxiv.org/abs/2309.05516),INT4, INT8, and FP8.
 - Optimized CUDA kernels, including integration with FlashAttention and FlashInfer.
 - Speculative decoding
 - Chunked prefill
@@ -100,14 +100,14 @@ Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
 ## Contributing
 
 We welcome and value any contributions and collaborations.
-Please check out [Contributing to vLLM](https://docs.vllm.ai/en/stable/contributing/overview.html) for how to get involved.
+Please check out [Contributing to vLLM](https://docs.vllm.ai/en/latest/contributing/index.html) for how to get involved.
 
 ## Sponsors
 
 vLLM is a community project. Our compute resources for development and testing are supported by the following organizations. Thank you for your support!
 
 <!-- Note: Please sort them in alphabetical order. -->
-<!-- Note: Please keep these consistent with docs/source/community/sponsors.md -->
+<!-- Note: Please keep these consistent with docs/community/sponsors.md -->
 Cash Donations:
 - a16z
 - Dropbox

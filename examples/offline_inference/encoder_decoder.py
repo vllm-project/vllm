@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-'''
+"""
 Demonstrate prompting of text-to-text
 encoder/decoder models, specifically BART
-'''
+"""
 
 from vllm import LLM, SamplingParams
-from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         TokensPrompt, zip_enc_dec_prompts)
+from vllm.inputs import (
+    ExplicitEncoderDecoderPrompt,
+    TextPrompt,
+    TokensPrompt,
+    zip_enc_dec_prompts,
+)
 
 
 def create_prompts(tokenizer):
@@ -18,8 +22,9 @@ def create_prompts(tokenizer):
     # - Helpers for building prompts
     text_prompt_raw = "Hello, my name is"
     text_prompt = TextPrompt(prompt="The president of the United States is")
-    tokens_prompt = TokensPrompt(prompt_token_ids=tokenizer.encode(
-        prompt="The capital of France is"))
+    tokens_prompt = TokensPrompt(
+        prompt_token_ids=tokenizer.encode(prompt="The capital of France is")
+    )
     # - Pass a single prompt to encoder/decoder model
     #   (implicitly encoder input prompt);
     #   decoder input prompt is assumed to be None
@@ -57,14 +62,19 @@ def create_prompts(tokenizer):
     #   decoder prompts together into a list of ExplicitEncoderDecoderPrompt
     #   instances
     zipped_prompt_list = zip_enc_dec_prompts(
-        ['An encoder prompt', 'Another encoder prompt'],
-        ['A decoder prompt', 'Another decoder prompt'])
+        ["An encoder prompt", "Another encoder prompt"],
+        ["A decoder prompt", "Another decoder prompt"],
+    )
 
     # - Let's put all of the above example prompts together into one list
     #   which we will pass to the encoder/decoder LLM.
     return [
-        single_text_prompt_raw, single_text_prompt, single_tokens_prompt,
-        enc_dec_prompt1, enc_dec_prompt2, enc_dec_prompt3
+        single_text_prompt_raw,
+        single_text_prompt,
+        single_tokens_prompt,
+        enc_dec_prompt1,
+        enc_dec_prompt2,
+        enc_dec_prompt3,
     ] + zipped_prompt_list
 
 
@@ -85,10 +95,12 @@ def print_outputs(outputs):
         prompt = output.prompt
         encoder_prompt = output.encoder_prompt
         generated_text = output.outputs[0].text
-        print(f"Output {i+1}:")
-        print(f"Encoder prompt: {encoder_prompt!r}\n"
-              f"Decoder prompt: {prompt!r}\n"
-              f"Generated text: {generated_text!r}")
+        print(f"Output {i + 1}:")
+        print(
+            f"Encoder prompt: {encoder_prompt!r}\n"
+            f"Decoder prompt: {prompt!r}\n"
+            f"Generated text: {generated_text!r}"
+        )
         print("-" * 50)
 
 

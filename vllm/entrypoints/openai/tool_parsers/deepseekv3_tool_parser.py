@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from collections.abc import Sequence
 from typing import Union
+
+import regex as re
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,

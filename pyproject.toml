@@ -8,6 +8,7 @@ requires = [
     "setuptools-scm>=8.0",
     "torch == 2.7.0",
     "wheel",
+    "regex",
     "jinja2",
 ]
 build-backend = "setuptools.build_meta"
@@ -35,8 +36,8 @@ dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
 Homepage="https://github.com/vllm-project/vllm"
-Documentation="https://vllm.readthedocs.io/en/latest/"
-Slack="http://slack.vllm.ai/"
+Documentation="https://docs.vllm.ai/en/latest/"
+Slack="https://slack.vllm.ai/"
 
 [project.scripts]
 vllm = "vllm.entrypoints.cli.main:main"
@@ -56,16 +57,12 @@ ignore_patterns = [
     ".buildkite/**",
     "benchmarks/**",
     "build/**",
+    "examples/**",
 ]
 
 [tool.ruff]
 # Allow lines to be as long as 80.
 line-length = 80
-exclude = [
-    # External file, leaving license intact
-    "examples/other/fp8/quantizer/quantize.py",
-    "vllm/vllm_flash_attn/flash_attn_interface.pyi"
-]
 
 [tool.ruff.lint.per-file-ignores]
 "vllm/third_party/**" = ["ALL"]
@@ -148,6 +145,7 @@ skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora
 skip_glob = [
     ".buildkite/*",
     "benchmarks/*",
+    "examples/*",
 ]
 use_parentheses = true
 skip_gitignore = true
@@ -165,9 +163,12 @@ markers = [
 
 [tool.pymarkdown]
 plugins.md004.style = "sublist" # ul-style
+plugins.md007.indent = 4 # ul-indent
+plugins.md007.start_indented = true # ul-indent
 plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html
+plugins.md046.enabled = false # code-block-style
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
 
 [tool.ty]

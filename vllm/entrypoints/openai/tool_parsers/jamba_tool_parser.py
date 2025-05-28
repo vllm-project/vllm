@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import re
 from collections.abc import Sequence
 from typing import Union
 
 import partial_json_parser
+import regex as re
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
@@ -96,8 +96,9 @@ class JambaToolParser(ToolParser):
                         function=FunctionCall(
                             name=function_call["name"],
                             # function call args are JSON but as a string
-                            arguments=json.dumps(function_call["arguments"])))
-                    for function_call in raw_function_calls
+                            arguments=json.dumps(function_call["arguments"],
+                                                 ensure_ascii=False),
+                        )) for function_call in raw_function_calls
                 ]
 
                 content = model_output[:model_output.
@@ -187,7 +188,7 @@ class JambaToolParser(ToolParser):
                     diff: Union[str, None] = current_tool_call.get("arguments")
 
                     if diff:
-                        diff = json.dumps(diff).replace(
+                        diff = json.dumps(diff, ensure_ascii=False).replace(
                             self.streamed_args_for_tool[self.current_tool_id],
                             "")
                         delta = DeltaMessage(tool_calls=[
@@ -248,7 +249,8 @@ class JambaToolParser(ToolParser):
                         "mid-arguments")
                     delta = None
                 elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments)
+                    cur_arguments_json = json.dumps(cur_arguments,
+                                                    ensure_ascii=False)
                     logger.debug("finding %s in %s", new_text,
                                  cur_arguments_json)
 
@@ -267,8 +269,10 @@ class JambaToolParser(ToolParser):
                         self.current_tool_id] += arguments_delta
 
                 elif cur_arguments and prev_arguments:
-                    cur_args_json = json.dumps(cur_arguments)
-                    prev_args_json = json.dumps(prev_arguments)
+                    cur_args_json = json.dumps(cur_arguments,
+                                               ensure_ascii=False)
+                    prev_args_json = json.dumps(prev_arguments,
+                                                ensure_ascii=False)
                     logger.debug("Searching for diff between \n%s\n%s",
                                  cur_args_json, prev_args_json)
 

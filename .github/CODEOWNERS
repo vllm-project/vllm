@@ -13,6 +13,7 @@
 /vllm/model_executor/guided_decoding @mgoin @russellb
 /vllm/multimodal @DarkLight1337 @ywang96
 /vllm/vllm_flash_attn @LucasWilkinson
+/vllm/lora @jeejeelee
 CMakeLists.txt @tlrmchlsmth
 
 # vLLM V1
@@ -40,3 +41,8 @@ CMakeLists.txt @tlrmchlsmth
 /tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb
 /tests/v1/structured_output @mgoin @russellb
 /tests/weight_loading @mgoin @youkaichao
+/tests/lora @jeejeelee
+
+# Docs
+/docs @hmellor
+mkdocs.yaml @hmellor

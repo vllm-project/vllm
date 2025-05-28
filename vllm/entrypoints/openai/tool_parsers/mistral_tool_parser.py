@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import re
 from collections.abc import Sequence
 from random import choices
 from string import ascii_letters, digits
 from typing import Union
 
 import partial_json_parser
+import regex as re
 from partial_json_parser.core.options import Allow
 from pydantic import Field
 

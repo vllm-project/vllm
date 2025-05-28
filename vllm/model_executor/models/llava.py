@@ -721,9 +721,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 batch.
             pixel_values: The pixels in each input image.
 
-        :::{seealso}
-        {class}`LlavaImageInputs`
-        :::
+        Info:
+            [LlavaImageInputs][]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None

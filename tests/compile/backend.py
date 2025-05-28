@@ -5,6 +5,8 @@ from typing import Callable, Union
 
 from torch import fx
 
+from vllm.compilation.fx_utils import (find_specified_fn,
+                                       find_specified_fn_maybe)
 from vllm.compilation.inductor_pass import InductorPass
 from vllm.config import get_current_vllm_config
 
@@ -44,3 +46,19 @@ class TestBackend:
         self.graph_post_pass = deepcopy(graph)
         # assign by reference, will reflect the final state of the graph
         self.final_graph = graph
+
+    def check_before_ops(self, ops,
+                         find_fn=find_specified_fn, \
+                         find_fn_maybe=find_specified_fn_maybe, \
+                        ops_fully_replaced=True):
+        for op in ops:
+            find_fn(self.graph_pre_pass.nodes, op)
+            if ops_fully_replaced:
+                assert find_fn_maybe(self.graph_post_pass.nodes, op) is None
+
+    def check_after_ops(self, ops,
+                        find_fn=find_specified_fn, \
+                        find_fn_maybe=find_specified_fn_maybe):
+        for op in ops:
+            find_fn(self.graph_post_pass.nodes, op)
+            assert find_fn_maybe(self.graph_pre_pass.nodes, op) is None

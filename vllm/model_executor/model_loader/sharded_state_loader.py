@@ -100,9 +100,9 @@ class ShardedStateLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> nn.Module:
         device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
         target_device = torch.device(device_config.device)
 
         from vllm.distributed import get_tensor_model_parallel_rank

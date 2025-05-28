@@ -19,6 +19,7 @@ namespace vec_op {
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES_FP8(...)        \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
   AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
+  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)     \
   AT_DISPATCH_CASE(at::ScalarType::Float8_e5m2, __VA_ARGS__)
 
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \

@@ -64,7 +64,7 @@ steps:
       - "docker push vllm/vllm-tpu:$BUILDKITE_COMMIT"
     plugins:
       - docker-login#v3.0.0:
-          username: vllm
+          username: vllmbot
           password-env: DOCKERHUB_TOKEN
     env:
       DOCKER_BUILDKIT: "1"

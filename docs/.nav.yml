@@ -1,0 +1,63 @@
+nav:
+  - Home: 
+    - vLLM: README.md
+    - Getting Started:
+      - getting_started/quickstart.md
+      - getting_started/installation
+    - Examples:
+      - Offline Inference: examples/offline_inference
+      - Online Serving: examples/online_serving
+      - Others: examples/others
+    - Quick Links:
+      - User Guide: usage/README.md
+      - Developer Guide: contributing/README.md
+      - API Reference: api/README.md
+    - Timeline:
+      - Roadmap: https://roadmap.vllm.ai
+      - Releases: https://github.com/vllm-project/vllm/releases
+  - User Guide:
+    - Summary: usage/README.md
+    - usage/v1_guide.md
+    - General:
+      - usage/*
+    - Inference and Serving:
+      - serving/offline_inference.md
+      - serving/openai_compatible_server.md
+      - serving/*
+      - serving/integrations
+    - Deployment:
+      - deployment/*
+      - deployment/frameworks
+      - deployment/integrations
+    - Training: training
+    - Configuration:
+      - Summary: configuration/README.md
+      - configuration/*
+    - Models:
+      - models/supported_models.md
+      - models/generative_models.md
+      - models/pooling_models.md
+      - models/extensions
+    - Features:
+      - features/compatibility_matrix.md
+      - features/*
+      - features/quantization
+  - Developer Guide:
+    - Summary: contributing/README.md
+    - General:
+      - glob: contributing/*
+        flatten_single_child_sections: true
+    - Model Implementation: contributing/model
+    - Design Documents:
+      - V0: design
+      - V1: design/v1
+  - API Reference:
+    - Summary: api/README.md
+    - Contents:
+      - glob: api/vllm/*
+        preserve_directory_names: true
+  - Community:
+    - community/*
+    - Blog: https://blog.vllm.ai
+    - Forum: https://discuss.vllm.ai
+    - Slack: https://slack.vllm.ai

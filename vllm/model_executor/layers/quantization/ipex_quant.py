@@ -14,7 +14,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
 from vllm.platforms import current_platform
 
-MIN_IPEX_VERSION = "2.5.0"
+MIN_IPEX_VERSION = "2.7.0"
 
 
 class IPEXConfig(QuantizationConfig):
@@ -181,8 +181,6 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
         out = layer.ipex_qlinear(reshaped_x)
-        if bias is not None:
-            out.add_(bias)
         return out.reshape(x.shape[:-1] + (layer.ipex_output_size, ))
 
 

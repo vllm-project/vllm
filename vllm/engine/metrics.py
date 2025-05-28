@@ -29,7 +29,7 @@ prometheus_client.disable_created_metrics()
 # to extract the metrics definitions.
 
 
-# begin-metrics-definitions
+# --8<-- [start:metrics-definitions]
 class Metrics:
     """
     vLLM uses a multiprocessing-based frontend for the OpenAI server.
@@ -293,7 +293,7 @@ class Metrics:
             labelnames=labelnames))
 
 
-# end-metrics-definitions
+# --8<-- [end:metrics-definitions]
 
     def _unregister_vllm_metrics(self) -> None:
         for collector in list(prometheus_client.REGISTRY._collector_to_names):

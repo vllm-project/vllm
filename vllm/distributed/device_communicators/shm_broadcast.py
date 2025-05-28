@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import pickle
-import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -19,7 +17,7 @@ from zmq import IPV6  # type: ignore
 from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
 import vllm.envs as envs
-from vllm.distributed.utils import StatelessProcessGroup
+from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.utils import (get_ip, get_open_port, get_open_zmq_ipc_path,
                         is_valid_ipv6_address)
@@ -27,20 +25,6 @@ from vllm.utils import (get_ip, get_open_port, get_open_zmq_ipc_path,
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
 logger = init_logger(__name__)
-
-# We prefer to use os.sched_yield as it results in tighter polling loops,
-# measured to be around 3e-7 seconds. However on earlier versions of Python
-# os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
-USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
-                   or (sys.version_info[:2] == (3, 10)
-                       and sys.version_info[2] >= 8))
-
-
-def sched_yield():
-    if USE_SCHED_YIELD:
-        os.sched_yield()
-    else:
-        time.sleep(0)
 
 
 class ShmRingBuffer:

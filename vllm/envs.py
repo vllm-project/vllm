@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
+    VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
 
 
 def get_default_cache_root():
@@ -163,7 +164,7 @@ def get_vllm_port() -> Optional[int]:
                 raise ValueError(
                     f"VLLM_PORT '{port}' appears to be a URI. "
                     "This may be caused by a Kubernetes service discovery issue"
-                    "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+                    "check the warning in: https://docs.vllm.ai/en/stable/usage/env_vars.html"
                 )
         except Exception:
             pass
@@ -175,7 +176,7 @@ def get_vllm_port() -> Optional[int]:
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
-# begin-env-vars-definition
+# --8<-- [start:env-vars-definition]
 
 environment_variables: dict[str, Callable[[], Any]] = {
 
@@ -809,11 +810,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
 
     # all2all backend for vllm's expert parallel communication
+    # Available options:
+    # - "naive": naive all2all implementation using all-reduce
+    # - "pplx": use pplx kernels
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
+
+    # Control the maximum number of tokens per expert supported by the
+    # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
+    # the blockscale tensor of activations NVFP4 Quantization.
+    # This is used to prevent the kernel from running out of memory.
+    "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
+    lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
 }
 
-# end-env-vars-definition
+# --8<-- [end:env-vars-definition]
 
 
 def __getattr__(name: str):

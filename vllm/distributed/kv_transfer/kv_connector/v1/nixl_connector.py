@@ -209,7 +209,17 @@ class NixlConnectorScheduler:
             rounded_num_prompt_tokens = round_down(
                 len(request.prompt_token_ids), self.block_size)
             count = max(rounded_num_prompt_tokens - num_computed_tokens, 0)
-            return count, count > 0
+            if count > 0:
+                return count, True
+
+            # NOTE: if count is 0 here, we have less than block_size
+            # tokens to pull after subtracting the local prefix cache hit.
+            # The remote only sends fully computed blocks, so there is
+            # nothing to transfer but we still need to notify the
+            # prefill worker so that the remote blocks are freed.
+            if all(p in params for p in ("remote_engine_id", "remote_host",
+                                         "remote_port")):
+                self._reqs_need_recv[request.request_id] = (request, [])
 
         # No remote prefill for this request.
         return 0, False
@@ -225,10 +235,6 @@ class NixlConnectorScheduler:
             num_external_tokens, params)
 
         if params is not None and params.get("do_remote_prefill"):
-            # NOTE(rob): if prompt < block_size, no remote blocks
-            # since the remote only sends fully computed blocks, so
-            # skip recving for this request. num_external_tokens
-            # should be 0 if there are no remote blocks.
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
                                              "remote_port")):
@@ -253,6 +259,15 @@ class NixlConnectorScheduler:
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
+            # For the case where there are no remote blocks to pull
+            # (block_ids is empty), we don't need to schedule
+            # an async read on the worker side.
+            if not block_ids:
+                logger.debug(
+                    "Skipping adding request %s to NixlConnectorMetadata, "
+                    "as there are no remote blocks to pull", req_id)
+                continue
+
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
@@ -522,6 +537,7 @@ class NixlConnectorWorker:
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
         engine_id = nixl_agent_meta.engine_id
+        assert engine_id != self.engine_id, "Conflict engine id found!"
         if engine_id in self._remote_agents:
             return
 

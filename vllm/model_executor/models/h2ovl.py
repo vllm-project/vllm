@@ -25,9 +25,10 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .intern_vit import InternVisionModel
 from .internvl import (IMG_CONTEXT, IMG_END, IMG_START,
+                       BaseInternVLDummyInputsBuilder,
+                       BaseInternVLMultiModalProcessor,
                        BaseInternVLProcessingInfo, BaseInternVLProcessor,
-                       InternVLChatModel, InternVLDummyInputsBuilder,
-                       InternVLMultiModalProcessor, build_transform,
+                       InternVLChatModel, build_transform,
                        find_closest_aspect_ratio, get_internvl_target_ratios)
 
 
@@ -430,8 +431,8 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
-                               ):
+class H2OVLMultiModalProcessor(
+        BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
 
     def _get_prompt_updates(
         self,
@@ -514,7 +515,7 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
 @MULTIMODAL_REGISTRY.register_processor(
     H2OVLMultiModalProcessor,
     info=H2OVLProcessingInfo,
-    dummy_inputs=InternVLDummyInputsBuilder)
+    dummy_inputs=BaseInternVLDummyInputsBuilder)
 class H2OVLChatModel(InternVLChatModel):
 
     def _init_vision_model(

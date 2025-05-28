@@ -69,7 +69,7 @@ def test_lora_functions_sync():
     run_check(llm.add_lora, make_lora_request(12), [12, 9, 10, 11])
     run_check(llm.add_lora, make_lora_request(13), [12, 13, 10, 11])
 
-    # Remove all LoRAs
+    # Remove all LoRAs.
     run_check(llm.remove_lora, 13, [12, 10, 11])
     run_check(llm.remove_lora, 12, [10, 11])
     run_check(llm.remove_lora, 11, [10])

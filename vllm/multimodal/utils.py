@@ -259,7 +259,8 @@ class MediaConnector:
 
 
 global_media_connector = MediaConnector()
-"""The global {class}`MediaConnector` instance used by vLLM."""
+"""The global [`MediaConnector`][vllm.multimodal.utils.MediaConnector]
+instance used by vLLM."""
 
 fetch_audio = global_media_connector.fetch_audio
 fetch_image = global_media_connector.fetch_image
