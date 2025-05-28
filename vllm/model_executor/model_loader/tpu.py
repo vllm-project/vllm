@@ -22,10 +22,11 @@ class TPUModelLoader(DefaultModelLoader):
     A TPU model loader for model loading under SPMD mode.
     """
 
-    def load_model(self,
-                   vllm_config: VllmConfig,
-                   mesh: Optional[xs.Mesh] = None
-                   ) -> nn.Module:  # type: ignore[override]
+    def load_model_tpu(
+        self,
+        vllm_config: VllmConfig,
+        mesh: Optional[xs.Mesh] = None,
+    ) -> nn.Module:
         # Initialize model and load weights on CPU. Then, during SPMD partition,
         # weights are sharded and transferred to TPUs.
         self.counter_before_loading_weights = time.perf_counter()
