@@ -42,19 +42,22 @@ HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
 class MQLLMEngine:
-    """A multiprocessing wrapper for {class}`LLMEngine`.
+    """A multiprocessing wrapper for
+    [`LLMEngine`][vllm.engine.llm_engine.LLMEngine].
 
-    This class is used to wrap the {class}`LLMEngine` class to enable use
+    This class is used to wrap the
+    [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] class to enable use
     in concurrnet manner. It runs a background loop and uses zeromq to
     receive new requests and stream outputs incrementally via ipc.
 
-    The {class}`LLMEngine` generate or encode process is kicked off when a new
-    RPCProcessRequest is received by the input_socket.
+    The [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] generate or encode
+    process is kicked off when a new RPCProcessRequest is received by the
+    input_socket.
 
     The self.engine_loop checks the input_socket for new requests,
     adds them to the LLMEngine if there are any, calls the internal
-    {class}`LLMEngine.step()`, and sends the RequestOutputs back over
-    the output_socket.
+    [`LLMEngine.step()`][vllm.engine.llm_engine.LLMEngine.step], and sends
+    the RequestOutputs back over the output_socket.
 
     If use_async_sockets is set, the logic associated with reading new
     requests from the socket and sending data to the socket is passed
@@ -65,8 +68,8 @@ class MQLLMEngine:
         ipc_path: Base path for zeromq interprocess messaging
         use_async_sockets: Whether to make send/recv async with GPU
         log_requests: Whether to log the requests.
-        *args: Arguments for {class}`LLMEngine`.
-        **kwargs: Arguments for {class}`LLMEngine`.
+        *args: Arguments for [`LLMEngine`][vllm.engine.llm_engine.LLMEngine].
+        **kwargs: Arguments for [`LLMEngine`][vllm.engine.llm_engine.LLMEngine].
     """
 
     def __init__(self,

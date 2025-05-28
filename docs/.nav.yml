@@ -5,11 +5,9 @@ nav:
       - getting_started/quickstart.md
       - getting_started/installation
     - Examples:
-      - Offline Inference: getting_started/examples/offline_inference
-      - Online Serving: getting_started/examples/online_serving
-      - Others:
-        - LMCache: getting_started/examples/lmcache
-        - getting_started/examples/other/*
+      - Offline Inference: examples/offline_inference
+      - Online Serving: examples/online_serving
+      - Others: examples/others
     - Quick Links:
       - User Guide: usage/README.md
       - Developer Guide: contributing/README.md
@@ -18,7 +16,8 @@ nav:
       - Roadmap: https://roadmap.vllm.ai
       - Releases: https://github.com/vllm-project/vllm/releases
   - User Guide:
-    - usage/README.md
+    - Summary: usage/README.md
+    - usage/v1_guide.md
     - General:
       - usage/*
     - Inference and Serving:
@@ -44,7 +43,7 @@ nav:
       - features/*
       - features/quantization
   - Developer Guide:
-    - contributing/README.md
+    - Summary: contributing/README.md
     - General:
       - glob: contributing/*
         flatten_single_child_sections: true
@@ -53,9 +52,10 @@ nav:
       - V0: design
       - V1: design/v1
   - API Reference:
-    - api/README.md
-    - glob: api/vllm/*
-      preserve_directory_names: true
+    - Summary: api/README.md
+    - Contents:
+      - glob: api/vllm/*
+        preserve_directory_names: true
   - Community:
     - community/*
     - Blog: https://blog.vllm.ai

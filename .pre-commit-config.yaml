@@ -17,7 +17,7 @@ repos:
   - id: ruff
     args: [--output-format, github, --fix]
   - id: ruff-format
-    files: ^(.buildkite|benchmarks)/.*
+    files: ^(.buildkite|benchmarks|examples)/.*
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.1
   hooks:
@@ -142,6 +142,7 @@ repos:
     language: python
     types: [python]
     pass_filenames: false
+    additional_dependencies: [regex]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
