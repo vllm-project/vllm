@@ -834,7 +834,7 @@ class FusedMoE(torch.nn.Module):
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
         if self.moe_parallel_config.use_pplx_kernels:
-            act_dtype = torch.get_default_dtype()
+            act_dtype = vllm_config.model_config.dtype
             self.batched_hidden_states = torch.zeros(
                 (MOE_DP_CHUNK_SIZE, self.hidden_size),
                 dtype=act_dtype,
