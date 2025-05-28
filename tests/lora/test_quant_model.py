@@ -109,7 +109,7 @@ def test_quant_model_lora(tinyllama_lora_files, model):
             "#f07700: A v",
             "#f00000: A v",
         ]
-    elif model.quantization == "GPTQ":
+    elif model.quantization == "gptq":
         expected_no_lora_output = [
             "I'm sorry, I don't have",
             "I'm sorry, I don't have",
@@ -122,7 +122,7 @@ def test_quant_model_lora(tinyllama_lora_files, model):
     def expect_match(output, expected_output):
         # HACK: GPTQ lora outputs are just incredibly unstable.
         # Assert that the outputs changed.
-        if (model.quantization == "GPTQ"
+        if (model.quantization == "gptq"
                 and expected_output is expected_lora_output):
             assert output != expected_no_lora_output
             for i, o in enumerate(output):
@@ -172,7 +172,7 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
                                  model):
     if num_gpus_available < 2:
         pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
-    if model.quantization == "GPTQ":
+    if model.quantization == "gptq":
         pytest.skip("GPTQ lora outputs are just incredibly unstable")
     llm_tp1 = vllm.LLM(
         model=model.model_path,
