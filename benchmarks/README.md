@@ -17,6 +17,12 @@ become available.
   </thead>
   <tbody>
     <tr>
+      <td><strong>Custom</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td>Local file: <code>data.jsonl</code></td>
+    </tr>
+    <tr>
       <td><strong>ShareGPT</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
@@ -124,6 +130,38 @@ P99 ITL (ms):                            8.39
 ==================================================
 ```
 
+### Custom Dataset
+If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl
+
+```
+{"prompt": "What is the capital of India?"}
+{"prompt": "What is the capital of Iran?"}
+{"prompt": "What is the capital of China?"}
+``` 
+
+```bash
+# start server
+VLLM_USE_V1=1 vllm serve meta-llama/Llama-3.1-8B-Instruct --disable-log-requests
+```
+
+```bash
+# run benchmarking script
+python3 benchmarks/benchmark_serving.py --port 9001 --save-result --save-detailed \
+  --backend vllm \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --endpoint /v1/completions \
+  --dataset-name custom \
+  --dataset-path <path-to-your-data-jsonl> \
+  --custom-skip-chat-template \
+  --num-prompts 80 \
+  --max-concurrency 1 \
+  --temperature=0.3 \
+  --top-p=0.75 \
+  --result-dir "./log/"
+```
+
+You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
+
 ### VisionArena Benchmark for Vision Language Models
 
 ```bash
@@ -201,6 +239,16 @@ python3 vllm/benchmarks/benchmark_serving.py \
     --dataset-path AI-MO/aimo-validation-aime \
     --num-prompts 10 \
     --seed 42
+```
+
+**`philschmid/mt-bench`**
+
+``` bash
+python3 vllm/benchmarks/benchmark_serving.py \
+    --model Qwen/QwQ-32B \
+    --dataset-name hf \
+    --dataset-path philschmid/mt-bench \
+    --num-prompts 80
 ```
 
 ### Running With Sampling Parameters
