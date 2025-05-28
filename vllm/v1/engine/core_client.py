@@ -67,13 +67,15 @@ class EngineCoreClient(ABC):
 
         if multiprocess_mode and asyncio_mode:
             if vllm_config.parallel_config.data_parallel_size > 1:
+                logger.debug("Initializing DPAsyncMPClient")
                 return DPAsyncMPClient(vllm_config, executor_class, log_stats)
-
+            logger.debug("Initializing AsyncMPClient")
             return AsyncMPClient(vllm_config, executor_class, log_stats)
 
         if multiprocess_mode and not asyncio_mode:
+            logger.debug("Initializing SyncMPClient")
             return SyncMPClient(vllm_config, executor_class, log_stats)
-
+        logger.debug("Initializing InprocClient")
         return InprocClient(vllm_config, executor_class, log_stats)
 
     @abstractmethod
