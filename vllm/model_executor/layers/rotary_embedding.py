@@ -24,7 +24,7 @@
 """Rotary Positional Embeddings."""
 import itertools
 import math
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Tuple, List
 
 import torch
 import torch.nn as nn

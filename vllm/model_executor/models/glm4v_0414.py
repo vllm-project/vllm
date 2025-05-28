@@ -285,6 +285,10 @@ class Glm4vVisionAttention(nn.Module):
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
+        if x.shape[0] == 5000:
+            from safetensors.torch import save_file
+            save_file({"x": x}, "/mnt/x.safetensors")
+            print("save with:\n", x)
         x, _ = self.qkv(x)
 
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
@@ -345,6 +349,10 @@ class Glm4vVisionAttention(nn.Module):
 
             context_layer = xops.memory_efficient_attention_forward(
                 q, k, v, attn_bias=attn_bias, p=0, scale=None)
+
+        if x.shape[0] == 5000:
+            print(context_layer)
+            breakpoint()
         context_layer = rearrange(context_layer,
                                   "b s h d -> s b (h d)").contiguous()
 
@@ -727,7 +735,6 @@ class Glm4vVisionTransformer(nn.Module):
 
         # transformers
         x = x.unsqueeze(1)
-
         for blk in self.blocks:
             x = blk(
                 x,
@@ -973,10 +980,10 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
             # FIXME： 用于保存image embed，适配 transformers时可用
-            # if image_embeds.shape[0] == 1250:
-            #     from safetensors.torch import save_file
-            #     save_file({"image_embeds": image_embeds}, "/mnt/image_embed.safetensors")
-            #     print("save with:\n", image_embeds)
+            if image_embeds.shape[0] == 1250:
+                from safetensors.torch import save_file
+                save_file({"image_embeds": image_embeds}, "/mnt/image_embed.safetensors")
+                print("save with:\n", image_embeds)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
