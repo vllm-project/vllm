@@ -572,13 +572,7 @@ class ModelConfig:
                 sliding_window = None
 
         self.original_max_model_len = self.max_model_len
-        self.max_model_len = _get_and_verify_max_len(
-            hf_config=self.hf_text_config,
-            max_model_len=self.max_model_len,
-            disable_sliding_window=self.disable_sliding_window,
-            sliding_window_len=self.get_hf_config_sliding_window(),
-            spec_target_max_model_len=self.spec_target_max_model_len,
-            encoder_config=self.encoder_config)
+        self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
         self.multimodal_config = self._init_multimodal_config()
@@ -1381,6 +1375,16 @@ class ModelConfig:
     @property
     def matryoshka_dimensions(self):
         return getattr(self.hf_config, "matryoshka_dimensions", None)
+
+    def get_and_verify_max_len(self, max_model_len: int):
+        max_model_len = _get_and_verify_max_len(
+            hf_config=self.hf_text_config,
+            max_model_len=max_model_len,
+            disable_sliding_window=self.disable_sliding_window,
+            sliding_window_len=self.get_hf_config_sliding_window(),
+            spec_target_max_model_len=self.spec_target_max_model_len,
+            encoder_config=self.encoder_config)
+        return max_model_len
 
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
@@ -4469,13 +4473,7 @@ class VllmConfig:
 
     def recalculate_max_model_len(self, max_model_len: int):
         model_config = self.model_config
-        max_model_len = _get_and_verify_max_len(
-            hf_config=model_config.hf_text_config,
-            max_model_len=max_model_len,
-            disable_sliding_window=model_config.disable_sliding_window,
-            sliding_window_len=model_config.get_hf_config_sliding_window(),
-            spec_target_max_model_len=model_config.spec_target_max_model_len,
-            encoder_config=model_config.encoder_config)
+        max_model_len = model_config.get_and_verify_max_len(max_model_len)
         self.model_config.max_model_len = max_model_len
         self.scheduler_config.max_model_len = max_model_len
         self.compute_hash()
