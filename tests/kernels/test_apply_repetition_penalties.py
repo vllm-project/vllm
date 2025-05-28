@@ -8,14 +8,11 @@ from vllm._custom_ops import (apply_repetition_penalties_cuda,
 from vllm.platforms import current_platform
 
 NUM_SEQS = [1, 2, 3, 4, 8, 13, 17, 32, 37, 256, 1023, 1024, 1025]
-# [stress, stress, stress Qwen, llama 4]
+# [stress, stress, stress, Qwen, llama 4]
 VOCAB_SIZES = [17, 256, 1019, 151936, 202048]
 REPETITION_PENALTY_VALUES = [1.05]
 SEEDS = [0]
 DTYPES = [torch.float32, torch.float16]
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
 
 
 @pytest.mark.parametrize("num_seqs", NUM_SEQS)
@@ -23,7 +20,8 @@ CUDA_DEVICES = [
 @pytest.mark.parametrize("repetition_penalty", REPETITION_PENALTY_VALUES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.skipif(not current_platform.is_cuda(),
+                    reason="This test for checking CUDA kernel")
 @torch.inference_mode()
 def test_apply_repetition_penalties(
     num_seqs: int,
@@ -31,14 +29,13 @@ def test_apply_repetition_penalties(
     repetition_penalty: float,
     dtype: torch.dtype,
     seed: int,
-    device: str,
 ) -> None:
     """
     Test the apply_repetition_penalties custom op 
     against a reference implementation.
     """
     current_platform.seed_everything(seed)
-    torch.set_default_device(device)
+    torch.set_default_device("cuda:0")
 
     # Create test data
     logits = torch.randn(num_seqs, vocab_size, dtype=dtype)
