@@ -218,7 +218,7 @@ class OpenAIServingTranscription(OpenAIServing):
                 },
             },
             "decoder_prompt":
-            f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
+            f"<|prev|>{request.prompt}<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>"
         }
         return cast(PromptType, prompt), duration
 
