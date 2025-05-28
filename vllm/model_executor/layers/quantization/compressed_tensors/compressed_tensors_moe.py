@@ -421,6 +421,10 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                 "For FP8 Fused MoE layer, we require either per tensor or "
                 "channelwise, dynamic per token quantization.")
 
+        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+            cutlass_moe_fp8)
+        self.fused_experts = cutlass_moe_fp8
+
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
@@ -499,28 +503,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-        device = w13_weight.device
-        # TODO strides can be shared across multiple layers
-        self.ab_strides1 = torch.full((num_experts, ),
-                                      hidden_size,
-                                      device=device,
-                                      dtype=torch.int64)
-        self.c_strides1 = torch.full((num_experts, ),
-                                     2 * intermediate_size_per_partition,
-                                     device=device,
-                                     dtype=torch.int64)
-        self.ab_strides2 = torch.full((num_experts, ),
-                                      intermediate_size_per_partition,
-                                      device=device,
-                                      dtype=torch.int64)
-        self.c_strides2 = torch.full((num_experts, ),
-                                     hidden_size,
-                                     device=device,
-                                     dtype=torch.int64)
-        # TODO remove after debugging
-        self.hidden_size = hidden_size
-        self.intermediate_size_per_partition = intermediate_size_per_partition
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Fp8 moe kernels require a single activation scale.
         # We take the max of all the scales in case they differ.
@@ -564,20 +546,13 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
     def select_gemm_impl(self, prepare_finalize):
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             CutlassExpertsFp8)
-        from vllm.model_executor.layers.fused_moe.modular_kernel import (
-            FusedMoEModularKernel)
-
-        # print("self:", vars(self))
 
         # self.moe should have been set by the caller
         assert self.moe is not None
 
         experts = CutlassExpertsFp8(
             ((self.moe.num_experts + prepare_finalize.world_size - 1) //
-             prepare_finalize.world_size),
-            # self.ab_strides1, self.c_strides1, self.ab_strides2,
-            # self.c_strides2,
-            self.moe.in_dtype,
+             prepare_finalize.world_size), self.moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
 

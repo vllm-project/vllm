@@ -269,9 +269,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 # For blocked per token: set to
                 #   ceil_div(hidden_dim, block_size) * sizeof(float32)
                 # For per-token: set to sizeof(float32)
-                hidden_dim_scale_bytes=(0 if moe.quant_dtype.itemsize != 1 else (
-                    (moe.hidden_dim + moe.block_size - 1) // moe.block_size *
-                    torch.float32.itemsize)),
+                hidden_dim_scale_bytes=(
+                    0 if moe.quant_dtype.itemsize != 1 else
+                    ((moe.hidden_dim + moe.block_size - 1) // moe.block_size *
+                     torch.float32.itemsize)),
                 group_name=all2all_manager.cpu_group.group_name,
             )
 
@@ -287,7 +288,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 quant_dtype=moe.quant_dtype,
                 per_act_token=(quant_config.target_scheme_map["Linear"].get(
                     "weights").strategy == QuantizationStrategy.TOKEN
-                    if quant_config is not None else False),
+                               if quant_config is not None else False),
             )
 
         if prepare_finalize is not None:
@@ -296,6 +297,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 prepare_finalize,
                 experts,
             )
+        else:
+            print("been here, no prepare finalize")
 
     def select_gemm_impl(
         self, prepare_finalize: Optional[FusedMoEPrepareAndFinalize]
@@ -334,6 +337,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: MoEConfig):
         super().__init__()
+        print("INIT THIS UNQUANTIZED FUSED MOE")
         self.fused_experts = fused_experts  # type: ignore
         self.moe = moe
 
@@ -357,6 +361,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if isinstance(prepare_finalize,
                       (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
             logger.debug("BatchedTritonExperts %s", self.moe)
+            print("use instance: BatchedTritonExperts")
             experts = BatchedTritonExperts(
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
                 world_size=all2all_manager.world_size,
@@ -370,6 +375,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
+            print("use instance: TritonExperts")
             experts = TritonExperts(
                 use_fp8_w8a8=False,
                 use_int8_w8a8=False,
@@ -462,6 +468,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
+
         return self.forward(
             x=x,
             layer=layer,

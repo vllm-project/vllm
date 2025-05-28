@@ -317,7 +317,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         """
         a1 = hidden_states
         E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
-  
+
         if global_num_experts == -1:
             global_num_experts = E
 

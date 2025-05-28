@@ -8,8 +8,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
-# from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp8_test
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel)
+from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+    PplxPrepareAndFinalize)
 from vllm.platforms import current_platform
 
 try:
@@ -113,7 +118,6 @@ def rank_chunk(num, r, w):
 def chunk_by_rank(t, r, w):
     num = t.shape[0]
     chunk = rank_chunk(num, r, w)
-    # print(f"chunk {t.shape}, {num}, {w}, {r}, {chunk}, {r*chunk}:{(r + 1)*chunk}")
     rem = num % w
     if rem == 0 or r < rem:
         return t[(r * chunk):(r + 1) * chunk].contiguous()
@@ -122,13 +126,6 @@ def chunk_by_rank(t, r, w):
         short_chunks = (r - rem) * chunk
         start = long_chunks + short_chunks
         return t[start:start + chunk].contiguous()
-
-
-from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel)
-from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-    PplxPrepareAndFinalize)
 
 
 def pplx_cutlass_moe(
@@ -182,8 +179,6 @@ def pplx_cutlass_moe(
     w2_scale = w2_scale.to(device)
     a1_scale = a1_scale.to(device)
 
-    rank_num_experts = rank_chunk(num_experts, rank, world_size)
-
     prepare_finalize = PplxPrepareAndFinalize(
         ata,
         max_num_tokens,
@@ -203,7 +198,6 @@ def pplx_cutlass_moe(
     )
 
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
-    score_chunk = chunk_by_rank(scores, rank, world_size).to(device)
     chunk_topk_weight = chunk_by_rank(topk_weights, rank,
                                       world_size).to(device)
     chunk_topk_ids = chunk_by_rank(topk_ids, rank,
@@ -226,14 +220,12 @@ def pplx_cutlass_moe(
 
     ata.destroy()
 
-    return out  #[:rank_num_tokens]
+    return out[:rank_num_tokens]
 
 
 vllm_config = VllmConfig()
 vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
-
-from vllm.model_executor.layers.activation import SiluAndMul
 
 
 def torch_moe2(a, w1, w2, topk_weight, topk_ids):
@@ -364,8 +356,10 @@ def test_cutlass_moe_pptx(
             w2_d[expert] = (w2_q[expert].float() * w2_scale[expert]).half()
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
-        topk_weights, topk_ids, _ = fused_topk(
-            a, score, topk, renormalize=False)
+        topk_weights, topk_ids, _ = fused_topk(a,
+                                               score,
+                                               topk,
+                                               renormalize=False)
 
         world_size, dp_size = world_dp_size
         a_scale1 = torch.randn(
@@ -375,6 +369,5 @@ def test_cutlass_moe_pptx(
             a_scale1 = a_scale1.repeat(world_size, 1)
 
         parallel_launch(world_size, _pplx_moe, dp_size, a, w1_q, w2_q,
-                        w1_scale, w2_scale, topk_weights, topk_ids,
-                        a_scale1, score, dtype, a, w1_d, w2_d, per_act_token,
-                        per_out_ch)
+                        w1_scale, w2_scale, topk_weights, topk_ids, a_scale1,
+                        score, dtype, a, w1_d, w2_d, per_act_token, per_out_ch)
