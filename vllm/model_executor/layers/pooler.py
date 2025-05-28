@@ -283,30 +283,38 @@ class Pooler(nn.Module):
         )
 
 
-class CrossEncodingPooler(nn.Module):
-    """A layer that pools specific information from hidden states.
+class ClassifierPooler(nn.Module):
+    """A pooling layer for classification tasks.
 
     This layer does the following:
-    1. Extracts specific tokens or aggregates data based on pooling method.
-    2. Normalizes output if specified.
-    3. Returns structured results as `PoolerOutput`.
-
-    Attributes:
-        pooling_type: The type of pooling to use.
-        normalize: Whether to normalize the pooled data.
+    1. Applies a classification layer to the hidden states.
+    2. Optionally applies a pooler layer.
+    3. Applies an activation function to the output. In the case of
+       classification models it is either sigmoid or softmax. In the
+       case of scoring models, the same behavior is configuration
+       dependent, as in the sentence-transformers library.
     """
 
     def __init__(
         self,
+        task: str,
         config: PretrainedConfig,
         classifier: nn.Module,
         pooler: Optional[nn.Module] = None,
     ):
         super().__init__()
+        if task not in ["classify", "score"]:
+            raise NotImplementedError(
+                f"task {task} is not supported with the classification pooler")
         self.classifier = classifier
         self.pooler = pooler
-        self.default_activation_function = \
-            get_cross_encoder_activation_function(config)
+
+        if task == "score":
+            self.default_activation_function = \
+                get_cross_encoder_activation_function(config)
+        else:
+            self.default_activation_function = nn.Sigmoid() \
+                if config.num_labels == 1 else nn.Softmax()
 
     def forward(
         self,
