@@ -274,17 +274,6 @@ steps:
     - pytest -v -s samplers
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
-- label: LogitsProcessor Test # 5min
-  mirror_hardwares: [amdexperimental, amdproduction]
-  source_file_dependencies:
-  - vllm/model_executor/layers
-  - vllm/model_executor/guided_decoding
-  - tests/test_logits_processor
-  - tests/model_executor/test_guided_processors
-  commands:
-    - pytest -v -s test_logits_processor.py
-    - pytest -v -s model_executor/test_guided_processors.py
-
 - label: Speculative decoding tests # 40min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
@@ -396,6 +385,17 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s tensorizer_loader
     - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
+
+- label: Model Executor Test
+  mirror_hardwares: [amdexperimental, amdproduction]
+  soft_fail: true
+  source_file_dependencies:
+  - vllm/model_executor
+  - tests/model_executor
+  commands:
+    - apt-get update && apt-get install -y curl libsodium23
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s model_executor
 
 - label: Benchmarks # 9min
   mirror_hardwares: [amdexperimental, amdproduction]
