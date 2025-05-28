@@ -9,7 +9,7 @@ import importlib
 import multiprocessing
 import os
 import shutil
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -46,8 +46,11 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 }
 
 # Models supported by Neuronx distributed for inference.
-_NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str]] = {
+_NEURON_SUPPORTED_MODELS: dict[str, tuple[str, str]] = {
     "LlamaForCausalLM":
+    ("neuronx_distributed_inference.models.llama.modeling_llama",
+     "NeuronLlamaForCausalLM"),
+    "MistralForCausalLM":
     ("neuronx_distributed_inference.models.llama.modeling_llama",
      "NeuronLlamaForCausalLM"),
     "DbrxForCausalLM":
@@ -84,16 +87,29 @@ class NeuronCausalLM(nn.Module):
         input_block_ids: torch.Tensor,
         sampling_params: torch.Tensor,
     ) -> torch.Tensor:
+        # sort block ids sequentially for perf/neuron support reasons
+        sorted_input_block_ids, sorted_indices = torch.sort(input_block_ids)
+        input_ids = torch.index_select(input_ids, 0, sorted_indices)
+        positions = torch.index_select(positions, 0, sorted_indices)
+        sampling_params = torch.index_select(sampling_params, 0,
+                                             sorted_indices)
+
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
-                            seq_ids=input_block_ids,
+                            seq_ids=sorted_input_block_ids,
                             sampling_params=sampling_params)
         # on-device sampling
         if self.config.neuron_config.on_device_sampling_config:
-            return output.hidden_states
+            output = output.hidden_states
         else:
-            return output.logits[:, -1, :]
+            output = output.logits[:, -1, :]
+
+        restored_indices = torch.argsort(sorted_indices)
+        if input_block_ids.shape[0] != 1:
+            output = torch.index_select(output, 0, restored_indices)
+
+        return output
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
@@ -143,8 +159,8 @@ class NeuronCausalLM(nn.Module):
         config = neuronx_model_cls.get_config_cls()(
             neuron_config,
             load_config=load_pretrained_config(model_name_or_path))
-        hashed_config = hashlib.md5(
-            config.to_json_string().encode('utf-8')).hexdigest()
+        hashed_config = hashlib.md5(config.to_json_string().encode('utf-8'),
+                                    usedforsecurity=False).hexdigest()
         if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
             compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
         elif os.path.exists(model_name_or_path):
@@ -263,8 +279,8 @@ class NeuronMllamaForCausalLM(nn.Module):
         config = neuronx_model_cls.get_config_cls()(
             neuron_config,
             load_config=load_pretrained_config(model_name_or_path))
-        hashed_config = hashlib.md5(
-            config.to_json_string().encode('utf-8')).hexdigest()
+        hashed_config = hashlib.md5(config.to_json_string().encode('utf-8'),
+                                    usedforsecurity=False).hexdigest()
         if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
             compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
         elif os.path.exists(model_name_or_path):
@@ -337,14 +353,26 @@ class NeuronSpeculationCausalLM(nn.Module):
         input_block_ids: torch.Tensor,
         sampling_params: torch.Tensor,
     ) -> torch.Tensor:
+        # sort block ids sequentially for perf/neuron support reasons
+        sorted_input_block_ids, sorted_indices = torch.sort(input_block_ids)
+        input_ids = torch.index_select(input_ids, 0, sorted_indices)
+        positions = torch.index_select(positions, 0, sorted_indices)
+        sampling_params = torch.index_select(sampling_params, 0,
+                                             sorted_indices)
+
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
-                            seq_ids=input_block_ids,
+                            seq_ids=sorted_input_block_ids,
                             sampling_params=sampling_params)
+        restored_indices = torch.argsort(sorted_indices)
+
         # CTX encoding
         if (positions[:, 0]).sum().item() == 0:
-            return output.fused_outputs[0][:, 0:1]
+            output = output.fused_outputs[0][:, 0:1]
+            if input_block_ids.shape[0] != 1:
+                output = torch.index_select(output, 0, restored_indices)
+            return output
 
         # Fused Spec (Generation)
         accepted_tokens_with_padding = output.fused_outputs[0]
@@ -359,13 +387,17 @@ class NeuronSpeculationCausalLM(nn.Module):
                                           -1) >= generated_token_counts
         accepted_tokens_with_padding[mask] = -1
 
+        if input_block_ids.shape[0] != 1:
+            accepted_tokens_with_padding = torch.index_select(
+                accepted_tokens_with_padding, 0, restored_indices)
+
         return accepted_tokens_with_padding
 
     def sample(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         batch_size, num_steps = logits.shape
         seq_ids = [
             seq_id for sg in sampling_metadata.seq_groups
@@ -413,6 +445,10 @@ class NeuronSpeculationCausalLM(nn.Module):
             draft_neuron_config.speculation_length = 0
         draft_neuron_config.trace_tokengen_model = True
         draft_neuron_config.enable_fused_speculation = False
+        if getattr(config.neuron_config, "draft_model_modules_to_not_convert",
+                   None):
+            draft_neuron_config.modules_to_not_convert = (
+                draft_neuron_config.draft_model_modules_to_not_convert)
         if config.neuron_config.enable_eagle_speculation:
             draft_neuron_config.is_eagle_draft = True
             draft_neuron_config.sequence_parallel_enabled = False
@@ -426,8 +462,8 @@ class NeuronSpeculationCausalLM(nn.Module):
         config.fused_spec_config = fused_spec_config
         self.config.neuron_config = neuron_config
 
-        hashed_config = hashlib.md5(
-            config.to_json_string().encode('utf-8')).hexdigest()
+        hashed_config = hashlib.md5(config.to_json_string().encode('utf-8'),
+                                    usedforsecurity=False).hexdigest()
         if os.getenv("NEURON_COMPILED_ARTIFACTS") is not None:
             compiled_model_path = os.getenv("NEURON_COMPILED_ARTIFACTS")
         elif os.path.exists(model_name_or_path):
@@ -499,7 +535,7 @@ def _get_default_neuron_config(model_config: ModelConfig,
         max_context_length=scheduler_config.max_model_len,
         seq_len=scheduler_config.max_model_len,
         enable_bucketing=True,
-        is_continuous_batching=(batch_size > 1),
+        is_continuous_batching=True,
         quantized=False,
         torch_dtype=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
         padding_side="right",
@@ -517,6 +553,7 @@ def _get_default_speculation_config(model_config: ModelConfig,
     args."""
     neuron_config = dict(
         tp_degree=parallel_config.tensor_parallel_size,
+        ctx_batch_size=1,
         batch_size=scheduler_config.max_num_seqs,
         max_context_length=scheduler_config.max_model_len,
         seq_len=scheduler_config.max_model_len,
@@ -524,6 +561,7 @@ def _get_default_speculation_config(model_config: ModelConfig,
         trace_tokengen_model=False,
         enable_fused_speculation=True,
         enable_bucketing=True,
+        is_continuous_batching=True,
         quantized=False,
         torch_dtype=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
         on_device_sampling_config=dict(

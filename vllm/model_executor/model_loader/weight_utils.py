@@ -8,8 +8,9 @@ import os
 import tempfile
 import time
 from collections import defaultdict
+from collections.abc import Generator
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import filelock
 import gguf
@@ -221,7 +222,7 @@ def get_sparse_attention_config(
     model_config: ModelConfig,
     load_config: LoadConfig,
     sparse_attention_config_filename: str = "sparse_attention_config.json",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     model_name_or_path = model_config.model
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
@@ -253,9 +254,9 @@ def get_sparse_attention_config(
 def download_weights_from_hf(
     model_name_or_path: str,
     cache_dir: Optional[str],
-    allow_patterns: List[str],
+    allow_patterns: list[str],
     revision: Optional[str] = None,
-    ignore_patterns: Optional[Union[str, List[str]]] = None,
+    ignore_patterns: Optional[Union[str, list[str]]] = None,
 ) -> str:
     """Download model weights from Hugging Face Hub.
 
@@ -263,11 +264,11 @@ def download_weights_from_hf(
         model_name_or_path (str): The model name or path.
         cache_dir (Optional[str]): The cache directory to store the model
             weights. If None, will use HF defaults.
-        allow_patterns (List[str]): The allowed patterns for the
+        allow_patterns (list[str]): The allowed patterns for the
             weight files. Files matched by any of the patterns will be
             downloaded.
         revision (Optional[str]): The revision of the model.
-        ignore_patterns (Optional[Union[str, List[str]]]): The patterns to
+        ignore_patterns (Optional[Union[str, list[str]]]): The patterns to
             filter out the weight files. Files matched by any of the patterns
             will be ignored.
 
@@ -318,6 +319,7 @@ def download_safetensors_index_file_from_hf(
 
     Args:
         model_name_or_path (str): The model name or path.
+        index_file (str): The safetensors index file name
         cache_dir (Optional[str]): The cache directory to store the model
             weights. If None, will use HF defaults.
         revision (Optional[str]): The revision of the model.
@@ -336,10 +338,10 @@ def download_safetensors_index_file_from_hf(
             )
         # If file not found on remote or locally, we should not fail since
         # only some models will have index_file.
-        except huggingface_hub.utils.EntryNotFoundError:
-            logger.info("No %s found in remote.", index_file)
         except huggingface_hub.utils.LocalEntryNotFoundError:
             logger.info("No %s found in local cache.", index_file)
+        except huggingface_hub.utils.EntryNotFoundError:
+            logger.info("No %s found in remote.", index_file)
 
 
 # For models like Mistral-7B-v0.3, there are both sharded
@@ -347,9 +349,9 @@ def download_safetensors_index_file_from_hf(
 # Passing both of these to the weight loader functionality breaks.
 # So, we use the index_file to
 # look up which safetensors files should be used.
-def filter_duplicate_safetensors_files(hf_weights_files: List[str],
+def filter_duplicate_safetensors_files(hf_weights_files: list[str],
                                        hf_folder: str,
-                                       index_file: str) -> List[str]:
+                                       index_file: str) -> list[str]:
     # model.safetensors.index.json is a mapping from keys in the
     # torch state_dict to safetensors file holding that weight.
     index_file_name = os.path.join(hf_folder, index_file)
@@ -372,7 +374,7 @@ def filter_duplicate_safetensors_files(hf_weights_files: List[str],
 
 
 def filter_files_not_needed_for_inference(
-        hf_weights_files: List[str]) -> List[str]:
+        hf_weights_files: list[str]) -> list[str]:
     """
     Exclude files that are not needed for inference.
 
@@ -408,9 +410,9 @@ def np_cache_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str],
     hf_folder: str,
-    hf_weights_files: List[str],
+    hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model np files.
 
     Will dump the model weights to numpy files if they are not already dumped.
@@ -424,7 +426,7 @@ def np_cache_weights_iterator(
     # dumping the same model weights to numpy at the same time.
     with get_lock(model_name_or_path, cache_dir):
         if not os.path.exists(weight_names_file):
-            weight_names: List[str] = []
+            weight_names: list[str] = []
             for bin_file in tqdm(
                     hf_weights_files,
                     desc="Loading np_cache checkpoint shards",
@@ -453,9 +455,9 @@ def np_cache_weights_iterator(
 
 
 def safetensors_weights_iterator(
-    hf_weights_files: List[str],
+    hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     for st_file in tqdm(
             hf_weights_files,
@@ -470,9 +472,9 @@ def safetensors_weights_iterator(
 
 
 def runai_safetensors_weights_iterator(
-    hf_weights_files: List[str],
+    hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
         for st_file in tqdm(
@@ -486,9 +488,9 @@ def runai_safetensors_weights_iterator(
 
 
 def fastsafetensors_weights_iterator(
-    hf_weights_files: List[str],
+    hf_weights_files: list[str],
     use_tqdm_on_load: bool,
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using fastsafetensor library."""
     if torch.distributed.is_initialized():
@@ -525,10 +527,10 @@ def fastsafetensors_weights_iterator(
 
 
 def pt_weights_iterator(
-    hf_weights_files: List[str],
+    hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     pt_load_map_location: Union[str, dict[str, str]] = "cpu",
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
     for bin_file in tqdm(
             hf_weights_files,
@@ -544,7 +546,7 @@ def pt_weights_iterator(
 
 
 def get_gguf_extra_tensor_names(
-        gguf_file: str, gguf_to_hf_name_map: Dict[str, str]) -> List[str]:
+        gguf_file: str, gguf_to_hf_name_map: dict[str, str]) -> list[str]:
     reader = gguf.GGUFReader(gguf_file)
     expected_gguf_keys = set(gguf_to_hf_name_map.keys())
     exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
@@ -553,8 +555,8 @@ def get_gguf_extra_tensor_names(
 
 
 def gguf_quant_weights_iterator(
-    gguf_file: str, gguf_to_hf_name_map: Dict[str, str]
-) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    gguf_file: str, gguf_to_hf_name_map: dict[str, str]
+) -> Generator[tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the quant weights in the model gguf files and convert
     them to torch tensors
@@ -633,7 +635,7 @@ def row_parallel_weight_loader(param: torch.Tensor,
     return default_weight_loader(param, loaded_weight)
 
 
-LoaderFunction = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+LoaderFunction = Callable[[torch.Tensor, torch.Tensor], None]
 
 
 def sharded_weight_loader(shard_axis: int) -> LoaderFunction:

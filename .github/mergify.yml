@@ -58,7 +58,7 @@ pull_request_rules:
       - files~=^benchmarks/structured_schemas/
       - files=benchmarks/benchmark_serving_structured_output.py
       - files=benchmarks/run_structured_output_benchmark.sh
-      - files=docs/source/features/structured_outputs.md
+      - files=docs/features/structured_outputs.md
       - files=examples/offline_inference/structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
@@ -135,9 +135,7 @@ pull_request_rules:
       - files~=^tests/entrypoints/openai/tool_parsers/
       - files=tests/entrypoints/openai/test_chat_with_tool_reasoning.py
       - files~=^vllm/entrypoints/openai/tool_parsers/
-      - files=docs/source/features/tool_calling.md
-      - files=docs/source/getting_started/examples/openai_chat_completion_client_with_tools.md
-      - files=docs/source/getting_started/examples/chat_with_tools.md
+      - files=docs/features/tool_calling.md
       - files~=^examples/tool_chat_*
       - files=examples/offline_inference/chat_with_tools.py
       - files=examples/online_serving/openai_chat_completion_client_with_tools_required.py
@@ -162,6 +160,17 @@ pull_request_rules:
        merged. Please rebase the PR, @{{author}}.
 
        https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/syncing-a-fork
+
+- name: assign reviewer for tensorizer changes
+  conditions:
+      - files~=^vllm/model_executor/model_loader/tensorizer.py
+      - files~=^vllm/model_executor/model_loader/tensorizer_loader.py
+      - files~=^tests/entrypoints/openai/test_tensorizer_entrypoint.py
+      - files~=^tests/tensorizer_loader/
+  actions:
+    assign:
+      users:
+        - "sangstar"
 
 - name: remove 'needs-rebase' label when conflict is resolved
   conditions:

@@ -242,9 +242,16 @@ class PoolerHead(nn.Module):
 
         if self.softmax:
             if isinstance(pooled_data, list):
-                pooled_data = [F.softmax(data, dim=-1) for data in pooled_data]
+                pooled_data = [
+                    F.softmax(data, dim=-1)
+                    if data.shape[-1] >= 2 else F.sigmoid(data)
+                    for data in pooled_data
+                ]
             else:
-                pooled_data = F.softmax(pooled_data, dim=-1)
+                if pooled_data.shape[-1] >= 2:
+                    pooled_data = F.softmax(pooled_data, dim=-1)
+                else:
+                    pooled_data = F.sigmoid(pooled_data)
 
         return pooled_data
 
