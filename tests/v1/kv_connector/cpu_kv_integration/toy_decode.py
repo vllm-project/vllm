@@ -10,6 +10,11 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 
+
+def get_kv_transfer_params(req_id: int):
+    return {"prefill_request_id": str(req_id)}
+
+
 if __name__ == "__main__":
 
     context = "Hi " * 1000
@@ -23,7 +28,16 @@ if __name__ == "__main__":
         context4 + "The capital of China is",
     ]
 
-    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
+    sampling_param_base = SamplingParams(temperature=0,
+                                         top_p=0.95,
+                                         max_tokens=10)
+    sampling_params = []
+    for i in range(len(prompts)):
+        sampling_param = sampling_param_base.clone()
+        sampling_param.extra_args = {
+            "kv_transfer_params": get_kv_transfer_params(i),
+        }
+        sampling_params.append(sampling_param)
 
     llm = LLM(
         model="meta-llama/Llama-3.1-8B-Instruct",
@@ -42,6 +56,7 @@ if __name__ == "__main__":
         max_model_len=2048,
         max_num_batched_tokens=2048,
         block_size=128,
+        tensor_parallel_size=1,
     )
 
     # 1ST generation (prefill instance)

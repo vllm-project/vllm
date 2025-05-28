@@ -430,10 +430,8 @@ class CPUConnector(KVConnectorBase_V1):
         elif role == KVConnectorRole.WORKER:
             # Prefiller side sender
             if self.kv_role == "kv_producer":
-                # TODO: remove the hard-code here
                 self._kv_sender = NixlPrefillManager(self._kv_size)
             elif self.kv_role == "kv_consumer":
-                # TODO: remove the hard-code here
                 self._kv_receiver = NixlDecodeManager(
                     self._kv_size,
                     self._host,
@@ -552,13 +550,7 @@ class CPUConnector(KVConnectorBase_V1):
                 "prefill_request_id" not in kv_transfer_params:
             logger.warning("Request %s does not have prefill_request_id",
                            request.request_id)
-            #return 0, False
-
-            # DEBUG: Set the prefill_request_id to the request id
-            # This is a temporary fix to make the code work
-            self._should_be_ready_reqs.add(request_id)
-            self._connect_request_ids(request_id, request_id)
-            return num_tokens // self._block_size * self._block_size, True
+            return 0, False
 
         prefill_request_id = kv_transfer_params["prefill_request_id"]
         self._connect_request_ids(prefill_request_id, request_id)
@@ -724,6 +716,7 @@ class CPUConnector(KVConnectorBase_V1):
             for p_req_id in self._inflight_h2d_requests:
                 logger.info("Freeing request %s", p_req_id)
                 self._kv_receiver.free_request(p_req_id)
+            self._inflight_h2d_requests.clear()
 
     @_lmcache_nvtx_annotate
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
@@ -837,8 +830,6 @@ class CPUConnector(KVConnectorBase_V1):
             p_ready_reqs = self._kv_receiver.get_finished(
                 len(self._gpu_kv_caches))
             ret = set()
-            # TODO: Bug here: we need to send the prefill request id from
-            # scheduler connector to the worker connector in kv_params
             for p_req_id in p_ready_reqs:
                 ret.add(self._prefill_req_id_to_decode_req_id[p_req_id])
 

@@ -570,7 +570,7 @@ class NixlCPUReceiver:
 
     def __init__(
         self,
-        allocator: RingBufferAllocator = None,
+        allocator: RingBufferAllocator,
         nixl_page_size: int = 4096,
     ) -> None:
         self._buffer_size = allocator.get_size()
@@ -975,8 +975,8 @@ class NixlDecodeManager:
 
         # The detailed specs of the requests
         # (p_request_id, layer_id) -> (SourceSpec, vaddr)
-        self._request_specs: dict[tuple(str, int),
-                                  list[tuple(SourceSpec, int)]] = {}
+        self._request_specs: dict[tuple[str, int], list[tuple[SourceSpec,
+                                                              int]]] = {}
 
         # Metadata
         self.rank = get_tensor_model_parallel_rank()
