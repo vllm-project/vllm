@@ -504,8 +504,7 @@ steps:
   - vllm/
   - tests/models/language/pooling
   commands:
-    # - pytest -v -s models/language/pooling -m 'not core_model'
-    - pytest -v -s models/language/pooling/test_embedding.py -m 'not core_model'
+    - pytest -v -s models/language/pooling -m 'not core_model'
 
 - label: Multi-Modal Models Test (Standard)
   mirror_hardwares: [amdexperimental]

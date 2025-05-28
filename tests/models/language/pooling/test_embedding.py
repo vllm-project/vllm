@@ -21,7 +21,7 @@ from ...utils import check_embeddings_close
                      marks=[pytest.mark.core_model]),
         pytest.param("intfloat/e5-mistral-7b-instruct",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
-        pytest.param("Isotr0py/Qwen2.5-0.5B-embed-base"),
+        pytest.param("Qwen/Qwen2.5-0.5B-Instruct"),
         # [Cross-Encoder]
         pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
@@ -41,10 +41,10 @@ def test_models(
         # switch to use ROCm CK FA backend
         monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
 
+    hf_extra_kwargs = {}
     vllm_extra_kwargs = {}
-    if model == "Isotr0py/Qwen2.5-0.5B-embed-base":
-        # use fp32 on small models for numeric stability
-        dtype = "float32"
+    if model == "Qwen/Qwen2.5-0.5B-Instruct":
+        hf_extra_kwargs = {"trust_remote_code": False}
         vllm_extra_kwargs["override_pooler_config"] = \
             PoolerConfig(pooling_type="MEAN", normalize=False)
 
@@ -56,8 +56,10 @@ def test_models(
     # So we need to strip the input texts to avoid test failing.
     example_prompts = [str(s).strip() for s in example_prompts]
 
-    with hf_runner(model, dtype=dtype,
-                   is_sentence_transformer=True) as hf_model:
+    with hf_runner(model,
+                   dtype=dtype,
+                   is_sentence_transformer=True,
+                   **hf_extra_kwargs) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(model,
