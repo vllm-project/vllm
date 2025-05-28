@@ -32,11 +32,13 @@ class XIELU(CustomOp):
         self.beta = beta
         self.eps = torch.tensor(eps, dtype=torch.bfloat16, device='cuda')
 
+        self._forward_method = self.forward_native
         if current_platform.is_cuda_alike():
-            # TODO CUDA implementation under development, using forward_native for now
-            self._forward_method = self.forward_native
-        elif current_platform.is_cpu():
-            self._forward_method = self.forward_native
+            try:
+                self._xielu_cuda = torch.classes.xielu.XIELU()
+                self._forward_method = self.forward_cuda
+            except (AttributeError, RuntimeError) as e:
+                logger.warning("CUDA xIELU not found (error: %s), defaulting to Python implementation", str(e))
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         # TODO optimize to precompute
@@ -49,7 +51,9 @@ class XIELU(CustomOp):
         )
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        return
+        alpha_p = F.softplus(self.alpha_p)
+        alpha_n = self.beta + F.softplus(self.alpha_n)
+        return self._xielu_cuda.forward(x, alpha_p, alpha_n, self.beta, self.eps, with_vector_loads=True)
 
 
 @CustomOp.register("fatrelu_and_mul")
