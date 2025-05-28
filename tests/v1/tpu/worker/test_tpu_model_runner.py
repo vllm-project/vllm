@@ -121,11 +121,11 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
     req_index = model_runner.input_batch.req_id_to_index[req_id]
     multi_group_block_table = model_runner.input_batch.block_table
     req_state = model_runner.requests[req_id]
-    
+
     # Access the first block table from MultiGroupBlockTable
     # This is safe since we currently only use single KV cache groups
     block_table = multi_group_block_table[0]
-    
+
     # req_state.block_ids is now list[list[int]] for MultiGroupBlockTable
     # Extract the first group's block IDs
     if isinstance(req_state.block_ids[0], list):
@@ -134,10 +134,10 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
     else:
         # Legacy format: list[int] - use directly
         req_block_ids = req_state.block_ids
-    
+
     if block_table.num_blocks_per_row[req_index] != len(req_block_ids):
         return False
-    
+
     num_blocks = block_table.num_blocks_per_row[req_index]
     block_table_values = block_table.block_table_np[req_index, :num_blocks]
     return (block_table_values == req_block_ids).all()
