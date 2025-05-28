@@ -1251,8 +1251,10 @@ class FusedMoE(torch.nn.Module):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            assert self.batched_hidden_states.size(0) >= chunk_size
-            assert self.batched_router_logits.size(0) >= chunk_size
+            assert (self.batched_hidden_states.size(0)
+                    >= chunk_size)  # type: ignore
+            assert (self.batched_router_logits.size(0)
+                    >= chunk_size)  # type: ignore
             staged_hidden_states = self.batched_hidden_states[:
                                                               chunk_size, :]  # type: ignore
             staged_router_logits = self.batched_router_logits[:
