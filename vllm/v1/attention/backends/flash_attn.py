@@ -47,7 +47,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+        return [32, 64, 80, 96, 128, 160, 192, 224, 256]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
