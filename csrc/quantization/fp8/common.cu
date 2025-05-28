@@ -89,9 +89,9 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                              torch::Tensor const& scale)  // [1]
 {
   int const block_size = 256;
+  int const num_tokens = input.numel() / input.size(-1);
   int const num_elems = input.numel();
-  int const num_blocks = min((num_elems + block_size - 1) / block_size, 1024);
-  dim3 const grid(num_blocks);
+  dim3 const grid(num_tokens);
   dim3 const block(block_size);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -112,9 +112,9 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                               torch::Tensor& scale)        // [1]
 {
   int const block_size = 256;
+  int const num_tokens = input.numel() / input.size(-1);
   int const num_elems = input.numel();
-  int const num_blocks = min((num_elems + block_size - 1) / block_size, 1024);
-  dim3 const grid(num_blocks);
+  dim3 const grid(num_tokens);
   dim3 const block(block_size);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
