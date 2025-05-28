@@ -9,6 +9,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.attention.backends.flash_attn import (CommonAttentionMetadata,
                                                    FlashAttentionMetadata)
@@ -346,7 +347,10 @@ class EagleProposer:
         if self.vllm_config.speculative_config.method != "eagle3" and \
                 hasattr(target_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
-            self.model.lm_head = target_model.lm_head
+            if supports_multimodal(target_model):
+                self.model.lm_head = target_model.get_language_model().lm_head
+            else:
+                self.model.lm_head = target_model.lm_head
 
     @torch.inference_mode()
     def dummy_run(
