@@ -63,7 +63,6 @@ requires_pplx = pytest.mark.skipif(
     reason="Requires PPLX kernels",
 )
 
-
 @dataclasses.dataclass
 class ProcessGroupInfo:
     world_size: int
@@ -72,6 +71,11 @@ class ProcessGroupInfo:
     node_rank: int
     local_rank: int
     device: torch.device
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_pplx_backend(monkeypatch):
+    monkeypatch.setenv("VLLM_ALL2ALL_BACKEND", "pplx")
 
 
 def _worker_parallel_launch(
