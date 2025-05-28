@@ -948,8 +948,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             if self.use_spmd:
                 tpu_loader = TPUModelLoader(
                     load_config=self.vllm_config.load_config)
-                model = tpu_loader.load_model(self.mesh,
-                                              vllm_config=self.vllm_config)
+                model = tpu_loader.load_model(vllm_config=self.vllm_config,
+                                              mesh=self.mesh)
             else:
                 model = get_model(vllm_config=self.vllm_config)
         if self.lora_config is not None:

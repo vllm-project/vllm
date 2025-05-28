@@ -5,7 +5,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch_xla.core.xla_model as xm
-import torch_xla.experimental.xla_sharding as xs
+import torch_xla.distributed.spmd as xs
 
 from vllm.config import VllmConfig
 from vllm.distributed.tpu_distributed_utils import get_fqn, shard_model
@@ -24,7 +24,8 @@ class TPUModelLoader(DefaultModelLoader):
 
     def load_model(self,
                    vllm_config: VllmConfig,
-                   mesh: Optional[xs.Mesh] = None) -> nn.Module:
+                   mesh: Optional[xs.Mesh] = None
+                   ) -> nn.Module:  # type: ignore[override]
         # Initialize model and load weights on CPU. Then, during SPMD partition,
         # weights are sharded and transferred to TPUs.
         self.counter_before_loading_weights = time.perf_counter()
