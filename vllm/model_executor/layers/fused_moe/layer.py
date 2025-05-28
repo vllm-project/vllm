@@ -250,6 +250,8 @@ def get_quant_config_input_activations(
             "input_activations" in quant_config.target_scheme_map["Linear"]):
         return quant_config.target_scheme_map["Linear"].get(
             "input_activations")
+    else:
+        return None
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
