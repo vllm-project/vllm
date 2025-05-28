@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import time
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch_xla.core.xla_model as xm
+import torch_xla.experimental.xla_sharding as xs
 
 from vllm.config import VllmConfig
 from vllm.distributed.tpu_distributed_utils import get_fqn, shard_model
@@ -20,7 +22,9 @@ class TPUModelLoader(DefaultModelLoader):
     A TPU model loader for model loading under SPMD mode.
     """
 
-    def load_model(self, mesh, vllm_config: VllmConfig) -> nn.Module:
+    def load_model(self,
+                   vllm_config: VllmConfig,
+                   mesh: Optional[xs.Mesh] = None) -> nn.Module:
         # Initialize model and load weights on CPU. Then, during SPMD partition,
         # weights are sharded and transferred to TPUs.
         self.counter_before_loading_weights = time.perf_counter()
@@ -78,7 +82,8 @@ class TPUModelLoader(DefaultModelLoader):
                 torch.compile(model.language_model.model, backend="openxla")
         return model
 
-    def _check_model_is_loaded(self, mesh, model):
+    def _check_model_is_loaded(self, mesh: Optional[xs.Mesh],
+                               model: nn.Module) -> None:
         """
         Ensure the model is properly loaded.
         1. All model parameters and buffers are on XLA device.
