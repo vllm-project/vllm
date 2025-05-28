@@ -358,11 +358,11 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             engine_core.scheduler.requests[1].num_tokens + 1,
         ]
         while engine_core.scheduler.get_num_unfinished_requests() == 2:
-            output = engine_core.step_with_batch_queue()[0]
+            output = engine_core.step_with_batch_queue()
             if step % 2 == 0:
                 # Even steps consumes an output.
                 assert output is not None
-                assert len(output.outputs) == 1
+                assert len(output[0].outputs) == 1
                 if req_id in engine_core.scheduler.requests:
                     assert engine_core.scheduler.requests[
                         req_id].num_tokens == expected_num_tokens[req_id]

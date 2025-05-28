@@ -386,8 +386,8 @@ class EngineCoreProc(EngineCore):
             vllm_config.__post_init__()
 
             # Set up data parallel environment.
-            has_coordinator = addresses.coordinator_output is not None
-            self._init_data_parallel(vllm_config, has_coordinator)
+            self.has_coordinator = addresses.coordinator_output is not None
+            self._init_data_parallel(vllm_config)
 
             # Initialize engine core and model.
             super().__init__(vllm_config, executor_class, log_stats,
@@ -509,8 +509,7 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
 
-    def _init_data_parallel(self, vllm_config: VllmConfig,
-                            has_coordinator: bool):
+    def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
     def run_busy_loop(self):
@@ -758,8 +757,7 @@ class DPEngineCoreProc(EngineCoreProc):
         super().__init__(vllm_config, on_head_node, handshake_address,
                          executor_class, log_stats, dp_rank)
 
-    def _init_data_parallel(self, vllm_config: VllmConfig,
-                            has_coordinator: bool):
+    def _init_data_parallel(self, vllm_config: VllmConfig):
 
         # Configure GPUs and stateless process group for data parallel.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -768,7 +766,6 @@ class DPEngineCoreProc(EngineCoreProc):
 
         assert dp_size > 1
         assert 0 <= local_dp_rank <= dp_rank < dp_size
-        assert has_coordinator, "DP Coordinator process must be used for DP>1"
 
         from vllm.platforms import current_platform
         device_control_env_var = current_platform.device_control_env_var
@@ -787,7 +784,7 @@ class DPEngineCoreProc(EngineCoreProc):
             stateless_destroy_torch_distributed_process_group(dp_group)
 
     def add_request(self, request: EngineCoreRequest):
-        if request.current_wave != self.current_wave:
+        if self.has_coordinator and request.current_wave != self.current_wave:
             if request.current_wave > self.current_wave:
                 self.current_wave = request.current_wave
             elif not self.engines_running:
@@ -813,6 +810,9 @@ class DPEngineCoreProc(EngineCoreProc):
             super()._handle_client_request(request_type, request)
 
     def _maybe_publish_request_counts(self):
+        if not self.has_coordinator:
+            return
+
         # Publish our request counts (if they've changed).
         counts = self.scheduler.get_request_counts()
         if counts != self.last_counts:
