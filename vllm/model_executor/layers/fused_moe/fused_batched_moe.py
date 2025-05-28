@@ -431,8 +431,6 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        _, block_k = self.block_shape
-
         num_tokens, hidden_dim = a1.size()
         topk = topk_ids.size(1)
 
@@ -450,6 +448,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             device=a1.device)
 
         if self.qtype is not None:
+            _, block_k = self.block_shape
             k_tiles = (hidden_dim + block_k - 1) // block_k
             b_a1_scale = torch.zeros(
                 (num_local_experts, self.max_num_tokens, k_tiles),
