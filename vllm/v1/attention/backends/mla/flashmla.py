@@ -44,7 +44,7 @@ class FlashMLABackend(MLACommonBackend):
 
 @dataclass
 class FlashMLADecodeMetadata(MLACommonDecodeMetadata):
-    tile_scheduler_metadata: tuple[torch.Tensor, torch.Tensor]
+    tile_scheduler_metadata: torch.Tensor
     num_splits: torch.Tensor
 
 
@@ -62,6 +62,9 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
+        self.cg_buf_tile_scheduler_metadata = None
+        self.cg_buf_num_splits = None
+
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
@@ -70,6 +73,29 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             self.num_q_heads,
             1, # MQA for the decode path
         )
+
+        if self.runner.full_cuda_graph:
+            # First time around (CUDAGraph capture), allocate the static buffer
+            if self.cg_buf_tile_scheduler_metadata is None:
+                self.cg_buf_tile_scheduler_metadata = tile_scheduler_metadata
+                self.cg_buf_num_splits = num_splits
+            else:
+                assert self.cg_buf_num_splits is not None
+
+                tile_scheduler_metadata_view = self.\
+                    cg_buf_tile_scheduler_metadata\
+                    [:, :tile_scheduler_metadata.size(1)]
+                # make sure static buffer is large enough
+                assert tile_scheduler_metadata_view.size(
+                ) == tile_scheduler_metadata.size()
+                tile_scheduler_metadata_view.copy_(tile_scheduler_metadata)
+                tile_scheduler_metadata = tile_scheduler_metadata_view
+
+                num_splits_view = self.cg_buf_num_splits[:num_splits.size(0)]
+                # make sure static buffer is large enough
+                assert num_splits_view.size() == num_splits.size()
+                num_splits_view.copy_(num_splits)
+                num_splits = num_splits_view
 
         return FlashMLADecodeMetadata(
             block_table=block_table_tensor,

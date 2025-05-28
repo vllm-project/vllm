@@ -450,6 +450,20 @@ class MLACommonMetadataBuilder(Generic[M]):
             seq_lens=seq_lens,
         )
 
+    # TODO maybe use this?
+    def build_for_cudagraph_capture(
+            self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+            common_prefix_len: int,
+            common_attn_metadata: CommonAttentionMetadata) -> M:
+        # decode-only cudagraph capture
+        assert num_reqs == num_actual_tokens
+        self._num_decodes = num_reqs
+        self._num_decode_tokens = num_reqs
+        self._num_prefills = 0
+        self._num_prefill_tokens = 0
+        return self.build(num_reqs, num_actual_tokens, max_query_len,
+                          common_prefix_len, common_attn_metadata)
+
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata) -> M:
@@ -461,8 +475,11 @@ class MLACommonMetadataBuilder(Generic[M]):
         device = self.runner.device
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-        slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(
-            device, non_blocking=True).long()
+        block_table.slot_mapping[:num_actual_tokens].copy_(
+            block_table.slot_mapping_cpu[:num_actual_tokens],
+            non_blocking=True)
+        # TODO maybe fill rest with -1?
+        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
 
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
