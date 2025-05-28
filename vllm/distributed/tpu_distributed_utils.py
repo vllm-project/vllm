@@ -26,6 +26,13 @@ class XlaQKVParallelLinear(nn.Module):
         self.skip_bias_add = qkv_linear.skip_bias_add
         self.return_bias = qkv_linear.return_bias
         assert qkv_linear.tp_size == 1, "TP > 1 is only supported under SPMD."
+
+        self.q_weight: Parameter
+        self.k_weight: Parameter
+        self.v_weight: Parameter
+        self.q_bias: Optional[Parameter]
+        self.k_bias: Optional[Parameter]
+        self.v_bias: Optional[Parameter]
         self._load_weights_from_qkv_linear(qkv_linear)
         if mesh is not None:
             self._shard_weight(mesh)
