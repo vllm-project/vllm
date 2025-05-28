@@ -65,7 +65,7 @@ template <typename scalar_t, typename fp8_type>
 __global__ void segmented_max_reduction(float* __restrict__ scale,
                                         const scalar_t* __restrict__ input,
                                         int64_t num_elems) {
-  __shared__ float cache[1024];
+  __shared__ float cache[256];
   int64_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
   // First store maximum for all values processes by
