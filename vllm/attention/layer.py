@@ -58,12 +58,12 @@ class Attention(nn.Module):
         """
         super().__init__()
 
-        if not envs.VLLM_USE_V1:
-            assert kv_sharing_target_layer_name is None, NotImplementedError(
-                "KV sharing is not supported in V0.")
-
-        # Verify target layer is valid for cross-layer KV sharing
         if kv_sharing_target_layer_name is not None:
+            if not envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "Cross-layer KV sharing is not supported in V0.")
+
+            # Verify target layer is valid for cross-layer KV sharing
             from vllm.model_executor.models.utils import extract_layer_index
             current_layer_idx = extract_layer_index(prefix)
             target_layer_idx = extract_layer_index(
