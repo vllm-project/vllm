@@ -82,7 +82,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser = EngineArgs.add_cli_args(parser)
     # V1 enables prefix caching by default which skews the latency
     # numbers. We need to disable prefix caching by default.
-    parser.set_defaults(enable_prefix_caching=True)
+    parser.set_defaults(enable_prefix_caching=False)
 
 
 def main(args: argparse.Namespace):
