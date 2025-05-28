@@ -62,6 +62,6 @@ def test_tpu_model_loader(model):
     vllm_config = _setup_environment(model)
     loader = TPUModelLoader(load_config=vllm_config.load_config)
     mesh = _get_spmd_mesh()
-    model = loader.load_model_tpu(vllm_config, mesh)
+    model = loader.load_model(vllm_config, vllm_config.model_config, mesh)
     del model
     gc.collect()

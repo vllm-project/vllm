@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.spmd as xs
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed.tpu_distributed_utils import get_fqn, shard_model
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -22,9 +22,10 @@ class TPUModelLoader(DefaultModelLoader):
     A TPU model loader for model loading under SPMD mode.
     """
 
-    def load_model_tpu(
+    def load_model(
         self,
         vllm_config: VllmConfig,
+        model_config: ModelConfig,
         mesh: Optional[xs.Mesh] = None,
     ) -> nn.Module:
         # Initialize model and load weights on CPU. Then, during SPMD partition,
