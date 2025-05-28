@@ -42,7 +42,8 @@ def _listen_for_register(poller, router_socket):
                 print(
                     "Unexpected, Received message from %s, data: %s",
                     remote_address,
-                    data)
+                    data,
+                )
 
 
 def start_service_discovery(hostname, port):
@@ -124,17 +125,17 @@ async def handle_request():
         )
         count += 1
 
-        request_id = (f"___prefill_addr_{prefill_zmq_addr}___decode_addr_{decode_zmq_addr}_{random_uuid()}")
+        request_id = f"___prefill_addr_{prefill_zmq_addr}___decode_addr_{decode_zmq_addr}_{random_uuid()}"
 
         # finish prefill
         async for _ in forward_request(
-            f'http://{prefill_addr}/v1/completions', prefill_request, request_id
+            f"http://{prefill_addr}/v1/completions", prefill_request, request_id
         ):
             continue
 
         # return decode
         generator = forward_request(
-            f'http://{decode_addr}/v1/completions', original_request_data, request_id
+            f"http://{decode_addr}/v1/completions", original_request_data, request_id
         )
         response = await make_response(generator)
         response.timeout = None
@@ -144,6 +145,7 @@ async def handle_request():
     except Exception as e:
         import sys
         import traceback
+
         exc_info = sys.exc_info()
         print("Error occurred in disagg prefill proxy server")
         print(e)
