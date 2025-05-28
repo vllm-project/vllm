@@ -158,6 +158,8 @@ class MsgpackEncoder:
         self, obj: torch.Tensor
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
+        # this creates a copy of the tensor if it's not already contiguous
+        obj = obj.contiguous()
         #  view the tensor as a 1D array of bytes
         arr = obj.flatten().view(torch.uint8).numpy()
         if obj.nbytes < self.size_threshold:
