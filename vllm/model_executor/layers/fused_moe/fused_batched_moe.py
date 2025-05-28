@@ -614,13 +614,10 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             else:
                 num = int(expert_num_tokens[expert].item())
             tmp = _resize_cache(workspace2, (num, N))
-            if self.use_fp8_w8a8:
-                assert False  # TBD
-            else:
-                input = hidden_states[expert, :num, :] @ w1[expert].transpose(
-                    0, 1)
-                self.activation(activation, tmp, input)
-                out[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
+            assert not self.use_fp8_w8a8
+            input = hidden_states[expert, :num, :] @ w1[expert].transpose(0, 1)
+            self.activation(activation, tmp, input)
+            out[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
 
         return out
 
