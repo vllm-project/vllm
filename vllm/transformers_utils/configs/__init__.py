@@ -22,6 +22,7 @@ from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
+from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
@@ -49,6 +50,7 @@ __all__ = [
     "MoonViTConfig",
     "KimiVLConfig",
     "NemotronConfig",
+    "NemotronHConfig",
     "NVLM_D_Config",
     "OvisConfig",
     "SkyworkR1VChatConfig",
