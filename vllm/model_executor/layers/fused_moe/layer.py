@@ -201,7 +201,6 @@ class FusedMoEParallelConfig:
 # Adapted from pplx-kernels tests/all_to_all_utils.py
 @dataclass
 class MoEConfig:
-    max_num_tokens: int
     num_experts: int
     experts_per_token: int
     hidden_dim: int
@@ -465,29 +464,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if use_batched_experts:
             logger.debug("BatchedTritonExperts %s", self.moe)
             assert self.moe.dp_size == all2all_manager.dp_world_size
-            experts = BatchedTritonExperts(
+            return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
                 world_size=all2all_manager.world_size,
                 # dp_size actually means tp_size, bug in pplx kernels
                 dp_size=all2all_manager.tp_group.world_size,
-                use_fp8_w8a8=False,
-                use_int8_w8a8=False,
-                use_int8_w8a16=False,
-                use_int4_w4a16=False,
-                block_shape=None,
-                per_channel_quant=False,
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            experts = TritonExperts(
-                use_fp8_w8a8=False,
-                use_int8_w8a8=False,
-                use_int8_w8a16=False,
-                use_int4_w4a16=False,
-                block_shape=None,
-                per_channel_quant=False,
-            )
-        return experts
+            return TritonExperts()
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -585,35 +570,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input)
-
-    def set_prepare_finalize(
-        self,
-        dp_size: int,
-        world_size: int,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-    ) -> bool:
-        assert self.fused_experts == fused_experts
-
-        experts: Optional[FusedMoEPermuteExpertsUnpermute] = None
-
-        if isinstance(prepare_finalize,
-                      (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
-            logger.debug("BatchedTritonExperts %s", self.moe)
-            experts = BatchedTritonExperts(
-                max_num_tokens=MOE_DP_CHUNK_SIZE,
-                world_size=world_size,
-                dp_size=dp_size,
-            )
-        else:
-            logger.debug("TritonExperts %s", self.moe)
-            experts = TritonExperts()
-
-        self.fused_experts = FusedMoEModularKernel(
-            prepare_finalize,
-            experts,
-        )
-
-        return True
 
     def forward_cuda(
         self,
@@ -940,14 +896,14 @@ class FusedMoE(torch.nn.Module):
                 quant_dtype = torch.float8_e4m3fn
 
         moe = MoEConfig(
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
-            in_dtype=params_dtype,
+            in_dtype=vllm_config.model_config.dtype,
             quant_dtype=quant_dtype,
+            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
         )
         self.moe_config = moe
         self.quant_config = quant_config
@@ -1412,7 +1368,7 @@ class FusedMoE(torch.nn.Module):
 
             assert (self.batched_hidden_states.size(0)  # type: ignore
                     >= chunk_size)
-            assert (self.batched_router_logits.size(0)  # type: ignore 
+            assert (self.batched_router_logits.size(0)  # type: ignore
                     >= chunk_size)
             staged_hidden_states = self.batched_hidden_states[:
                                                               chunk_size, :]  # type: ignore

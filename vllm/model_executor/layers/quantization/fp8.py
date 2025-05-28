@@ -12,7 +12,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (MOE_DP_CHUNK_SIZE, FusedMoE,
                                                   FusedMoEMethodBase,
@@ -780,6 +780,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             BatchedTritonOrDeepGemmExperts)
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts)
+        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+            BatchedPrepareAndFinalize,
+            BatchedTritonExperts)
+        from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+            PplxPrepareAndFinalize)
 
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
@@ -788,17 +793,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         use_batched_experts = max_num_tokens_per_rank is not None
 
         if use_batched_experts:
+            logger.debug("BatchedTritonExperts(fp8)")
             return BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 world_size=prepare_finalize.world_size,
                 dp_size=prepare_finalize.dp_size,
-                per_channel_quant=False,
                 qtype=torch.float8_e4m3fn,
                 block_shape=self.quant_config.weight_block_size,
                 per_act_token=False,  #?
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         else:
+            logger.debug("TritonOrDeepGemmExperts(fp8)")
             return TritonOrDeepGemmExperts(
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
