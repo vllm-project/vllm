@@ -14,6 +14,7 @@
 /vllm/model_executor/guided_decoding @mgoin @russellb
 /vllm/multimodal @DarkLight1337 @ywang96
 /vllm/vllm_flash_attn @LucasWilkinson
+/vllm/lora @jeejeelee
 CMakeLists.txt @tlrmchlsmth
 
 /csrc/ @charlifu @mawong-amd @shajrawi @gshtras @maleksan85 @sunway513 @hongxiayang
@@ -25,3 +26,29 @@ fused_moe @divakar-amd @shajrawi @gshtras @maleksan85 @sunway513 @hongxiayang
 /.buildkite/ @Alexei-V-Ivanov-AMD @shajrawi @gshtras @maleksan85 @sunway513 @hongxiayang
 
 /benchmarks/profiling @AdrianAbeyta @dllehr-amd @shajrawi @gshtras @maleksan85 @sunway513 @hongxiayang
+# Test ownership
+/.buildkite/lm-eval-harness @mgoin @simon-mo
+/tests/async_engine @njhill @robertgshaw2-redhat @simon-mo
+/tests/basic_correctness/test_chunked_prefill @rkooo567 @comaniac
+/tests/distributed/test_multi_node_assignment.py @youkaichao
+/tests/distributed/test_pipeline_parallel.py @youkaichao
+/tests/distributed/test_same_node.py @youkaichao
+/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @simon-mo
+/tests/entrypoints/llm/test_guided_generate.py @mgoin @russellb
+/tests/kernels @tlrmchlsmth @WoosukKwon
+/tests/model_executor/test_guided_processors.py @mgoin @russellb
+/tests/models @DarkLight1337 @ywang96
+/tests/multi_step @alexm-redhat @comaniac
+/tests/multimodal @DarkLight1337 @ywang96
+/tests/prefix_caching @comaniac @KuntaiDu
+/tests/quantization @mgoin @robertgshaw2-redhat
+/tests/spec_decode @njhill @LiuXiaoxuanPKU
+/tests/test_inputs.py @DarkLight1337 @ywang96
+/tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb
+/tests/v1/structured_output @mgoin @russellb
+/tests/weight_loading @mgoin @youkaichao
+/tests/lora @jeejeelee
+
+# Docs
+/docs @hmellor
+mkdocs.yaml @hmellor

@@ -415,15 +415,6 @@ class Phi4MMImagePixelInputs(TypedDict):
     """Shape: `(batch_size * num_images, H_mask, W_mask)`"""
 
 
-class Phi4MMImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
-    """
-
-
 class Phi4MMAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
     data: Union[torch.Tensor, list[torch.Tensor]]
@@ -436,7 +427,6 @@ class Phi4MMAudioEmbeddingInputs(TypedDict):
     """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)"""
 
 
-Phi4MMImageInput = Union[Phi4MMImagePixelInputs, Phi4MMImageEmbeddingInputs]
 Phi4MMAudioInputs = Union[Phi4MMAudioFeatureInputs, Phi4MMAudioEmbeddingInputs]
 
 
@@ -1112,15 +1102,13 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
     def _process_image_input(
             self, image_input: Phi4MMImagePixelInputs) -> list[torch.Tensor]:
-        if image_input["type"] == "image_embeds":
-            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
-        else:
-            dtype = next(self.vision_encoder.parameters()).dtype
-            pixel_values = image_input['data'].to(dtype)
-            image_sizes = image_input['image_sizes']
-            image_attention_mask = image_input['image_attention_mask']
-            image_embeds = self.vision_encoder(pixel_values, image_sizes,
-                                               image_attention_mask)
+
+        dtype = next(self.vision_encoder.parameters()).dtype
+        pixel_values = image_input['data'].to(dtype)
+        image_sizes = image_input['image_sizes']
+        image_attention_mask = image_input['image_attention_mask']
+        image_embeds = self.vision_encoder(pixel_values, image_sizes,
+                                           image_attention_mask)
         return image_embeds
 
     def get_multimodal_embeddings(
@@ -1240,9 +1228,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> None:
-        weights = ((name, data) for name, data in weights
-                   if "lora" not in name)
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, skip_substrs=["lora"])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

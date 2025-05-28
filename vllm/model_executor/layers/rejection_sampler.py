@@ -123,12 +123,13 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         # for rejection sampling
         if self.use_flashinfer and chain_speculative_sampling is not None:
             batch_size, k, _ = draft_probs.shape
-            uniform_samples = self._create_uniform_samples(
-                seeded_seqs, batch_size, k, draft_probs.device)
-            output_token_ids, accepted_token_num, emitted_token_num \
-                = chain_speculative_sampling(
-                draft_probs, draft_token_ids, uniform_samples,
-                target_with_bonus_probs)
+
+            (output_token_ids, accepted_token_num,
+             emitted_token_num) = chain_speculative_sampling(
+                 draft_probs,
+                 draft_token_ids,
+                 target_with_bonus_probs,
+             )
 
             # num_emitted_tokens returned by flashinfer
             # does not include the bonus token
@@ -261,16 +262,16 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         True, then a token can be accepted, else it should be
         rejected.
 
-        Given {math}`q(\hat{x}_{n+1}|x_1, \dots, x_n)`, the probability of
-        {math}`\hat{x}_{n+1}` given context {math}`x_1, \dots, x_n` according
-        to the target model, and {math}`p(\hat{x}_{n+1}|x_1, \dots, x_n)`, the
+        Given $q(\hat{x}_{n+1}|x_1, \dots, x_n)$, the probability of
+        $\hat{x}_{n+1}$ given context $x_1, \dots, x_n$ according
+        to the target model, and $p(\hat{x}_{n+1}|x_1, \dots, x_n)$, the
         same conditional probability according to the draft model, the token
         is accepted with probability:
 
-        :::{math}
+        $$
         \min\left(1, \frac{q(\hat{x}_{n+1}|x_1, \dots, x_n)}
                         {p(\hat{x}_{n+1}|x_1, \dots, x_n)}\right)
-        :::
+        $$
 
         This implementation does not apply causality. When using the output,
         if a token is rejected, subsequent tokens should not be used.
@@ -313,30 +314,31 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         target model is recovered (within hardware numerics).
 
         The probability distribution used in this rejection case is constructed
-        as follows. Given {math}`q(x|x_1, \dots, x_n)`, the probability of
-        {math}`x` given context {math}`x_1, \dots, x_n` according to the target
-        model and {math}`p(x|x_1, \dots, x_n)`, the same conditional probability
+        as follows. Given $q(x|x_1, \dots, x_n)$, the probability of
+        $x$ given context $x_1, \dots, x_n$ according to the target
+        model and $p(x|x_1, \dots, x_n)$, the same conditional probability
         according to the draft model:
 
-        :::{math}
+        $$
         x_{n+1} \sim (q(x|x_1, \dots, x_n) - p(x|x_1, \dots, x_n))_+
-        :::
+        $$
 
-        where {math}`(f(x))_+` is defined as:
+        where $(f(x))_+$ is defined as:
 
-        :::{math}
+        $$
         (f(x))_+ = \frac{\max(0, f(x))}{\sum_x \max(0, f(x))}
-        :::
+        $$
 
         See https://github.com/vllm-project/vllm/pull/2336 for a visualization
         of the draft, target, and recovered probability distributions.
 
         Returns a tensor of shape [batch_size, k, vocab_size].
 
-        Note: This batches operations on GPU and thus constructs the recovered
-        distribution for all tokens, even if they are accepted. This causes
-        division-by-zero errors, so we use self._smallest_positive_value to
-        avoid that. This introduces some drift to the distribution.
+        Note: 
+            This batches operations on GPU and thus constructs the recovered
+            distribution for all tokens, even if they are accepted. This causes
+            division-by-zero errors, so we use self._smallest_positive_value to
+            avoid that. This introduces some drift to the distribution.
         """
         _, k, _ = draft_probs.shape
 
