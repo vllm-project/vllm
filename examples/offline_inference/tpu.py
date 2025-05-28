@@ -25,23 +25,24 @@ def main():
     parser.add_argument("--use-spmd", action="store_true", help="Enable SPMD mode")
     args = parser.parse_args()
 
-    additional_kwargs = {}
+    llm_args = {
+        "model": "Qwen/Qwen2-1.5B-Instruct",
+        "max_num_batched_tokens": 64,
+        "max_num_seqs": 4,
+        "max_model_len": 128,
+    }
     if args.use_spmd:
         os.environ["VLLM_XLA_USE_SPMD"] = "1"
         # Can only hardcode the number of chips for now.
         # calling xr.global_runtime_device_count() beforeing init SPMD env in
         # torch_xla will mess up the distributed env.
-        additional_kwargs["tensor_parallel_size"] = 8
+        llm_args["tensor_parallel_size"] = 8
+        # Use Llama, for num_kv_heads = 8.
+        llm_args["model"] = "meta-llama/Llama-3.1-8B-Instruct"
 
     # Set `enforce_eager=True` to avoid ahead-of-time compilation.
     # In real workloads, `enforace_eager` should be `False`.
-    llm = LLM(
-        model="Qwen/Qwen3-0.6B",
-        max_num_batched_tokens=64,
-        max_num_seqs=4,
-        max_model_len=128,
-        **additional_kwargs,
-    )
+    llm = LLM(**llm_args)
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)
     for output, answer in zip(outputs, answers):
