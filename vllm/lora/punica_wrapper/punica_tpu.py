@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional, Union
+import math
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.nn.functional as F
+import torch_xla.core.xla_model as xm
 
 from vllm.lora.ops.xla_ops import bgmv_expand, bgmv_expand_slice, bgmv_shrink
+from vllm.lora.punica_wrapper.utils import convert_mapping
+
+if TYPE_CHECKING:
+    # avoid circuit import
+    from vllm.lora.layers import LoRAMapping
+    from vllm.lora.models import LongContextLoRAContext
 
 from .punica_base import PunicaWrapperBase
 
@@ -31,6 +39,15 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self._sampler_indices_padded = self._sampler_indices_padded.to(
             dtype=torch.int32)
 
+        torch.ops.xla.dynamo_set_buffer_donor_(self._token_lora_indices, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._sampler_indices, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._sampler_indices_padded,
+                                               True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._embeddings_indices, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._long_lora_indices, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._lora_indices_per_batch,
+                                               True)
+
         torch._dynamo.mark_dynamic(self._token_lora_indices, 0)
         torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
         torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)
@@ -55,15 +72,11 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def shrink(
         self,
-        y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
         scale: float,
     ):
-        if self.no_lora:
-            return y
-        return bgmv_shrink(x, w_t_all, y, self._get_token_lora_indices(x),
-                           scale)
+        return bgmv_shrink(x, w_t_all, self._get_token_lora_indices(x), scale)
 
     def expand(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor,
                add_inputs: bool):
@@ -72,7 +85,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def expand_slice(self, y: torch.Tensor, x: torch.Tensor,
                      w_t_all: torch.Tensor, y_offset: int, y_slice_size: int,
-                     y_total_size: int, add_inputs: bool) -> torch.Tensor:
+                     add_inputs: bool) -> torch.Tensor:
         return bgmv_expand_slice(x, w_t_all, y,
                                  self._get_token_lora_indices(x), y_offset,
                                  y_slice_size, add_inputs)
@@ -98,9 +111,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
 
         for slice_idx in range(len(lora_a_stacked)):
-            y_s = y[slice_idx]
             lora_s = lora_a_stacked[slice_idx]
-            y_s = self.shrink(y_s, x, lora_s, scale)
+            y_s = self.shrink(x, lora_s, scale)
             y[slice_idx, :, :] = y_s  # type: ignore[index]
         return y
 
@@ -140,15 +152,12 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             y = self._apply_bias(self._get_token_lora_indices(y), y,
                                  output_slices, lora_bias_stacked)
         for slice_idx in range(len(lora_b_stacked)):
-            y = self.expand_slice(
-                y,
-                x[slice_idx],
-                lora_b_stacked[slice_idx],
-                offset_left,
-                output_slices[slice_idx],
-                y_total_size=sum(output_slices),
-                add_inputs=add_inputs,
-            )
+            y = self.expand_slice(y,
+                                  x[slice_idx],
+                                  lora_b_stacked[slice_idx],
+                                  offset_left,
+                                  output_slices[slice_idx],
+                                  add_inputs=add_inputs)
             offset_left += output_slices[slice_idx]
         return y.view_as(y_org)
 
@@ -216,12 +225,10 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default, consistent with the
-            # triton op
             T = x.size(0)
             buffer = torch.zeros(
                 (len(output_slices), T, r),
-                dtype=torch.float32,
+                dtype=x.dtype,
                 device=x.device,
             )
         buffer = self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
@@ -257,26 +264,16 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
-        if self.no_lora:
-            return y
-
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
-        r = lora_b_stacked.size(-1)
-        if buffer is None:
-            # We set the buffer to be float32 by default, consistent with the
-            # triton op
-            buffer = torch.zeros((x.size(0), r),
-                                 dtype=torch.float32,
-                                 device=x.device)
 
-        buffer = bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices,
-                             scale)
+        sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+        buffer = bgmv_shrink(x, lora_a_stacked, sampler_indices, scale)
         y = bgmv_expand(buffer,
                         lora_b_stacked,
                         y,
-                        self.sampler_indices,
+                        sampler_indices,
                         add_inputs=True)
         return y.view_as(y_org)
 
@@ -316,10 +313,92 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         return output.view_as(org_output)
 
+    # This performs the same tensor ops as the base method, except it does them
+    # on the CPU then transfers the results to the TPU
+    def _update_base_metadata(
+        self,
+        mapping: "LoRAMapping",
+        lora_index_to_id: list[Optional[int]],
+        max_loras: int,
+        vocab_size: int,
+        extra_vocab_size: int,
+        long_lora_context: Optional["LongContextLoRAContext"] = None,
+    ):
+        # Make sure we don't accidentally collect outside operations
+        xm.mark_step()
+
+        # Pad the prompt mapping to avoid running into recompiles on the TPU
+        # TODO: Should this happen inside mapping internally? If so how can we
+        # avoid having backend specific LoRAMapping classes?
+        mapping.prompt_mapping = self._pad_prompt_mapping(
+            mapping.prompt_mapping)
+
+        (
+            base_indices,
+            sampler_indices,
+            sampler_indices_padded,
+            embeddings_indices,
+            long_lora_offsets_tensor,
+            indices_len,
+        ) = convert_mapping(
+            mapping,
+            lora_index_to_id,
+            max_loras,
+            vocab_size,
+            extra_vocab_size,
+            "cpu",
+            long_lora_context,
+        )
+        self._token_lora_indices = self._pad_to_shape(
+            base_indices, self._token_lora_indices.shape,
+            dims=1).to(self.device)
+        self._sampler_indices = self._pad_to_shape(sampler_indices,
+                                                   self._sampler_indices.shape,
+                                                   dims=1).to(self.device)
+        self._sampler_indices_padded = self._pad_to_shape(
+            sampler_indices_padded, self._sampler_indices_padded.shape,
+            dims=1).to(self.device)
+        self._embeddings_indices = self._pad_to_shape(
+            embeddings_indices, self._embeddings_indices.shape,
+            dims=2).to(self.device)
+        if long_lora_offsets_tensor is not None:
+            self._long_lora_indices = self._pad_to_shape(
+                long_lora_offsets_tensor,
+                self._long_lora_indices.shape,
+                dims=1).to(self.device)
+        else:
+            zeroed = torch.zeros_like(self._long_lora_indices.cpu(),
+                                      dtype=torch.int32)
+            self._long_lora_indices = zeroed.to(self.device)
+        self.indices_len[:] = indices_len
+
     def _update_prefill_metadata(self,
                                  token_lora_tensor: torch.Tensor) -> None:
         self.batch_size = 1
-        self._lora_indices_per_batch[:self.batch_size].copy_(
-            token_lora_tensor[:self.batch_size])
-        # TODO: .item() is extremely inefficient on TPU, so find a way around it
-        self.no_lora = torch.all(token_lora_tensor == -1).item()
+        self._lora_indices_per_batch[:self.
+                                     batch_size] = token_lora_tensor[:self.
+                                                                     batch_size]
+
+    def _pad_prompt_mapping(
+            self, prompt_mapping: tuple[int, ...]) -> tuple[int, ...]:
+        num_reqs = len(prompt_mapping)
+
+        # From vllm/v1/worker/tpu_model_runner:51, but need to avoid a circular
+        # import
+        MIN_NUM_SEQS = 8
+
+        padded_num_reqs = max(2**math.ceil(math.log2(num_reqs)), MIN_NUM_SEQS)
+        pad_len = padded_num_reqs - num_reqs
+
+        padding = [-1] * pad_len
+        return tuple(list(prompt_mapping) + padding)
+
+    def _pad_to_shape(self, src, target_shape, dims=1):
+        if dims == 1:
+            pad_len = target_shape[0] - src.shape[0]
+            return F.pad(src, (0, pad_len), value=0).to(torch.int32)
+        else:
+            pad_rows = target_shape[0] - src.shape[0]
+            pad_cols = target_shape[1] - src.shape[1]
+            return F.pad(src, (0, pad_cols, 0, pad_rows),
+                         value=0).to(torch.int32)
