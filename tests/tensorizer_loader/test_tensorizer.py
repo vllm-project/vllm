@@ -296,7 +296,7 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
     }
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
-    config = TensorizerConfig(tensorizer_uri=str(model_path), serialization_kwargs=serialization_params, _debug=True)
+    config = TensorizerConfig(tensorizer_uri=str(model_path), serialization_kwargs=serialization_params)
     llm = LLM(
         model=model_ref,
         device="cuda",
