@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.gpu_base_model_runner import GPUBaseModelRunner
-from vllm.v1.worker.gpu_pooling_input_batch import (InputBatch,
+from vllm.v1.worker.gpu_pooling_input_batch import (GPUPoolingInputBatch,
                                                     PoolingRequestState)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
@@ -35,7 +35,7 @@ else:
 logger = init_logger(__name__)
 
 
-class GPUPoolingModelRunner(GPUBaseModelRunner[InputBatch,
+class GPUPoolingModelRunner(GPUBaseModelRunner[GPUPoolingInputBatch,
                                                PoolingRequestState],
                             LoRAModelRunnerMixin):
 
@@ -223,7 +223,7 @@ class GPUPoolingModelRunner(GPUBaseModelRunner[InputBatch,
         return pooler_output
 
     def initialize_input_batch(self, kv_cache_config: KVCacheConfig):
-        self.input_batch = InputBatch(
+        self.input_batch = GPUPoolingInputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,

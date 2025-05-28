@@ -30,7 +30,7 @@ class PoolingRequestState(BaseRequestState):
         return self.prompt_token_ids[idx]
 
 
-class InputBatch(BaseInputBatch):
+class GPUPoolingInputBatch(BaseInputBatch):
 
     def __init__(
         self,
