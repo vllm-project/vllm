@@ -88,7 +88,7 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         assert len(engine_core.scheduler.running) == 4
 
         # Loop through until they are all done.
-        while len(engine_core.step().outputs) > 0:
+        while len(engine_core.step()[0].outputs) > 0:
             pass
 
         assert len(engine_core.scheduler.waiting) == 0
@@ -163,11 +163,11 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         req0.request_id = req1.request_id = "test"
         engine_core.add_request(req0)
 
-        while len(engine_core.step().outputs) > 0:
+        while len(engine_core.step()[0].outputs) > 0:
             pass
 
         engine_core.add_request(req1)
-        while len(engine_core.step().outputs) > 0:
+        while len(engine_core.step()[0].outputs) > 0:
             pass
 
         assert len(engine_core.scheduler.waiting) == 0
@@ -207,7 +207,7 @@ def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
             assert len(engine_core.scheduler.waiting) == 1
             assert len(engine_core.scheduler.running) == 0
             # Loop through until they are all done.
-            while len(engine_core.step().outputs) > 0:
+            while len(engine_core.step()[0].outputs) > 0:
                 pass
             assert len(engine_core.scheduler.waiting) == 0
             assert len(engine_core.scheduler.running) == 0
@@ -296,7 +296,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         engine_core.add_request(req1)
 
         # Schedule Batch 1: (10, req0)
-        assert engine_core.step_with_batch_queue() is None
+        assert engine_core.step_with_batch_queue()[0] is None
         assert engine_core.batch_queue.qsize() == 1
         scheduler_output = engine_core.batch_queue.queue[-1][1]
         assert scheduler_output.num_scheduled_tokens[0] == 10
@@ -305,7 +305,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             req0.request_id].num_computed_tokens == 10
 
         # Schedule Batch 2: (2, req0), (8, req1)
-        assert engine_core.step_with_batch_queue() is None
+        assert engine_core.step_with_batch_queue()[0] is None
         assert engine_core.batch_queue.qsize() == 2
         scheduler_output = engine_core.batch_queue.queue[-1][1]
         assert scheduler_output.num_scheduled_tokens[0] == 2
@@ -327,7 +327,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         assert scheduler_output.num_scheduled_tokens[1] == 4
 
         # Batch queue is full. Finish Batch 2. Get first token of req0.
-        output = engine_core.step_with_batch_queue()
+        output = engine_core.step_with_batch_queue()[0]
         assert output is not None
         assert len(output.outputs) == 1
         assert engine_core.scheduler.requests[req0.request_id].num_tokens == 13
@@ -339,7 +339,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         assert scheduler_output.num_scheduled_tokens[0] == 1
 
         # Batch queue is full. Finish Batch 3. Get first token of req1.
-        output = engine_core.step_with_batch_queue()
+        output = engine_core.step_with_batch_queue()[0]
         assert output is not None
         assert len(output.outputs) == 1
         assert engine_core.scheduler.requests[req1.request_id].num_tokens == 13
@@ -358,7 +358,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             engine_core.scheduler.requests[1].num_tokens + 1,
         ]
         while engine_core.scheduler.get_num_unfinished_requests() == 2:
-            output = engine_core.step_with_batch_queue()
+            output = engine_core.step_with_batch_queue()[0]
             if step % 2 == 0:
                 # Even steps consumes an output.
                 assert output is not None

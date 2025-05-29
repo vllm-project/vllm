@@ -211,8 +211,12 @@ class EngineCore:
             # Re-raise exception
             raise err
 
-    def step(self) -> EngineCoreOutputs:
-        """Schedule, execute, and make output."""
+    def step(self) -> tuple[EngineCoreOutputs, bool]:
+        """Schedule, execute, and make output.
+
+        Returns tuple of outputs and a flag indicating whether the model
+        was executed.
+        """
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
@@ -220,15 +224,17 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[],
                 scheduler_stats=self.scheduler.make_stats(),
-            )
+            ), False
         scheduler_output = self.scheduler.schedule()
         model_output = self.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
 
-        return engine_core_outputs
+        return (engine_core_outputs,
+                scheduler_output.total_num_scheduled_tokens > 0)
 
-    def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
+    def step_with_batch_queue(
+            self) -> tuple[Optional[EngineCoreOutputs], bool]:
         """Schedule and execute batches with the batch queue.
         Note that if nothing to output in this step, None is returned.
 
@@ -273,7 +279,7 @@ class EngineCore:
             engine_core_outputs = self.scheduler.update_from_output(
                 scheduler_output, model_output)
 
-        return engine_core_outputs
+        return engine_core_outputs, scheduled_batch
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -537,14 +543,16 @@ class EngineCoreProc(EngineCore):
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
 
-    def _process_engine_step(self):
+    def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
 
         # Step the engine core.
-        outputs = self.step_fn()
+        outputs, model_executed = self.step_fn()
         # Put EngineCoreOutputs into the output queue.
         if outputs is not None:
             self.output_queue.put_nowait(outputs)
+
+        return model_executed
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -749,30 +757,16 @@ class DPEngineCoreProc(EngineCoreProc):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
 
+            # 2) Step the engine core.
+            executed = self._process_engine_step()
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
-
-            if local_unfinished_reqs:
-                # 2) Step the engine core.
-                self._process_engine_step()
-
-                # Check if we have now finished all requests.
-                local_unfinished_reqs = (
-                    self.scheduler.has_unfinished_requests())
-            else:
-                if self.scheduler.has_finished_requests():
-                    # There are no unfinished requests, but there are some
-                    # finished requests remaining to be removed from the
-                    # batch state. This engine step won't perform a forward
-                    # pass but will flush the finished requests to ensure
-                    # up-to-date state is returned in the engine outputs.
-                    self._process_engine_step()
-
-                if not self.engines_running:
+            if not executed:
+                if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.
                     continue
 
-                # There must be unfinished requests in DP peers, run a
-                # dummy forward pass.
+                # We are in a running state and so must execute a dummy pass
+                # if the model didn't execute any ready requests.
                 self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
