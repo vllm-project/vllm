@@ -59,12 +59,18 @@ def tensorize_model_and_lora(tmp_dir, model_uri):
 def server(model_uri, tensorize_model_and_lora):
     model_loader_extra_config = {
         "tensorizer_uri": model_uri,
+        "stream_kwargs": {
+            "force_http": False,
+        },
+        "deserialization_kwargs": {
+            "verify_hash": True,
+            "num_readers": 8,
+        }
     }
 
     ## Start OpenAI API server
     args = [
-        "--load-format", "tensorizer", "--device", "cuda",
-        "--model-loader-extra-config",
+        "--load-format", "tensorizer", "--model-loader-extra-config",
         json.dumps(model_loader_extra_config), "--enable-lora"
     ]
 

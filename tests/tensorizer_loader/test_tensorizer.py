@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 from typing import Callable
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
@@ -418,3 +419,53 @@ def test_assert_stream_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
         out, err = capfd.readouterr()
         combined_output = out + err
         assert ("ValueError: Only binary modes (\"rb\", \"wb\", \"wb+\", etc.) are valid when opening local file streams.") in combined_output
+
+def test_serialize_and_serve_entrypoints(tmp_path):
+    model_ref = "facebook/opt-125m"
+
+    suffix = "test"
+    try:
+        result = subprocess.run([
+            sys.executable,
+            f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py", "--model",
+            model_ref, "serialize", "--serialized-directory",
+            str(tmp_path), "--suffix", suffix, "--serialization-kwargs",
+            json.dumps({"limit_cpu_concurrency": 4})
+        ],
+                                check=True,
+                                capture_output=True,
+                                text=True)
+    except subprocess.CalledProcessError as e:
+        print("Tensorizing failed.")
+        print("STDOUT:\n", e.stdout)
+        print("STDERR:\n", e.stderr)
+        raise
+
+    # Next, try to serve with vllm serve
+    model_uri = tmp_path / "vllm" / model_ref / suffix / "model.tensors"
+
+    model_loader_extra_config = {
+        "tensorizer_uri": str(model_uri),
+        "stream_kwargs": {
+            "force_http": False,
+        },
+        "deserialization_kwargs": {
+            "verify_hash": True,
+            "num_readers": 8,
+        }
+    }
+
+    try:
+        result = subprocess.run([
+            sys.executable,
+            "-m", "vllm.entrypoints.cli.serve", model_ref, "--model-loader-extra-config",
+            json.dumps(model_loader_extra_config),
+        ],
+                                check=True,
+                                capture_output=True,
+                                text=True)
+    except subprocess.CalledProcessError as e:
+        print("Model serving failed.")
+        print("STDOUT:\n", e.stdout)
+        print("STDERR:\n", e.stderr)
+        raise
