@@ -992,6 +992,10 @@ class NixlDecodeManager:
         self._done_receiving_count: defaultdict[str,
                                                 int] = defaultdict(lambda: 0)
 
+        # Already 'ready' request, we don't want to check and return it
+        # again.
+        self._already_ready_requests: set[str] = set()
+
     def _check_receive_and_update(self):
         """Checks the KV cache receiving status and update the internal
         states
@@ -1038,6 +1042,10 @@ class NixlDecodeManager:
         ready_requests = []
         self._check_receive_and_update()
         for p_request_id in self._expected_tokens:
+            if p_request_id in self._already_ready_requests:
+                # Already checked and ready, skip it
+                continue
+
             expected_tokens = self._expected_tokens[p_request_id]
             assert p_request_id in self._received_tokens
             # check if all the layers are there
@@ -1052,6 +1060,7 @@ class NixlDecodeManager:
                     break
             if ready:
                 ready_requests.append(p_request_id)
+                self._already_ready_requests.add(p_request_id)
 
         if self.world_size == 1:
             return ready_requests

@@ -464,7 +464,8 @@ class CPUConnector(KVConnectorBase_V1):
         self._decode_req_metas: dict[str, DecodeReqMeta] = {}
 
         # Decode h2d cuda events
-        self._decoder_cuda_events: list[torch.cuda.Event] = []
+        # layer id -> cuda event
+        self._decoder_cuda_events: dict[int, torch.cuda.Event] = {}
 
         # In-progress kv load requests's prefill request ids
         self._inflight_h2d_requests: set[str] = set()
@@ -663,25 +664,31 @@ class CPUConnector(KVConnectorBase_V1):
         assert isinstance(meta, CPUConnectorMetadata), \
                 "Connector metadata is not of type CPUConnectorMetadata"
 
+        ready_decode_metas = []
+        total_expected_tokens = []
         for decode_meta in meta.decode_meta:
             self._connect_request_ids(decode_meta.prefill_req_id,
                                       decode_meta.req_id)
-            if not decode_meta.is_ready:
-                continue
+            if decode_meta.is_ready:
+                ready_decode_metas.append(decode_meta)
+                total_expected_tokens.append(
+                        len(decode_meta.block_ids) * \
+                        self._block_size)
+                self._inflight_h2d_requests.add(decode_meta.prefill_req_id)
 
-            total_expected_tokens = len(decode_meta.block_ids) * \
-                    self._block_size
-
-            self._inflight_h2d_requests.add(decode_meta.prefill_req_id)
-            for layer_id in range(len(self._gpu_kv_caches)):
+        # Vars needed:
+        #   decode_meta.prefill_req_id
+        for layer_id in range(len(self._gpu_kv_caches)):
+            for decode_meta, total_expected in zip(ready_decode_metas,
+                                                   total_expected_tokens):
                 decode_specs = self._kv_receiver.get_kv_specs(
                     decode_meta.prefill_req_id, layer_id)
                 layer_name = self._layer_id_to_name[layer_id]
                 dst_layer = self._gpu_kv_caches[layer_name]
                 for decode_spec in decode_specs:
                     start = decode_spec.start
-                    stop = min(decode_spec.stop, total_expected_tokens)
-                    if start >= total_expected_tokens:
+                    stop = min(decode_spec.stop, total_expected)
+                    if start >= total_expected:
                         continue
                     src_buffer = decode_spec.buffer
                     block_ids = decode_meta.block_ids
@@ -689,9 +696,25 @@ class CPUConnector(KVConnectorBase_V1):
                     with torch.cuda.stream(self._cuda_stream):
                         h2d_page_copy(src_buffer, dst_layer, block_ids, start,
                                       stop, self._block_size)
-        event = torch.cuda.Event()
-        event.record(self._cuda_stream)
-        self._decoder_cuda_events.append(event)
+
+            # Record the cuda event for this layer
+            event = torch.cuda.Event()
+            event.record(self._cuda_stream)
+            self._decoder_cuda_events[layer_id] = event
+
+        #for decode_meta in meta.decode_meta:
+        #    self._connect_request_ids(decode_meta.prefill_req_id,
+        #                              decode_meta.req_id)
+        #    if not decode_meta.is_ready:
+        #        continue
+
+        #    total_expected_tokens = len(decode_meta.block_ids) * \
+        #            self._block_size
+
+        #    self._inflight_h2d_requests.add(decode_meta.prefill_req_id)
+        #event = torch.cuda.Event()
+        #event.record(self._cuda_stream)
+        #self._decoder_cuda_events[
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -709,7 +732,8 @@ class CPUConnector(KVConnectorBase_V1):
             return
 
         layer_id = self._get_layer_id(layer_name)
-        self._decoder_cuda_events[layer_id].synchronize()
+        event = self._decoder_cuda_events.pop(layer_id)
+        event.synchronize()
 
         if layer_id == len(self._gpu_kv_caches) - 1:
             # Free the memory for the whole request
@@ -848,11 +872,7 @@ class CPUConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
-        logger.warning("Closing the CPUConnector")
         if hasattr(self, "_kv_sender") and self._kv_sender is not None:
             self._kv_sender.close()
         if hasattr(self, "_kv_receiver") and self._kv_receiver is not None:
             self._kv_receiver.close()
-
-    def __del__(self):
-        self.close()

@@ -262,5 +262,4 @@ class KVConnectorBase_V1(ABC):
         Close the connector. This is called when the connector is no longer
         needed.
         """
-        logger.debug("Closing KVConnectorBase_V1")
-        pass
+        return

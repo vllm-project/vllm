@@ -69,7 +69,7 @@ if __name__ == "__main__":
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        new_prompts.append(prompt + generated_text)
+        new_prompts.append(prompt[-30:] + generated_text)
         #print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     # Write new_prompts to output.txt
@@ -78,8 +78,9 @@ if __name__ == "__main__":
             f.write(prompt + "\n")
     print(f"Saved {len(new_prompts)} prompts to output.txt")
 
-    # HACK: for offline single-process inference only
-    # Wait for all send finishes
     from vllm.distributed.kv_transfer import get_kv_transfer_group
-    cpu_connector = get_kv_transfer_group()
-    cpu_connector.close()
+    try:
+        cpu_connector = get_kv_transfer_group()
+        cpu_connector.close()
+    except Exception:
+        pass
