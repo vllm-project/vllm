@@ -1296,6 +1296,18 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
+        if kv_cache_config.kv_cache_groups[
+                0].kv_cache_spec.block_size != self.block_size:
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_size=kv_cache_config.kv_cache_groups[0].kv_cache_spec.
+                block_size,
+            )
         # Verify dtype compatibility between block_table_cpu and input_batch
         assert self.block_table_cpu.dtype == self.input_batch.block_table[
             0].get_cpu_tensor().dtype
