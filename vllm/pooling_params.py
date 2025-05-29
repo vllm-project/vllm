@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 
+from vllm.sampling_params import RequestOutputKind
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
@@ -22,6 +24,7 @@ class PoolingParams(
 
     dimensions: Optional[int] = None
     additional_data: Optional[Any] = None
+    output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
     def clone(self) -> "PoolingParams":
         """Returns a deep copy of the PoolingParams instance."""
@@ -51,3 +54,7 @@ class PoolingParams(
         return (f"PoolingParams("
                 f"dimensions={self.dimensions}, "
                 f"additional_metadata={self.additional_data})")
+
+    def __post_init__(self) -> None:
+        assert self.output_kind == RequestOutputKind.FINAL_ONLY,\
+            "For pooling output_kind has to be FINAL_ONLY"

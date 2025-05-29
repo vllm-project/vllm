@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import zmq
+import zmq.asyncio
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
@@ -32,7 +33,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -55,7 +56,6 @@ class EngineCore:
                  executor_class: type[Executor],
                  log_stats: bool,
                  executor_fail_callback: Optional[Callable] = None):
-        assert vllm_config.model_config.runner_type != "pooling"
 
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
@@ -137,17 +137,49 @@ class EngineCore:
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
-        kv_cache_configs = [
-            get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
-                                available_gpu_memory_one_worker)
-            for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
-            zip(kv_cache_specs, available_gpu_memory)
-        ]
+        if any(kv_cache_specs):
+            kv_cache_configs = [
+                get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
+                                    available_gpu_memory_one_worker)
+                for kv_cache_spec_one_worker, available_gpu_memory_one_worker
+                in zip(kv_cache_specs, available_gpu_memory)
+            ]
 
-        # Since we use a shared centralized controller, we need the
-        # `kv_cache_config` to be consistent across all workers to make sure
-        # all the memory operators can be applied to all workers.
-        unify_kv_cache_configs(kv_cache_configs)
+            for kv_cache_spec_one_worker in kv_cache_specs:
+                for _, spec in kv_cache_spec_one_worker.items():
+                    if isinstance(spec, AttentionSpec) and \
+                        spec.attn_type != "decoder":
+
+                        logger.info("Found non-decoder layer. Disabling "
+                                    "prefix cache and chunked prefill")
+                        self.vllm_config.cache_config.\
+                            enable_prefix_caching = False
+                        self.vllm_config.scheduler_config.\
+                            enable_chunked_prefill = False
+                        self.vllm_config.scheduler_config.\
+                            chunked_prefill_enabled = False
+                        self.vllm_config.scheduler_config.\
+                            long_prefill_token_threshold = 0
+                        break
+
+            # Since we use a shared centralized controller, we need the
+            # `kv_cache_config` to be consistent across all workers to make sure
+            # all the memory operators can be applied to all workers.
+            unify_kv_cache_configs(kv_cache_configs)
+            # All workers have the same kv_cache_config except layer names,
+            # so use an arbitrary one to get the number of blocks.
+            assert all([
+                cfg.num_blocks == kv_cache_configs[0].num_blocks
+                for cfg in kv_cache_configs
+            ])
+            num_gpu_blocks = kv_cache_configs[0].num_blocks
+        else:
+            kv_cache_configs = [
+                KVCacheConfig(num_blocks=1, tensors={}, kv_cache_groups=[])
+                for kv_cache_spec_one_worker in kv_cache_specs
+            ]
+
+            num_gpu_blocks = 1
 
         # All workers have the same kv_cache_config except layer names, so use
         # an arbitrary one to initialize the scheduler.

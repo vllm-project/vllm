@@ -14,7 +14,7 @@ from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -197,9 +197,7 @@ class LLMEngine:
             tokenization_kwargs, trace_headers, prompt_adapter_request,
             priority)
 
-        n = params.n if isinstance(params, SamplingParams) else 1
-
-        if n == 1:
+        if not isinstance(params, SamplingParams) or (n := params.n) == 1:
             # Make a new RequestState and queue.
             self.output_processor.add_request(request, prompt_str, None, 0)
             # Add the request to EngineCore.
@@ -220,7 +218,7 @@ class LLMEngine:
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
-    def step(self) -> list[RequestOutput]:
+    def step(self) -> list[Union[RequestOutput, PoolingRequestOutput]]:
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False

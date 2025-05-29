@@ -6,13 +6,14 @@
 import datetime
 import locale
 import os
-import re
 import subprocess
 import sys
 # Unlike the rest of the PyTorch this file must be python2 compliant.
 # This script outputs relevant system environment info
 # Run it with `python collect_env.py` or `python -m torch.utils.collect_env`
 from collections import namedtuple
+
+import regex as re
 
 from vllm.envs import environment_variables
 
