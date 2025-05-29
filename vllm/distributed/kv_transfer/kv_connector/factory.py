@@ -59,15 +59,6 @@ class KVConnectorFactory:
                              f"but found {envs.VLLM_USE_V1=}")
 
         kv_transfer_config = config.kv_transfer_config
-        if not hasattr(kv_transfer_config, "_initialized_engine_id"):
-            import uuid
-            kv_transfer_config.engine_id = str(uuid.uuid4())
-            kv_transfer_config._initialized_engine_id = True
-            logger.debug("Generated new engine_id %s in connector factory",
-                         kv_transfer_config.engine_id)
-        else:
-            logger.debug("Reusing existing engine_id %s in connector factory",
-                         kv_transfer_config.engine_id)
         connector_name = kv_transfer_config.kv_connector
         if connector_name in cls._registry:
             connector_cls = cls._registry[connector_name]()
