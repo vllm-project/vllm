@@ -2,13 +2,15 @@
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuron import get_neuron_model
@@ -36,6 +38,7 @@ class ModelInputForNeuron(ModelRunnerInputBase):
     input_block_ids: Optional[torch.Tensor] = None
     sampling_metadata: SamplingMetadata = None
     multi_modal_kwargs: BatchedTensorInputs = None
+    adapter_ids: Optional[str] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -80,6 +83,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                            "The model will run without sliding window.")
         self.device_config = (self.device_config if self.device_config
                               is not None else DeviceConfig())
+        self.lora_config = vllm_config.lora_config
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
 
@@ -378,9 +382,12 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
                 sampling_params=sampling_params,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
-                                             device=self.device),
+                adapter_ids=model_input.adapter_ids,
+                **MultiModalKwargs.as_kwargs(
+                    model_input.multi_modal_kwargs or {},
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                ),
             )
         elif current_platform.use_transformers_neuronx():
             # [TODO] validate on-device sampling
@@ -389,9 +396,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 input_block_ids=model_input.input_block_ids,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
-                                             device=self.device),
+                **MultiModalKwargs.as_kwargs(
+                    model_input.multi_modal_kwargs or {},
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                ),
             )
 
         # Compute the logits only if the on-device sampling is turned off as
@@ -412,3 +421,28 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+
+    def remove_all_loras(self):
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
+
+    def set_active_loras(self, lora_requests: Set[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
+
+    def add_lora(self, lora_request: LoRARequest):
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
+
+    def remove_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
+
+    def pin_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
+
+    def list_loras(self) -> Set[int]:
+        raise NotImplementedError(
+            "LoRAs are not supported for Transformers NeuronX framework")
