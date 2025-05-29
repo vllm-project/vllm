@@ -16,7 +16,7 @@ import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
 from .compiler_interface import (CompilerInterface, EagerAdaptor,
                                  InductorAdaptor, InductorStandaloneAdaptor)
@@ -29,7 +29,8 @@ logger = init_logger(__name__)
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     if compilation_config.use_inductor:
-        if envs.VLLM_TEST_STANDALONE_COMPILE:
+        if envs.VLLM_USE_STANDALONE_COMPILE and is_torch_equal_or_newer(
+                "2.8.0"):
             logger.info("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor()
         else:

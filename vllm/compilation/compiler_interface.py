@@ -155,7 +155,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
     This is not on by default yet, but we plan to turn it on by default for
     PyTorch 2.8.
 
-    Use VLLM_TEST_STANDALONE_COMPILE to toggle this on or off.
+    Use VLLM_USE_STANDALONE_COMPILE to toggle this on or off.
     """
     name = "inductor_standalone"
 

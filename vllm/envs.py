@@ -143,10 +143,10 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
 
 def get_vllm_port() -> Optional[int]:
     """Get the port from VLLM_PORT environment variable.
-    
+
     Returns:
         The port number as an integer if VLLM_PORT is set, None otherwise.
-        
+
     Raises:
         ValueError: If VLLM_PORT is a URI, suggest k8s service discovery issue.
     """
@@ -308,9 +308,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
 
-    # Internal flag to enable/disable Inductor standalone compile
-    "VLLM_TEST_STANDALONE_COMPILE":
-    lambda: os.environ.get("VLLM_TEST_STANDALONE_COMPILE", "0") != "0",
+    # Feature flag to enable/disable Inductor standalone compile.
+    # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
+    # enabled by default.
+    "VLLM_USE_STANDALONE_COMPILE":
+    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -892,7 +894,7 @@ def compute_hash() -> str:
         "VLLM_USE_TRITON_AWQ",
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",
-        "VLLM_TEST_STANDALONE_COMPILE",
+        "VLLM_USE_STANDALONE_COMPILE",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:
