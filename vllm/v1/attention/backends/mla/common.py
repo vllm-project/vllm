@@ -481,6 +481,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         device = self.runner.device
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[req_slice]
+        print(f"num_reqs: {num_reqs} bloc_table_shape: {block_table_tensor.shape}")
         slot_mapping = block_table.slot_mapping_cpu[token_slice].to(
             device, non_blocking=True).long()
 

@@ -1358,6 +1358,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     ))
                     ubatch_threads.append(thread)
                     thread.start()
+                ubatch_ctxs[0].cpu_wait_event.set()
                     
                 for thread in ubatch_threads:
                     thread.join()
