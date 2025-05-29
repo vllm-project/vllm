@@ -165,7 +165,7 @@ class InputProcessingContext(InputContext):
             if isinstance(output, BatchFeature):
                 return output.to(dtype=self.model_config.dtype)
 
-            def maybe_cast_dtype(x: torch.Tensor):
+            def maybe_cast_dtype(x: "torch.Tensor"):
                 # This mimics the behavior of transformers.BatchFeature
                 dtype = self.model_config.dtype
                 return x.to(dtype=dtype) if x.is_floating_point() else x
