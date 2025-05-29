@@ -2,16 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union, cast
 
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar
 
+from vllm.jsontree import JSONTree, json_map_leaves
+from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import resolve_mm_processor_kwargs
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm.config import ModelConfig
     from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
                                  MultiModalRegistry)
@@ -20,6 +24,8 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 _C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -134,7 +140,7 @@ class InputProcessingContext(InputContext):
         hf_processor: ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
-    ) -> BatchFeature:
+    ) -> Union[BatchFeature, JSONTree["torch.Tensor"]]:
         """
         Call `hf_processor` on the prompt `data`
         (text, image, audio...) with configurable options `kwargs`.
@@ -156,7 +162,20 @@ class InputProcessingContext(InputContext):
 
         try:
             output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
-            return output.to(dtype=self.model_config.dtype)
+            if isinstance(output, BatchFeature):
+                return output.to(dtype=self.model_config.dtype)
+
+            def maybe_cast_dtype(x: torch.Tensor):
+                # This mimics the behavior of transformers.BatchFeature
+                dtype = self.model_config.dtype
+                return x.to(dtype=dtype) if x.is_floating_point() else x
+
+            logger.warning_once(
+                f"{type(hf_processor).__name__} did not return `BatchFeature`. "
+                "Make sure to match the behaviour of `ProcessorMixin` when "
+                "implementing custom processors.")
+            output = cast(JSONTree["torch.Tensor"], output)
+            return json_map_leaves(maybe_cast_dtype, output)
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
