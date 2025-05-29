@@ -45,8 +45,7 @@ from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
-                        is_list_of)
+from vllm.utils import Counter, Device, deprecate_kwargs, is_list_of
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -143,12 +142,6 @@ class LLM:
     DEPRECATE_LEGACY: ClassVar[bool] = True
     """A flag to toggle whether to deprecate the legacy generate/encode API."""
 
-    DEPRECATE_INIT_POSARGS: ClassVar[bool] = True
-    """
-    A flag to toggle whether to deprecate positional arguments in
-    [LLM.__init__][].
-    """
-
     @classmethod
     @contextmanager
     def deprecate_legacy_api(cls):
@@ -158,16 +151,11 @@ class LLM:
 
         cls.DEPRECATE_LEGACY = False
 
-    @deprecate_args(
-        start_index=2,  # Ignore self and model
-        is_deprecated=lambda: LLM.DEPRECATE_INIT_POSARGS,
-        additional_message=(
-            "All positional arguments other than `model` will be "
-            "replaced with keyword arguments in an upcoming version."),
-    )
     def __init__(
         self,
         model: str,
+        *,
+        task: TaskOption = "auto",
         tokenizer: Optional[str] = None,
         tokenizer_mode: TokenizerMode = "auto",
         skip_tokenizer_init: bool = False,
@@ -189,8 +177,6 @@ class LLM:
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        # After positional args are removed, move this right below `model`
-        task: TaskOption = "auto",
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any]]] = None,
         **kwargs,
@@ -207,6 +193,9 @@ class LLM:
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
+        if hf_overrides is None:
+            hf_overrides = {}
+
         if compilation_config is not None:
             if isinstance(compilation_config, int):
                 compilation_config_instance = CompilationConfig(
@@ -218,7 +207,7 @@ class LLM:
             else:
                 compilation_config_instance = compilation_config
         else:
-            compilation_config_instance = None
+            compilation_config_instance = CompilationConfig()
 
         engine_args = EngineArgs(
             model=model,
@@ -519,10 +508,28 @@ class LLM:
         executor = self.llm_engine.model_executor
         return executor.apply_model(func)
 
+    def _get_beam_search_lora_requests(
+        self,
+        lora_request: Optional[Union[list[LoRARequest], LoRARequest]],
+        prompts: list[Union[TokensPrompt, TextPrompt]],
+    ) -> list[Optional[LoRARequest]]:
+        """Get the optional lora request corresponding to each prompt."""
+        if isinstance(lora_request,
+                      Sequence) and len(lora_request) != len(prompts):
+            raise ValueError(
+                "Lora request list should be the same length as the prompts")
+            return lora_request
+
+        if lora_request is None or isinstance(lora_request, LoRARequest):
+            return [lora_request] * len(prompts)
+
+        raise TypeError(f"Invalid lora_request type {type(lora_request)}")
+
     def beam_search(
         self,
         prompts: list[Union[TokensPrompt, TextPrompt]],
         params: BeamSearchParams,
+        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -531,6 +538,7 @@ class LLM:
             prompts: A list of prompts. Each prompt can be a string or a list
                 of token IDs.
             params: The beam search parameters.
+            lora_request: LoRA request to use for generation, if any.
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
@@ -539,6 +547,9 @@ class LLM:
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+
+        lora_requests = self._get_beam_search_lora_requests(
+            lora_request, prompts)
 
         def sort_beams_key(x: BeamSearchSequence) -> float:
             return get_beam_search_score(x.tokens, x.cum_logprob,
@@ -567,7 +578,7 @@ class LLM:
                                             temperature=temperature)
         instances: list[BeamSearchInstance] = []
 
-        for prompt in prompts:
+        for lora_req, prompt in zip(lora_requests, prompts):
             # Add multimodal processor kwargs & data
             mm_kwargs = {}
             if "multi_modal_data" in prompt:
@@ -583,7 +594,12 @@ class LLM:
                 prompt_tokens = tokenizer.encode(prompt["prompt"])
 
             instances.append(
-                BeamSearchInstance(prompt_tokens, logprobs=None, **mm_kwargs))
+                BeamSearchInstance(
+                    prompt_tokens,
+                    lora_request=lora_req,
+                    logprobs=None,
+                    **mm_kwargs,
+                ), )
 
         for _ in range(max_tokens):
             all_beams: list[BeamSearchSequence] = list(
@@ -597,15 +613,17 @@ class LLM:
             if len(all_beams) == 0:
                 break
 
-            prompts_batch = [
-                create_tokens_prompt_from_beam(beam) for beam in all_beams
-            ]
+            # create the corresponding batch entries for prompt & optional lora
+            prompts_batch, lora_req_batch = zip(
+                *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
+                  for beam in all_beams])
 
             # only runs for one step
             # we don't need to use tqdm here
             output = self.generate(prompts_batch,
                                    sampling_params=beam_search_params,
-                                   use_tqdm=False)
+                                   use_tqdm=False,
+                                   lora_request=lora_req_batch)
 
             for (start, end), instance in zip(instance_start_and_end,
                                               instances):
@@ -623,6 +641,7 @@ class LLM:
                             new_beam = BeamSearchSequence(
                                 tokens=current_beam.tokens + [token_id],
                                 logprobs=current_beam.logprobs + [logprobs],
+                                lora_request=current_beam.lora_request,
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob,
                                 multi_modal_data=current_beam.multi_modal_data,

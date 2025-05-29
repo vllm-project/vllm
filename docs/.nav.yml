@@ -12,6 +12,7 @@ nav:
       - User Guide: usage/README.md
       - Developer Guide: contributing/README.md
       - API Reference: api/README.md
+      - CLI Reference: cli/README.md
     - Timeline:
       - Roadmap: https://roadmap.vllm.ai
       - Releases: https://github.com/vllm-project/vllm/releases
@@ -56,6 +57,8 @@ nav:
     - Contents:
       - glob: api/vllm/*
         preserve_directory_names: true
+  - CLI Reference:
+    - Summary: cli/README.md
   - Community:
     - community/*
     - Blog: https://blog.vllm.ai
