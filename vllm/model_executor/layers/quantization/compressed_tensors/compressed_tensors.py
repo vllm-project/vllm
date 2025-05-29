@@ -581,7 +581,10 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
         """
         if current_platform.is_hpu():
-            weight_scale = layer.weight_scale.transpose(0, 1)
+            if layer.weight_scale.dim() > 1:
+                weight_scale = layer.weight_scale.transpose(0, 1)
+            else:
+                weight_scale = layer.weight_scale
             return hpu_ops.apply_fp8_linear_hpu(input=x,
                                                 weight=layer.weight,
                                                 weight_scale=weight_scale,
