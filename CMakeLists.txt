@@ -251,7 +251,6 @@ set(VLLM_EXT_SRC
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
   "csrc/custom_all_reduce.cu"
-  "csrc/tensor_store_load_mem.cu"
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")

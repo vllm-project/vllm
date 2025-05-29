@@ -345,5 +345,3 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
     int64_t size);
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
-void store_tensor(torch::Tensor& device_tensor, torch::Tensor& host_tensor);
-void load_tensor(torch::Tensor& host_tensor, torch::Tensor& device_tensor);

@@ -703,13 +703,4 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("free_shared_buffer", &free_shared_buffer);
 }
 
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _mem_pool), mem_pool) {
-  // Store Tensor to pinned memory
-  mem_pool.def("store_tensor(Tensor device_tensor, Tensor! host_tensor) -> ()");
-  mem_pool.impl("store_tensor", torch::kCUDA, &store_tensor);
-  // Load Tensor from pinned memory
-  mem_pool.def("load_tensor(Tensor host_tensor, Tensor! device_tensor) -> ()");
-  mem_pool.impl("load_tensor", torch::kCUDA, &load_tensor);
-}
-
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
