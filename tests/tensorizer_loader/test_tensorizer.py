@@ -296,7 +296,8 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
     }
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
-    config = TensorizerConfig(tensorizer_uri=str(model_path), serialization_kwargs=serialization_params)
+    config = TensorizerConfig(tensorizer_uri=str(model_path),
+                              serialization_kwargs=serialization_params)
     llm = LLM(
         model=model_ref,
         device="cuda",
@@ -331,6 +332,50 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
     }
 
     assert assert_from_collective_rpc(llm, serialization_test, kwargs)
+
+
+def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
+
+    deserialization_params = {
+        "lazy_load": True,
+        "num_readers": 1,
+    }
+
+    serialization_params = {
+        "limit_cpu_concurrency": 2,
+    }
+
+    model_ref = "facebook/opt-125m"
+    model_path = tmp_path / (model_ref + ".tensors")
+    config = TensorizerConfig(tensorizer_uri=str(model_path),
+                              serialization_kwargs=serialization_params)
+
+    args = EngineArgs(model=model_ref, device="cuda")
+    tensorize_vllm_model(args, config)
+
+    loader_tc = TensorizerConfig(
+        tensorizer_uri=str(model_path),
+        deserialization_kwargs=deserialization_params,
+    )
+
+    # lazy_load = True is listed as a deserialization_param, which will
+    # break the loading process because is_vllm_tensorized hard-codes a
+    # lazy_load = True to check for the vllm-tensorized marker.
+
+    # If `deserialization_params` is passed to TensorDeserializer as expected,
+    # we should expect the ValueError being caught.
+    try:
+        LLM(
+            model=model_ref,
+            load_format="tensorizer",
+            model_loader_extra_config=loader_tc,
+        )
+    except RuntimeError:
+        out, err = capfd.readouterr()
+        combined_output = out + err
+        assert ("TypeError: tensorizer.serialization.TensorDeserializer() got multiple values for keyword argument 'lazy_load'") in combined_output
+
+
 
 
 
