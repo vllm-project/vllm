@@ -117,19 +117,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert global_num_experts != -1
         assert w2.size(1) == K
-
-        # a1q, a1q_scale, _, expert_ids, inv_perm = _moe_permute(
-        #     a1q,
-        #     a1q_scale,
-        #     topk_ids,
-        #     global_num_experts,
-        #     expert_map,
-        #     self.block_shape[0],
-        # )
         fill_invalid_expert = 0
-        topk = topk_ids.size(1)
-        a1q, a1q_scale, _, inv_perm, _, expert_ids = moe_permute(
-            a1q, a1q_scale, topk_ids, topk, global_num_experts, expert_map,
+        a1q, a1q_scale, _, inv_perm, expert_ids = moe_permute(
+            a1q, a1q_scale, topk_ids, global_num_experts, expert_map,
             self.block_shape[0], fill_invalid_expert)
 
         # Note: M_sum is different than the pre-permuted shape of a1q.
