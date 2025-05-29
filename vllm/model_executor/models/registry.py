@@ -345,7 +345,6 @@ def _try_load_model_cls(
 ) -> Optional[type[nn.Module]]:
     from vllm.platforms import current_platform
     current_platform.verify_model_arch(model_arch)
-    model.load_model_cls()
     try:
         return model.load_model_cls()
     except Exception:

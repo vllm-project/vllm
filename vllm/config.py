@@ -562,7 +562,7 @@ class ModelConfig:
                 # only the attention layer itself is aware of the sliding
                 # window, and use the window size to compute the attention.
                 self.hf_text_config.interleaved_sliding_window = sliding_window
-                # delattr(self.hf_text_config, "sliding_window")
+                delattr(self.hf_text_config, "sliding_window")
                 sliding_window = None
 
         self.max_model_len = _get_and_verify_max_len(

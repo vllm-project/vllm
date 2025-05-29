@@ -22,7 +22,7 @@ from typing import Iterable, Literal, Optional, Union
 
 import torch
 from torch import nn
-from transformers import AutoModel, PretrainedConfig, PreTrainedModel, LlavaConfig
+from transformers import AutoModel, PretrainedConfig, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.attention import Attention
@@ -161,8 +161,6 @@ def init_on_device_without_buffers(device: torch.device):
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
-        # NOTE: this means we don't check if return config type is same as requested
-        # vLLM on contrary always checks. In which cases we can have different config types tho?
         return self.ctx.model_config.hf_config
 
     def get_supported_mm_limits(self):
@@ -194,28 +192,20 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
         mm_counts,
     ) -> ProcessorInputs:
         num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-        num_frames = 8
 
         processor = self.info.get_hf_processor()
-        image_token = getattr(processor, "image_token", None)
-        video_token = getattr(processor, "video_token", None)
+        if "gemma3" in processor.__class__.__name__.lower():
+            image_token = getattr(processor, "boi_token")
+        else:
+            image_token = getattr(processor, "image_token", "")
         target_width, target_height = self.info.get_max_image_size()
 
-        # NOTE: we can pass videos/images/audio to any processor With the new API used in MLLMs,
-        # HF processor will take the modality needed for model and ignore all others
         mm_data = {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=1
             ),
-            "video": self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-                num_frames=num_frames,
-                num_videos=num_videos,
-            )
         }
 
         prompt_text = image_token*num_images
@@ -253,25 +243,12 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs,
         num_image_patches: torch.Tensor = None,
     ):
-        # NOTE from `transformers`: we are planning on refactoring image processors to return same format as output
-        # The final solution would be either to converge as Idefics-style or used a nested tensor
-        if False and "image_grid_thw" in hf_inputs: # Qwen-style model
-            image_grid_thw = hf_inputs["image_grid_thw"]
-            image_grid_sizes = image_grid_thw.prod(-1)
-            mm_fields = {
-                "image_grid_thw" : MultiModalFieldConfig.batched("image"),
-                "image_embeds": MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
-                "pixel_values": MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
-            }
-        else:
-            hf_inputs.pop("attention_mask", None)
-            size_per_item = num_image_patches if num_image_patches is not None else torch.tensor([1] * len(hf_inputs["pixel_values"]))
-            mm_fields = {key: MultiModalFieldConfig.flat_from_sizes("image", size_per_item) for key in hf_inputs.keys() if "video" not in key}
-            mm_fields["image_embeds"] = MultiModalFieldConfig.flat_from_sizes("image", size_per_item)
-            # mm_fields = {key: MultiModalFieldConfig.batched("image") for key in hf_inputs.keys() if "video" not in key}
-            # mm_fields["image_embeds"] = MultiModalFieldConfig.batched("image")
+        hf_inputs.pop("attention_mask", None) # processors always return a mask but vLLM doesn't need it
+        mm_fields = {key: MultiModalFieldConfig.flat_from_sizes("image", num_image_patches) for key in hf_inputs.keys()}
+        mm_fields["image_embeds"] = MultiModalFieldConfig.flat_from_sizes("image", num_image_patches)
+        mm_fields["num_image_patches"] = MultiModalFieldConfig.batched("image")
         return mm_fields
-    
+
     def _apply_hf_processor_text_mm(
         self,
         prompt_text,
@@ -294,9 +271,8 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         )
         processed_data.update(passthrough_data)
 
-        print("prompt_text", prompt_text, processed_data['input_ids'].shape, processed_data["mm_token_type_ids"].shape, processed_data['pixel_values'].shape)
         prompt_ids, = processed_data.pop("input_ids").tolist()
-        mm_token_type_ids = processed_data.pop("mm_token_type_ids")
+        mm_token_type_ids = processed_data.pop("mm_token_type_ids") if "mm_token_type_ids" in processed_data else processed_data.pop("token_type_ids") # for gemma3 only
 
         return prompt_ids, processed_data, mm_token_type_ids
 
@@ -340,7 +316,6 @@ class MultiModalProcessor(BaseMultiModalProcessor):
             image_sizes.append((image_size.height, image_size.width))
 
         mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(image_sizes=image_sizes, **mm_processor_kwargs)
-        print("num_tokens", mm_token_type_ids.shape, mm_positions.shape, image_sizes, mm_tokens_per_modality, mm_processor_kwargs.keys())
 
         mm_placeholders = {}
         split_sizes = mm_tokens_per_modality["num_image_tokens"]
@@ -348,7 +323,6 @@ class MultiModalProcessor(BaseMultiModalProcessor):
             chunked_mm_positions = torch.split(mm_positions, split_sizes)
             mm_tokens = torch.tensor(prompt_ids)[mm_token_type_ids[0].bool()]
             chunked_mm_tokens = torch.split(mm_tokens, split_sizes)
-            print("Is embed", (mm_tokens == hf_processor.image_token_id).sum(-1))
             ranges = [
                 PlaceholderRange(offset=positions[0].item(), length=positions.shape[0], is_embed=(mm_tokens == hf_processor.image_token_id).bool())
                 for positions, mm_tokens in zip(chunked_mm_positions, chunked_mm_tokens)
@@ -356,6 +330,7 @@ class MultiModalProcessor(BaseMultiModalProcessor):
             mm_placeholders = {"image": ranges}
 
         num_image_patches = torch.tensor(mm_tokens_per_modality["num_image_patches"]) if "num_image_patches" in mm_tokens_per_modality else None
+        processed_data['num_image_patches'] = num_image_patches
         mm_kwargs = MultiModalKwargs.from_hf_inputs(
             processed_data,
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs, num_image_patches),
@@ -734,9 +709,10 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
             "language_model.model": "model.language_model",
             "text_model.model": "model.text_model",
             "vision_tower": "model.vision_tower",
-            "image_newline": "model.image_newline",
             "vqmodel": "model.vqmodel",
             "vision_model": "model.vision_model",
+            "vision_embed_tokens": "model.vision_embed_tokens",
+            "image_newline": "model.image_newline",
             "multi_modal_projector": "model.multi_modal_projector",
             "text_model.lm_head": "lm_head",
             "language_model.lm_head": "lm_head",
@@ -781,23 +757,38 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
 
     def get_multimodal_embeddings(self, **kwargs):
         pixel_values = kwargs.pop("pixel_values", None)
+        pixel_values = pixel_values if pixel_values is not None else kwargs.pop("image_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
+        num_image_patches = kwargs.pop("num_image_patches")
 
         if pixel_values is None and image_embeds is None:
             return None
 
         if pixel_values is not None:
-            pixel_values = pixel_values.to(self.dtype)
+            if isinstance(pixel_values, torch.Tensor):
+                pixel_values = pixel_values.flatten(0, 1).to(self.dtype)
+                if isinstance(num_image_patches, list):
+                    num_image_patches = torch.cat(num_image_patches)
+                num_image_patches = num_image_patches.flatten()
+            else:
+                pixel_values = torch.cat(pixel_values).to(self.dtype)
+                num_image_patches = torch.cat(num_image_patches).flatten()
+
             vision_embeddings = self.model.model.get_image_features(
-                # Thing about pixels being batched again, adding extra dim
-                # TODO: find out do we really need that extra dim
-                pixel_values.flatten(0, 1), 
+                pixel_values, 
                 **{k: v.flatten(0, 1) for k, v in kwargs.items()},
-            )
+            )   
+
             if isinstance(vision_embeddings, torch.Tensor):
-                print("vision_embeddings", vision_embeddings.shape, pixel_values.shape)
-            # TODO: fix pixtral to return output of shape [bs, seq-len, dim]
-            # vision_embeddings = vision_embeddings.reshape(pixel_values.shape[0], -1, 5120)
+                if vision_embeddings.ndim == 2:
+                    vision_embeddings = vision_embeddings.unsqueeze(0)
+
+                # Embeddings have to be 2D tensors of length `num_images` but transformers
+                # returns concat tensors if each patch is of different size. We split it back
+                # to make vLLM assertions happy
+                vision_embeddings = torch.split(vision_embeddings, num_image_patches.tolist())
+                vision_embeddings = [embed.flatten(start_dim=0, end_dim=-2) for embed in vision_embeddings]
+
             return vision_embeddings
 
         if image_embeds is not None:
@@ -810,16 +801,9 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
     ) -> torch.Tensor:
         inputs_embeds = self.model.model.get_input_embeddings()(input_ids)
         if multimodal_embeddings is not None:
-            # most supported VLMs merge like this, otherwise we can add a special
-            # `merge_multimodal_embeddings` method on HF side
             mask = (input_ids == self.config.image_token_id)
             mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
             multimodal_embeddings = torch.cat(multimodal_embeddings)
 
-            # FIXME: The returned multimodal_embeddings must be either a 3D torch.Tensor of shape
-            # (num_items, feature_size, hidden_size), or a list / tuple of 2D torch.Tensor’s of shape
-            # (feature_size, hidden_size), so that multimodal_embeddings[i] retrieves the embeddings generated
-            # from the i-th multimodal data item (e.g, image) of the request.
-            print(mask[..., 0].sum(-1), multimodal_embeddings.shape)
             inputs_embeds = inputs_embeds.masked_scatter(mask, multimodal_embeddings)
         return inputs_embeds
