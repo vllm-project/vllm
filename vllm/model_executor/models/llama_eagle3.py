@@ -215,6 +215,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         if self.draft_id_to_target_id is None:
+            assert logits.shape[1] == self.config.vocab_size, \
+                "Expected logits to have shape " \
+                f"(*, {self.config.vocab_size}), but got {logits.shape}"
             return logits
 
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
@@ -251,7 +254,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
 
         loaded_weights = loader.load_weights(model_weights.items())
 
-        if 'd2t' not in loaded_weights:
+        if not any('draft_id_to_target_id' in name for name in loaded_weights):
             self.draft_id_to_target_id = None
 
         return loaded_weights
