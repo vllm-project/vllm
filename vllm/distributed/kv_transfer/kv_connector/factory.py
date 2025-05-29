@@ -59,6 +59,15 @@ class KVConnectorFactory:
                              f"but found {envs.VLLM_USE_V1=}")
 
         kv_transfer_config = config.kv_transfer_config
+        if not hasattr(kv_transfer_config, "_initialized_engine_id"):
+            import uuid
+            kv_transfer_config.engine_id = str(uuid.uuid4())
+            kv_transfer_config._initialized_engine_id = True
+            logger.debug("Generated new engine_id %s in connector factory",
+                         kv_transfer_config.engine_id)
+        else:
+            logger.debug("Reusing existing engine_id %s in connector factory",
+                         kv_transfer_config.engine_id)
         connector_name = kv_transfer_config.kv_connector
         if connector_name in cls._registry:
             connector_cls = cls._registry[connector_name]()
@@ -70,7 +79,8 @@ class KVConnectorFactory:
             connector_module = importlib.import_module(connector_module_path)
             connector_cls = getattr(connector_module, connector_name)
         assert issubclass(connector_cls, KVConnectorBase_V1)
-        logger.info("Creating v1 connector with name: %s", connector_name)
+        logger.info("Creating v1 connector with name: %s and engine_id: %s",
+                    connector_name, kv_transfer_config.engine_id)
         # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
         # Scheduler connector:
         # - Co-locate with scheduler process
