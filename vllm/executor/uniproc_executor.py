@@ -131,11 +131,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
                        kwargs: Optional[Dict] = None) -> List[Any]:
         if kwargs is None:
             kwargs = {}
-        # tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        # if method == "execute_model":
-        #     if tp_size > 1:
-        #         tp_group = get_tp_group()
-        #         kwargs = tp_group.broadcast_object(kwargs)
         assert kwargs is not None
         answer = run_method(self.driver_worker, method, args, kwargs)
         if method == "execute_model" and self.parallel_config.pipeline_parallel_size > 1:

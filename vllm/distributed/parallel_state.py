@@ -886,7 +886,6 @@ def init_model_parallel_group(
     use_message_queue_broadcaster: bool = False,
     group_name: Optional[str] = None,
 ) -> GroupCoordinator:
-    # assert use_message_queue_broadcaster is False
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,

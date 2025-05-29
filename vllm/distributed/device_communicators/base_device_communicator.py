@@ -223,7 +223,7 @@ class DeviceCommunicatorBase:
         tensor = torch.empty(size, dtype=dtype, device=self.device)
         torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
-        
+
     def destroy(self):
         pass
 
