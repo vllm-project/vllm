@@ -363,26 +363,11 @@ def get_kv_event_publisher(
     original_endpoint = modified_config.endpoint
     modified_config.endpoint = _offset_endpoint_port(original_endpoint,
                                                      data_parallel_rank)
-    if original_endpoint != modified_config.endpoint:
-        logger.info(
-            "KV event publisher endpoint adjusted from %s to %s for DP rank %d",
-            original_endpoint,
-            modified_config.endpoint,
-            data_parallel_rank,
-        )
 
     # Apply port offsetting to the replay_endpoint if it exists
     if modified_config.replay_endpoint:
         original_replay_endpoint = modified_config.replay_endpoint
         modified_config.replay_endpoint = _offset_endpoint_port(
             original_replay_endpoint, data_parallel_rank)
-        if original_replay_endpoint != modified_config.replay_endpoint:
-            logger.info(
-                ("KV event publisher replay_endpoint "
-                 "adjusted from %s to %s for DP rank %d"),
-                original_replay_endpoint,
-                modified_config.replay_endpoint,
-                data_parallel_rank,
-            )
 
     return EventPublisherFactory.create(modified_config)
