@@ -19,7 +19,7 @@ from ...utils import check_embeddings_close
                      marks=[pytest.mark.core_model]),
         pytest.param("intfloat/e5-mistral-7b-instruct",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
-        pytest.param("Qwen/Qwen2.5-0.5B-Instruct"),
+        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
         # [Encoder-only]
         pytest.param("BAAI/bge-base-en-v1.5",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
@@ -46,7 +46,7 @@ def test_models(
         monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
 
     vllm_extra_kwargs = {}
-    if model == "Qwen/Qwen2.5-0.5B-Instruct":
+    if model == "ssmits/Qwen2-7B-Instruct-embed-base":
         vllm_extra_kwargs["override_pooler_config"] = \
             PoolerConfig(pooling_type="MEAN", normalize=False)
 
