@@ -8,6 +8,9 @@ from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy,
+                                             QuantizationType)
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
@@ -238,6 +241,18 @@ class FusedMoeWeightScaleSupported(Enum):
     BLOCK = "block"
 
 
+def get_quant_config_input_activations(
+        quant_config: Optional[QuantizationConfig]
+) -> Optional[QuantizationArgs]:
+    if (quant_config is not None and hasattr(quant_config, 'target_scheme_map')
+            and "Linear" in quant_config.target_scheme_map and
+            "input_activations" in quant_config.target_scheme_map["Linear"]):
+        return quant_config.target_scheme_map["Linear"].get(
+            "input_activations")
+    else:
+        return None
+
+
 class FusedMoEMethodBase(QuantizeMethodBase):
 
     @abstractmethod
@@ -262,12 +277,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 # dp_size actually means tp_size, bug in pplx kernels
                 dp_size=all2all_manager.tp_group.world_size,
                 hidden_dim=moe.hidden_dim,
-                hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
+                hidden_dim_bytes=moe.hidden_dim * moe.quant_dtype.itemsize,
                 # For blocked per token: set to
                 #   ceil_div(hidden_dim, block_size) * sizeof(float32)
                 # For per-token: set to sizeof(float32)
-                hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else (
-                    (moe.hidden_dim + moe.block_size - 1) // moe.block_size *
+                hidden_dim_scale_bytes=(0 if moe.quant_dtype.itemsize != 1 else (
+                    ((moe.hidden_dim + moe.block_size - 1) // moe.block_size) *
                     torch.float32.itemsize)),
             )
 
@@ -285,7 +300,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 rank=all2all_manager.rank,
                 # dp_size actually means tp_size, bug in pplx kernels
                 dp_size=all2all_manager.tp_group.world_size,
-                quant_dtype=moe.in_dtype,
+                quant_dtype=moe.quant_dtype,
             )
 
         if prepare_finalize is not None:
@@ -774,6 +789,17 @@ class FusedMoE(torch.nn.Module):
             from vllm_hpu_extension.ops import DynamicFusedMOE
             self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
+        quant_dtype = vllm_config.model_config.dtype
+        if quant_config is not None:
+            input_activations = get_quant_config_input_activations(
+                quant_config)
+            if (input_activations is not None
+                    and input_activations.num_bits == 8):
+                if input_activations.type == QuantizationType.FLOAT:
+                    quant_dtype = torch.float8_e4m3fn
+                elif input_activations.type == QuantizationType.INT:
+                    quant_dtype = torch.int8
+
         moe = MoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
@@ -781,6 +807,7 @@ class FusedMoE(torch.nn.Module):
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=vllm_config.model_config.dtype,
+            quant_dtype=quant_dtype,
             max_num_tokens=MOE_DP_CHUNK_SIZE,
         )
         self.moe_config = moe
@@ -822,12 +849,12 @@ class FusedMoE(torch.nn.Module):
         if self.moe_parallel_config.use_pplx_kernels:
             self.batched_hidden_states = torch.zeros(
                 (MOE_DP_CHUNK_SIZE, self.hidden_size),
-                dtype=moe.in_dtype,
+                dtype=vllm_config.model_config.dtype,
                 device=torch.cuda.current_device())
 
             self.batched_router_logits = torch.zeros(
                 (MOE_DP_CHUNK_SIZE, self.global_num_experts),
-                dtype=moe.in_dtype,
+                dtype=vllm_config.model_config.dtype,
                 device=torch.cuda.current_device())
 
     @property
