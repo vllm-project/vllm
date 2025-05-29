@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
+from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
@@ -140,6 +141,33 @@ def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
                           ref_out.to(torch.float32),
                           rtol=0.15)
     assert torch.allclose(scale, ref_scale)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,d,dtype,group_size,seed,column_major_scales",
+    itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS, [False, True]))
+@torch.inference_mode()
+def test_cuda_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed,
+                                        column_major_scales):
+    torch.manual_seed(seed)
+    x = torch.rand(num_tokens, d, dtype=dtype)
+
+    ref_out, ref_scale = native_per_token_group_quant_fp8(x, group_size)
+    triton_out, triton_scale = per_token_group_quant_fp8(
+        x, group_size, column_major_scales=column_major_scales)
+    out, scale = ops.per_token_group_quant_fp8(
+        x, group_size, column_major_scales=column_major_scales)
+
+    torch.testing.assert_close(out.to(torch.float32),
+                               ref_out.to(torch.float32),
+                               atol=0.01,
+                               rtol=0.01)
+
+    torch.testing.assert_close(out.to(torch.float32),
+                               triton_out.to(torch.float32),
+                               atol=0.01,
+                               rtol=0.01)
+    torch.testing.assert_close(scale, triton_scale)
 
 
 @pytest.mark.parametrize(

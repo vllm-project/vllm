@@ -10,13 +10,11 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
-template <typename scalar_t, bool is_column_major>
+template <typename scalar_t, typename fp8_t, bool is_column_major>
 __global__ void per_token_group_quant_fp8_kernel(
-    const scalar_t* __restrict__ input, FP8_TYPE* __restrict__ output_q,
+    const scalar_t* __restrict__ input, fp8_t* __restrict__ output_q,
     float* __restrict__ output_s, const int group_size,
     const int groups_per_row, const int y_s_stride) {
-  float const min_scaling_factor = 1.0f / (FP8_E4M3_MAX * 512.f);
-
   // Each block processes one group
   const int tid = threadIdx.x;
 
@@ -31,8 +29,7 @@ __global__ void per_token_group_quant_fp8_kernel(
   const int64_t input_offset =
       row * (groups_per_row * group_size) + row_group_id * group_size;
   scalar_t const* __restrict__ group_input = input + input_offset;
-  FP8_TYPE* __restrict__ group_output = output_q + input_offset;
-  // FP8_TYPE* __restrict__ group_output = output_q + group_idx * group_size;
+  fp8_t* __restrict__ group_output = output_q + input_offset;
 
   // Calculate scale output pointer based on layout
   float* scale_output;
@@ -55,28 +52,30 @@ __global__ void per_token_group_quant_fp8_kernel(
   } else {
     for (int i = tid; i < group_size; i += blockDim.x) {
       float const x = static_cast<float>(group_input[i]);
-      absmax_val = max(absmax_val, fabs(x));
+      absmax_val = fmaxf(absmax_val, fabsf(x));
     }
   }
 
-  using BlockReduce = cub::BlockReduce<float, 1024>;
+  using BlockReduce = cub::BlockReduce<float, 128>;
   __shared__ typename BlockReduce::TempStorage reduceStorage;
   float const block_absmax_val =
       BlockReduce(reduceStorage).Reduce(absmax_val, cub::Max{}, blockDim.x);
   __shared__ float group_scale;
   if (tid == 0) {
-    group_scale = max(block_absmax_val / FP8_E4M3_MAX, min_scaling_factor);
+    const float eps_val = 1e-10f;  // Epsilon value matching Triton
+    float effective_absmax = fmaxf(block_absmax_val, eps_val);
+    group_scale = effective_absmax / quant_type_max_v<fp8_t>;
     *scale_output = group_scale;
   }
   __syncthreads();
 
   // Quantize the data
   if (can_vectorize) {
-    vllm::scaled_fp8_conversion_vec<scalar_t, false>(
+    vllm::scaled_fp8_conversion_vec<scalar_t, false, fp8_t>(
         group_output, group_input, group_scale, group_size, tid, blockDim.x);
   } else {
     for (int i = tid; i < group_size; i += blockDim.x) {
-      group_output[i] = vllm::scaled_fp8_conversion<false>(
+      group_output[i] = vllm::scaled_fp8_conversion<false, fp8_t>(
           static_cast<float>(group_input[i]), group_scale);
     }
   }
@@ -96,7 +95,7 @@ void per_token_group_quant_fp8(torch::Tensor const& input,
   const int y_s_stride = column_major_scales ? output_s.stride(-1) : 1;
 
   // Launch parameters
-  const int block_size = std::min(1024, static_cast<int>(group_size));
+  const int block_size = std::min(128, static_cast<int>(group_size));
   dim3 grid(num_rows, groups_per_row);
   dim3 block(block_size);
 
@@ -105,21 +104,22 @@ void per_token_group_quant_fp8(torch::Tensor const& input,
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_fp8_kernel", [&] {
-        if (column_major_scales) {
-          per_token_group_quant_fp8_kernel<scalar_t, true>
-              <<<grid, block, 0, stream>>>(
-                  static_cast<scalar_t*>(input.data_ptr()),
-                  static_cast<FP8_TYPE*>(output_q.data_ptr()),
-                  static_cast<float*>(output_s.data_ptr()), group_size,
-                  groups_per_row, y_s_stride);
-        } else {
-          per_token_group_quant_fp8_kernel<scalar_t, false>
-              <<<grid, block, 0, stream>>>(
-                  static_cast<scalar_t*>(input.data_ptr()),
-                  static_cast<FP8_TYPE*>(output_q.data_ptr()),
-                  static_cast<float*>(output_s.data_ptr()), group_size,
-                  groups_per_row, y_s_stride);
-        }
-        return true;
+        VLLM_DISPATCH_FP8_TYPES(
+            output_q.scalar_type(), "per_token_group_quant_fp8_kernel_fp8_type",
+            [&] {
+              if (column_major_scales) {
+                per_token_group_quant_fp8_kernel<scalar_t, fp8_t, true>
+                    <<<grid, block, 0, stream>>>(
+                        input.data_ptr<scalar_t>(), output_q.data_ptr<fp8_t>(),
+                        output_s.data_ptr<float>(), group_size, groups_per_row,
+                        y_s_stride);
+              } else {
+                per_token_group_quant_fp8_kernel<scalar_t, fp8_t, false>
+                    <<<grid, block, 0, stream>>>(
+                        input.data_ptr<scalar_t>(), output_q.data_ptr<fp8_t>(),
+                        output_s.data_ptr<float>(), group_size, groups_per_row,
+                        y_s_stride);
+              }
+            });
       });
 }
