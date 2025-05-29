@@ -304,7 +304,7 @@ class ModelConfig:
     - 25.6k -> 25,600"""
     spec_target_max_model_len: Optional[int] = None
     """Specify the maximum length for spec decoding draft models."""
-    quantization: Optional[QuantizationMethods] = None
+    quantization: SkipValidation[Optional[QuantizationMethods]] = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
