@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import queue
 import threading
 import time
@@ -13,7 +14,7 @@ from typing import Any, Callable, Optional, Union
 import msgspec
 import zmq
 
-from vllm.config import KVEventsConfig
+from vllm.config import KVEventsConfig, ParallelConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -56,7 +57,7 @@ class AllBlocksCleared(KVCacheEvent):
 
 class KVEventBatch(EventBatch):
     events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
-    dp_name: Optional[str] = None
+    data_parallel_rank: Optional[int] = None
 
 
 class EventPublisher(ABC):
@@ -295,3 +296,93 @@ class EventPublisherFactory:
         except KeyError as exc:
             raise ValueError(f"Unknown event publisher '{kind}'") from exc
         return constructor(**config_dict)
+
+
+def _offset_endpoint_port(endpoint: str, data_parallel_rank: int) -> str:
+    """Helper function to offset the port in an endpoint by 
+        the data parallel rank.
+
+    Args:
+        endpoint: The endpoint string 
+            (e.g., "tcp://*:5557" or "inproc://cache")
+        data_parallel_rank: The data parallel rank to offset by
+
+    Returns:
+        The endpoint with the port offset by data_parallel_rank 
+            or suffix appended
+    """
+    if "inproc" in endpoint:
+        return f"{endpoint}_dp{data_parallel_rank}"
+    elif "tcp" in endpoint:
+        if endpoint and ":" in endpoint:
+            # Get everything after the last colon (the port)
+            last_colon_idx = endpoint.rfind(":")
+            base_addr = endpoint[:last_colon_idx]
+            base_port = int(endpoint[last_colon_idx + 1:])
+            new_port = base_port + data_parallel_rank
+            return f"{base_addr}:{new_port}"
+        return endpoint
+    else:
+        raise ValueError("Invalid endpoint: must contain 'inproc' or 'tcp'")
+
+
+def get_kv_event_publisher(
+        parallel_config: ParallelConfig,
+        kv_events_config: Optional[KVEventsConfig]) -> EventPublisher:
+    """Create a KV event publisher for data parallel masters only.
+
+    Only one publisher is created per data parallel group 
+    to avoid duplicate events. The endpoint port is offset by the 
+    data parallel rank to ensure unique publishers.
+
+    Args:
+        parallel_config: Parallel configuration containing rank information
+        kv_events_config: KV events configuration, 
+            if None returns NullEventPublisher
+
+    Returns:
+        EventPublisher instance 
+            (either configured publisher or NullEventPublisher)
+    """
+    # Check if KV events are enabled
+    if not kv_events_config or not kv_events_config.enable_kv_cache_events:
+        return NullEventPublisher()
+
+    # Create a KV event publisher only one for each dp group
+    data_parallel_rank = parallel_config.data_parallel_rank
+    data_parallel_size = parallel_config.data_parallel_size
+
+    # If data_parallel_rank <= 1, no need to offset ports
+    if data_parallel_size <= 1:
+        return EventPublisherFactory.create(kv_events_config)
+
+    # Create a modified config with port offsetting
+    modified_config = copy.deepcopy(kv_events_config)
+
+    # Apply port offsetting to the endpoint
+    original_endpoint = modified_config.endpoint
+    modified_config.endpoint = _offset_endpoint_port(original_endpoint,
+                                                     data_parallel_rank)
+    if original_endpoint != modified_config.endpoint:
+        logger.info(
+            "KV event publisher endpoint adjusted from %s to %s for DP rank %d",
+            original_endpoint,
+            modified_config.endpoint,
+            data_parallel_rank,
+        )
+
+    # Apply port offsetting to the replay_endpoint if it exists
+    if modified_config.replay_endpoint:
+        original_replay_endpoint = modified_config.replay_endpoint
+        modified_config.replay_endpoint = _offset_endpoint_port(
+            original_replay_endpoint, data_parallel_rank)
+        if original_replay_endpoint != modified_config.replay_endpoint:
+            logger.info(
+                ("KV event publisher replay_endpoint "
+                 "adjusted from %s to %s for DP rank %d"),
+                original_replay_endpoint,
+                modified_config.replay_endpoint,
+                data_parallel_rank,
+            )
+
+    return EventPublisherFactory.create(modified_config)

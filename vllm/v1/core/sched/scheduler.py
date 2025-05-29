@@ -8,12 +8,12 @@ from collections.abc import Iterable
 from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_events import (KVEventBatch, ZmqEventPublisher,
+                                        get_kv_event_publisher)
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
-from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -78,9 +78,6 @@ class Scheduler(SchedulerInterface):
         if self.vllm_config.kv_transfer_config is not None:
             self.connector = KVConnectorFactory.create_connector_v1(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
-
-        self.kv_event_publisher = EventPublisherFactory.create(
-            self.kv_events_config)
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -150,8 +147,11 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
 
-        self.is_dp_master = get_dp_group().is_first_rank
-        self.dp_name = get_dp_group().unique_name
+        # create a KV event publisher only one for each dp group
+        self.data_parallel_rank = \
+            self.vllm_config.parallel_config.data_parallel_rank
+        self.kv_event_publisher = get_kv_event_publisher(
+            vllm_config.parallel_config, self.kv_events_config)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -563,10 +563,10 @@ class Scheduler(SchedulerInterface):
         # Clear events even if not publishing to avoid memory buildup
         events = self.kv_cache_manager.take_events()
         # Only collect and publish KV events if this is the DP master
-        if self.is_dp_master and events:
-            batch = KVEventBatch(
-                ts=time.time(), events=events, dp_name=self.dp_name
-            )
+        if isinstance(self.kv_event_publisher, ZmqEventPublisher) and events:
+            batch = KVEventBatch(ts=time.time(),
+                                 events=events,
+                                 data_parallel_rank=self.data_parallel_rank)
             self.kv_event_publisher.publish(batch)
 
         # Advance the number of computed tokens for the request AFTER
