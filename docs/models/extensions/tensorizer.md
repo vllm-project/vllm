@@ -17,8 +17,35 @@ To load a model using Tensorizer, it first needs to be serialized by Tensorizer.
 The example script in [examples/others/tensorize_vllm_model.py](https://github.com/vllm-project/vllm/blob/main/examples/others/tensorize_vllm_model.py)
 takes care of this process.
 
-Let's walk through a basic example by serializing `facebook/opt-125m` using the
-script, and then loading it for inference.
+The core frontend object of note integrating Tensorizer is 
+`TensorizerConfig`, defined [here](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/model_loader/tensorizer.py#L135-L214)
+It's a config object holding important state and passed to any serialization 
+or deserialization operation. When loading with Tensorizer using the vLLM 
+library rather than through a model-serving entrypoint, it gets passed to 
+the `LLM` entrypoint class directly. Here's an example of loading a model
+saved at `"s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors"`.
+
+```python
+from vllm import LLM
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+
+path_to_tensors = "s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors"
+
+model_ref = "facebook/opt-125m"
+tensorizer_config = TensorizerConfig(
+        tensorizer_uri=path_to_tensors,
+    )
+
+llm = LLM(
+    model_ref,
+    load_format="tensorizer",
+    model_loader_extra_config=tensorizer_config,
+)
+```
+
+But that code won't work unless you actually have your serialized model 
+tensors `model.tensors`, so let's walk through a basic example of serializing 
+`facebook/opt-125m` using the example script, and then loading it for inference.
 
 ## Saving a vLLM model with Tensorizer
 To save a model with Tensorizer, call the example script with the necessary
