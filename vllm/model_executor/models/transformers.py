@@ -464,8 +464,8 @@ class TransformersModel(nn.Module):
         # Attention layers
         self.attention_instances = self.create_attention_instances()
 
-        # Move meta tensors to device (should happen last)
-        self.meta_to_empty(self.model)
+        # Initialize any parameters that have not had their modules replaced
+        self.init_parameters(self.model)
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(["hidden_states"],
@@ -584,15 +584,24 @@ class TransformersModel(nn.Module):
                 prefix=f"{i}.attn")
         return attention_instances
 
-    def meta_to_empty(self, module: nn.Module):
-        for name, param in module.named_parameters(recurse=False): 
+    def init_parameters(self, module: nn.Module):
+        """
+        If a `parameter` is on the `meta` device, then its parent
+        `module` is the original module created by:
+
+        ```python
+        with torch.device("meta"):
+            self.model: PreTrainedModel = AutoModel.from_config(...)
+        ```
+        """
+        for name, param in module.named_parameters(recurse=False):
             if param.device == torch.device("meta"):
-                new_param = torch.empty_like(param,
-                                             device=self.device_config.device)
-                new_param = type(param)(new_param)
-                module._parameters[name] = new_param
+                new_param = nn.Parameter(
+                    torch.empty_like(param.data,
+                                     device=self.device_config.device))
+                setattr(module, name, new_param)
         for child in module.children():
-            self.meta_to_empty(child)
+            self.init_parameters(child)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.model.get_input_embeddings()
