@@ -99,7 +99,6 @@ def prepare_mamba2_metadata(
             num_prefills, dtype=torch.int32, device=query_start_loc.device),
                                           query_start_loc.diff(),
                                           output_size=num_prefill_tokens)
-        seq_idx.unsqueeze_(0)
 
         # We compute metadata for chunked prefill once at the top level model
         # forward and reuse them in mamba layers. If not needed, they will be
