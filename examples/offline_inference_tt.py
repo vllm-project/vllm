@@ -246,7 +246,7 @@ def run_inference_perf(
     prompts,
     sampling_params,
     N_warmup=1,
-    N_inference=4,
+    N_inference=3,
 ):
     for i in tqdm(range(N_inference), desc="Inference runs"):
         if i == N_warmup:
@@ -261,7 +261,7 @@ async def run_inference_perf_async(
     prompts,
     sampling_params,
     N_warmup=1,
-    N_inference=4,
+    N_inference=3,
 ):
     for i in tqdm(range(N_inference), desc="Inference runs"):
         if i == N_warmup:

@@ -1168,7 +1168,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            if not seq_group.is_prefill():
+            if not seq_group.is_prefill() and is_last_step:
+                # set time after all steps since _get_stats sets actual_num_batched_tokens based on num steps
                 seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
@@ -1218,7 +1219,8 @@ class LLMEngine:
 
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            if not seq_group.is_prefill():
+            if not seq_group.is_prefill() and is_last_step:
+                # set time after all steps since _get_stats sets actual_num_batched_tokens based on num steps
                 seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
@@ -1805,6 +1807,9 @@ class LLMEngine:
                 else:
                     # TPOTs.
                     latency = seq_group.get_last_token_latency()
+                    # last_token_time is set only for the last step so take avg
+                    num_outputs = scheduler_outputs.num_lookahead_slots + 1
+                    latency /= num_outputs
                     time_per_output_tokens_iter.append(latency)
                     if seq_group.state.current_step == 0:
                         # For async_output_proc, the do_log_stats()
