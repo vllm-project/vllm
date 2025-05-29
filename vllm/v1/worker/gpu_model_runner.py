@@ -1117,6 +1117,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for k, v in self.intermediate_tensors.items()
         })
 
+    def eplb_step(self) -> None:
+        """
+        Step for the EPLB (Expert Parallelism Load Balancing) state.
+        """
+        if not self.parallel_config.enable_eplb:
+            return
+
+        assert is_mixture_of_experts(self.model)
+        avg_tokens, max_tokens, balancedness = \
+            self.eplb_state.step(self.model)
+
+        if get_ep_group().is_first_rank:
+            logger.debug(
+                "Model step: avg_tokens=%.2f, max_tokens=%d, "
+                "balancedness=%.4f", avg_tokens, max_tokens, balancedness)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1441,16 +1457,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
 
-        # EPLB step
-        if self.parallel_config.enable_eplb:
-            assert is_mixture_of_experts(self.model)
-            avg_tokens, max_tokens, balancedness = \
-                self.eplb_state.step(self.model)
-
-            if get_ep_group().is_first_rank:
-                logger.debug(
-                    "Model step: avg_tokens=%.2f, max_tokens=%d, "
-                    "balancedness=%.4f", avg_tokens, max_tokens, balancedness)
+        self.eplb_step()
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1774,6 +1781,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
                 self.drafter.dummy_run(num_tokens)
+
+        # This is necessary to avoid blocking DP
+        self.eplb_step()
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]
