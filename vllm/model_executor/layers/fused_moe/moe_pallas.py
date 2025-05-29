@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn.functional as F
+import torch_xla.experimental.custom_kernel  # noqa: F401
 
 
 def _histogram(input: torch.Tensor, min: int, max: int) -> torch.Tensor:
