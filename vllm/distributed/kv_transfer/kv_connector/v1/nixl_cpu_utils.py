@@ -555,6 +555,9 @@ class NixlCPUSender:
                          destination_spec)
 
     def close(self) -> None:
+        if not hasattr(self, "_nixl_wrapper"):
+            return
+
         if self._reg_dlist is not None:
             self._nixl_wrapper.deregister_memory(self._reg_dlist)
         for agent in self._remote_agents.values():
@@ -778,8 +781,9 @@ class NixlCPUReceiver:
             "Watermark information before closing: (low: %d, high: %d)",
             self._allocator.low_watermark, self._allocator.high_watermark)
         self.stop_handshake_listener()
-        self._nixl_wrapper.deregister_memory(self._reg_dlist)
-        del self._nixl_wrapper
+        if hasattr(self, "_nixl_wrapper"):
+            self._nixl_wrapper.deregister_memory(self._reg_dlist)
+            del self._nixl_wrapper
 
 
 @contextlib.contextmanager

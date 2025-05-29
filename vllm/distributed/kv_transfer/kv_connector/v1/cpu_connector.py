@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
+import nvtx
 import torch
 from lmcache.utils import _lmcache_nvtx_annotate
 
@@ -640,6 +641,7 @@ class CPUConnector(KVConnectorBase_V1):
 
         self._kv_page_shape = kv_caches[list(kv_caches.keys())[0]].shape[2:]
 
+    @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         """
@@ -678,6 +680,9 @@ class CPUConnector(KVConnectorBase_V1):
 
         # Vars needed:
         #   decode_meta.prefill_req_id
+        if len(ready_decode_metas) == 0:
+            return
+
         for layer_id in range(len(self._gpu_kv_caches)):
             for decode_meta, total_expected in zip(ready_decode_metas,
                                                    total_expected_tokens):
@@ -694,28 +699,22 @@ class CPUConnector(KVConnectorBase_V1):
                     block_ids = decode_meta.block_ids
 
                     with torch.cuda.stream(self._cuda_stream):
+                        rng = nvtx.start_range("h2d_page_copy")
                         h2d_page_copy(src_buffer, dst_layer, block_ids, start,
                                       stop, self._block_size)
+                        nvtx.end_range(rng)
 
             # Record the cuda event for this layer
             event = torch.cuda.Event()
             event.record(self._cuda_stream)
             self._decoder_cuda_events[layer_id] = event
 
-        #for decode_meta in meta.decode_meta:
-        #    self._connect_request_ids(decode_meta.prefill_req_id,
-        #                              decode_meta.req_id)
-        #    if not decode_meta.is_ready:
-        #        continue
+        # TODO (ApostaC): Potential optimizations
+        # 1. coalesce the h2d page copy to a single call
+        # 2. Don't launch all the layers, but just first 2 layers
+        # 2.1 launch the rest of the layers during the `wait_for_layer_load`
 
-        #    total_expected_tokens = len(decode_meta.block_ids) * \
-        #            self._block_size
-
-        #    self._inflight_h2d_requests.add(decode_meta.prefill_req_id)
-        #event = torch.cuda.Event()
-        #event.record(self._cuda_stream)
-        #self._decoder_cuda_events[
-
+    @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
         Block until the KV for a specific layer is loaded into vLLM's
@@ -732,8 +731,9 @@ class CPUConnector(KVConnectorBase_V1):
             return
 
         layer_id = self._get_layer_id(layer_name)
-        event = self._decoder_cuda_events.pop(layer_id)
-        event.synchronize()
+        event = self._decoder_cuda_events.pop(layer_id, None)
+        if event is not None:
+            event.synchronize()
 
         if layer_id == len(self._gpu_kv_caches) - 1:
             # Free the memory for the whole request
@@ -800,9 +800,11 @@ class CPUConnector(KVConnectorBase_V1):
             self._cuda_stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self._cuda_stream):
                 # Copy the data from the GPU to the CPU buffer page by page
+                rng = nvtx.start_range("d2h_page_copy")
                 d2h_page_copy(src_layer=kv_layer,
                               dst_buffer=buffer,
                               block_ids=prefill_req.blocks_to_save)
+                nvtx.end_range(rng)
 
             # record the cuda stream
             task.cuda_event = torch.cuda.Event()
