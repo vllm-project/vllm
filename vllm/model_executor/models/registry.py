@@ -459,7 +459,8 @@ class _ModelRegistry:
         if len(normalized_arch) != len(architectures):
             # The order matters. If causal comes first, checks on MM model fails because it is not registered in MultimodalRegistry
             # TODO: needs help from vLLM team
-            normalized_arch.extend(["TransformersForMultimodalLM", "TransformersForCausalLM"])
+            normalized_arch.extend(
+                ["TransformersForMultimodalLM", "TransformersForCausalLM"])
         return normalized_arch
 
     def inspect_model_cls(

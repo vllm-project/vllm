@@ -14,11 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Wrapper around `transformers` models"""
-import re
-from itertools import chain
 from collections.abc import Iterable
 from contextlib import contextmanager, nullcontext
-from typing import Iterable, Literal, Optional, Union
+from typing import Literal, Optional, Union
 
 import regex as re
 import torch
@@ -42,15 +40,18 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalInputs,
+                                    PlaceholderRange)
+from vllm.multimodal.parse import ImageProcessorItems
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo)
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_get_processor
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry, MultiModalKwargs
-from vllm.multimodal.processing import BaseMultiModalProcessor, BaseProcessingInfo
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalInputs, PlaceholderRange
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize
 
-from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant, SupportsMultiModal
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsQuant)
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, maybe_prefix)
@@ -124,7 +125,7 @@ def replace_linear_class(
 def init_on_device_without_buffers(device: torch.device):
     """
     A context manager under which models are initialized with all parameters on the specified device.
-    However buffers are not initalized on specified device.
+    However buffers are not initialized on specified device.
 
     Args:
         device (`torch.device`):
@@ -139,28 +140,35 @@ def init_on_device_without_buffers(device: torch.device):
             param_cls = type(module._parameters[name])
             kwargs = module._parameters[name].__dict__
             kwargs["requires_grad"] = param.requires_grad
-            module._parameters[name] = param_cls(module._parameters[name].to(device), **kwargs)
+            module._parameters[name] = param_cls(
+                module._parameters[name].to(device), **kwargs)
 
     tensor_constructors_to_patch = {}
 
     def patch_tensor_constructor(fn):
+
         def wrapper(*args, **kwargs):
             kwargs["device"] = device
             return fn(*args, **kwargs)
+
         return wrapper
 
     try:
         nn.Module.register_parameter = register_empty_parameter
-        for torch_function_name in tensor_constructors_to_patch.keys():
-            setattr(torch, torch_function_name, patch_tensor_constructor(getattr(torch, torch_function_name)))
+        for torch_function_name in tensor_constructors_to_patch:
+            setattr(
+                torch, torch_function_name,
+                patch_tensor_constructor(getattr(torch, torch_function_name)))
         yield
     finally:
         nn.Module.register_parameter = old_register_parameter
-        for torch_function_name, old_torch_function in tensor_constructors_to_patch.items():
+        for torch_function_name, old_torch_function in tensor_constructors_to_patch.items(
+        ):
             setattr(torch, torch_function_name, old_torch_function)
 
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
+
     def get_hf_config(self):
         return self.ctx.model_config.hf_config
 
@@ -174,7 +182,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         width, height = self.get_max_image_size()
         processor = self.get_hf_processor()
         mm_processor_kwargs = self.ctx.model_config.mm_processor_kwargs or {}
-        mm_tokens = processor._get_num_multimodal_tokens(image_sizes=([height, width],), **mm_processor_kwargs)
+        mm_tokens = processor._get_num_multimodal_tokens(
+            image_sizes=([height, width], ), **mm_processor_kwargs)
         image_tokens = mm_tokens["num_image_tokens"][0]
         return image_tokens
 
@@ -183,10 +192,11 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return processor
 
     def get_max_image_size(self):
-        return 10_000, 10_000 # hardcode for arbitrary very large size
+        return 10_000, 10_000  # hardcode for arbitrary very large size
 
 
 class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
+
     def get_dummy_processor_inputs(
         self,
         seq_len,
@@ -196,20 +206,19 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
 
         processor = self.info.get_hf_processor()
         if "gemma3" in processor.__class__.__name__.lower():
-            image_token = getattr(processor, "boi_token")
+            image_token = processor.boi_token
         else:
             image_token = getattr(processor, "image_token", "")
         target_width, target_height = self.info.get_max_image_size()
 
         mm_data = {
-            "image": self._get_dummy_images(
-                width=target_width,
-                height=target_height,
-                num_images=1
-            ),
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=1),
         }
 
-        prompt_text = image_token*num_images
+        prompt_text = image_token * num_images
         return ProcessorInputs(
             prompt_text=prompt_text,
             mm_data=mm_data,
@@ -217,6 +226,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
 
 
 class MultiModalProcessor(BaseMultiModalProcessor):
+
     def _get_prompt_updates(
         self,
         mm_items,
@@ -244,9 +254,16 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs,
         num_image_patches: torch.Tensor = None,
     ):
-        hf_inputs.pop("attention_mask", None) # processors always return a mask but vLLM doesn't need it
-        mm_fields = {key: MultiModalFieldConfig.flat_from_sizes("image", num_image_patches) for key in hf_inputs.keys()}
-        mm_fields["image_embeds"] = MultiModalFieldConfig.flat_from_sizes("image", num_image_patches)
+        hf_inputs.pop(
+            "attention_mask",
+            None)  # processors always return a mask but vLLM doesn't need it
+        mm_fields = {
+            key: MultiModalFieldConfig.flat_from_sizes("image",
+                                                       num_image_patches)
+            for key in hf_inputs.keys()
+        }
+        mm_fields["image_embeds"] = MultiModalFieldConfig.flat_from_sizes(
+            "image", num_image_patches)
         mm_fields["num_image_patches"] = MultiModalFieldConfig.batched("image")
         return mm_fields
 
@@ -273,7 +290,10 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         processed_data.update(passthrough_data)
 
         prompt_ids, = processed_data.pop("input_ids").tolist()
-        mm_token_type_ids = processed_data.pop("mm_token_type_ids") if "mm_token_type_ids" in processed_data else processed_data.pop("token_type_ids") # for gemma3 only
+        mm_token_type_ids = processed_data.pop(
+            "mm_token_type_ids"
+        ) if "mm_token_type_ids" in processed_data else processed_data.pop(
+            "token_type_ids")  # for gemma3 only
 
         return prompt_ids, processed_data, mm_token_type_ids
 
@@ -282,7 +302,7 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         prompt,
         mm_data,
         hf_processor_mm_kwargs,
-        return_mm_hashes = False,
+        return_mm_hashes=False,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -293,8 +313,7 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         if return_mm_hashes:
             raise ValueError(
                 "TransformersMultimodalLM doesn't support mm hashing yet! Probably you did not set "
-                "`disable_mm_preprocessor_cache=True`."
-            )
+                "`disable_mm_preprocessor_cache=True`.")
 
         mm_items = self._to_mm_items(mm_data)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
@@ -316,7 +335,8 @@ class MultiModalProcessor(BaseMultiModalProcessor):
             image_size = images.get_image_size(item_idx)
             image_sizes.append((image_size.height, image_size.width))
 
-        mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(image_sizes=image_sizes, **mm_processor_kwargs)
+        mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(
+            image_sizes=image_sizes, **mm_processor_kwargs)
 
         mm_placeholders = {}
         split_sizes = mm_tokens_per_modality["num_image_tokens"]
@@ -325,16 +345,23 @@ class MultiModalProcessor(BaseMultiModalProcessor):
             mm_tokens = torch.tensor(prompt_ids)[mm_token_type_ids[0].bool()]
             chunked_mm_tokens = torch.split(mm_tokens, split_sizes)
             ranges = [
-                PlaceholderRange(offset=positions[0].item(), length=positions.shape[0], is_embed=(mm_tokens == hf_processor.image_token_id).bool())
-                for positions, mm_tokens in zip(chunked_mm_positions, chunked_mm_tokens)
+                PlaceholderRange(
+                    offset=positions[0].item(),
+                    length=positions.shape[0],
+                    is_embed=(mm_tokens == hf_processor.image_token_id).bool())
+                for positions, mm_tokens in zip(chunked_mm_positions,
+                                                chunked_mm_tokens)
             ]
             mm_placeholders = {"image": ranges}
 
-        num_image_patches = torch.tensor(mm_tokens_per_modality["num_image_patches"]) if "num_image_patches" in mm_tokens_per_modality else None
+        num_image_patches = torch.tensor(
+            mm_tokens_per_modality["num_image_patches"]
+        ) if "num_image_patches" in mm_tokens_per_modality else None
         processed_data['num_image_patches'] = num_image_patches
         mm_kwargs = MultiModalKwargs.from_hf_inputs(
             processed_data,
-            self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs, num_image_patches),
+            self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
+                                       num_image_patches),
         )
 
         return MultiModalInputs(
@@ -345,6 +372,7 @@ class MultiModalProcessor(BaseMultiModalProcessor):
             mm_hashes=None,
             mm_placeholders=mm_placeholders,
         )
+
 
 class ConfigOverride:
     """Context manager to temporarily override config attributes."""
@@ -415,7 +443,10 @@ class TransformersModel(nn.Module):
             # weights mapper to rename weights.
             self.model: PreTrainedModel = AutoModel.from_config(
                 config,
-                attn_implementation={"text_config": "vllm", "vision_config": "eager"},
+                attn_implementation={
+                    "text_config": "vllm",
+                    "vision_config": "eager"
+                },
                 torch_dtype=model_config.dtype,
                 trust_remote_code=model_config.trust_remote_code,
             )
@@ -473,14 +504,15 @@ class TransformersModel(nn.Module):
 
         # Layers before module list
         for name in pp_plan[:module_list_idx]:
-            if self.pp_group.is_first_rank or (self.text_config.tie_word_embeddings
-                                               and self.pp_group.is_last_rank):
+            if self.pp_group.is_first_rank or (
+                    self.text_config.tie_word_embeddings
+                    and self.pp_group.is_last_rank):
                 continue
             setattr(self.model, name, PPMissingLayer())
 
         # Module list
-        start_layer, end_layer = get_pp_indices(self.text_config.num_hidden_layers,
-                                                self.pp_rank, self.pp_size)
+        start_layer, end_layer = get_pp_indices(
+            self.text_config.num_hidden_layers, self.pp_rank, self.pp_size)
         layers_name = pp_plan[module_list_idx]
         layers = getattr(self.model, layers_name)
         for i in range(len(layers)):
@@ -559,7 +591,8 @@ class TransformersModel(nn.Module):
     def meta_to_empty(self, module: nn.Module):
         for name, param in module.named_parameters(recurse=False):
             if param.device == torch.device("meta"):
-                new_param = torch.empty_like(param, device=self.device_config.device)
+                new_param = torch.empty_like(param,
+                                             device=self.device_config.device)
                 new_param = type(param)(new_param)
                 module._parameters[name] = new_param
         for child in module.children():
@@ -629,7 +662,8 @@ class TransformersModel(nn.Module):
 class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
                               SupportsPP):
     embedding_padding_modules = ["lm_head"]
-    embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
+    embedding_modules = ["embed_tokens"
+                         ]  # TODO transformers will have a util to get it
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -706,11 +740,12 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-@MULTIMODAL_REGISTRY.register_processor(MultiModalProcessor,
-                                        info=MultiModalProcessingInfo,
-                                        dummy_inputs=MultiModalDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    MultiModalProcessor,
+    info=MultiModalProcessingInfo,
+    dummy_inputs=MultiModalDummyInputsBuilder)
 class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
-                              SupportsPP, SupportsMultiModal):
+                                  SupportsPP, SupportsMultiModal):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"]
 
@@ -766,9 +801,7 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
             prefix_mapper["model"] = "model.language_model"
             prefix_mapper["visual"] = "model.visual"
 
-        return WeightsMapper(
-            orig_to_new_prefix=prefix_mapper,
-        )
+        return WeightsMapper(orig_to_new_prefix=prefix_mapper, )
 
     def forward(
         self,
@@ -794,14 +827,16 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.get_text_config().tie_word_embeddings else None),
+            skip_prefixes=([
+                "lm_head."
+            ] if self.config.get_text_config().tie_word_embeddings else None),
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_multimodal_embeddings(self, **kwargs):
         pixel_values = kwargs.pop("pixel_values", None)
-        pixel_values = pixel_values if pixel_values is not None else kwargs.pop("image_patches", None)
+        pixel_values = pixel_values if pixel_values is not None else kwargs.pop(
+            "image_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
         num_image_patches = kwargs.pop("num_image_patches")
 
@@ -819,9 +854,12 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
                 num_image_patches = torch.cat(num_image_patches).flatten()
 
             vision_embeddings = self.model.model.get_image_features(
-                pixel_values, 
-                **{k: v.flatten(0, 1) for k, v in kwargs.items()},
-            )   
+                pixel_values,
+                **{
+                    k: v.flatten(0, 1)
+                    for k, v in kwargs.items()
+                },
+            )
 
             if isinstance(vision_embeddings, torch.Tensor):
                 if vision_embeddings.ndim == 2:
@@ -830,8 +868,12 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
                 # Embeddings have to be 2D tensors of length `num_images` but transformers
                 # returns concat tensors if each patch is of different size. We split it back
                 # to make vLLM assertions happy
-                vision_embeddings = torch.split(vision_embeddings, num_image_patches.tolist())
-                vision_embeddings = [embed.flatten(start_dim=0, end_dim=-2) for embed in vision_embeddings]
+                vision_embeddings = torch.split(vision_embeddings,
+                                                num_image_patches.tolist())
+                vision_embeddings = [
+                    embed.flatten(start_dim=0, end_dim=-2)
+                    for embed in vision_embeddings
+                ]
 
             return vision_embeddings
 
@@ -841,7 +883,7 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings = None,
+        multimodal_embeddings=None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.model.get_input_embeddings()(input_ids)
         if multimodal_embeddings is not None:
@@ -849,5 +891,6 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
             mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
             multimodal_embeddings = torch.cat(multimodal_embeddings)
 
-            inputs_embeds = inputs_embeds.masked_scatter(mask, multimodal_embeddings)
+            inputs_embeds = inputs_embeds.masked_scatter(
+                mask, multimodal_embeddings)
         return inputs_embeds
