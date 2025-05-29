@@ -441,6 +441,8 @@ def test_serialize_and_serve_entrypoints(tmp_path):
         print("STDERR:\n", e.stderr)
         raise
 
+    print("Serializing STDOUT:\n", result.stdout)
+
     # Next, try to serve with vllm serve
     model_uri = tmp_path / "vllm" / model_ref / suffix / "model.tensors"
 
@@ -469,3 +471,5 @@ def test_serialize_and_serve_entrypoints(tmp_path):
         print("STDOUT:\n", e.stdout)
         print("STDERR:\n", e.stderr)
         raise
+
+    print("vLLM Serving STDOUT:\n", result.stdout)
