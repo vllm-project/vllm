@@ -299,6 +299,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
 
+    # Use separate prefill and decode kernels for V1 attention instead of
+    # the unified triton kernel.
+    "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+     ("true", "1")),
+
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
     # when using the flash-attention backend.
     "VLLM_FLASH_ATTN_VERSION":
@@ -319,13 +326,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_ROCM_FP8_FLASH_ATTN":
     lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
              ("true", "1")),
-
-    # Use separate prefill and decode kernels for V1 attention instead of
-    # the unified triton kernel.
-    "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
-    lambda:
-    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
-     ("true", "1")),
 
     # Internal flag to enable/disable Inductor standalone compile
     "VLLM_TEST_STANDALONE_COMPILE":
