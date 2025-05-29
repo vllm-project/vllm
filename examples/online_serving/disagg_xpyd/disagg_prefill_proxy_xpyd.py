@@ -105,16 +105,12 @@ async def handle_request():
         global prefill_instances
         global prefill_cv
         with prefill_cv:
-            # prefill_addr, prefill_zmq_addr = random.choice(
-            #     list(prefill_instances.items()))
             prefill_list = list(prefill_instances.items())
             prefill_addr, prefill_zmq_addr = prefill_list[count % len(prefill_list)]
 
         global decode_instances
         global decode_cv
         with decode_cv:
-            # decode_addr, decode_zmq_addr = random.choice(
-            #     list(decode_instances.items()))
             decode_list = list(decode_instances.items())
             decode_addr, decode_zmq_addr = decode_list[count % len(decode_list)]
 

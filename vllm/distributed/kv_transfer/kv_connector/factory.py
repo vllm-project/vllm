@@ -85,7 +85,6 @@ class KVConnectorFactory:
 # Register various connectors here.
 # The registration should not be done in each individual file, as we want to
 # only load the files corresponding to the current connector.
-
 KVConnectorFactory.register_connector(
     "PyNcclConnector",
     "vllm.distributed.kv_transfer.kv_connector.simple_connector",
