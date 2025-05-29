@@ -7,8 +7,6 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm import _custom_ops as ops
-
 
 @dataclass
 class MemoryBlock:
@@ -132,7 +130,8 @@ class TensorMemoryPool:
             buffer = (ctypes.c_byte * block.size).from_address(block.addr)
             cpu_tensor = torch.frombuffer(buffer,
                                           dtype=tensor.dtype,
-                                          count=tensor.numel()).reshape(tensor.shape)
+                                          count=tensor.numel()).reshape(
+                                              tensor.shape)
         except ValueError as err:
             self.free(addr)
             raise MemoryError(f"Failed to create tensor view: {err}") from err
@@ -155,8 +154,7 @@ class TensorMemoryPool:
             raise ValueError("Requested tensor size exceeds block size")
 
         buffer = (ctypes.c_byte * block.size).from_address(block.addr)
-        cpu_tensor = torch.frombuffer(buffer,
-                                      dtype=dtype,
+        cpu_tensor = torch.frombuffer(buffer, dtype=dtype,
                                       count=num_elements).reshape(shape)
 
         cuda_tensor = torch.empty(shape, dtype=dtype, device=device)
