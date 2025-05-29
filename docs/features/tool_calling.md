@@ -239,6 +239,7 @@ Flags: `--tool-call-parser hermes`
 
 Supported models:
 * `deepseek-ai/DeepSeek-V3-0324`
+* `deepseek-ai/DeepSeek-R1-0528`
 
 Flags: `--tool-call-parser deepseek_v3 --chat-template examples/tool_chat_template_deepseekv3.jinja`
 
