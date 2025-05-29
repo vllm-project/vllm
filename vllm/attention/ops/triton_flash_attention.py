@@ -22,11 +22,10 @@ Not currently supported:
 """
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.platforms import current_platform
-from vllm.utils import is_navi
+from vllm.platforms.rocm import on_gfx1x
+from vllm.triton_utils import tl, triton
 
 torch_dtype: tl.constexpr = torch.float16
 
@@ -384,7 +383,7 @@ def get_rdna_autotune_configs():
 
 
 def get_autotune_configs():
-    if is_navi():
+    if on_gfx1x():
         return get_rdna_autotune_configs()
     else:
         return get_cdna_autotune_configs()
@@ -832,7 +831,7 @@ class _attention(torch.autograd.Function):
         sm_scale=1.0,
         bias=None,
         fp8_scales=None,
-        o_scale_ptr=None,
+        fp8_out_scale=None,
     ):
         if fp8_scales is not None:
             use_fp8 = True
@@ -918,11 +917,11 @@ class _attention(torch.autograd.Function):
             bias_strides = (0, 0, 0, 0)
 
         p_descale = 1.0 / p_scale
-        o_descale = 1.0 / o_scale_ptr.item(
-        ) if o_scale_ptr is not None else 1.0
+        o_descale = 1.0 / fp8_out_scale.item(
+        ) if fp8_out_scale is not None else 1.0
 
-        arg_max_seqlens_q = 0 if is_navi() else max_seqlens_q
-        arg_max_seqlens_k = 0 if is_navi() else max_seqlens_k
+        arg_max_seqlens_q = 0 if on_gfx1x() else max_seqlens_q
+        arg_max_seqlens_k = 0 if on_gfx1x() else max_seqlens_k
 
         attn_fwd[grid](
             q,
@@ -961,7 +960,7 @@ class _attention(torch.autograd.Function):
             ENABLE_DROPOUT=False,
             RETURN_ENCODED_SOFTMAX=False,
             USE_FP8=use_fp8,
-            USE_FP8_OUT=o_scale_ptr is not None,
+            USE_FP8_OUT=fp8_out_scale is not None,
         )
 
         ctx.grid = grid

@@ -49,9 +49,8 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                         POOLING_MODEL_MAX_NUM_BATCHED_TOKENS, GiB_bytes,
                         LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, get_open_port, is_mi250, is_navi,
-                        is_torch_equal_or_newer, random_uuid,
-                        resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, is_torch_equal_or_newer,
+                        random_uuid, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -1906,17 +1905,12 @@ class ParallelConfig:
 
         self._verify_args()
 
-        if is_mi250() and self.tensor_parallel_size > 1:
+        from vllm.platforms.rocm import on_gfx1x
+        if on_gfx1x() and self.tensor_parallel_size > 1:
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
-                "working correctly on multi AMD MI250.")
-
-        if is_navi() and self.tensor_parallel_size <= 2:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "working correctly when using two AMD Navi GPUs.")
+                "working correctly on multiple AMD Radeon GPUs.")
 
     @property
     def use_ray(self) -> bool:
@@ -1927,6 +1921,7 @@ class ParallelConfig:
     def _verify_args(self) -> None:
         # Lazy import to avoid circular import
         from vllm.executor.executor_base import ExecutorBase
+        from vllm.platforms import current_platform
         if self.distributed_executor_backend not in (
                 "ray", "mp", "uni",
                 "external_launcher", None) and not (isinstance(

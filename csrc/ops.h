@@ -38,7 +38,7 @@ void paged_attention_v1(
     torch::Tensor& v_scale, const int64_t tp_rank,
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step, const int64_t num_threads);
+    const int64_t blocksparse_head_sliding_step);
 
 void paged_attention_v2(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
@@ -50,7 +50,7 @@ void paged_attention_v2(
     torch::Tensor& v_scale, const int64_t tp_rank,
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step, const int64_t num_threads);
+    const int64_t blocksparse_head_sliding_step);
 
 #ifndef USE_ROCM
 void merge_attn_states(torch::Tensor& output,

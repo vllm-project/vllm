@@ -479,16 +479,6 @@ class PyObjectCache:
 
 
 @cache
-def is_mi250() -> bool:
-    from vllm.platforms import current_platform
-    if not current_platform.is_rocm() or not torch.cuda.is_available():
-        return False
-    archName = torch.cuda.get_device_properties('cuda').gcnArchName
-    return (archName is not None) and \
-        ("gfx90a" in archName)
-
-
-@cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
@@ -1862,17 +1852,6 @@ def weak_ref_tensor(tensor: Any) -> Any:
         return torch.ops._C.weak_ref_tensor(tensor)
     else:
         return tensor
-
-
-@cache
-def is_navi() -> bool:
-    from vllm.platforms import current_platform
-    if not current_platform.is_rocm() or not torch.cuda.is_available():
-        return False
-    # All (visible) GPUs must be of the same type,
-    # otherwise FP8 results can't be guaranteed.
-    archName = torch.cuda.get_device_properties('cuda').gcnArchName
-    return archName is not None and "gfx1" in archName
 
 
 @cache
