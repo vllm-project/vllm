@@ -45,8 +45,7 @@ from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
-                        is_list_of)
+from vllm.utils import Counter, Device, deprecate_kwargs, is_list_of
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -143,12 +142,6 @@ class LLM:
     DEPRECATE_LEGACY: ClassVar[bool] = True
     """A flag to toggle whether to deprecate the legacy generate/encode API."""
 
-    DEPRECATE_INIT_POSARGS: ClassVar[bool] = True
-    """
-    A flag to toggle whether to deprecate positional arguments in
-    [LLM.__init__][].
-    """
-
     @classmethod
     @contextmanager
     def deprecate_legacy_api(cls):
@@ -158,16 +151,11 @@ class LLM:
 
         cls.DEPRECATE_LEGACY = False
 
-    @deprecate_args(
-        start_index=2,  # Ignore self and model
-        is_deprecated=lambda: LLM.DEPRECATE_INIT_POSARGS,
-        additional_message=(
-            "All positional arguments other than `model` will be "
-            "replaced with keyword arguments in an upcoming version."),
-    )
     def __init__(
         self,
         model: str,
+        *,
+        task: TaskOption = "auto",
         tokenizer: Optional[str] = None,
         tokenizer_mode: TokenizerMode = "auto",
         skip_tokenizer_init: bool = False,
@@ -189,8 +177,6 @@ class LLM:
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        # After positional args are removed, move this right below `model`
-        task: TaskOption = "auto",
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any]]] = None,
         **kwargs,
