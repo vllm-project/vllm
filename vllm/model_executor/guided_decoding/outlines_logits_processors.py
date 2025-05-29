@@ -94,8 +94,8 @@ class BaseLogitsProcessor:
         _apply_token_bitmask_inplace_kernel(
             logits=scores.unsqueeze(dim=0),
             # mask must be on same device
-            mask=self._mask.to(scores.device))
-        self._mask.to("cpu")
+            mask=self._mask.to(scores.device, non_blocking=True))
+        self._mask.to("cpu", non_blocking=True)
 
         return scores
 
