@@ -66,7 +66,7 @@ vllm chat
 vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 
 # Quick chat with a single prompt
-vllm chat --quick hi
+vllm chat --quick "hi"
 ```
 
 ## complete
@@ -83,7 +83,7 @@ vllm complete
 vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 
 # Quick complete with a single prompt
-vllm complete --quick The future of AI is
+vllm complete --quick "The future of AI is"
 ```
 
 ## bench
