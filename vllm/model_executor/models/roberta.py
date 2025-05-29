@@ -10,7 +10,7 @@ from transformers import RobertaConfig
 
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.pooler import CrossEncodingPooler
+from vllm.model_executor.layers.pooler import ClassifierPooler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -189,7 +189,9 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
                                  embedding_class=RobertaEmbedding,
                                  add_pooling_layer=False)
         self.classifier = RobertaClassificationHead(config)
-        self._pooler = CrossEncodingPooler(config, self.classifier)
+
+        self._pooler = ClassifierPooler(vllm_config.model_config,
+                                        self.classifier)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         bert_weights, task_weights = roberta_task_weights_filter(weights)
