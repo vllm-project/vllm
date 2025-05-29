@@ -204,16 +204,12 @@ class P2pNcclEngine:
                 while tensor_id not in self.recv_store:
                     self.recv_store_cv.wait()
                 tensor = self.recv_store[tensor_id]
-                # self.recv_store[tensor_id] = None
-                # while len(self.recv_store) > 10000:
-                #     self.recv_store.pop(next(iter(self.recv_store)))
 
             if tensor is not None:
                 if isinstance(tensor, tuple):
                     addr, dtype, shape = tensor
                     tensor = self.pool.load_tensor(addr, dtype, shape,
                                                    self.device)
-                    # self.pool.free(addr)
                 else:
                     addr = 0
                     self.buffer_size -= (tensor.element_size() *
@@ -421,9 +417,6 @@ class P2pNcclEngine:
 
         response = sock.recv()
         if response != b"0":
-            # with self.send_queue_cv:
-            #     self.send_queue.append([tensor_id, remote_address, tensor])
-            #     self.send_queue_cv.notify()
             logger.warning(
                 "🔴Send Tensor, Peer Out Of Memory/Threshold, %s 👉 %s, "
                 "MyRank:%s, data:%s, tensor:%s, size:%fGB, response:%s",
@@ -437,8 +430,9 @@ class P2pNcclEngine:
         if self.send_type == "PUT_ASYNC":
             self._have_sent_tensor_id(tensor_id)
 
-        logger.info("🔵Send Tensor, %s👉%s, MyRank:%s, data:%s, tensor:%s",
-                    self.zmq_address, remote_address, rank, data, tensor.shape)
+        logger.info(
+            "🔵Send Tensor, %s👉%s, MyRank:%s, data:%s", self.zmq_address,
+            remote_address, rank, data)
         return True
 
     def get_finished(
