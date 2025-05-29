@@ -75,3 +75,6 @@ th:not(:first-child) {
 | multi-step                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | [❌](gh-issue:8477) | ✅     |
 | best-of                                                   | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
 | beam-search                                               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     |
+
+!!! note
+    Please refer to [Feature support through NxD Inference backend][feature-support-through-nxd-inference-backend] for features supported on AWS Neuron hardware
