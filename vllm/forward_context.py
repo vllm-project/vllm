@@ -114,7 +114,7 @@ def set_forward_context(attn_metadata: Any,
     if vllm_config.parallel_config.data_parallel_size > 1 and (
             attn_metadata is not None or num_tokens is not None):
         dp_metadata = DPMetadata.make(vllm_config.parallel_config,
-                                      attn_metadata, num_tokens)
+                                      attn_metadata, num_tokens or 0)
 
     global _forward_context
     prev_context = _forward_context
