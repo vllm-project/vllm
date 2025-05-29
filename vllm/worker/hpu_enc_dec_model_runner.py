@@ -18,7 +18,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.utils import bind_kv_cache, is_fake_hpu
-from vllm.worker.hpu_model_runner import (HpuModelAdapter, HPUModelRunnerBase,
+from vllm.worker.hpu_model_runner import (CachedStepOutput, HpuModelAdapter,
+                                          HPUModelRunnerBase,
                                           ModelInputForHPUWithSamplingMetadata,
                                           setup_profiler, subtuple)
 from vllm.worker.model_runner_base import (
@@ -668,7 +669,7 @@ class HPUEncoderDecoderModelRunner(
                     if num_steps > 1:
                         output = output.sampled_token_ids
                         self.cached_step_outputs.append(
-                            output.detach().clone())
+                            CachedStepOutput(output))
                 htorch.core.mark_step()
                 if i < num_steps - 1:
                     if i == 0:
@@ -761,8 +762,8 @@ class HPUEncoderDecoderModelRunner(
         sampler_outputs = []
         num_outputs = len(self.cached_step_outputs)
         for i in range(num_outputs):
-            next_token_ids = self.cached_step_outputs.pop(0)
-            next_token_ids = next_token_ids.cpu().tolist()
+            next_token_ids = self.cached_step_outputs.pop(
+                0).token_ids.cpu().tolist()
             sampler_output = self._make_decode_output(
                 next_token_ids, model_input.sampling_metadata.seq_groups)
             sampler_outputs.append(sampler_output)
