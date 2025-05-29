@@ -63,35 +63,37 @@ def print_outputs(outputs):
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
-if __name__ == '__main__':
-    assert len(PROMPTS) == len(IMAGES) == len(SAMPLING_PARAMS), \
-        f"""Text, image prompts and sampling parameters should have the 
+if __name__ == "__main__":
+    assert (
+        len(PROMPTS) == len(IMAGES) == len(SAMPLING_PARAMS)
+    ), f"""Text, image prompts and sampling parameters should have the 
             same batch size; but got {len(PROMPTS)}, {len(IMAGES)}, 
             and {len(SAMPLING_PARAMS)}"""
 
     # Create an LLM.
-    llm = LLM(model="meta-llama/Llama-3.2-11B-Vision-Instruct",
-              max_num_seqs=1,
-              max_model_len=4096,
-              block_size=4096,
-              device="neuron",
-              tensor_parallel_size=32,
-              override_neuron_config={
-                  "sequence_parallel_enabled": False,
-                  "skip_warmup": True,
-                  "save_sharded_checkpoint": True,
-                  "on_device_sampling_config": {
-                      "global_topk": 1,
-                      "dynamic": False,
-                      "deterministic": False
-                  },
-              })
+    llm = LLM(
+        model="meta-llama/Llama-3.2-11B-Vision-Instruct",
+        max_num_seqs=1,
+        max_model_len=4096,
+        block_size=4096,
+        device="neuron",
+        tensor_parallel_size=32,
+        override_neuron_config={
+            "sequence_parallel_enabled": False,
+            "skip_warmup": True,
+            "save_sharded_checkpoint": True,
+            "on_device_sampling_config": {
+                "global_topk": 1,
+                "dynamic": False,
+                "deterministic": False,
+            },
+        },
+    )
 
     batched_inputs = []
     batched_sample_params = []
     for pmpt, img, params in zip(PROMPTS, IMAGES, SAMPLING_PARAMS):
-        inputs, sampling_params = get_VLLM_mllama_model_inputs(
-            pmpt, img, params)
+        inputs, sampling_params = get_VLLM_mllama_model_inputs(pmpt, img, params)
         # test batch-size = 1
         outputs = llm.generate(inputs, sampling_params)
         print_outputs(outputs)

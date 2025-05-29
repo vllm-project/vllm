@@ -19,7 +19,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.neuronx_distributed import (
     _get_model_architecture, get_neuron_model)
-from vllm.platforms import current_platform
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.worker.neuron_model_runner import (ModelInputForNeuron,
                                              NeuronModelRunner)
@@ -138,7 +138,8 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                     'has_image').squeeze(1),
             )
         else:
-            bs = model_input.input_tokens.shape[0]
+            bs = model_input.input_tokens.shape[0] if (model_input.input_tokens
+                                                       is not None) else 1
             empty_pixel_values = torch.zeros([bs, 1, 4, 3, 560, 560],
                                              dtype=torch.bfloat16)
             empty_aspect_ratios = torch.ones([bs, 1, 2], dtype=torch.int64)
@@ -208,7 +209,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForNeuron:
-        multi_modal_kwargs = None
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
         is_prompt = seq_group_metadata_list[0].is_prompt
@@ -231,6 +231,14 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
                 sampling_params.top_p = top_p
                 sampling_params.temperature = temperature
 
+        # we need multi_modal_data for later tokens as well
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
+        for seq_group_metadata in seq_group_metadata_list:
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                multi_modal_kwargs_list.append(mm_data)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
+
         lora_adapter_ids = self._get_lora_adapter_ids(seq_group_metadata_list)
 
         sampling_metadata = SamplingMetadata.prepare(
@@ -243,18 +251,6 @@ class NeuronxDistributedModelRunner(NeuronModelRunner):
             self.device,
             self.pin_memory,
             generators=self.get_generators(finished_requests_ids))
-
-        if current_platform.use_transformers_neuronx(
-        ) and not self._on_device_sampling_disabled:
-            # Once the request IDs are changed in current iteration, we will
-            # update the on-device sampling parameters.
-            current_batch_request_ids = [
-                seq_group_meta_data.request_id
-                for seq_group_meta_data in seq_group_metadata_list
-            ]
-            if current_batch_request_ids != self._previous_batch_request_ids:
-                self._update_neuron_sampling_params(seq_group_metadata_list)
-                self._previous_batch_request_ids = current_batch_request_ids
 
         return ModelInputForNeuron(input_tokens=input_tokens,
                                    input_positions=input_positions,

@@ -208,7 +208,7 @@ class NeuronMllamaForCausalLM(nn.Module):
         # token-generation
         # This is a cache (on CPU) that saves has_image data per sequence id
         # The number of entries in this cache is <= Batch-Size
-        self.has_image_cache = {}
+        self.has_image_cache: dict[int, torch.Tensor] = {}
         self.config = config
         self.logits_processor = LogitsProcessor(
             config.get_text_config().vocab_size, logits_as_input=True)
