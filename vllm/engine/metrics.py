@@ -594,16 +594,6 @@ class PrometheusStatLogger(StatLoggerBase):
         self._log_counter(self.metrics.counter_total_evicted_tokens,
                           total_evicted)
 
-        if self.metrics.show_hidden_metrics:
-            self._log_histogram(self.metrics.histogram_time_in_queue_request,
-                                stats.time_in_queue_requests)
-            self._log_histogram(
-                self.metrics.histogram_model_forward_time_request,
-                stats.model_forward_time_requests)
-            self._log_histogram(
-                self.metrics.histogram_model_execute_time_request,
-                stats.model_execute_time_requests)
-
         # Metadata
         finished_reason_counter = CollectionsCounter(
             stats.finished_reason_requests)
