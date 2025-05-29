@@ -69,13 +69,11 @@ def benchmark_permute(
                 a1q_scale,
                 first_token_off,
                 inv_perm_idx,
-                permuted_idx,
                 m_indices,
             ) = moe_permute(
                 qhidden_states,
                 a1q_scale=None,
                 topk_ids=topk_ids,
-                topk=topk,
                 n_expert=num_experts,
                 expert_map=None,
                 align_block_size=align_block_size,
@@ -159,13 +157,11 @@ def benchmark_unpermute(
                 a1q_scale,
                 first_token_off,
                 inv_perm_idx,
-                permuted_idx,
                 m_indices,
             ) = moe_permute(
                 qhidden_states,
                 a1q_scale=None,
                 topk_ids=topk_ids,
-                topk=topk,
                 n_expert=num_experts,
                 expert_map=None,
                 align_block_size=align_block_size,
@@ -175,7 +171,6 @@ def benchmark_unpermute(
                 permuted_hidden_states.to(dtype),
                 first_token_off,
                 inv_perm_idx,
-                permuted_idx,
                 m_indices,
             )
         else:
@@ -203,7 +198,6 @@ def benchmark_unpermute(
                 permuted_hidden_states,
                 first_token_off,
                 inv_perm_idx,
-                permuted_idx,
                 m_indices,
             ) = input
             output = torch.empty_like(hidden_states)
@@ -212,7 +206,6 @@ def benchmark_unpermute(
                 permuted_hidden_states,
                 topk_weights,
                 inv_perm_idx,
-                topk,
                 first_token_off,
             )
         else:
