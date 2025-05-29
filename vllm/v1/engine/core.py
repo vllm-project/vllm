@@ -123,7 +123,6 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
-        self.vllm_config = vllm_config
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
