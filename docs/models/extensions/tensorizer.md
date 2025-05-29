@@ -62,7 +62,8 @@ python examples/others/tensorize_vllm_model.py \
    --suffix v1
 ```
 
-This saves the model tensors at `s3://my-bucket/vllm/facebook/opt-125m/v1`.
+This saves the model tensors at 
+`s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors`.
 
 ## Serving the model using Tensorizer
 Once the model is serialized where you want it, you need to pass
