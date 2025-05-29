@@ -790,7 +790,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
                 world_size=all2all_manager.world_size,
                 dp_size=all2all_manager.tp_group.world_size,
-                qtype=torch.float8_e4m3fn,
+                use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
                 per_act_token=False,  #?
             )
