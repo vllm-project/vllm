@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import multiprocessing
-import random
-import time
 
 import numpy as np
-from vllm.distributed.parallel_state import get_pp_group
-from ..utils import init_test_distributed_environment
 import torch.distributed as dist
 
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.utils import get_ip, update_environment_variables
+
+from ..utils import init_test_distributed_environment
 
 
 def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
@@ -43,9 +42,10 @@ def distributed_run(fn, world_size):
 
 
 def worker_fn_wrapper(fn):
+
     def wrapped_fn(env):
         update_environment_variables(env)
-        init_test_distributed_environment(1, 2, int(env['RANK']),"12345")
+        init_test_distributed_environment(1, 2, int(env['RANK']), "12345")
         fn()
 
     return wrapped_fn
@@ -59,10 +59,7 @@ def worker_fn():
     port = 1345
     pp_group = get_pp_group()
     if rank == 1:
-        broadcast_object = {
-            "ip": ip,
-            "port": port
-        }
+        broadcast_object = {"ip": ip, "port": port}
         pp_group.broadcast_object_async(broadcast_object, src=1)
     else:
         recv = pp_group.broadcast_object_async(None, src=1)

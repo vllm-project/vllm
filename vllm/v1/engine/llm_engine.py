@@ -243,8 +243,9 @@ class LLMEngine:
             # 4) Record stats
             if self.stat_logger is not None:
                 assert outputs.scheduler_stats is not None
-                self.stat_logger.record(scheduler_stats=outputs.scheduler_stats,
-                                        iteration_stats=iteration_stats)
+                self.stat_logger.record(
+                    scheduler_stats=outputs.scheduler_stats,
+                    iteration_stats=iteration_stats)
 
             return processed_outputs.request_outputs
         return []

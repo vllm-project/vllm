@@ -25,8 +25,8 @@ import contextlib
 import gc
 import pickle
 import weakref
-from concurrent.futures import Future
 from collections import namedtuple
+from concurrent.futures import Future
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
@@ -97,6 +97,7 @@ def _get_unique_name(name: str) -> str:
 
 _groups: dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
 
+
 def _to_concurrent_future(result: torch.Future) -> Future:
     """
     Convert a PyTorch Future to a concurrent.futures.Future.
@@ -106,9 +107,11 @@ def _to_concurrent_future(result: torch.Future) -> Future:
         timeout: Optional timeout for the wait operation
         
     Returns:
-        concurrent.futures.Future that will complete when the PyTorch Future completes
+        concurrent.futures.Future that will complete when the PyTorch Future 
+        completes
     """
-    concurrent_future = Future()
+    concurrent_future: Future = Future()
+
     def _complete_torch_future(fut: torch.Future):
         try:
             # Get the result from the PyTorch future
@@ -117,8 +120,10 @@ def _to_concurrent_future(result: torch.Future) -> Future:
                 concurrent_future.set_result(result)
         except Exception as e:
             raise e
+
     result.add_done_callback(_complete_torch_future)
     return concurrent_future
+
 
 def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
@@ -478,42 +483,55 @@ class GroupCoordinator:
                                                     src=self.ranks[src],
                                                     group=self.cpu_group)
             return recv[0]
-    
 
-    def broadcast_object_async(self, obj: Optional[Any] = None, src: int = 0) -> Future:
+    def broadcast_object_async(self,
+                               obj: Optional[Any] = None,
+                               src: int = 0) -> Future:
         """Broadcast the input object.
         NOTE: `src` is the local rank of the source rank.
         """
         assert src < self.world_size, f"Invalid src rank ({src})"
-        assert self.world_size > 1, "call broadcast_object_async only when world size > 1"
+        assert self.world_size > 1, \
+            "call broadcast_object_async when world size > 1"
 
-        assert self.mq_broadcaster is None,  "Message queue broadcaster only supports sync broadcast"
+        assert self.mq_broadcaster is None, \
+            "Message queue broadcaster only supports sync broadcast"
         if self.rank_in_group == src:
-            object_tensor = torch.frombuffer(
-                pickle.dumps(obj),
-                dtype=torch.uint8
-            ).to(self.device)
+            object_tensor = torch.frombuffer(pickle.dumps(obj),
+                                             dtype=torch.uint8).to(self.device)
             size_tensor = torch.tensor([object_tensor.numel()],
-                                        dtype=torch.long,
-                                        device=self.device)
-            work = torch.distributed.broadcast(size_tensor, src=self.ranks[src], group=self.device_group, async_op=True)
+                                       dtype=torch.long,
+                                       device=self.device)
+            work = torch.distributed.broadcast(size_tensor,
+                                               src=self.ranks[src],
+                                               group=self.device_group,
+                                               async_op=True)
             assert work is not None
-            work.get_future().then(
-                lambda x: torch.distributed.broadcast(object_tensor, src=self.ranks[src], group=self.device_group)
-            )
-            future = Future()
+            work.get_future().then(lambda x: torch.distributed.broadcast(
+                object_tensor, src=self.ranks[src], group=self.device_group))
+            future: Future = Future()
             future.set_result(obj)
             return future
         else:
+
             def broadcast_object_tensor(size_tensor: torch.Tensor) -> Any:
                 # Tensor to receive serialized objects into.
-                object_tensor = torch.empty(size_tensor.item(), dtype=torch.uint8, device=self.device)
-                torch.distributed.broadcast(object_tensor, src=self.ranks[src], group=self.device_group)
+                object_tensor = torch.empty(size_tensor.item(),
+                                            dtype=torch.uint8,
+                                            device=self.device)
+                torch.distributed.broadcast(object_tensor,
+                                            src=self.ranks[src],
+                                            group=self.device_group)
                 return pickle.loads(object_tensor.cpu().numpy().tobytes())
+
             size_tensor = torch.empty(1, dtype=torch.long, device=self.device)
-            work = torch.distributed.broadcast(size_tensor, src=self.ranks[src], group=self.device_group, async_op=True)
+            work = torch.distributed.broadcast(size_tensor,
+                                               src=self.ranks[src],
+                                               group=self.device_group,
+                                               async_op=True)
             assert work is not None
-            result = work.get_future().then(lambda x: broadcast_object_tensor(x.value()[0]))
+            result = work.get_future().then(
+                lambda x: broadcast_object_tensor(x.value()[0]))
             return _to_concurrent_future(result)
 
     def broadcast_object_list(self,

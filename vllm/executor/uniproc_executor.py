@@ -6,8 +6,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 
-from vllm.distributed.parallel_state import get_pp_group
 import vllm.envs as envs
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
@@ -124,6 +124,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     @property
     def max_concurrent_batches(self) -> int:
         return self.parallel_config.pipeline_parallel_size - self.pp_rank
+
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
@@ -133,12 +134,14 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             kwargs = {}
         assert kwargs is not None
         answer = run_method(self.driver_worker, method, args, kwargs)
-        if method == "execute_model" and self.parallel_config.pipeline_parallel_size > 1:
-            # transfer the answer from the last PP rank to first PP rank with async torch.dist P2P
+        if method == "execute_model" \
+            and self.parallel_config.pipeline_parallel_size > 1:
+            # transfer the answer from the last PP rank
+            # to first PP rank with async torch.dist P2P
             answer = get_pp_group().broadcast_object_async(
-                answer,
-                src=self.parallel_config.pipeline_parallel_size - 1)
+                answer, src=self.parallel_config.pipeline_parallel_size - 1)
         return [answer]
+
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """
         Determine the number of available KV blocks.

@@ -125,7 +125,6 @@ class EngineCore:
             self.batch_queue = queue.Queue(self.batch_queue_size)
         self.vllm_config = vllm_config
 
-
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
 
@@ -232,7 +231,6 @@ class EngineCore:
             scheduler_output, model_output)  # type: ignore
 
         return engine_core_outputs
-
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
         """Schedule and execute batches with the batch queue.
