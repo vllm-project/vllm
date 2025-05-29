@@ -30,7 +30,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import direct_register_custom_op
+from vllm.utils import direct_register_custom_op, cdiv
 
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 has_deepep = importlib.util.find_spec("deep_ep") is not None
@@ -311,6 +311,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                                          DeepEPHTPrepareAndFinalize,
                                          DeepEPLLPrepareAndFinalize]] = None
         if moe.use_pplx_kernels:
+            # For blocked per token: set to
+            #   ceil_div(hidden_dim, block_size) * sizeof(float32)
+            # For per-token: set to sizeof(float32)
+            if moe.quant_dtype.itemsize == 1:
+                scale_bytes = (cdiv(moe.hidden_dim, moe.block_size) *
+                               torch.float32.itemsize)
+            else:
+                scale_bytes = 0
+
             all_to_all_args = dict(
                 max_num_tokens=moe.max_num_tokens,
                 num_experts=moe.num_experts,
@@ -321,12 +330,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 dp_size=all2all_manager.tp_group.world_size,
                 hidden_dim=moe.hidden_dim,
                 hidden_dim_bytes=moe.hidden_dim * moe.quant_dtype.itemsize,
-                # For blocked per token: set to
-                #   ceil_div(hidden_dim, block_size) * sizeof(float32)
-                # For per-token: set to sizeof(float32)
-                hidden_dim_scale_bytes=(0 if moe.quant_dtype.itemsize != 1 else (
-                    ((moe.hidden_dim + moe.block_size - 1) // moe.block_size) *
-                    torch.float32.itemsize)),
+                hidden_dim_scale_bytes=scale_bytes,
             )
 
             # Intranode pplx a2a takes a group name while internode does not.

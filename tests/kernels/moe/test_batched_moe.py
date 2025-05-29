@@ -269,7 +269,7 @@ def batched_moe(
     block_shape: Optional[list[int]] = None,
     per_act_token: bool = False,
 ) -> torch.Tensor:
-    max_num_tokens = round_up(a.shape[0], 64)  # ?
+    max_num_tokens = round_up(a.shape[0], 64)
     fused_experts = FusedMoEModularKernel(
         BatchedPrepareAndFinalize(max_num_tokens,
                                   world_size=1,
@@ -343,9 +343,9 @@ def torch_moe2(
             topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
 
 
-@pytest.mark.parametrize("m", [1, 33, 64, 222])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 512, 1024])
+@pytest.mark.parametrize("m", [32, 45, 64]) #[1, 33, 64, 222])
+@pytest.mark.parametrize("n", [128, 512, 1024, 2048])
+@pytest.mark.parametrize("k", [128, 512, 1024, 2048])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])

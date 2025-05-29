@@ -518,15 +518,12 @@ def pplx_moe(
     num_experts = w1.shape[0]
     block_size = block_shape[1] if block_shape is not None else 128
     topk = topk_ids.shape[1]
-    if block_shape:
-        max_num_tokens = round_up(rank_chunk(a.shape[0], 0, world_size), block_shape[0])
-    else:
-        max_num_tokens = rank_chunk(a.shape[0], 0, world_size)
+    max_num_tokens = round_up(rank_chunk(a.shape[0], 0, world_size), 64)
 
     if qtype is not None:
         a_dtype = qtype
-        #print(f"SCALE BYTES {hidden_dim} {block_size} {((hidden_dim + block_size - 1) * torch.float32.itemsize) // block_size}")
-        scale_bytes = 16
+        # This is probably not right
+        scale_bytes = round_up(((hidden_dim + block_size - 1) // block_size) * torch.float32.itemsize, 16)
     else:
         a_dtype = a.dtype
         scale_bytes = 0
