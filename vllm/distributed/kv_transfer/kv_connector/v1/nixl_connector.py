@@ -383,7 +383,8 @@ class NixlConnectorWorker:
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
-                                 ready_event: threading.Event, world_rank: int):
+                                 ready_event: threading.Event,
+                                 world_rank: int):
         """Background thread for getting new NIXL handshakes."""
         # NOTE(rob): this is a simple implementation. We will move
         # to a better approach like an ETCD server in the future.
