@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Wrapper around `transformers` models"""
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager, nullcontext
 from typing import Literal, Optional, Union
 
@@ -42,7 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalInputs,
-                                    PlaceholderRange)
+                                    PlaceholderRange, MultiModalDataDict)
 from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo)
@@ -197,11 +197,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
 class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len,
-        mm_counts,
-    ) -> ProcessorInputs:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
         processor = self.info.get_hf_processor()
@@ -209,20 +205,23 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
             image_token = processor.boi_token
         else:
             image_token = getattr(processor, "image_token", "")
+        return image_token * num_images
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
+
         target_width, target_height = self.info.get_max_image_size()
 
-        mm_data = {
+        return  {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=1),
+                                   num_images=num_images),
         }
-
-        prompt_text = image_token * num_images
-        return ProcessorInputs(
-            prompt_text=prompt_text,
-            mm_data=mm_data,
-        )
 
 
 class MultiModalProcessor(BaseMultiModalProcessor):
@@ -436,17 +435,14 @@ class TransformersModel(nn.Module):
             config_override = ConfigOverride(
                 config, sliding_window=config.interleaved_sliding_window)
 
-        # Use meta device to delay allocating GPU tensors
+        # Set correct attn impl and init on "meta" to delay allocating GPU tensors
+        self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"):
             # FIXME(Isotr0py): We need to refactor this part in the future to
             # avoid registering an extra model layer, otherwise we will need a
             # weights mapper to rename weights.
             self.model: PreTrainedModel = AutoModel.from_config(
                 config,
-                attn_implementation={
-                    "text_config": "vllm",
-                    "vision_config": "eager"
-                },
                 torch_dtype=model_config.dtype,
                 trust_remote_code=model_config.trust_remote_code,
             )
@@ -589,7 +585,7 @@ class TransformersModel(nn.Module):
         return attention_instances
 
     def meta_to_empty(self, module: nn.Module):
-        for name, param in module.named_parameters(recurse=False):
+        for name, param in module.named_parameters(recurse=False): 
             if param.device == torch.device("meta"):
                 new_param = torch.empty_like(param,
                                              device=self.device_config.device)
