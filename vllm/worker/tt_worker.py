@@ -382,7 +382,7 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         else:
             dispatch_core_axis = device_params.pop(
                 "dispatch_core_axis",
-                ttnn.DispatchCoreAxis.COL if os.environ["ARCH_NAME"] == "blackhole" else ttnn.DispatchCoreAxis.ROW,
+                ttnn.DispatchCoreAxis.COL if "blackhole" in ttnn.get_arch_name() else ttnn.DispatchCoreAxis.ROW,
             )
 
         dispatch_core_config = ttnn.DispatchCoreConfig(dispatch_core_type, dispatch_core_axis)
