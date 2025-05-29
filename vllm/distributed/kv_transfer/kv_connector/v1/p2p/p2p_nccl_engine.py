@@ -430,9 +430,8 @@ class P2pNcclEngine:
         if self.send_type == "PUT_ASYNC":
             self._have_sent_tensor_id(tensor_id)
 
-        logger.info(
-            "🔵Send Tensor, %s👉%s, MyRank:%s, data:%s", self.zmq_address,
-            remote_address, rank, data)
+        logger.info("🔵Send Tensor, %s👉%s, MyRank:%s, data:%s",
+                    self.zmq_address, remote_address, rank, data)
         return True
 
     def get_finished(
