@@ -707,6 +707,15 @@ class DPEngineCoreProc(EngineCoreProc):
         assert dp_size > 1
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
+        if vllm_config.kv_transfer_config is not None:
+            # modify the engine_id and append the local_dp_rank to it to ensure
+            # that the kv_transfer_config is unique for each DP rank.
+            vllm_config.kv_transfer_config.engine_id = (
+                f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+            )
+            logger.debug("Setting kv_transfer_config.engine_id to %s",
+                         vllm_config.kv_transfer_config.engine_id)
+
         from vllm.platforms import current_platform
         device_control_env_var = current_platform.device_control_env_var
         world_size = vllm_config.parallel_config.world_size
