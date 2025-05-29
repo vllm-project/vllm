@@ -99,6 +99,12 @@ def with_amdsmi_context(fn):
 
 
 @cache
+def on_gfx1x() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
+
+
+@cache
 def on_mi250_mi300() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942"])
