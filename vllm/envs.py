@@ -75,7 +75,6 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
-    VLLM_RPD_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -587,12 +586,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
-
-    # Enables rpd profiler if set. Path to the directory where torch profiler
-    # traces are saved. Note that it must be an absolute path.
-    "VLLM_RPD_PROFILER_DIR":
-    lambda: (None if os.getenv("VLLM_RPD_PROFILER_DIR", None) is None else os.
-             path.expanduser(os.getenv("VLLM_RPD_PROFILER_DIR", "."))),
 
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":
