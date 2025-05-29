@@ -24,7 +24,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import (DPMetadata, get_forward_context,
+                                  set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model
@@ -145,31 +146,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
-        # Set up speculative decoding.
-        self.use_spec_decode = False
         self.use_aux_hidden_state_outputs = False
-        if self.speculative_config:
-            self.use_spec_decode = True
-
-            # NOTE(Jiayi): currently we put the entire draft model on
-            # the last PP rank. This is not ideal if there are many
-            # layers in the draft model.
-            if get_pp_group().is_last_rank:
-                if self.speculative_config.method == "ngram":
-                    self.drafter = NgramProposer(self.vllm_config)
-                elif self.speculative_config.use_eagle():
-                    self.drafter = EagleProposer(self.vllm_config, self.device,
-                                                 self)  # type: ignore
-                    if self.speculative_config.method == "eagle3":
-                        self.use_aux_hidden_state_outputs = True
-                elif self.speculative_config.method == "medusa":
-                    self.drafter = MedusaProposer(
-                        vllm_config=self.vllm_config,
-                        device=self.device)  # type: ignore
-                else:
-                    raise ValueError("Unknown speculative decoding method: "
-                                     f"{self.speculative_config.method}")
-                self.rejection_sampler = RejectionSampler()
+        # Set up speculative decoding.
+        # NOTE(Jiayi): currently we put the entire draft model on
+        # the last PP rank. This is not ideal if there are many
+        # layers in the draft model.
+        if self.speculative_config and get_pp_group().is_last_rank:
+            if self.speculative_config.method == "ngram":
+                self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.use_eagle():
+                self.drafter = EagleProposer(self.vllm_config, self.device,
+                                             self)  # type: ignore
+                if self.speculative_config.method == "eagle3":
+                    self.use_aux_hidden_state_outputs = True
+            elif self.speculative_config.method == "medusa":
+                self.drafter = MedusaProposer(
+                    vllm_config=self.vllm_config,
+                    device=self.device)  # type: ignore
+            else:
+                raise ValueError("Unknown speculative decoding method: "
+                                 f"{self.speculative_config.method}")
+            self.rejection_sampler = RejectionSampler()
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -937,8 +934,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         encoder_outputs = []
         for grouped_mm_inputs in grouped_mm_inputs_list:
             batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
-            batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
-                                                           device=self.device)
+            batched_mm_inputs = MultiModalKwargs.as_kwargs(
+                batched_mm_inputs,
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -1113,6 +1113,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for k, v in self.intermediate_tensors.items()
         })
 
+    def get_dp_padding(self, num_tokens: int):
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        if dp_size == 1:
+            # Early exit.
+            return 0
+
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        return max_tokens_across_dp_cpu - num_tokens
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1149,6 +1161,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_input_tokens = round_up(num_scheduled_tokens, tp_size)
             else:
                 num_input_tokens = num_scheduled_tokens
+
+        # Padding for DP
+        num_input_tokens += self.get_dp_padding(num_input_tokens)
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -1323,7 +1338,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
 
-        if not self.use_spec_decode:
+        if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
@@ -1368,11 +1383,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                scheduler_output.num_scheduled_tokens[req_id])
                     next_token_id = req_state.get_token_id(seq_len)
                 next_token_ids.append(next_token_id)
-            next_token_ids = async_tensor_h2d(next_token_ids,
-                                              dtype=torch.int32,
-                                              target_device=self.device,
-                                              pin_memory=True)
-            eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
+            next_token_ids = torch.tensor(next_token_ids,
+                                          dtype=torch.int32,
+                                          device=self.device)
+            # At this moment, we assume all eagle layers belong to the same KV
+            # cache group, thus using the same attention metadata.
+            eagle_attn_metadata = attn_metadata[
+                self.drafter.attn_layer_names[0]]
 
             # NOTE: deepseek_mtp uses MLA which does not have `block_table`
             if hasattr(eagle_attn_metadata, "block_table"):
@@ -1665,6 +1682,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn: bool = True,
     ) -> torch.Tensor:
 
+        # Padding for DP
+        num_tokens += self.get_dp_padding(num_tokens)
+
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
@@ -1743,7 +1763,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 hidden_states = outputs
 
-            if self.use_spec_decode and self.speculative_config.use_eagle():
+            if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
                 self.drafter.dummy_run(num_tokens)
 
@@ -1798,7 +1818,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     "initializing the engine.") from e
             else:
                 raise e
-        if self.use_spec_decode:
+        if self.speculative_config:
             draft_token_ids = [[0] for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
                 draft_token_ids, self.device)
@@ -1880,7 +1900,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
-                batched_dummy_mm_inputs, device=self.device)
+                batched_dummy_mm_inputs,
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
 
             # Run multimodal encoder.
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
@@ -2051,6 +2074,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
+
+        if self.speculative_config and self.speculative_config.use_eagle():
+            assert isinstance(self.drafter, EagleProposer)
+            # validate all draft model layers belong to the same kv cache
+            # group
+            self.drafter.validate_same_kv_cache_group(kv_cache_config)
 
         bind_kv_cache(
             kv_caches,

@@ -246,6 +246,9 @@ def test_propose(num_speculative_tokens):
     # Assign the mock to the proposer
     proposer.model = model_mock
 
+    # Assign draft attn_layer_names since load_model is not invoked
+    proposer.attn_layer_names = ["layer.0"]
+
     # Create input tensors
     cu_num_tokens = torch.tensor([0, seq_len_1, total_tokens],
                                  dtype=torch.int32,
