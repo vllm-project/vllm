@@ -488,11 +488,12 @@ class NixlConnectorWorker:
         kv_elem_size = first_kv_cache.element_size()
 
         # TODO(tms): Find a more robust way to detect and handle MLA
-        use_mla = len(first_kv_cache.shape) == 3
-        # FIXME Actual memory layout is NOT the one you expect from
-        # dims, needs docs
-        assert not first_kv_cache.is_contiguous()
-        if use_mla:
+        self.use_mla = len(first_kv_cache.shape) == 3
+        # NOTE (NickLucche) To move blocks efficiently with NIXL, the expected
+        # KV memory layout is HND, as opposed to the default NHD. Note that it
+        # will only affects the strides. For MLA instead, we make require no
+        # such thing and resort to the standard layout.
+        if self.use_mla:
             # MLA case.
             self.num_blocks = first_kv_cache.shape[0]
             block_rank = 2  # [block_size, latent_dim]
@@ -513,8 +514,8 @@ class NixlConnectorWorker:
         # block size in bytes
         self.block_len = kv_elem_size * math.prod(block_shape)
 
-        logger.debug("Registering KV_Caches. use_mla: %s, shape %s", use_mla,
-                     first_kv_cache.shape)
+        logger.debug("Registering KV_Caches. use_mla: %s, shape %s",
+                     self.use_mla, first_kv_cache.shape)
         logger.debug("num_blocks: %s, block_shape: %s", self.num_blocks,
                      block_shape)
         logger.debug("Per layer kv cache size: %s", first_kv_cache.shape)
@@ -531,7 +532,7 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
-            cache_list = [cache_or_caches] if use_mla else cache_or_caches
+            cache_list = [cache_or_caches] if self.use_mla else cache_or_caches
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
@@ -643,6 +644,9 @@ class NixlConnectorWorker:
         along the kv_heads dimension, and so forth until "tp_ratio" D TP workers have pulled from P-Worker0.   
         
         Note that the above will also hold true for the homogeneous TP case, where tp_ratio evaluates to 1.
+
+        Regarding MLA case, the cache is replicated across TP workers so the rank_offset will just always be 0
+        so that the whole cache is shared by "tp_ratio" D TP workers.
         """ # noqa: E501
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
@@ -662,15 +666,23 @@ class NixlConnectorWorker:
         tp_ratio = self._tp_size[self.engine_id] // self._tp_size[engine_id]
         assert tp_ratio > 0, "Decode TP cannot be smaller than"
         " prefill TP"
+        if self.use_mla:
+            # With MLA the only difference is in the number of blocks.
+            remote_block_size = nixl_agent_meta.block_len / (
+                self.slot_size_bytes)
+            assert self.block_len == nixl_agent_meta.block_len
+        else:
+            remote_block_size = nixl_agent_meta.block_len / (
+                self.slot_size_bytes * tp_ratio)
 
-        remote_block_size = nixl_agent_meta.block_len / (self.slot_size_bytes *
-                                                         tp_ratio)
+            assert nixl_agent_meta.block_len == self.block_len * tp_ratio, \
+            "Remote P worker KV layer cache must be of shape [2, N, \
+            local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
+
         assert self.block_size == remote_block_size, "Remote P worker with \
         different block size is not supported"
 
-        assert nixl_agent_meta.block_len == self.block_len * tp_ratio, "Remote\
-         P worker KV layer cache must be of shape \
-        [2, N, local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
+        assert self.num_blocks >= nixl_agent_meta.num_blocks
 
         # Create dst descs and xfer side handles. TP workers have same #blocks.
         if engine_id in self.dst_num_blocks:
@@ -688,7 +700,8 @@ class NixlConnectorWorker:
         if p_remote_rank == remote_rank:
             self.kv_caches_base_addr[
                 engine_id] = nixl_agent_meta.kv_caches_base_addr
-            rank_offset = self.rank % tp_ratio * self.block_len
+            rank_offset = self.rank % tp_ratio * self.block_len \
+                if not self.use_mla else 0
             # Register all remote blocks, but only the corresponding kv heads.
             for base_addr in nixl_agent_meta.kv_caches_base_addr:
                 for block_id in range(nixl_agent_meta.num_blocks):

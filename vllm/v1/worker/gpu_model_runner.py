@@ -2119,7 +2119,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
-                    # kv_cache_shape=(16, 8, 128)=>( 8, 16, 128)
                     dtype = kv_cache_spec.dtype
                     try:
                         kv_cache_stride_order = self.attn_backends[
