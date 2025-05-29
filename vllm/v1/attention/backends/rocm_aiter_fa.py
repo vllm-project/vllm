@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Attention layer with FlashAttention."""
+"""Attention layer with AiterFlashAttention."""
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -261,42 +261,9 @@ class AiterFlashAttentionMetadataBuilder:
 
         use_cascade = common_prefix_len > 0
 
-        if use_cascade:
-            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
-                                                dtype=torch.int32,
-                                                device=self.runner.device)
-            prefix_kv_lens = torch.tensor([common_prefix_len],
-                                          dtype=torch.int32,
-                                          device=self.runner.device)
-            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
-                              common_prefix_len)
-            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
-                self.runner.device)
-            prefix_scheduler_metadata = schedule(
-                batch_size=1,
-                cu_query_lens=cu_prefix_query_lens,
-                max_query_len=num_actual_tokens,
-                seqlens=prefix_kv_lens,
-                max_seq_len=common_prefix_len,
-                causal=False)
-            scheduler_metadata = schedule(batch_size=num_reqs,
-                                          cu_query_lens=query_start_loc,
-                                          max_query_len=max_query_len,
-                                          seqlens=suffix_kv_lens,
-                                          max_seq_len=max_seq_len -
-                                          common_prefix_len,
-                                          causal=True)
-        else:
-            cu_prefix_query_lens = None
-            prefix_kv_lens = None
-            suffix_kv_lens = None
-            prefix_scheduler_metadata = None
-            scheduler_metadata = schedule(batch_size=num_reqs,
-                                          cu_query_lens=query_start_loc,
-                                          max_query_len=max_query_len,
-                                          seqlens=seq_lens,
-                                          max_seq_len=max_seq_len,
-                                          causal=True)
+        cu_prefix_query_lens = None
+        prefix_kv_lens = None
+        suffix_kv_lens = None
 
         attn_metadata = AiterFlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -310,12 +277,10 @@ class AiterFlashAttentionMetadataBuilder:
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
-            scheduler_metadata=scheduler_metadata,
             cu_prefix_query_lens=cu_prefix_query_lens,
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             local_attn_metadata=local_attn_metadata,
-            prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
         return attn_metadata
 
@@ -386,10 +351,6 @@ class AiterFlashAttentionMetadata:
     prefix_kv_lens: Optional[torch.Tensor]
     suffix_kv_lens: Optional[torch.Tensor]
 
-    # Optional aot scheduling
-    scheduler_metadata: Optional[torch.Tensor] = None
-    prefix_scheduler_metadata: Optional[torch.Tensor] = None
-
     # for local attention
     @dataclass
     class LocalAttentionMetadata:
@@ -421,7 +382,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
-                "FlashAttention does not support block-sparse attention.")
+                "AiterFlashAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -446,7 +407,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
             AiterFlashAttentionBackend.get_supported_head_sizes()
         if head_size not in support_head_sizes:
             raise ValueError(
-                f"Head size {head_size} is not supported by FlashAttention. "
+                f"Head size {head_size} is not supported by "
+                "AiterFlashAttention. "
                 f"Supported head sizes are: {support_head_sizes}. "
                 "Set VLLM_USE_V1=0 to use another attention backend.")
 
@@ -458,7 +420,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         self.use_irope = use_irope
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
-                "FlashAttention does not support fp8 kv-cache on this device.")
+                "AiterFlashAttention does not support fp8 kv-cache on this "
+                "device.")
 
     def forward(
         self,
@@ -470,7 +433,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         attn_metadata: AiterFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention.
+        """Forward pass with AiterFlashAttention.
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]
