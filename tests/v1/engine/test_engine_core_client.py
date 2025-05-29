@@ -354,15 +354,15 @@ async def test_kv_cache_events_dp(
         m.setenv("VLLM_USE_V1", "1")
         block_size = 16
         num_blocks = 2
-        dp_size = 1
-        # tp_size = 2
+        dp_size = 2
+        tp_size = 1
 
         engine_args = EngineArgs(
             model=MODEL_NAME,
             enforce_eager=True,
             enable_prefix_caching=True,
             data_parallel_size=dp_size,
-            # tensor_parallel_size=tp_size,
+            tensor_parallel_size=tp_size,
             block_size=block_size,
         )
         engine_args.kv_events_config = publisher_config
