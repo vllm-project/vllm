@@ -454,6 +454,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 dtype=torch.float32,
                 device=a1.device)
         else:
+            assert a1_scale is None
             b_a1_scale = None
 
         first_expert = num_local_experts * self.rank
@@ -782,8 +783,6 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                             (E, max_num_tokens, N))
         intermediate_cache2 = _resize_cache(workspace2,
                                             (E, max_num_tokens, N // 2))
-
-        assert not self.use_fp8_w8a8 or a1q_scale is not None
 
         # MM1
         invoke_moe_batched_triton_kernel(A=hidden_states,

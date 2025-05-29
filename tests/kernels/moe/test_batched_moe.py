@@ -277,7 +277,7 @@ def batched_moe(
                                   rank=0,
                                   qtype=qtype,
                                   block_shape=block_shape,
-                                  per_act_token=False),
+                                  per_act_token=per_act_token),
         BatchedTritonExperts(max_num_tokens=max_num_tokens,
                              dp_size=1,
                              world_size=1,
@@ -328,22 +328,13 @@ def torch_moe2(
                 tmp2 = SiluAndMul()(tmp1)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
             else:
-                #tmp1 = ops.cutlass_scaled_mm(a[mask],
-                #                             w1[i].transpose(0, 1),
-                #                             a_scale[mask],
-                #                             w1_scale[i],
-                #                             torch.bfloat16)
                 tmp1 = native_w8a8_block_matmul(a[mask], w1[i], a_scale[mask],
                                                 w1_scale[i], block_shape,
                                                 torch.bfloat16)
+
                 tmp2 = SiluAndMul()(tmp1)
                 tmp2, b_scale = per_token_group_quant_fp8(tmp2, block_shape[1])
 
-                # out[mask] = ops.cutlass_scaled_mm(tmp2,
-                #                                   w2[i].transpose(0, 1),
-                #                                   b_scale,
-                #                                   w2_scale[i],
-                #                                   torch.bfloat16)
                 out[mask] = native_w8a8_block_matmul(tmp2, w2[i], b_scale,
                                                      w2_scale[i], block_shape,
                                                      torch.bfloat16)
@@ -404,10 +395,10 @@ def test_fused_moe_batched_experts(
 
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                     w2_s, use_fp8_w8a8, block_shape)
         batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
                                      w2_s, qtype, block_shape)
+        baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s,
+                                     w2_s, use_fp8_w8a8, block_shape)
 
     torch.testing.assert_close(baseline_output,
                                batched_output,

@@ -324,10 +324,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 # For blocked per token: set to
                 #   ceil_div(hidden_dim, block_size) * sizeof(float32)
                 # For per-token: set to sizeof(float32)
-                hidden_dim_scale_bytes=(
-                    0 if moe.quant_dtype.itemsize != 1 else
-                    ((moe.hidden_dim + moe.block_size - 1) // moe.block_size *
-                     torch.float32.itemsize)),
+                hidden_dim_scale_bytes=(0 if moe.quant_dtype.itemsize != 1 else (
+                    ((moe.hidden_dim + moe.block_size - 1) // moe.block_size) *
+                    torch.float32.itemsize)),
             )
 
             # Intranode pplx a2a takes a group name while internode does not.
@@ -886,15 +885,16 @@ class FusedMoE(torch.nn.Module):
             from vllm_hpu_extension.ops import DynamicFusedMOE
             self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
-        # Only support float8 for now.
-        quant_dtype = params_dtype
+        quant_dtype = vllm_config.model_config.dtype
         if quant_config is not None:
             input_activations = get_quant_config_input_activations(
                 quant_config)
             if (input_activations is not None
-                    and input_activations.num_bits == 8
-                    and input_activations.type == QuantizationType.FLOAT):
-                quant_dtype = torch.float8_e4m3fn
+                    and input_activations.num_bits == 8):
+                if input_activations.type == QuantizationType.FLOAT:
+                    quant_dtype = torch.float8_e4m3fn
+                elif input_activations.type == QuantizationType.INT:
+                    quant_dtype = torch.int8
 
         moe = MoEConfig(
             num_experts=self.global_num_experts,
