@@ -17,6 +17,7 @@ RUN apt update && \
 WORKDIR /root
 
 # Install vllm-fork inside the container
+ENV VLLM_TARGET_DEVICE=hpu
 RUN git clone https://github.com/HabanaAI/vllm-fork.git && \
     cd vllm-fork && \
     git checkout ${VLLM_FORK_COMMIT} && \
