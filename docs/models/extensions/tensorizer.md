@@ -8,15 +8,14 @@ vLLM model tensors that have been serialized to disk, an HTTP/HTTPS endpoint, or
 at runtime extremely quickly directly to the GPU, resulting in significantly
 shorter Pod startup times and CPU memory usage. Tensor encryption is also supported.
 
-vLLM fully integrates Tensorizer in to its model loading machinery. The 
-following will give a brief overview on how to get started with using 
+vLLM fully integrates Tensorizer in to its model loading machinery. The
+following will give a brief overview on how to get started with using
 Tensorizer on vLLM.
 
 ## The basics
 To load a model using Tensorizer, it first needs to be serialized by Tensorizer.
-The example script in [examples/others/tensorize_vllm_model.py] takes care of 
-this process.
-(https://github.com/vllm-project/vllm/blob/main/examples/others/tensorize_vllm_model.py)
+The example script in [examples/others/tensorize_vllm_model.py](https://github.com/vllm-project/vllm/blob/main/examples/others/tensorize_vllm_model.py)
+takes care of this process.
 
 Let's walk through a basic example by serializing `facebook/opt-125m` using the
 script, and then loading it for inference.
@@ -24,8 +23,8 @@ script, and then loading it for inference.
 ## Saving a vLLM model with Tensorizer
 To save a model with Tensorizer, call the example script with the necessary
 CLI arguments. The docstring for the script itself explains the CLI args
-and how to use it properly in great detail, and we'll use one of the 
-examples from the docstring directly, assuming we want to save our model at 
+and how to use it properly in great detail, and we'll use one of the
+examples from the docstring directly, assuming we want to save our model at
 our S3 bucket example `s3://my-bucket`:
 
 ```bash
@@ -40,12 +39,12 @@ This saves the model tensors at `s3://my-bucket/vllm/facebook/opt-125m/v1`.
 
 ## Serving the model using Tensorizer
 Once the model is serialized where you want it, you need to pass
-`--load-format=tensorizer` as well as a JSON string to the 
-`--model-loader-extra-config` CLI arg for `vllm serve`, specifying 
-all the keyword arguments you'd normally pass to the `TensorizerConfig` 
-initializer, as if you were instantiating it like this, for instance: 
-`TensorizerConfig(**{"tensorizer_uri": "foo"})`. Here's an example bash 
-script that neatly lays out the JSON string before passing it to 
+`--load-format=tensorizer` as well as a JSON string to the
+`--model-loader-extra-config` CLI arg for `vllm serve`, specifying
+all the keyword arguments you'd normally pass to the `TensorizerConfig`
+initializer, as if you were instantiating it like this, for instance:
+`TensorizerConfig(**{"tensorizer_uri": "foo"})`. Here's an example bash
+script that neatly lays out the JSON string before passing it to
 `--model-loader-extra-config`:
 
 ```bash
@@ -66,11 +65,11 @@ vllm serve facebook/opt-125m \
   --model-loader-extra-config="$MODEL_LOADER_EXTRA_CONFIG"
 ```
 
-Note in this case, if the directory to the model artifacts at 
+Note in this case, if the directory to the model artifacts at
 `s3://my-bucket/vllm/facebook/opt-125m/v1/` doesn't at least have a `config.
-json` file, you'll want to pass `facebook/opt-125m` as the model tag like 
-it was done in the example script above. In our example, we just added a 
-`model.tensors` file to that directory. In this case, vLLM will take care of 
+json` file, you'll want to pass `facebook/opt-125m` as the model tag like
+it was done in the example script above. In our example, we just added a
+`model.tensors` file to that directory. In this case, vLLM will take care of
 resolving the other model artifacts using HF Hub.
 
 !!! note
