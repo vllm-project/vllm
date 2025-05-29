@@ -37,8 +37,9 @@ class XIELU(CustomOp):
         self._forward_method = self.forward_native
         if current_platform.is_cuda_alike():
             try:
-                from xielu.ops.wrappers import XIELU, XIELUfn
-                self._xielu_cuda = XIELUfn()
+                # XIELUfn/XIELUPy works but XIELU runs into Dynamo Errors
+                from xielu.ops.wrappers import XIELU, XIELUfn, XIELUPy
+                self._xielu_cuda = XIELUPy()
                 self._xielu_cuda.alpha_p = self.alpha_p
                 self._xielu_cuda.alpha_n = self.alpha_n
                 self._xielu_cuda.beta = self.beta
@@ -58,8 +59,10 @@ class XIELU(CustomOp):
         )
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        alpha_p = F.softplus(self.alpha_p)
-        alpha_n = self.beta + F.softplus(self.alpha_n)
+        # alpha_p = F.softplus(self.alpha_p)
+        # alpha_n = self.beta + F.softplus(self.alpha_n)
+        # use this optimally with precomputed alpha_p and alpha_n
+        # return self._xielu_cuda.forward_inference(x)
         return self._xielu_cuda.forward(x)
 
 
