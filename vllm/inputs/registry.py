@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
+import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar
 
@@ -13,8 +14,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import resolve_mm_processor_kwargs
 
 if TYPE_CHECKING:
-    import torch
-
     from vllm.config import ModelConfig
     from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
                                  MultiModalRegistry)
@@ -139,7 +138,7 @@ class InputProcessingContext(InputContext):
         hf_processor: ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
-    ) -> Union[BatchFeature, JSONTree["torch.Tensor"]]:
+    ) -> Union[BatchFeature, JSONTree]:
         """
         Call `hf_processor` on the prompt `data`
         (text, image, audio...) with configurable options `kwargs`.
@@ -164,16 +163,16 @@ class InputProcessingContext(InputContext):
             if isinstance(output, BatchFeature):
                 return output.to(dtype=self.model_config.dtype)
 
-            def maybe_cast_dtype(x: "torch.Tensor"):
+            def maybe_cast_dtype(x):
                 # This mimics the behavior of transformers.BatchFeature
-                dtype = self.model_config.dtype
-                return x.to(dtype=dtype) if x.is_floating_point() else x
+                if isinstance(x, torch.Tensor) and x.is_floating_point():
+                    return x.to(dtype=self.model_config.dtype)
+                return x
 
             logger.warning_once(
                 f"{type(hf_processor).__name__} did not return `BatchFeature`. "
                 "Make sure to match the behaviour of `ProcessorMixin` when "
                 "implementing custom processors.")
-            output = cast(JSONTree["torch.Tensor"], output)
             return json_map_leaves(maybe_cast_dtype, output)
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
