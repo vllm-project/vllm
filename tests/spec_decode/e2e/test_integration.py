@@ -23,8 +23,10 @@ MAIN_MODEL = "JackFram/llama-68m"
     [
         {
             # Identical models.
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 5,
+            "speculative_config": {
+                "model": "JackFram/llama-68m",
+                "num_speculative_tokens": 5,
+            },
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -57,26 +59,33 @@ def test_spec_decode_cuda_graph(vllm_runner, common_llm_kwargs,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
     }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    {
-        "speculative_model": "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
-        "num_speculative_tokens": 5,
-    },
-])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [])
 @pytest.mark.parametrize(
     "test_llm_kwargs",
     [
         # Explicitly specify draft model quantization
         {
-            "speculative_model_quantization": "gptq",
+            "speculative_config": {
+                "model": "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+                "num_speculative_tokens": 5,
+                "quantization": "gptq",
+            },
         },
         # Explicitly specify GPTQ-based draft model to use marlin quantization
         {
-            "speculative_model_quantization": "marlin",
+            "speculative_config": {
+                "model": "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+                "num_speculative_tokens": 5,
+                "quantization": "marlin",
+            },
         },
         # Not explicitly specify draft model quantization
         {
-            "speculative_model_quantization": None,
+            "speculative_config": {
+                "model": "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+                "num_speculative_tokens": 5,
+                "quantization": None,
+            },
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -107,15 +116,16 @@ def test_speculative_model_quantization_config(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 3,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",
-                         [{
-                             "speculative_disable_mqa_scorer": True,
-                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_config": {
+        "model": "JackFram/llama-68m",
+        "num_speculative_tokens": 3,
+        "disable_mqa_scorer": True,
+    },
+}])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
     "output_len",
@@ -127,7 +137,7 @@ def test_speculative_model_quantization_config(vllm_runner, common_llm_kwargs,
 def test_mqa_scorer(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
                     baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
                     output_len: int, seed: int):
-    """Verify that ngram speculative decoding generates the same output 
+    """Verify that speculative decoding generates the same output
     with batch expansion scorer and mqa scorer.
     """
     run_equality_correctness_test(vllm_runner,

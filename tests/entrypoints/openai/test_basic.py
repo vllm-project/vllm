@@ -171,3 +171,51 @@ async def test_request_wrong_content_type(server: RemoteOpenAIServer):
             extra_headers={
                 "Content-Type": "application/x-www-form-urlencoded"
             })
+
+
+@pytest.mark.parametrize(
+    "server_args",
+    [
+        pytest.param(["--enable-server-load-tracking"],
+                     id="enable-server-load-tracking")
+    ],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_server_load(server: RemoteOpenAIServer):
+    # Check initial server load
+    response = requests.get(server.url_for("load"))
+    assert response.status_code == HTTPStatus.OK
+    assert response.json().get("server_load") == 0
+
+    def make_long_completion_request():
+        return requests.post(
+            server.url_for("v1/completions"),
+            headers={"Content-Type": "application/json"},
+            json={
+                "prompt": "Give me a long story",
+                "max_tokens": 1000,
+                "temperature": 0,
+            },
+        )
+
+    # Start the completion request in a background thread.
+    completion_future = asyncio.create_task(
+        asyncio.to_thread(make_long_completion_request))
+
+    # Give a short delay to ensure the request has started.
+    await asyncio.sleep(0.1)
+
+    # Check server load while the completion request is running.
+    response = requests.get(server.url_for("load"))
+    assert response.status_code == HTTPStatus.OK
+    assert response.json().get("server_load") == 1
+
+    # Wait for the completion request to finish.
+    await completion_future
+    await asyncio.sleep(0.1)
+
+    # Check server load after the completion request has finished.
+    response = requests.get(server.url_for("load"))
+    assert response.status_code == HTTPStatus.OK
+    assert response.json().get("server_load") == 0

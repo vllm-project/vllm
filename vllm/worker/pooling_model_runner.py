@@ -84,10 +84,17 @@ class PoolingModelRunner(
         #  explore how to leverage it.
         if (prefill_meta is None and decode_meta is not None
                 and decode_meta.use_cuda_graph):
-            assert model_input.input_tokens is not None
-            graph_batch_size = model_input.input_tokens.shape[0]
-            model_executable = self.graph_runners[virtual_engine][
-                graph_batch_size]
+            if model_input.inputs_embeds is None:
+                assert model_input.input_tokens is not None
+                graph_batch_size = model_input.input_tokens.shape[0]
+                model_executable = (
+                    self.graph_runners[model_input.virtual_engine][(
+                        graph_batch_size, False)])
+            else:
+                graph_batch_size = model_input.inputs_embeds.shape[0]
+                model_executable = (
+                    self.graph_runners[model_input.virtual_engine][(
+                        graph_batch_size, True)])
         else:
             model_executable = self.model
 
@@ -112,10 +119,14 @@ class PoolingModelRunner(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device),
+                **MultiModalKwargs.as_kwargs(
+                    multi_modal_kwargs,
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                ),
                 **cross_enc_kwargs,
-                **seqlen_agnostic_kwargs)
+                **seqlen_agnostic_kwargs,
+            )
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):

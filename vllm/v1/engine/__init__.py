@@ -2,6 +2,7 @@
 
 import enum
 import time
+from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import msgspec
@@ -48,17 +49,20 @@ class EngineCoreRequest(
     # due to circular imports and typing we have in data.py
 
     request_id: str
-    # NOTE(ywang96): original text prompt is needed when a request is added to
-    # Detokenizer, but set to None when it is added to EngineCoreClient.
-    prompt: Optional[str]
     prompt_token_ids: list[int]
-    mm_inputs: Optional[list[Optional[MultiModalKwargs]]]
+    mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]
     mm_hashes: Optional[list[str]]
     mm_placeholders: Optional[list[PlaceholderRange]]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
+    cache_salt: Optional[str]
+
+    # Used in DP case to indicate which wave of requests this is expected to
+    # belong to, to cover a race condition where the request is sent before
+    # a wave finished notification is received.
+    current_wave: int = 0
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -101,6 +105,10 @@ class EngineCoreOutput(
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
+    kv_transfer_params: Optional[dict[str, Any]] = None
+
+    # The number of tokens with prefix cache hits.
+    num_cached_tokens: int = 0
 
     @property
     def finished(self) -> bool:
@@ -128,12 +136,22 @@ class EngineCoreOutputs(
     #NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 
+    engine_index: int = 0
+
     # [num_reqs]
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: Optional[SchedulerStats] = None
     timestamp: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None
+    finished_requests: Optional[set[str]] = None
+
+    # In DP case, used to signal that the current wave of requests
+    # has finished and the engines are paused.
+    wave_complete: Optional[int] = None
+    # In DP case, used to signal that a request was received for an
+    # "old" wave, so the next wave needs to be started in other engines.
+    start_wave: Optional[int] = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:
@@ -147,4 +165,7 @@ class EngineCoreRequestType(enum.Enum):
     """
     ADD = b'\x00'
     ABORT = b'\x01'
-    UTILITY = b'\x02'
+    START_DP_WAVE = b'\x02'
+    UTILITY = b'\x03'
+    # Sentinel used within EngineCoreProc.
+    EXECUTOR_FAILED = b'\x04'

@@ -8,7 +8,7 @@ import os
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.entrypoints.llm import LLM
+from vllm.engine.llm_engine import LLMEngine
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
@@ -43,7 +43,7 @@ def test_lora_functions_sync():
                              gpu_memory_utilization=0.8,
                              enforce_eager=True)
 
-    llm = LLM.get_engine_class().from_engine_args(engine_args)
+    llm = LLMEngine.from_engine_args(engine_args)
 
     def run_check(fn, args, expected: list):
         fn(args)
@@ -69,7 +69,7 @@ def test_lora_functions_sync():
     run_check(llm.add_lora, make_lora_request(12), [12, 9, 10, 11])
     run_check(llm.add_lora, make_lora_request(13), [12, 13, 10, 11])
 
-    # Remove all LoRAs
+    # Remove all LoRAs.
     run_check(llm.remove_lora, 13, [12, 10, 11])
     run_check(llm.remove_lora, 12, [10, 11])
     run_check(llm.remove_lora, 11, [10])

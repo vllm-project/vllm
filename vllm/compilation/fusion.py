@@ -1,24 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, NamedTuple, Optional
 
 import torch
 import torch._inductor.pattern_matcher as pm
-# TODO(luka) use vllm.utils once #10836 landed
-from compressed_tensors.quantization import FP8_DTYPE
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
-from vllm.config import CompilationConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from .fx_utils import find_getitem_maybe
 from .multi_output_match import MultiOutputMatch
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 def empty_bf16(*args, **kwargs):
@@ -57,7 +57,7 @@ kFp8StaticTensorSym = QuantKey(FP8_DTYPE, True, True, True)
 kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, False, True, True)
 kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, False, False, True)
 
-QUANT_OPS: Dict[QuantKey, OpOverload] = {
+QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa
     kFp8DynamicTensorSym:
     torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa
@@ -80,7 +80,7 @@ class FusedRMSQuantKey(NamedTuple):
                 f"{'' if self.fused_add else 'out'} residual)")
 
 
-FUSED_OPS: Dict[FusedRMSQuantKey, OpOverload] = {
+FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(kFp8StaticTensorSym, False):
     torch.ops._C.rms_norm_static_fp8_quant.default,  # noqa
     FusedRMSQuantKey(kFp8StaticTensorSym, True):
@@ -101,7 +101,7 @@ class QuantMultiOutputMatch(MultiOutputMatch):
         self.QUANT_OP = quant_op  # in-place quant op
         self.FUSED_OP = fused_op  # in-place fused quant op
 
-    def insert_fused_node(self, fused_return_mapping: Dict[int, Tuple[fx.Node,
+    def insert_fused_node(self, fused_return_mapping: dict[int, tuple[fx.Node,
                                                                       int]],
                           **kwargs):
         """
@@ -531,7 +531,7 @@ class FusionPass(VllmInductorPass):
     _instance: 'Optional[FusionPass]' = None
 
     @classmethod
-    def instance(cls, config: CompilationConfig.PassConfig):
+    def instance(cls, config: VllmConfig):
         """
         Get the singleton instance of the FusionPass.
         If the instance exists, the config is updated but
@@ -540,15 +540,15 @@ class FusionPass(VllmInductorPass):
         if cls._instance is None:
             cls._instance = FusionPass(config)
         else:
-            cls._instance.config = config
+            cls._instance.pass_config = config.compilation_config.pass_config
         return cls._instance
 
-    def __init__(self, config: CompilationConfig.PassConfig):
+    def __init__(self, config: VllmConfig):
         assert self.__class__._instance is None, \
             "FusionPass singleton instance already exists"
         super().__init__(config)
 
-        self.matches: List[MultiOutputMatch] = []
+        self.matches: list[MultiOutputMatch] = []
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="fusion_pass")
 

@@ -1,19 +1,65 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
+
+
+class RequestOutputCollector:
+    """
+    Collects streamed RequestOutputs per individual request,
+    for hand-off to the consuming asyncio generate task.
+
+    When streaming deltas, RequestOutputs are merged if the
+    producer gets ahead of the consumer.
+    """
+
+    def __init__(self, output_kind: RequestOutputKind):
+        self.aggregate = output_kind == RequestOutputKind.DELTA
+        self.output: Optional[Union[RequestOutput, Exception]] = None
+        self.ready = asyncio.Event()
+
+    def put(self, output: Union[RequestOutput, Exception]) -> None:
+        """Non-blocking put operation."""
+        if self.output is None or isinstance(output, Exception):
+            self.output = output
+            self.ready.set()
+        elif isinstance(self.output, RequestOutput):
+            # This ensures that request outputs with different request indexes
+            # (if n > 1) do not override each other.
+            self.output.add(output, aggregate=self.aggregate)
+
+    async def get(self) -> RequestOutput:
+        """Get operation blocks on put event."""
+        while (output := self.output) is None:
+            await self.ready.wait()
+        self.output = None
+        self.ready.clear()
+        if isinstance(output, Exception):
+            raise output
+        return output
+
+    def get_nowait(self) -> Optional[RequestOutput]:
+        """Non-blocking get operation."""
+        output = self.output
+        if output is not None:
+            self.output = None
+            self.ready.clear()
+        if isinstance(output, Exception):
+            raise output
+        return output
 
 
 @dataclass
@@ -38,7 +84,7 @@ class RequestState:
         detokenizer: IncrementalDetokenizer,
         max_tokens_param: Optional[int],
         arrival_time: float,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ):
         self.request_id = request_id
@@ -63,9 +109,10 @@ class RequestState:
         cls,
         tokenizer: AnyTokenizer,
         request: EngineCoreRequest,
+        prompt: Optional[str],
         parent_req: Optional[ParentRequest],
         request_index: int,
-        queue: Optional[asyncio.Queue[RequestOutput]],
+        queue: Optional[RequestOutputCollector],
         log_stats: bool,
     ) -> "RequestState":
         if not request.sampling_params.detokenize:
@@ -77,7 +124,7 @@ class RequestState:
             lora_name=(request.lora_request.name
                        if request.lora_request is not None else None),
             output_kind=request.sampling_params.output_kind,
-            prompt=request.prompt,
+            prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
             logprobs_processor=LogprobsProcessor.from_new_request(
                 tokenizer=tokenizer,
@@ -99,37 +146,39 @@ class RequestState:
         new_token_ids: list[int],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
+        kv_transfer_params: Optional[dict[str, Any]] = None,
+        num_cached_tokens: int = 0,
     ) -> Optional[RequestOutput]:
 
         finished = finish_reason is not None
-        output_kind = self.output_kind
-        final_only = output_kind == RequestOutputKind.FINAL_ONLY
+        final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
 
-        # In follow up, we will switch to invariant where EngineCore
-        # does not stream partial prefills.
-        if not finished and (self.is_prefilling or final_only):
+        if not finished and final_only:
             # Only the final output is required in FINAL_ONLY mode.
             return None
-
-        def new_request_output(request_id: str) -> RequestOutput:
-            return self._new_request_output(request_id, finished)
 
         completion_output = self._new_completion_output(
             new_token_ids, finish_reason, stop_reason)
 
-        if self.parent_req is not None:
-            return self.parent_req.make_request_output(final_only,
-                                                       completion_output,
-                                                       new_request_output)
+        request_id = self.request_id
+        if self.parent_req is None:
+            outputs = [completion_output]
+        else:
+            request_id, outputs, finished = self.parent_req.get_outputs(
+                request_id, completion_output)
+            if not outputs:
+                return None
 
-        request_output = new_request_output(self.request_id)
-        request_output.outputs.append(completion_output)
-        return request_output
+        return self._new_request_output(request_id, outputs, finished,
+                                        kv_transfer_params, num_cached_tokens)
 
     def _new_request_output(
         self,
         request_id: str,
+        outputs: list[CompletionOutput],
         finished: bool,
+        kv_transfer_params: Optional[dict[str, Any]] = None,
+        num_cached_tokens: int = 0,
     ) -> RequestOutput:
 
         if self.output_kind == RequestOutputKind.DELTA:
@@ -143,8 +192,10 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=self.prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
-            outputs=[],
+            outputs=outputs,
             finished=finished,
+            kv_transfer_params=kv_transfer_params,
+            num_cached_tokens=num_cached_tokens,
         )
 
     def _new_completion_output(
@@ -182,12 +233,13 @@ class OutputProcessor:
 
     def __init__(
         self,
-        tokenizer: BaseTokenizerGroup,
+        tokenizer: TokenizerGroup,
         log_stats: bool,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: dict[str, RequestState] = {}
+        self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
 
     def get_num_unfinished_requests(self):
@@ -196,23 +248,37 @@ class OutputProcessor:
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
 
+    def propagate_error(self, e: Exception):
+        """Propagate error to all generate() tasks."""
+
+        for _, state in self.request_states.items():
+            assert state.queue is not None
+            state.queue.put(e)
+
     def abort_requests(
         self,
-        request_ids: list[str],
-    ) -> None:
+        request_ids: Iterable[str],
+    ) -> list[str]:
+        request_ids_to_abort = []
         for request_id in request_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
                 self.lora_states.abort_request(req_state)
-                if req_state.parent_req is not None:
-                    req_state.parent_req.finish_child_request(request_id)
+                request_ids_to_abort.append(request_id)
+            else:
+                parent = self.parent_requests.pop(request_id, None)
+                if parent and parent.child_requests:
+                    self.abort_requests(parent.child_requests)
+                    request_ids_to_abort.extend(parent.child_requests)
+        return request_ids_to_abort
 
     def add_request(
         self,
         request: EngineCoreRequest,
+        prompt: Optional[str],
         parent_req: Optional[ParentRequest] = None,
         request_index: int = 0,
-        queue: Optional[asyncio.Queue[RequestOutput]] = None,
+        queue: Optional[RequestOutputCollector] = None,
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
@@ -221,12 +287,15 @@ class OutputProcessor:
         req_state = RequestState.from_new_request(
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
+            prompt=prompt,
             parent_req=parent_req,
             request_index=request_index,
             queue=queue,
             log_stats=self.log_stats)
         self.request_states[request_id] = req_state
         self.lora_states.add_request(req_state)
+        if parent_req:
+            self.parent_requests[parent_req.request_id] = parent_req
 
     def process_outputs(
         self,
@@ -246,16 +315,14 @@ class OutputProcessor:
             * If there is no queue (for usage with LLMEngine), 
               return a list of RequestOutput objects.
 
-        ****************** NOTE FOR DEVELOPERS ******************
+        NOTE FOR DEVELOPERS
 
-        VLLM V1 minimizes the number of python loops over the full
+        vLLM V1 minimizes the number of python loops over the full
         batch to ensure system overheads are minimized. This is the 
         only function that should loop over EngineCoreOutputs.
 
         If you need to touch every element of the batch, do it from
         within the loop below.
-        
-        **********************************************************
         """
 
         request_outputs: list[RequestOutput] = []
@@ -275,38 +342,27 @@ class OutputProcessor:
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
+            kv_transfer_params = engine_core_output.kv_transfer_params
+            num_cached_tokens = engine_core_output.num_cached_tokens
+            req_state.is_prefilling = False
 
-            # TODO(andy): prompt logprobs + chunked prefill can
-            # result in engine core returning an output for a
-            # partial prefill (in order to send back partial
-            # prompt logprobs.) This breaks the invariant that
-            # process_outputs is only operating on engine core
-            # outputs associated with non-partial completions.
-            # Currently this is handled by having `is_prefilling`
-            # check for new decoded tokens, indicating that
-            # the completion is not partial.
-            #
-            # Follow up will aggregate partial prompt logprobs
-            # in the EngineCore.
-            req_state.is_prefilling = not new_token_ids
-
-            # 2) Detokenize the token ids into text and check for stop
-            #    strings.
-            stop_string = req_state.detokenizer.update(new_token_ids)
-            if stop_string and finish_reason != FinishReason.STOP:
+            # 2) Detokenize the token ids into text and perform stop checks.
+            stop_string = req_state.detokenizer.update(
+                new_token_ids, finish_reason == FinishReason.STOP)
+            if stop_string:
                 finish_reason = FinishReason.STOP
                 stop_reason = stop_string
 
-            # 3) Compute sample and prompt logprobs for request,
-            #    if required.
+            # 3) Compute sample and prompt logprobs for request, if required.
             req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
-                    new_token_ids, finish_reason, stop_reason):
+                    new_token_ids, finish_reason, stop_reason,
+                    kv_transfer_params, num_cached_tokens):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
-                    req_state.queue.put_nowait(request_output)
+                    req_state.queue.put(request_output)
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
@@ -314,12 +370,14 @@ class OutputProcessor:
             # Free completed requests.
             if finish_reason is not None:
                 self.request_states.pop(req_id)
+                # Remove parent request if applicable.
+                parent_req = req_state.parent_req
+                if parent_req and not parent_req.child_requests:
+                    self.parent_requests.pop(parent_req.request_id, None)
                 if not engine_core_output.finished:
                     # If req not finished in EngineCore, but Detokenizer
                     # detected stop string, abort needed in EngineCore.
                     reqs_to_abort.append(req_id)
-                if req_state.parent_req is not None:
-                    req_state.parent_req.finish_child_request(req_id)
 
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,

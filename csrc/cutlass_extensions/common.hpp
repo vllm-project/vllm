@@ -15,15 +15,6 @@
                 cutlassGetStatusString(error));     \
   }
 
-/**
- * Panic wrapper for unwinding CUDA runtime errors
- */
-#define CUDA_CHECK(status)                                        \
-  {                                                               \
-    cudaError_t error = status;                                   \
-    TORCH_CHECK(error == cudaSuccess, cudaGetErrorString(error)); \
-  }
-
 inline int get_cuda_max_shared_memory_per_block_opt_in(int const device) {
   int max_shared_mem_per_block_opt_in = 0;
   cudaDeviceGetAttribute(&max_shared_mem_per_block_opt_in,
@@ -45,6 +36,26 @@ struct enable_sm90_or_later : Kernel {
   template <typename... Args>
   CUTLASS_DEVICE void operator()(Args&&... args) {
 #if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
+    Kernel::operator()(std::forward<Args>(args)...);
+#endif
+  }
+};
+
+template <typename Kernel>
+struct enable_sm90_only : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE void operator()(Args&&... args) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ == 900
+    Kernel::operator()(std::forward<Args>(args)...);
+#endif
+  }
+};
+
+template <typename Kernel>
+struct enable_sm100_only : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE void operator()(Args&&... args) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ == 1000
     Kernel::operator()(std::forward<Args>(args)...);
 #endif
   }

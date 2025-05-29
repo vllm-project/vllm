@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import warnings
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 from functorch.experimental.control_flow import cond  # noqa: F401
@@ -25,7 +25,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+            cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
 
         if not current_platform.is_tpu():
             return False, "ScaledMMXLA requires running on TPU."
@@ -97,7 +97,8 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
                                              block_size=-1,
                                              int4_weight=False,
                                              quantize_activation=True)
-
+        # `quantized_matmul` output is fp32, cast it down to bf16 for perf
+        out = out.to(x.dtype)
         # Explicitly capture control flow to make dynamo happy.
         # https://pytorch.org/docs/main/generated/exportdb/index.html#cond-branch-class-method # noqa: E501
         return cond(bias is None, self.no_add_bias, self.add_bias, [out, bias])

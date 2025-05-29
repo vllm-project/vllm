@@ -18,6 +18,14 @@ from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import Counter, is_pin_memory_available
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This file tests V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 class MockLogitsSampler(Sampler):
 
     def __init__(self, fake_logits: torch.Tensor):
@@ -470,7 +478,7 @@ def test_sampler_mixed(seed: int, device: str):
             sampling_params = SamplingParams(
                 temperature=random.random() + 0.1,
                 top_p=min(random.random() + 0.1, 1),
-                top_k=random.randint(0, 10) or -1,
+                top_k=random.randint(0, 10),
                 n=n,
                 presence_penalty=random.randint(0, 1),
             )
@@ -638,6 +646,8 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 def test_flashinfer_fallback(seed: int, device: str):
     if not envs.VLLM_USE_FLASHINFER_SAMPLER:
         pytest.skip("Flashinfer sampler is disabled")
+
+    pytest.skip("After FlashInfer 0.2.3, sampling will never fail")
 
     set_random_seed(seed)
     torch.set_default_device(device)

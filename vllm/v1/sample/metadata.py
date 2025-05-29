@@ -38,3 +38,6 @@ class SamplingMetadata:
     # `allowed_token_ids_mask` is a 2D bool tensor of shape (max batch size,
     # vocab size).
     allowed_token_ids_mask: Optional[torch.Tensor]
+
+    # req_index -> bad_words_token_ids
+    bad_words_token_ids: dict[int, list[list[int]]]

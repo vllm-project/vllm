@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from typing import Optional
 
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import regex as re
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
@@ -263,15 +263,16 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
 
     prompt = "What is an LLM?"
     n = 3
-    max_tokens = 5
+    max_tokens = 50  # we want some to finish earlier than others
 
     # High temperature to maximize chance of unique completions.
     completion = await client.completions.create(model=model_name,
                                                  prompt=prompt,
                                                  max_tokens=max_tokens,
                                                  n=n,
-                                                 temperature=0.95,
+                                                 temperature=1.0,
                                                  stream=False,
+                                                 logprobs=0,
                                                  seed=42)
 
     # Assert `n` completions
@@ -279,6 +280,7 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
     assert num_completions == n, (
         f"Num completions {num_completions} but expected {n}.")
     completion_repeats: dict[str, int] = {}
+    output_token_lengths = set()
     for idx, choice in enumerate(completion.choices):
         # Assert correct completion index & some finish reason.
         assert choice.index == idx, (
@@ -287,6 +289,9 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
             "None finish_reason is invalid.")
         text = choice.text
         completion_repeats[text] = completion_repeats.get(text, 0) + 1
+        output_token_lengths.add(len(choice.logprobs.tokens))
+    # Assert subrequests finished at different times
+    assert len(output_token_lengths) > 1
     # Assert `n` unique completions
     num_unique = len(completion_repeats)
     if num_unique != n:
@@ -312,16 +317,16 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
 
     prompt = "What is an LLM?"
     n = 3
-    max_tokens = 5
+    max_tokens = 50  # we want some to finish earlier than others
 
     stream = await client.completions.create(model=model_name,
                                              prompt=prompt,
                                              max_tokens=max_tokens,
                                              n=n,
-                                             temperature=0.95,
+                                             temperature=1.0,
                                              stream=True,
                                              seed=42)
-    chunks: list[list[str]] = [[] for i in range(n)]
+    chunks: list[list[str]] = [[] for _ in range(n)]
     finish_reason_count = 0
     async for chunk in stream:
         index = chunk.choices[0].index
@@ -333,14 +338,18 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     assert finish_reason_count == n, (
         f"Expected {n} completions with valid indices and finish_reason.")
     completion_repeats: dict[str, int] = {}
+    chunk_lengths = set()
     for chunk in chunks:
         chunk_len = len(chunk)
         # Assert correct number of completion tokens
-        assert chunk_len == max_tokens, (
+        chunk_lengths.add(chunk_len)
+        assert chunk_len <= max_tokens, (
             f"max_tokens={max_tokens} but chunk len is {chunk_len}.")
         text = "".join(chunk)
         completion_repeats[text] = completion_repeats.get(text, 0) + 1
         print(text)
+    # Assert subrequests finished at different times
+    assert len(chunk_lengths) > 1
     # Assert `n` unique completions
     num_unique = len(completion_repeats)
     if num_unique != n:
@@ -575,3 +584,97 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
             assert max(logprobs_arg,
                        1) <= len(top_logprobs) <= logprobs_arg + 1
         assert len(logprobs.tokens) > 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_invalid_json_schema(client: openai.AsyncOpenAI,
+                                   model_name: str) -> None:
+    invalid_json_schema = {
+        "$defs": {
+            "CarType": {
+                "enum": ["sedan", "SUV", "Truck", "Coupe"],
+                "title": "CarType",
+                "type": "string",
+            }
+        },
+        "properties": {
+            "brand": {
+                "title": "Brand",
+                "type": "string"
+            },
+            "model": {
+                "title": "Model",
+                "type": "string"
+            },
+            "car_type": {
+                "$ref": "#/$defs/CarType"
+            },
+            "foo": "bar",
+        },
+        "required": ["brand", "model", "car_type"],
+        "title": "CarDescription",
+        "type": "object",
+    }
+    prompt = ("Generate a JSON with the brand, model and car_type of"
+              "the most iconic car from the 90's")
+    with pytest.raises((openai.BadRequestError, openai.APIError)):
+        await client.completions.create(
+            model=model_name,
+            prompt=prompt,
+            extra_body={"guided_json": invalid_json_schema},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_invalid_regex(client: openai.AsyncOpenAI, model_name: str):
+    prompt = ("Generate an email address for Alan Turing, who works in Enigma."
+              "End in .com and new line. Example result:"
+              "alan.turing@enigma.com\n")
+
+    with pytest.raises((openai.BadRequestError, openai.APIError)):
+        await client.completions.create(
+            model=model_name,
+            prompt=prompt,
+            extra_body={
+                "guided_regex": r"[.*",
+                "stop": ["\n"]
+            },
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
+    invalid_simplified_sql_grammar = """
+        root ::= select_statementinvalidsyntax
+
+        select_statement ::= "SELECT " column " from " table " where " condition
+
+        column ::= "col_1 " | "col_2 "
+
+        table ::= "table_1 " | "table_2 "
+
+        condition ::= column "= " number
+
+        number ::= "1 " | "2 "
+    """
+
+    prompt = ("Generate an SQL query to show the 'username' and 'email'"
+              "from the 'users' table.")
+    with pytest.raises((openai.BadRequestError, openai.APIError)):
+        await client.completions.create(
+            model=model_name,
+            prompt=prompt,
+            extra_body={"guided_grammar": invalid_simplified_sql_grammar},
+        )

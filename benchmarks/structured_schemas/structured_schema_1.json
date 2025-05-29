@@ -1,25 +1,19 @@
 {
-  "type": "array",
-  "items": {
     "type": "object",
     "properties": {
       "name": { "type": "string" },
-      "race": { "type": "string" },
-      "class": { "type": "string" },
-      "level": { "type": "integer" },
-      "background": { "type": "string" },
-      "alignment": { "type": "string" },
-      "backstory": { "type": "string" }
+      "email": { "type": "string" },
+      "street": { "type": "string" },
+      "city": { "type": "string" },
+      "state": { "type": "string" },
+      "zip": { "type": "string" },
+      "phone": { "type": "string" },
+      "website": { "type": "string" },
+      "company": { "type": "string" },
+      "age": { "type": "integer" }
     },
     "required": [
       "name",
-      "race",
-      "class",
-      "level",
-      "background",
-      "alignment",
-      "backstory"
+      "email"
     ]
-  }
 }
-

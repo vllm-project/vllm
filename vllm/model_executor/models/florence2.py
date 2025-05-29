@@ -3,34 +3,34 @@
 import math
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BartTokenizer, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
                                              BartParallelLMHead,
                                              BartScaledWordEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
-from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalKwargs)
+from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptIndexTargets, PromptInsertion,
                                         PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsV0Only
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
+                         SupportsV0Only)
 from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 
 
@@ -671,7 +671,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
 
     def forward(
         self,
@@ -714,13 +713,8 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
                                        sampling_metadata)
         return logits
 
-    def sample(self, logits: torch.Tensor,
-               sampling_metadata: SamplingMetadata) -> SamplerOutput:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -729,7 +723,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -763,41 +757,32 @@ class Florence2ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_max_image_tokens(self) -> int:
+    def get_num_image_tokens(self) -> int:
         processor_config = self.ctx.get_hf_image_processor_config()
         return processor_config["image_seq_length"]
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
 
 
 class Florence2DummyInputsBuilder(
         BaseDummyInputsBuilder[Florence2ProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width = target_height = self.info.get_hf_config().projection_dim
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="",
-            mm_data=mm_data,
-        )
 
 
 class Florence2MultiModalProcessor(
@@ -824,6 +809,18 @@ class Florence2MultiModalProcessor(
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         return [self.info.get_hf_config().eos_token_id]
+
+    def _apply_hf_processor_tokens_only(
+        self,
+        prompt_tokens: list[int],
+    ) -> list[int]:
+        hf_processor = self.info.get_hf_processor()
+        tokenizer: BartTokenizer = hf_processor.tokenizer
+        prompt_text = tokenizer.decode(prompt_tokens)
+        # convert task tokens to prompt
+        prompt_text = hf_processor._construct_prompts([prompt_text])[0]
+        prompt_tokens = tokenizer.encode(prompt_text, add_special_tokens=False)
+        return prompt_tokens
 
     def _call_hf_processor(
         self,
@@ -858,7 +855,7 @@ class Florence2MultiModalProcessor(
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         pad_token_id = hf_config.pad_token_id
-        num_image_tokens = self.info.get_max_image_tokens()
+        num_image_tokens = self.info.get_num_image_tokens()
         image_tokens = [pad_token_id] * num_image_tokens
 
         return [
@@ -874,7 +871,8 @@ class Florence2MultiModalProcessor(
     Florence2MultiModalProcessor,
     info=Florence2ProcessingInfo,
     dummy_inputs=Florence2DummyInputsBuilder)
-class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                        SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -923,15 +921,9 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
             raise NotImplementedError(
                 'Florence2 only supports COSINE as temporal embedding.')
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-        return get_sampler()
-
     def _validate_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        self, data: Union[torch.Tensor, list[torch.Tensor]]
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
 
         size = self.processor_config["size"]
         h, w = size["height"], size["width"]
@@ -952,12 +944,12 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         return data
 
     def _parse_and_validate_image_input(self, **kwargs: object):
-        pixel_values: Optional[Union[List[List[torch.Tensor]],
-                                     List[torch.Tensor],
+        pixel_values: Optional[Union[list[list[torch.Tensor]],
+                                     list[torch.Tensor],
                                      torch.Tensor]] = kwargs.pop(
                                          "pixel_values", None)
-        image_embeds: Optional[Union[List[List[torch.Tensor]],
-                                     List[torch.Tensor],
+        image_embeds: Optional[Union[list[list[torch.Tensor]],
+                                     list[torch.Tensor],
                                      torch.Tensor]] = kwargs.pop(
                                          "image_embeds", None)
 
@@ -1036,9 +1028,11 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         pixel_values = image_input["data"]
         return self._encode_image(pixel_values)
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -1048,7 +1042,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
@@ -1102,14 +1096,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

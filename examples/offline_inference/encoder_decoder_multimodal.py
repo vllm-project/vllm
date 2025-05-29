@@ -3,19 +3,27 @@
 This example shows how to use vLLM for running offline inference with
 the explicit/implicit prompt format on enc-dec LMMs for text generation.
 """
-import time
 
-from vllm import LLM, SamplingParams
+import time
+from collections.abc import Sequence
+from dataclasses import asdict
+from typing import NamedTuple
+
+from vllm import LLM, EngineArgs, PromptType, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.utils import FlexibleArgumentParser
 
 
+class ModelRequestData(NamedTuple):
+    engine_args: EngineArgs
+    prompts: Sequence[PromptType]
+
+
 def run_florence2():
-    # Create a Florence-2 encoder/decoder model instance
-    llm = LLM(
+    engine_args = EngineArgs(
         model="microsoft/Florence-2-large",
-        tokenizer="facebook/bart-large",
+        tokenizer="Isotr0py/Florence-2-tokenizer",
         max_num_seqs=8,
         trust_remote_code=True,
         limit_mm_per_prompt={"image": 1},
@@ -23,58 +31,60 @@ def run_florence2():
     )
 
     prompts = [
-        {   # implicit prompt with task token
+        {  # implicit prompt with task token
             "prompt": "<DETAILED_CAPTION>",
-            "multi_modal_data": {
-                "image": ImageAsset("stop_sign").pil_image
-            },
+            "multi_modal_data": {"image": ImageAsset("stop_sign").pil_image},
         },
-        {   # explicit encoder/decoder prompt
+        {  # explicit encoder/decoder prompt
             "encoder_prompt": {
                 "prompt": "Describe in detail what is shown in the image.",
-                "multi_modal_data": {
-                    "image": ImageAsset("cherry_blossom").pil_image
-                },
+                "multi_modal_data": {"image": ImageAsset("cherry_blossom").pil_image},
             },
             "decoder_prompt": "",
         },
     ]
-    return llm, prompts
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
 
 
 def run_mllama():
-    # Create a Mllama encoder/decoder model instance
-    llm = LLM(
+    engine_args = EngineArgs(
         model="meta-llama/Llama-3.2-11B-Vision-Instruct",
-        max_model_len=4096,
+        max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": 1},
         dtype="half",
     )
 
     prompts = [
-        {   # Implicit prompt
-            "prompt": "<|image|><|begin_of_text|>What is the content of this image?",   # noqa: E501
+        {  # Implicit prompt
+            "prompt": "<|image|><|begin_of_text|>What is the content of this image?",  # noqa: E501
             "multi_modal_data": {
                 "image": ImageAsset("stop_sign").pil_image,
             },
         },
-        {   # Explicit prompt
+        {  # Explicit prompt
             "encoder_prompt": {
                 "prompt": "<|image|>",
                 "multi_modal_data": {
                     "image": ImageAsset("stop_sign").pil_image,
                 },
             },
-            "decoder_prompt": "<|image|><|begin_of_text|>Please describe the image.",   # noqa: E501
+            "decoder_prompt": "<|image|><|begin_of_text|>Please describe the image.",  # noqa: E501
         },
     ]
-    return llm, prompts
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
 
 
 def run_whisper():
-    # Create a Whisper encoder/decoder model instance
-    llm = LLM(
+    engine_args = EngineArgs(
         model="openai/whisper-large-v3-turbo",
         max_model_len=448,
         max_num_seqs=16,
@@ -83,13 +93,13 @@ def run_whisper():
     )
 
     prompts = [
-        {   # Test implicit prompt
+        {  # Test implicit prompt
             "prompt": "<|startoftranscript|>",
             "multi_modal_data": {
                 "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
             },
         },
-        {   # Test explicit encoder/decoder prompt
+        {  # Test explicit encoder/decoder prompt
             "encoder_prompt": {
                 "prompt": "",
                 "multi_modal_data": {
@@ -97,9 +107,13 @@ def run_whisper():
                 },
             },
             "decoder_prompt": "<|startoftranscript|>",
-        }
+        },
     ]
-    return llm, prompts
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
 
 
 model_example_map = {
@@ -109,18 +123,52 @@ model_example_map = {
 }
 
 
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description="Demo on using vLLM for offline inference with "
+        "vision language models for text generation"
+    )
+    parser.add_argument(
+        "--model-type",
+        "-m",
+        type=str,
+        default="mllama",
+        choices=model_example_map.keys(),
+        help='Huggingface "model_type".',
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Set the seed when initializing `vllm.LLM`.",
+    )
+    return parser.parse_args()
+
+
 def main(args):
     model = args.model_type
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
 
-    llm, prompts = model_example_map[model]()
+    req_data = model_example_map[model]()
+
+    # Disable other modalities to save memory
+    default_limits = {"image": 0, "video": 0, "audio": 0}
+    req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
+        req_data.engine_args.limit_mm_per_prompt or {}
+    )
+
+    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    llm = LLM(**engine_args)
+
+    prompts = req_data.prompts
 
     # Create a sampling params object.
     sampling_params = SamplingParams(
         temperature=0,
         top_p=1.0,
         max_tokens=64,
+        skip_special_tokens=False,
     )
 
     start = time.time()
@@ -134,8 +182,7 @@ def main(args):
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"Decoder prompt: {prompt!r}, "
-              f"Generated text: {generated_text!r}")
+        print(f"Decoder prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     duration = time.time() - start
 
@@ -144,15 +191,5 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser(
-        description='Demo on using vLLM for offline inference with '
-        'vision language models for text generation')
-    parser.add_argument('--model-type',
-                        '-m',
-                        type=str,
-                        default="mllama",
-                        choices=model_example_map.keys(),
-                        help='Huggingface "model_type".')
-
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

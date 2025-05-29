@@ -2,8 +2,7 @@
 """
 Utilities for Punica kernel construction.
 """
-import triton
-import triton.language as tl
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
@@ -130,7 +129,7 @@ def do_expand_kernel(
     # Identify A and B block pointers
     offset_k = tl.arange(0, BLOCK_K)
     a_ptr = (cur_input_ptr + ram[:, None] * input_d1_stride +
-             offset_k[None, :] * input_d2_stride, )
+             offset_k[None, :] * input_d2_stride)
     b_ptr = (cur_lora_ptr + cur_lora_d0_stride * lora_index +
              offset_k[:, None] * cur_lora_d2_stride +
              rbn[None, :] * cur_lora_d1_stride)

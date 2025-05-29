@@ -60,8 +60,10 @@ PRECISION = "float32"
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -107,14 +109,18 @@ def test_medusa_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
-        "disable_logprobs_during_spec_decoding": False,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+            "disable_logprobs": False,
+        },
     },
     {
-        "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
-        "disable_logprobs_during_spec_decoding": True,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+            "disable_logprobs": True,
+        },
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -132,19 +138,20 @@ def test_medusa_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
                                     prefill_chunk_size: int):
     """Verify greedy equality with different batch size."""
     maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
-    run_equality_correctness_test(vllm_runner,
-                                  common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs,
-                                  test_llm_kwargs,
-                                  batch_size,
-                                  max_output_len=output_len,
-                                  seed=seed,
-                                  temperature=0.0,
-                                  logprobs=logprobs,
-                                  prompt_logprobs=logprobs,
-                                  disable_logprobs=test_llm_kwargs[
-                                      'disable_logprobs_during_spec_decoding'])
+    run_equality_correctness_test(
+        vllm_runner,
+        common_llm_kwargs,
+        per_test_common_llm_kwargs,
+        baseline_llm_kwargs,
+        test_llm_kwargs,
+        batch_size,
+        max_output_len=output_len,
+        seed=seed,
+        temperature=0.0,
+        logprobs=logprobs,
+        prompt_logprobs=logprobs,
+        disable_logprobs=test_llm_kwargs["speculative_config"]
+        ["disable_logprobs"])
 
 
 @pytest.mark.parametrize(
@@ -165,8 +172,10 @@ def test_medusa_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -196,7 +205,7 @@ def test_medusa_e2e_greedy_correctness_cuda_graph(
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "block_size": 8,
+        "block_size": 16,
         # 2 for small prompt, 256//8 for generated.
         "num_gpu_blocks_override": 2 + 256 // 8,
         "max_model_len": (2 + 256 // 8) * 8,
@@ -214,8 +223,10 @@ def test_medusa_e2e_greedy_correctness_cuda_graph(
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
     },
 ])
 @pytest.mark.parametrize(
@@ -264,8 +275,10 @@ def test_medusa_e2e_greedy_correctness_with_preemption(
     "test_llm_kwargs",
     [
         {
-            "speculative_model": SPEC_MODEL,
-            "num_speculative_tokens": k,
+            "speculative_config": {
+                "model": SPEC_MODEL,
+                "num_speculative_tokens": k,
+            },
         }
         # Try a range of num. speculative tokens
         for k in range(1, 1 + MAX_SPEC_TOKENS)
@@ -312,12 +325,13 @@ def test_medusa_different_k(vllm_runner, common_llm_kwargs,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",
-                         [{
-                             "speculative_model": SPEC_MODEL,
-                             "num_speculative_tokens": MAX_SPEC_TOKENS,
-                             "speculative_disable_by_batch_size": 4
-                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_config": {
+        "model": SPEC_MODEL,
+        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "disable_by_batch_size": 4,
+    },
+}])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
     "output_len",
@@ -359,16 +373,17 @@ def test_medusa_disable_queue(vllm_runner, common_llm_kwargs,
 
         # Main model
         "model_name": MAIN_MODEL,
-        "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
-        "speculative_disable_by_batch_size": 4
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",
-                         [{
-                             "speculative_disable_mqa_scorer": True,
-                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_config": {
+        "model": SPEC_MODEL,
+        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "disable_by_batch_size": 4,
+        "disable_mqa_scorer": True,
+    },
+}])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
     "output_len",

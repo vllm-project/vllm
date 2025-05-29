@@ -14,7 +14,7 @@ __global__ void awq_marlin_repack_kernel(
   int n_tiles = size_n / tile_n_size;
   int block_k_tiles = div_ceil(k_tiles, gridDim.x);
 
-  int start_k_tile = blockIdx.x * block_k_tiles;
+  auto start_k_tile = blockIdx.x * block_k_tiles;
   if (start_k_tile >= k_tiles) {
     return;
   }
@@ -51,8 +51,8 @@ __global__ void awq_marlin_repack_kernel(
     int4* sh_ptr = sh + stage_size * pipe;
 
     if (threadIdx.x < stage_size) {
-      int k_id = threadIdx.x / stage_n_threads;
-      int n_id = threadIdx.x % stage_n_threads;
+      auto k_id = threadIdx.x / stage_n_threads;
+      auto n_id = threadIdx.x % stage_n_threads;
 
       int first_k = k_tile_id * tile_k_size;
 
@@ -70,8 +70,8 @@ __global__ void awq_marlin_repack_kernel(
       return;
     }
 
-    int warp_id = threadIdx.x / 32;
-    int th_id = threadIdx.x % 32;
+    auto warp_id = threadIdx.x / 32;
+    auto th_id = threadIdx.x % 32;
 
     if (warp_id >= 4) {
       return;

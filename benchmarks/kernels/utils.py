@@ -23,6 +23,7 @@ class ArgPool:
     For every invocation during a benchmarking run, it will choose a
     different value from the list.
     """
+
     values: Iterable[Any]
 
     def __getitem__(self, index):
@@ -30,9 +31,7 @@ class ArgPool:
 
 
 class Bench:
-
     class ArgsIterator:
-
         def __init__(self, args_list, kwargs_list):
             assert len(args_list) == len(kwargs_list)
             self.args_list = args_list
@@ -53,10 +52,16 @@ class Bench:
         def n_args(self):
             return self.n
 
-    def __init__(self, cuda_graph_params: Optional[CudaGraphBenchParams],
-                 label: str, sub_label: str, description: str, fn: Callable,
-                 *args, **kwargs):
-
+    def __init__(
+        self,
+        cuda_graph_params: Optional[CudaGraphBenchParams],
+        label: str,
+        sub_label: str,
+        description: str,
+        fn: Callable,
+        *args,
+        **kwargs,
+    ):
         self.cuda_graph_params = cuda_graph_params
         self.use_cuda_graph = self.cuda_graph_params is not None
         self.label = label
@@ -67,10 +72,8 @@ class Bench:
         # Process args
         self._args = args
         self._kwargs = kwargs
-        self.args_list, self.kwargs_list = self.collapse_argpool(
-            *args, **kwargs)
-        self.args_iterator = self.ArgsIterator(self.args_list,
-                                               self.kwargs_list)
+        self.args_list, self.kwargs_list = self.collapse_argpool(*args, **kwargs)
+        self.args_iterator = self.ArgsIterator(self.args_list, self.kwargs_list)
 
         # Cudagraph runner
         self.g = None
@@ -100,16 +103,13 @@ class Bench:
 
         for i in range(argpool_size):
             # collapse args; Just pick the ith value
-            args_list[i] = tuple([
-                arg[i] if isinstance(arg, ArgPool) else arg
-                for arg in args_list[i]
-            ])
+            args_list[i] = tuple(
+                [arg[i] if isinstance(arg, ArgPool) else arg for arg in args_list[i]]
+            )
 
             # collapse kwargs
             kwargs_i = kwargs_list[i]
-            arg_pool_keys = [
-                k for k, v in kwargs_i.items() if isinstance(v, ArgPool)
-            ]
+            arg_pool_keys = [k for k, v in kwargs_i.items() if isinstance(v, ArgPool)]
             for k in arg_pool_keys:
                 # again just pick the ith value
                 kwargs_i[k] = kwargs_i[k][i]
@@ -142,7 +142,7 @@ class Bench:
 
     def run_cudagrah(self) -> TMeasurement:
         assert self.use_cuda_graph
-        globals = {'g': self.g}
+        globals = {"g": self.g}
 
         return TBenchmark.Timer(
             stmt="g.replay()",
@@ -162,15 +162,15 @@ class Bench:
 
         has_arg_pool = self.args_iterator.n_args > 1
         if has_arg_pool:
-            setup = '''
+            setup = """
                     args_iterator.reset()
                     args_it = args_iterator.__next__()
-                    '''
-            stmt = '''
+                    """
+            stmt = """
                     args, kwargs = next(args_it)
                     fn(*args, **kwargs)
-                    '''
-            globals = {'fn': self.fn, 'args_iterator': self.args_iterator}
+                    """
+            globals = {"fn": self.fn, "args_iterator": self.args_iterator}
         else:
             # no arg pool. Just use the args and kwargs directly
             self.args_iterator.reset()
@@ -178,10 +178,10 @@ class Bench:
             args, kwargs = next(args_it)
 
             setup = ""
-            stmt = '''
+            stmt = """
                     fn(*args, **kwargs)
-                   '''
-            globals = {'fn': self.fn, 'args': args, 'kwargs': kwargs}
+                   """
+            globals = {"fn": self.fn, "args": args, "kwargs": kwargs}
 
         return TBenchmark.Timer(
             stmt=stmt,

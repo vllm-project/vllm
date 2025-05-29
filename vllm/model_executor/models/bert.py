@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -26,7 +27,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .interfaces import SupportsCrossEncoding, SupportsV0Only
+from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
 from .utils import WeightsMapper, maybe_prefix
 
 
@@ -313,7 +314,8 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
-class BertModel(nn.Module):
+class BertModel(nn.Module, SupportsQuant):
+    packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
     def __init__(self,
                  *,
@@ -348,8 +350,8 @@ class BertModel(nn.Module):
                 token_type_ids=token_type_ids)
         return self.encoder(hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "query", "q"),
@@ -358,7 +360,7 @@ class BertModel(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if self.pooler is None and "pooler" in name:
                 continue
@@ -385,7 +387,7 @@ class BertModel(nn.Module):
         return loaded_params
 
 
-class BertEmbeddingModel(nn.Module, SupportsV0Only):
+class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -423,7 +425,7 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights = self.hf_to_vllm_mapper.apply(weights)
         weights = ((name, data) for name, data in weights
                    if not name.startswith("lm_head."))
@@ -443,7 +445,8 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only):
                                                 softmax=False)
 
 
-class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
+class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
+                                    SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -470,7 +473,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self._pooler = CrossEncodingPooler(config, self.classifier,
                                            self.bert.pooler)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         self_weights = []
 

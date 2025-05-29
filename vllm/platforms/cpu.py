@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import sys
+from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
 
 import psutil
 import torch
 
 from vllm.logger import init_logger
+from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import Platform, PlatformEnum, _Backend
+from .interface import CpuArchEnum, Platform, PlatformEnum, _Backend
 
 logger = init_logger(__name__)
 
@@ -17,14 +20,26 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
-logger = init_logger(__name__)
-
 
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
+
+    @property
+    def supported_dtypes(self) -> list:
+        if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
+            return [torch.bfloat16, torch.float32]
+        elif sys.platform.startswith(
+                "darwin") and self.get_cpu_architecture() == CpuArchEnum.ARM:
+            # TODO: change this condition to check if the platform support bf16
+            # instead of checking the OS. For instance M2 shall supports bf16
+            # already. But we need to modify `cpu_extension.cmake` to activate
+            # the feature in the build.
+            return [torch.float16, torch.float32]
+        # x86/aarch64 CPU has supported both bf16 and fp16 natively.
+        return [torch.bfloat16, torch.float16, torch.float32]
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -37,6 +52,9 @@ class CpuPlatform(Platform):
                              use_mla: bool) -> str:
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
+        if use_mla:
+            logger.info("Using CPU MLA backend.")
+            return "vllm.attention.backends.cpu_mla.CPUMLABackend"
         logger.info("Using Torch SDPA backend.")
         return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
 
@@ -57,18 +75,41 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
-            logger.warning(
-                "CUDA graph is not supported on CPU, fallback to the eager "
-                "mode.")
             model_config.enforce_eager = True
 
         cache_config = vllm_config.cache_config
 
+        ipex_available = find_spec("intel_extension_for_pytorch") is not None
+
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            cache_config.block_size = 128 if ipex_available else 16
+
+        if not ipex_available and cache_config.block_size != 16:
+            raise RuntimeError(
+                f"--block-size={cache_config.block_size} requires"
+                " intel_extension_for_pytorch")
+
+        scheduler_config = vllm_config.scheduler_config
+        if ((scheduler_config.chunked_prefill_enabled
+             or cache_config.enable_prefix_caching)
+                and cache_config.cache_dtype != "auto"):
+            raise RuntimeError("Chunked-prefill and prefix-cache on the CPU "
+                               "backend is not compatible with FP8 KV cache.")
+
+        if cache_config.cache_dtype == "fp8_e4m3":
+            cache_config.cache_dtype = "fp8_e5m2"
+            logger.warning(
+                "CPU backend doesn't support fp8_e4m3 KV cache type, "
+                "cast to fp8_e5m2.")
+
+        if (cache_config.cache_dtype != "auto"
+                and model_config.dtype == torch.half):
+            logger.warning("FP8 KV cache on the CPU backend only does not"
+                           " support fp16 for now, cast to bf16.")
+            model_config.dtype = torch.bfloat16
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
@@ -76,7 +117,7 @@ class CpuPlatform(Platform):
             if kv_cache_space == 0:
                 cache_config.cpu_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
                 logger.warning(
-                    "Environment variable VLLM_CPU_KVCACHE_SPACE (GB) "
+                    "Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
                     "for CPU backend is not set, using 4 by default.")
             else:
                 cache_config.cpu_kvcache_space_bytes = kv_cache_space * GiB_bytes  # type: ignore # noqa
@@ -84,14 +125,6 @@ class CpuPlatform(Platform):
             raise RuntimeError(
                 "Invalid environment variable VLLM_CPU_KVCACHE_SPACE"
                 f" {kv_cache_space}, expect a positive integer value.")
-
-        scheduler_config = vllm_config.scheduler_config
-        if ((scheduler_config.chunked_prefill_enabled
-             or cache_config.enable_prefix_caching)
-                and model_config.dtype == torch.half):
-            logger.warning("Chunked-prefill on the CPU backend only does not"
-                           " support fp16 for now, cast to bf16.")
-            model_config.dtype = torch.bfloat16
 
         parallel_config = vllm_config.parallel_config
         if (parallel_config.distributed_executor_backend is not None
@@ -137,6 +170,23 @@ class CpuPlatform(Platform):
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size)
+        if sys.platform == "darwin" and \
+                envs.VLLM_WORKER_MULTIPROC_METHOD == "fork":
+            if os.environ.get('VLLM_WORKER_MULTIPROC_METHOD', None) is None:
+                logger.warning(
+                    "Default to spawn method on MacOS. If this is not desired,"
+                    " set VLLM_WORKER_MULTIPROC_METHOD to fork explicitly.")
+                os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+
+        if vllm_config.model_config and vllm_config.model_config.use_mla:
+            logger.info(
+                "MLA is enabled on a non-GPU platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            vllm_config.scheduler_config.max_num_batched_tokens = max(
+                vllm_config.scheduler_config.max_model_len,
+                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:

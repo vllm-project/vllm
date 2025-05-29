@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-from typing import Callable, Dict, List, Type, Union
+from typing import Callable, Union
 
 from torch._C._profiler import _EventType, _ProfilerEvent, _TensorMetadata
 
@@ -30,14 +30,14 @@ def trim_string_back(string, width):
 
 class TablePrinter:
 
-    def __init__(self, row_cls: Type[dataclasses.dataclass],
-                 column_widths: Dict[str, int]):
+    def __init__(self, row_cls: type[dataclasses.dataclass],
+                 column_widths: dict[str, int]):
         self.row_cls = row_cls
         self.fieldnames = [x.name for x in dataclasses.fields(row_cls)]
         self.column_widths = column_widths
         assert set(self.column_widths.keys()) == set(self.fieldnames)
 
-    def print_table(self, rows: List[dataclasses.dataclass]):
+    def print_table(self, rows: list[dataclasses.dataclass]):
         self._print_header()
         self._print_line()
         for row in rows:
