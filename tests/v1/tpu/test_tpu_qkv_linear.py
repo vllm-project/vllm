@@ -55,6 +55,8 @@ def _get_spmd_mesh():
 
 
 @pytest.mark.parametrize("bias", [False, True])
+# `xr.use_spmd()` will set a global state, and this state is not reversible.
+# Therefore, non-SPMD tests should be run before SPMD tests.
 @pytest.mark.parametrize("mesh", [None, _get_spmd_mesh()])
 @pytest.mark.parametrize("device", ['cpu', 'xla'])
 @torch.no_grad()
