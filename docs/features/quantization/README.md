@@ -13,6 +13,7 @@ Contents:
 - [Bitblas](bitblas.md)
 - [Gguf](gguf.md)
 - [Gptqmodel](gptqmodel.md)
+- [Inc](inc.md)
 - [Int4](int4.md)
 - [Int8](int8.md)
 - [Fp8](fp8.md)

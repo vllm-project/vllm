@@ -924,6 +924,7 @@ class EngineArgs:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
+            device="cpu" if self.quantization == "inc" else None,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
