@@ -101,7 +101,7 @@ def get_forward_context() -> ForwardContext:
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
                         virtual_engine: int = 0,
-                        num_tokens: int = 0):
+                        num_tokens: Optional[int] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -111,9 +111,10 @@ def set_forward_context(attn_metadata: Any,
     if need_to_track_batchsize:
         forward_start_time = time.perf_counter()
     dp_metadata: Optional[DPMetadata] = None
-    if vllm_config.parallel_config.data_parallel_size > 1:
+    if vllm_config.parallel_config.data_parallel_size > 1 and (
+            attn_metadata is not None or num_tokens is not None):
         dp_metadata = DPMetadata.make(vllm_config.parallel_config,
-                                      attn_metadata, num_tokens)
+                                      attn_metadata, num_tokens or 0)
 
     global _forward_context
     prev_context = _forward_context
