@@ -376,7 +376,45 @@ def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(tmp_path, c
         assert ("TypeError: tensorizer.serialization.TensorDeserializer() got multiple values for keyword argument 'lazy_load'") in combined_output
 
 
+def test_assert_stream_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
 
+    deserialization_params = {
+        "num_readers": 1,
+    }
 
+    serialization_params = {
+        "limit_cpu_concurrency": 2,
+    }
 
+    model_ref = "facebook/opt-125m"
+    model_path = tmp_path / (model_ref + ".tensors")
+    config = TensorizerConfig(tensorizer_uri=str(model_path),
+                              serialization_kwargs=serialization_params)
 
+    args = EngineArgs(model=model_ref, device="cuda")
+    tensorize_vllm_model(args, config)
+
+    stream_kwargs = {
+        "mode": "foo"
+    }
+
+    loader_tc = TensorizerConfig(
+        tensorizer_uri=str(model_path),
+        deserialization_kwargs=deserialization_params,
+        stream_kwargs=stream_kwargs,
+    )
+
+    # Like in the last test, purposefully breaking the loading process
+    # by passing an illegal value for the "mode" parameter for open_stream.
+    # If the ValueError we're looking for is produced, we've confirmed that
+    # we're able to pass stream_kwargs to configure the stream
+    try:
+        LLM(
+            model=model_ref,
+            load_format="tensorizer",
+            model_loader_extra_config=loader_tc,
+        )
+    except RuntimeError:
+        out, err = capfd.readouterr()
+        combined_output = out + err
+        assert ("ValueError: Only binary modes (\"rb\", \"wb\", \"wb+\", etc.) are valid when opening local file streams.") in combined_output

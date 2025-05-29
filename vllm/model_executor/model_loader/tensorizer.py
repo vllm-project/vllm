@@ -146,6 +146,7 @@ class TensorizerConfig:
     hf_config: Optional[PretrainedConfig] = None
     dtype: Optional[Union[str, torch.dtype]] = None
     lora_dir: Optional[str] = None
+    stream_kwargs: Optional[dict[str, Any]] = None
     serialization_kwargs: Optional[dict[str, Any]] = None
     deserialization_kwargs: Optional[dict[str, Any]] = None
     _is_sharded: bool = False
@@ -185,6 +186,7 @@ class TensorizerConfig:
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
+            "stream_kwargs": self.stream_kwargs,
             "serialization_kwargs": self.serialization_kwargs,
             "deserialization_kwargs": self.deserialization_kwargs,
         }
@@ -233,6 +235,7 @@ class TensorizerArgs:
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
     s3_endpoint: Optional[str] = None
+    stream_kwargs: Optional[dict[str, Any]] = None
     deserialization_kwargs: Optional[dict[str, Any]] = None
     serialization_kwargs: Optional[dict[str, Any]] = None
     """
@@ -272,6 +275,11 @@ class TensorizerArgs:
           be set via the S3_SECRET_ACCESS_KEY environment variable.
       s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
           S3_ENDPOINT_URL environment variable.
+      stream_kwargs: Arbitrary keyword arguments to pass to Tensorizer's
+          `stream_io` object, which the `TensorSeriaizer` and 
+          TensorDeserializer` objects use to work with streams.
+          See the Tensorizer page in vLLM's official documentation for more 
+          information on available kwargs.
       deserialization_kwargs: Additional keyword arguments to be passed 
           directly to Tensorizer's `TensorDeserializer`. See the Tensorizer
           page in vLLM's official documentation for more information on 
@@ -293,6 +301,8 @@ class TensorizerArgs:
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
         }
+        if self.stream_kwargs:
+            self.stream_params.update(**self.stream_kwargs)
 
 
         if self.encryption_keyfile:
