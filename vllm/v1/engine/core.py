@@ -125,6 +125,10 @@ class EngineCore:
             self.batch_queue = queue.Queue(self.batch_queue_size)
         self.vllm_config = vllm_config
 
+
+        self.step_fn = (self.step if self.batch_queue is None else
+                        self.step_with_batch_queue)
+
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
@@ -229,6 +233,7 @@ class EngineCore:
 
         return engine_core_outputs
 
+
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
         """Schedule and execute batches with the batch queue.
         Note that if nothing to output in this step, None is returned.
@@ -269,10 +274,10 @@ class EngineCore:
         if not scheduled_batch and not self.batch_queue.empty():
             future, scheduler_output = self.batch_queue.get_nowait()
             # Blocking until the first result is available.
-            model_output = future.result()
-            self.batch_queue.task_done()
-            engine_core_outputs = self.scheduler.update_from_output(
-                scheduler_output, model_output)
+            if future is not None:
+                model_output = future.result()
+                engine_core_outputs = self.scheduler.update_from_output(
+                    scheduler_output, model_output)
 
         return engine_core_outputs
 
