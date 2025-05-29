@@ -5,69 +5,10 @@ import itertools
 
 import torch
 import triton
+from weight_shapes import WEIGHT_SHAPES
 
 from vllm._custom_ops import cutlass_scaled_mm as vllm_scaled_mm
 from vllm._custom_ops import scaled_fp8_quant as vllm_scaled_fp8_quant
-
-# Weight Shapes are in the format
-# ([K, N], TP_SPLIT_DIM)
-# Example:
-#  A shape of ([14336, 4096], 0) indicates the following GEMM shape,
-#   - TP1 : K = 14336, N = 4096
-#   - TP2 : K = 7168, N = 4096
-#  A shape of ([4096, 6144], 1) indicates the following GEMM shape,
-#   - TP1 : K = 4096, N = 6144
-#   - TP4 : K = 4096, N = 1536
-
-# TP1 shapes
-WEIGHT_SHAPES = {
-    "meta-llama/Llama-3.1-8B-Instruct": [
-        ([4096, 6144], 1),
-        ([4096, 4096], 0),
-        ([4096, 28672], 1),
-        ([14336, 4096], 0),
-    ],
-    "meta-llama/Llama-3.3-70B-Instruct": [
-        ([8192, 10240], 1),
-        ([8192, 8192], 0),
-        ([8192, 57344], 1),
-        ([28672, 8192], 0),
-    ],
-    "mistralai/Mistral-Large-Instruct-2407": [
-        ([12288, 14336], 1),
-        ([12288, 12288], 0),
-        ([12288, 57344], 1),
-        ([28672, 12288], 0),
-    ],
-    "Qwen/Qwen2.5-7B-Instruct": [
-        ([3584, 4608], 1),
-        ([3584, 3584], 0),
-        ([3584, 37888], 1),
-        ([18944, 3584], 0),
-    ],
-    "Qwen/Qwen2.5-32B-Instruct": [
-        ([5120, 7168], 1),
-        ([5120, 5120], 0),
-        ([5120, 55296], 1),
-        ([27648, 5120], 0),
-    ],
-    "Qwen/Qwen2.5-72B-Instruct": [
-        ([8192, 10240], 1),
-        ([8192, 8192], 0),
-        ([8192, 59136], 1),
-        ([29568, 8192], 0),
-    ],
-    "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct": [
-        ([2048, 3072], 1),
-        ([2048, 4096], 1),
-        ([2048, 2048], 0),
-        ([2048, 576], 0),
-        ([2048, 21888], 1),
-        ([10944, 2048], 0),
-        ([2048, 2816], 1),
-        ([1408, 2048], 0),
-    ],
-}
 
 
 @triton.testing.perf_report(
@@ -98,7 +39,7 @@ WEIGHT_SHAPES = {
             "fp8-channel-w-token-a-noquant",
             # "fp8-channel-w-tensor-a-noquant",
         ],
-        ylabel="GB/s (larger is better)",
+        ylabel="TFLOP/s (larger is better)",
         plot_name="BF16 vs FP8 GEMMs",
         args={},
     )
@@ -109,12 +50,14 @@ def benchmark(batch_size, provider, N, K):
     dtype = torch.bfloat16
 
     # Create input tensors
-    a = torch.ones((M, K), device=device, dtype=dtype) * 5.0
-    b = torch.ones((N, K), device=device, dtype=dtype) * 5.0
+    a = torch.randn((M, K), device=device, dtype=dtype)
+    b = torch.randn((N, K), device=device, dtype=dtype)
+
+    quantiles = [0.5, 0.2, 0.8]
 
     if "torch-bf16" in provider:
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-            lambda: torch.nn.functional.linear(a, b), quantiles=[0.5, 0.2, 0.8]
+            lambda: torch.nn.functional.linear(a, b), quantiles=quantiles
         )
 
     elif "fp8" in provider:
@@ -226,12 +169,12 @@ def benchmark(batch_size, provider, N, K):
         b_fp8 = b_fp8.t()
 
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-            lambda: run_quant(), quantiles=[0.5, 0.2, 0.8]
+            lambda: run_quant(), quantiles=quantiles
         )
 
-    # Calculate GB/s
-    gbps = lambda ms: (2 * M * N * K + M * N) * a.element_size() * 1e-12 / (ms * 1e-3)
-    return gbps(ms), gbps(max_ms), gbps(min_ms)
+    # Calculate TFLOP/s, two flops per multiply-add
+    tflops = lambda ms: (2 * M * N * K) * 1e-12 / (ms * 1e-3)
+    return tflops(ms), tflops(max_ms), tflops(min_ms)
 
 
 def prepare_shapes(args):
@@ -253,6 +196,7 @@ if __name__ == "__main__":
         nargs="+",
         type=str,
         default=["meta-llama/Llama-3.1-8B-Instruct"],
+        choices=[*WEIGHT_SHAPES.keys()],
         help="List of models to benchmark",
     )
     parser.add_argument(
@@ -266,7 +210,7 @@ if __name__ == "__main__":
 
     KN_model_names = prepare_shapes(args)
     for K, N, model_name in KN_model_names:
-        print(f"{model_name}, N={N} K={K}, BF16 vs FP8 GEMMs GB/s:")
+        print(f"{model_name}, N={N} K={K}, BF16 vs FP8 GEMMs TFLOP/s:")
         benchmark.run(
             print_data=True,
             show_plots=True,
