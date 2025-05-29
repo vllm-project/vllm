@@ -11,6 +11,10 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
+import os
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class TorchAOConfig(QuantizationConfig):
@@ -18,6 +22,13 @@ class TorchAOConfig(QuantizationConfig):
 
     def __init__(self, torchao_config) -> None:
         self.torchao_config = torchao_config
+        # TODO: enable after 2.8.0
+        # TorchAO quantization relies on tensor subclasses. In order,
+        # to enable proper caching this needs standalone compile
+        # os.environ["VLLM_TEST_STANDALONE_COMPILE"] = "1"
+        # logger.info("Using TorchAO: Setting VLLM_TEST_STANDALONE_COMPILE=1")
+        os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
+        logger.info("Using TorchAO: Setting VLLM_DISABLE_COMPILE_CACHE=1")
 
     def __repr__(self) -> str:
         return f"TorchAOConfig({self.torchao_config})"
@@ -60,10 +71,10 @@ class TorchAOConfig(QuantizationConfig):
         if not isinstance(layer, LinearBase):
             return None
 
-        from torchao.quantization import AOPerModuleConfig
+        from torchao.quantization import ModuleFqnToConfig
 
         module_fqn = prefix
-        if isinstance(self.torchao_config, AOPerModuleConfig):
+        if isinstance(self.torchao_config, ModuleFqnToConfig):
             module_fqn_to_config = self.torchao_config.module_fqn_to_config
             c = module_fqn_to_config.get(
                 module_fqn) or module_fqn_to_config.get("_default", None)
