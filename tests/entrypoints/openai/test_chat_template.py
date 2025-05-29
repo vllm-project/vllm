@@ -2,11 +2,13 @@
 
 import pytest
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
                                          load_chat_template)
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+from ...models.registry import HF_EXAMPLE_MODELS
 from ...utils import VLLM_PATH
 
 chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
@@ -91,8 +93,22 @@ def test_no_load_chat_template_literallike():
     MODEL_TEMPLATE_GENERATON_OUTPUT)
 def test_get_gen_prompt(model, template, add_generation_prompt,
                         continue_final_message, expected_output):
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
+    )
+
     # Initialize the tokenizer
-    tokenizer = get_tokenizer(tokenizer_name=model)
+    tokenizer = get_tokenizer(
+        tokenizer_name=model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code,
+    )
     template_content = load_chat_template(chat_template=template)
 
     # Create a mock request object using keyword arguments
@@ -106,10 +122,10 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
 
     # Call the function and get the result
     result = apply_hf_chat_template(
-        tokenizer,
-        trust_remote_code=True,
+        tokenizer=tokenizer,
         conversation=mock_request.messages,
         chat_template=mock_request.chat_template or template_content,
+        model_config=model_config,
         tools=None,
         add_generation_prompt=mock_request.add_generation_prompt,
         continue_final_message=mock_request.continue_final_message,

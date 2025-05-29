@@ -12,7 +12,7 @@ import torch
 from prometheus_client import start_http_server
 from tqdm import tqdm
 
-from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
+from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger, logger
 # yapf: disable
@@ -33,9 +33,7 @@ from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
 
-def parse_args():
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible batch runner.")
+def make_arg_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "-i",
         "--input-file",
@@ -61,7 +59,7 @@ def parse_args():
         "to the output URL.",
     )
     parser.add_argument("--response-role",
-                        type=nullable_str,
+                        type=optional_type(str),
                         default="assistant",
                         help="The role name to return if "
                         "`request.add_generation_prompt=True`.")
@@ -98,7 +96,13 @@ def parse_args():
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.")
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description="vLLM OpenAI-Compatible batch runner.")
+    return make_arg_parser(parser).parse_args()
 
 
 # explicitly use pure text format, with a newline at the end
@@ -365,8 +369,8 @@ async def main(args):
 
         # Determine the type of request and run it.
         if request.url == "/v1/chat/completions":
-            chat_handler_fn = (None if openai_serving_chat is None else
-                               openai_serving_chat.create_chat_completion)
+            chat_handler_fn = openai_serving_chat.create_chat_completion if \
+                openai_serving_chat is not None else None
             if chat_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
@@ -380,8 +384,8 @@ async def main(args):
                 run_request(chat_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/embeddings":
-            embed_handler_fn = (None if openai_serving_embedding is None else
-                                openai_serving_embedding.create_embedding)
+            embed_handler_fn = openai_serving_embedding.create_embedding if \
+                openai_serving_embedding is not None else None
             if embed_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
@@ -394,8 +398,8 @@ async def main(args):
                 run_request(embed_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/score":
-            score_handler_fn = (None if openai_serving_scores is None else
-                                openai_serving_scores.create_score)
+            score_handler_fn = openai_serving_scores.create_score if \
+                openai_serving_scores is not None else None
             if score_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(

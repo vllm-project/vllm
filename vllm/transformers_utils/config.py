@@ -6,7 +6,7 @@ import os
 import time
 from functools import cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Literal, Optional, Type, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 import huggingface_hub
 from huggingface_hub import hf_hub_download
@@ -24,7 +24,7 @@ from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
-from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm import envs
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -33,35 +33,37 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              EAGLEConfig, ExaoneConfig,
                                              H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
-                                             MedusaConfig, MllamaConfig,
+                                             KimiVLConfig, MedusaConfig,
+                                             MiniMaxText01Config,
+                                             MiniMaxVL01Config, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
-                                             Olmo2Config, RWConfig,
+                                             OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
 
-if VLLM_USE_MODELSCOPE:
+if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
 else:
     from transformers import AutoConfig
 
 MISTRAL_CONFIG_NAME = "params.json"
-HF_TOKEN = os.getenv('HF_TOKEN', None)
 
 logger = init_logger(__name__)
 
-_CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, Type[PretrainedConfig]] = {
+_CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
     "mllama": MllamaConfig
 }
 
-_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
+_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
+    "kimi_vl": KimiVLConfig,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
@@ -72,9 +74,11 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "exaone": ExaoneConfig,
     "h2ovl_chat": H2OVLChatConfig,
     "internvl_chat": InternVLChatConfig,
+    "minimax_text_01": MiniMaxText01Config,
+    "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
-    "olmo2": Olmo2Config,
+    "ovis": OvisConfig,
     "solar": SolarConfig,
     "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
@@ -125,7 +129,7 @@ def list_repo_files(
             ]
         # if model is remote, use hf_hub api to list files
         try:
-            if VLLM_USE_MODELSCOPE:
+            if envs.VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import (
                     modelscope_list_repo_files)
                 return modelscope_list_repo_files(repo_id,
@@ -180,7 +184,7 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
     return file_exists(str(model),
                        config_name,
                        revision=revision,
-                       token=HF_TOKEN)
+                       token=os.getenv('HF_TOKEN', None))
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
@@ -194,7 +198,7 @@ def patch_rope_scaling(config: PretrainedConfig) -> None:
         patch_rope_scaling_dict(rope_scaling)
 
 
-def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
+def patch_rope_scaling_dict(rope_scaling: dict[str, Any]) -> None:
     if "rope_type" in rope_scaling and "type" in rope_scaling:
         rope_type = rope_scaling["rope_type"]
         rope_type_legacy = rope_scaling["type"]
@@ -220,13 +224,30 @@ def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
-def uses_mrope(config: PretrainedConfig) -> bool:
-    """Detect if the model with this config uses M-ROPE."""
+def _uses_mrope(config: PretrainedConfig) -> bool:
     rope_scaling = getattr(config, "rope_scaling", None)
     if rope_scaling is None:
         return False
 
     return "mrope_section" in rope_scaling
+
+
+def uses_mrope(config: PretrainedConfig) -> bool:
+    """Detect if the model with this config uses M-ROPE."""
+    return _uses_mrope(config) or thinker_uses_mrope(config)
+
+
+def thinker_uses_mrope(config: PretrainedConfig) -> bool:
+    """Detect if the model contains a thinker config and it uses M-ROPE."""
+    thinker_config = getattr(config, "thinker_config", None)
+    if thinker_config is None:
+        return False
+
+    thinker_text_config = getattr(thinker_config, "text_config", None)
+    if thinker_text_config is None:
+        return False
+
+    return uses_mrope(thinker_text_config)
 
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
@@ -278,7 +299,10 @@ def get_config(
                 "   - For Hugging Face models: ensure the presence of a "
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
-                "'params.json'.\n").format(model=model)
+                "'params.json'.\n"
+                "3. For GGUF: pass the local path of the GGUF checkpoint.\n"
+                "   Loading GGUF from a remote repo directly is not yet "
+                "supported.\n").format(model=model)
 
             raise ValueError(error_message) from e
 
@@ -287,7 +311,7 @@ def get_config(
             model,
             revision=revision,
             code_revision=code_revision,
-            token=HF_TOKEN,
+            token=os.getenv('HF_TOKEN', None),
             **kwargs,
         )
 
@@ -299,7 +323,7 @@ def get_config(
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=HF_TOKEN,
+                token=os.getenv('HF_TOKEN', None),
                 **kwargs,
             )
         else:
@@ -309,7 +333,7 @@ def get_config(
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=HF_TOKEN,
+                    token=os.getenv('HF_TOKEN', None),
                     **kwargs,
                 )
             except ValueError as e:
@@ -327,7 +351,7 @@ def get_config(
                     raise e
 
     elif config_format == ConfigFormat.MISTRAL:
-        config = load_params_config(model, revision, token=HF_TOKEN, **kwargs)
+        config = load_params_config(model, revision, **kwargs)
     else:
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
@@ -536,7 +560,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
                                          revision=revision,
-                                         token=HF_TOKEN)
+                                         token=os.getenv('HF_TOKEN', None))
         except Exception:
             repo_files = []
 
@@ -633,6 +657,11 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_file_name = "params.json"
 
     config_dict = get_hf_file_to_dict(config_file_name, model, revision)
+    if config_dict is None:
+        raise ValueError(
+            f"Failed to load mistral '{config_file_name}' config for model "
+            f"{model}. Please check if the model is a mistral-format model "
+            f"and if the config file exists.")
     assert isinstance(config_dict, dict)
 
     config_mapping = {
@@ -659,9 +688,24 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
     config_dict["tie_word_embeddings"] = config_dict.get(
         "tie_embeddings", False)
-    config_dict["max_seq_len"] = config_dict.get("max_seq_len", 128_000)
-    config_dict["max_position_embeddings"] = config_dict.get(
-        "max_position_embeddings", 128_000)
+
+    if config_dict.get("max_position_embeddings") is None:
+        max_position_embeddings = 128_000
+        try:
+            trust_remote_code_val = kwargs.get("trust_remote_code", False)
+            hf_config = get_config(model=model,
+                                   trust_remote_code=trust_remote_code_val,
+                                   revision=revision,
+                                   config_format=ConfigFormat.HF)
+            if hf_value := hf_config.get_text_config().max_position_embeddings:
+                max_position_embeddings = hf_value
+        except Exception as e:
+            logger.warning(
+                "The params.json file is missing 'max_position_embeddings'"
+                " and could not get a value from the HF config."
+                " Defaulting to 128000",
+                exc_info=e)
+        config_dict["max_position_embeddings"] = max_position_embeddings
 
     if config_dict.get("quantization") is not None:
         quantization = config_dict.get("quantization", {})
@@ -671,6 +715,9 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
                 "quant_method": "fp8",
                 "activation_scheme": "static"
             }
+        elif quantization.get("quant_method") == "compressed-tensors":
+            # Pass through the quantization config to compressed-tensors
+            quantization_config = quantization
         else:
             raise ValueError(
                 f"Found unknown quantization='{quantization}' in config")
@@ -688,6 +735,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
     if config_type == "multimodal":
         multimodal_config = config_dict.pop("vision_encoder")
+        quantization_config = config_dict.get("quantization_config", {})
 
         config_dict = {
             "text_config": config_dict,
@@ -695,6 +743,8 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
+        if quantization_config:
+            config_dict["quantization_config"] = quantization_config
 
     config_dict.update(kwargs)
 
@@ -715,9 +765,9 @@ def get_hf_image_processor_config(
     hf_token: Optional[Union[bool, str]] = None,
     revision: Optional[str] = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     # ModelScope does not provide an interface for image_processor
-    if VLLM_USE_MODELSCOPE:
+    if envs.VLLM_USE_MODELSCOPE:
         return dict()
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
@@ -732,14 +782,22 @@ def get_hf_text_config(config: PretrainedConfig):
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """
-    if hasattr(config, "text_config"):
+    # This block should be unnecessary after https://github.com/huggingface/transformers/pull/37517
+    if hasattr(config, "thinker_config"):
+        # TODO(suyang.fy): Refactor code.
+        #  For Qwen2.5-Omni, change hf_text_config to
+        #  thinker_config.text_config.
+        return config.thinker_config.text_config
+
+    text_config = config.get_text_config()
+
+    if text_config is not config:
         # The code operates under the assumption that text_config should have
         # `num_attention_heads` (among others). Assert here to fail early
         # if transformers config doesn't align with this assumption.
-        assert hasattr(config.text_config, "num_attention_heads")
-        return config.text_config
-    else:
-        return config
+        assert hasattr(text_config, "num_attention_heads")
+
+    return text_config
 
 
 def try_get_generation_config(
@@ -765,10 +823,17 @@ def try_get_generation_config(
 
 
 def get_cross_encoder_activation_function(config: PretrainedConfig):
-    if (hasattr(config, "sbert_ce_default_activation_function")
-            and config.sbert_ce_default_activation_function is not None):
 
+    function_name: Optional[str] = None
+    if hasattr(config, "sentence_transformers") and "activation_fn" in \
+        config.sentence_transformers:
+        function_name = config.sentence_transformers["activation_fn"]
+
+    elif (hasattr(config, "sbert_ce_default_activation_function")
+          and config.sbert_ce_default_activation_function is not None):
         function_name = config.sbert_ce_default_activation_function
+
+    if function_name is not None:
         assert function_name.startswith("torch.nn.modules."), \
             "Loading of activation functions is restricted to " \
             "torch.nn.modules for security reasons"

@@ -5,7 +5,8 @@ from typing import Dict, List, Optional, Tuple
 try:
     import intel_extension_for_pytorch.llm.modules as ipex_modules
     _use_ipex = True
-except ImportError:
+# AttributeError is to handle a bug in ipex https://github.com/intel/intel-extension-for-pytorch/pull/813
+except (ImportError, AttributeError):
     _use_ipex = False
 
 import torch

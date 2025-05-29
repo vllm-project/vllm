@@ -101,9 +101,9 @@ async def test_load(output_kind: RequestOutputKind):
         # the engines only synchronize stopping every N steps so
         # allow a small amount of time here.
         for _ in range(10):
-            if core_client.num_engines_running == 0:
+            if not core_client.engines_running:
                 break
             await asyncio.sleep(0.5)
 
-        assert core_client.num_engines_running == 0
+        assert not core_client.engines_running
         assert not core_client.reqs_in_flight

@@ -9,7 +9,7 @@ at::Tensor as_g_workspace;
 
 torch::Tensor allspark_w8a16_gemm(
     torch::Tensor const& a, torch::Tensor const& b_qweight,
-    torch::Tensor const& b_scales, c10::optional<torch::Tensor> const& b_qzeros,
+    torch::Tensor const& b_scales, std::optional<torch::Tensor> const& b_qzeros,
     int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
     int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) {
   TORCH_CHECK_NOT_IMPLEMENTED(
@@ -347,7 +347,7 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
       for (int n_idx = 0; n_idx < WARP_NITER; ++n_idx) {
         hmma16816_f32<FType>(
             C_frag[m_idx][n_idx], A_frag[reg_buf_idx][m_idx],
-            reinterpret_cast<uint32_t(&)[2]>(BF_frag[reg_buf_idx][n_idx]));
+            reinterpret_cast<uint32_t (&)[2]>(BF_frag[reg_buf_idx][n_idx]));
       }
     }
   }
@@ -918,7 +918,7 @@ void allspark_qgemm_w8a16_perc_ampere(
 
 torch::Tensor allspark_w8a16_gemm(
     torch::Tensor const& a, torch::Tensor const& b_qweight,
-    torch::Tensor const& b_scales, c10::optional<torch::Tensor> const& b_qzeros,
+    torch::Tensor const& b_scales, std::optional<torch::Tensor> const& b_qzeros,
     int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
     int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) {
   // Verify device and strides

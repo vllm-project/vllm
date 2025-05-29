@@ -77,7 +77,6 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                prompt="test",
                 mm_inputs=[],
                 mm_hashes=[],
                 mm_positions=[],
@@ -294,8 +293,28 @@ def test_update_states_request_unscheduled(model_runner):
 
 
 def test_get_paddings():
+    # Bucketed padding
     min_token_size, max_token_size, padding_gap = 16, 512, 64
     expected_paddings = [16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
+                                          padding_gap)
+
+    # Bucketed padding with max_token_size not a power of two.
+    max_token_size = 317
+    expected_paddings = [16, 32, 64, 128, 192, 256, 320]
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
+                                          padding_gap)
+    assert actual_paddings == expected_paddings
+
+    # Exponential padding.
+    max_token_size, padding_gap = 1024, 0
+    expected_paddings = [16, 32, 64, 128, 256, 512, 1024]
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
+                                          padding_gap)
+    assert actual_paddings == expected_paddings
+    # Exponential padding with max_token_size not a power of two.
+    max_token_size = 317
+    expected_paddings = [16, 32, 64, 128, 256, 512]
     actual_paddings = _get_token_paddings(min_token_size, max_token_size,
                                           padding_gap)
     assert actual_paddings == expected_paddings

@@ -6,6 +6,16 @@ from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 
+def parse_args():
+    parser = FlexibleArgumentParser()
+    parser = EngineArgs.add_cli_args(parser)
+    # Set example specific arguments
+    parser.set_defaults(
+        model="jinaai/jina-embeddings-v3", task="embed", trust_remote_code=True
+    )
+    return parser.parse_args()
+
+
 def main(args: Namespace):
     # Sample prompts.
     prompts = [
@@ -31,20 +41,17 @@ def main(args: Namespace):
     print("-" * 60)
     for prompt, output in zip(prompts, outputs):
         embeds = output.outputs.embedding
-        embeds_trimmed = ((str(embeds[:16])[:-1] +
-                           ", ...]") if len(embeds) > 16 else embeds)
-        print(f"Prompt: {prompt!r} \n"
-              f"Embeddings for text matching: {embeds_trimmed} "
-              f"(size={len(embeds)})")
+        embeds_trimmed = (
+            (str(embeds[:16])[:-1] + ", ...]") if len(embeds) > 16 else embeds
+        )
+        print(
+            f"Prompt: {prompt!r} \n"
+            f"Embeddings for text matching: {embeds_trimmed} "
+            f"(size={len(embeds)})"
+        )
         print("-" * 60)
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser()
-    parser = EngineArgs.add_cli_args(parser)
-    # Set example specific arguments
-    parser.set_defaults(model="jinaai/jina-embeddings-v3",
-                        task="embed",
-                        trust_remote_code=True)
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

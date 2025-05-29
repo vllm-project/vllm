@@ -6,6 +6,16 @@ from vllm import LLM, EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 
+def parse_args():
+    parser = FlexibleArgumentParser()
+    parser = EngineArgs.add_cli_args(parser)
+    # Set example specific arguments
+    parser.set_defaults(
+        model="intfloat/e5-mistral-7b-instruct", task="embed", enforce_eager=True
+    )
+    return parser.parse_args()
+
+
 def main(args: Namespace):
     # Sample prompts.
     prompts = [
@@ -26,19 +36,13 @@ def main(args: Namespace):
     print("\nGenerated Outputs:\n" + "-" * 60)
     for prompt, output in zip(prompts, outputs):
         embeds = output.outputs.embedding
-        embeds_trimmed = ((str(embeds[:16])[:-1] +
-                           ", ...]") if len(embeds) > 16 else embeds)
-        print(f"Prompt: {prompt!r} \n"
-              f"Embeddings: {embeds_trimmed} (size={len(embeds)})")
+        embeds_trimmed = (
+            (str(embeds[:16])[:-1] + ", ...]") if len(embeds) > 16 else embeds
+        )
+        print(f"Prompt: {prompt!r} \nEmbeddings: {embeds_trimmed} (size={len(embeds)})")
         print("-" * 60)
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser()
-    parser = EngineArgs.add_cli_args(parser)
-    # Set example specific arguments
-    parser.set_defaults(model="intfloat/e5-mistral-7b-instruct",
-                        task="embed",
-                        enforce_eager=True)
-    args = parser.parse_args()
+    args = parse_args()
     main(args)

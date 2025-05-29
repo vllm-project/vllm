@@ -59,17 +59,16 @@ TEST_PARAMS = [
         prefix_len=500,
         decode_len=50,
 
+        # commit id: ccb246776d93ef105904a8ec015b3587240a1183
+        # tpu: v5lite (old vllm CI/CD)
+        # expected_avg_time=1.4,
+        # err_tol=0.30,
+
         # (This is the active CI/CD instance)
         # commit id: ccb246776d93ef105904a8ec015b3587240a1183
-        # tpu: v5lite (vllm CI/CD)
-        expected_avg_time=1.4,
-        err_tol=0.30,
-
-        # (TODO: There is no v6e in CI/CD currently)
-        # commit id: ccb246776d93ef105904a8ec015b3587240a1183
-        # tpu: v6e
-        # expected_avg_time=1.5,
-        # err_tol=0.20,
+        # tpu: v6e (current vllm CI/CD)
+        expected_avg_time=1.7,  # measured with VLLM_XLA_CACHE_PATH=  
+        err_tol=0.20,
     ),
 ]
 
