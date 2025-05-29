@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+torch._dynamo.config.suppress_errors = True
 import warnings
 
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
@@ -37,7 +38,12 @@ class XIELU(CustomOp):
         self._forward_method = self.forward_native
         if current_platform.is_cuda_alike():
             try:
-                self._xielu_cuda = torch.classes.xielu.XIELU()
+                from xielu.ops.wrappers import XIELU, XIELUfn
+                self._xielu_cuda = XIELUfn()
+                self._xielu_cuda.alpha_p = self.alpha_p
+                self._xielu_cuda.alpha_n = self.alpha_n
+                self._xielu_cuda.beta = self.beta
+                self._xielu_cuda.eps = self.eps
                 self._forward_method = self.forward_cuda
             except (AttributeError, RuntimeError) as e:
                 warnings.warn(f"CUDA xIELU not found (error: {e}), defaulting to Python implementation")
@@ -55,7 +61,7 @@ class XIELU(CustomOp):
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         alpha_p = F.softplus(self.alpha_p)
         alpha_n = self.beta + F.softplus(self.alpha_n)
-        return self._xielu_cuda.forward(x, alpha_p, alpha_n, self.beta, self.eps, with_vector_loads=True)
+        return self._xielu_cuda.forward(x)
 
 
 @CustomOp.register("fatrelu_and_mul")
