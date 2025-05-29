@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-torch._dynamo.config.suppress_errors = True
 import warnings
 
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
