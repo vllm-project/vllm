@@ -13,6 +13,9 @@ trap remove_docker_container EXIT
 # Remove the container that might not be cleaned up in the previous run.
 remove_docker_container
 
+# Build the docker image.
+docker build -f docker/Dockerfile.tpu -t vllm-tpu .
+
 # Set up cleanup.
 cleanup_docker() {
   # Get Docker's root directory
@@ -38,9 +41,6 @@ cleanup_docker() {
   fi
 }
 cleanup_docker
-
-# Build the docker image.
-docker build -f docker/Dockerfile.tpu -t vllm-tpu .
 
 # For HF_TOKEN.
 source /etc/environment
