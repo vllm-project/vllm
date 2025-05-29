@@ -26,8 +26,6 @@ def _listen_for_register(poller, router_socket):
             # data: {"type": "P", "http_address": "ip:port",
             #        "zmq_address": "ip:port"}
             data = msgpack.loads(message)
-            # print("Received message from %s, data: %s",
-            #              remote_address.decode(), data)
             if data["type"] == "P":
                 global prefill_instances
                 global prefill_cv
@@ -83,7 +81,6 @@ async def forward_request(url, data, request_id):
         }
         async with session.post(url=url, json=data, headers=headers) as response:
             if response.status == 200:
-                # if response.headers.get('Transfer-Encoding') == 'chunked':
                 if True:
                     async for chunk_bytes in response.content.iter_chunked(1024):
                         yield chunk_bytes
