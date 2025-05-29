@@ -46,7 +46,7 @@ __device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
   }
 
   float r =
-      fmax(-quant_type_max_v<fp8_type>, fmin(x, quant_type_max_v<fp8_type>));
+      fmaxf(-quant_type_max_v<fp8_type>, fminf(x, quant_type_max_v<fp8_type>));
 #ifndef USE_ROCM
   return static_cast<fp8_type>(r);
 #else
@@ -73,7 +73,7 @@ __global__ void segmented_max_reduction(float* __restrict__ scale,
   scalar_t tmp = 0.0;
   while (i < num_elems) {
     float x = static_cast<float>(input[i]);
-    tmp = max(tmp, fabs(x));
+    tmp = fmaxf(tmp, fabsf(x));
     i += blockDim.x * gridDim.x;
   }
   cache[threadIdx.x] = tmp;
@@ -114,13 +114,13 @@ __device__ float thread_max_vec(scalar_t const* __restrict__ input,
     scalarxN_t in_vec = vectorized_in[i];
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; ++j) {
-      absmax_val = max(absmax_val, fabs(in_vec.val[j]));
+      absmax_val = fmaxf(absmax_val, fabsf(in_vec.val[j]));
     }
   }
 
   // Handle the remaining elements if num_elems is not divisible by VEC_SIZE
   for (int64_t i = num_vec_elems * VEC_SIZE + tid; i < num_elems; i += step) {
-    absmax_val = max(absmax_val, fabs(input[i]));
+    absmax_val = fmaxf(absmax_val, fabsf(input[i]));
   }
 
   return absmax_val;
