@@ -275,6 +275,8 @@ def test_kv_cache_events(
         engine_args = EngineArgs(model=MODEL_NAME,
                                  enforce_eager=True,
                                  enable_prefix_caching=True,
+                                 data_parallel_size=2,
+                                 tensor_parallel_size=2,
                                  block_size=block_size)
         engine_args.kv_events_config = publisher_config
 
@@ -319,9 +321,12 @@ def test_kv_cache_events(
 
             seq, received = result
 
+            # Print the dp_name
+            print(f"received.dp_name: {received.dp_name}")
+
             assert seq == 0, "Sequence number mismatch"
-            assert len(received.events) == 1, (
-                "We should have exactly one BlockStored event")
+            assert len(received.events) == 2, (
+                "We should have exactly two BlockStored event")
             event = received.events[0]
             assert isinstance(
                 event, BlockStored), ("We should have a BlockStored event")
