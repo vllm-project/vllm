@@ -11,12 +11,12 @@ namespace vllm {
 
 // Vectorization containers
 template <typename scalar_t, size_t vec_size>
-struct __align__(8) vec_n_t {
+struct __align__(vec_size * sizeof(scalar_t)) vec_n_t {
   scalar_t val[vec_size];
 };
 
 template <typename quant_type_t, size_t vec_size>
-struct __align__(4) q8_n_t {
+struct __align__(vec_size * sizeof(quant_type_t)) q8_n_t {
   static_assert(std::is_same_v<quant_type_t, int8_t> ||
                 std::is_same_v<quant_type_t, c10::Float8_e4m3fn> ||
                 std::is_same_v<quant_type_t, c10::Float8_e4m3fnuz>);

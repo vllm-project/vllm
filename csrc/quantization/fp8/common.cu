@@ -39,8 +39,8 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
   fp8_type* __restrict__ token_output = &out[offset];
 
   // For vectorization, token_input and token_output pointers need to be
-  // aligned at 8-byte and 4-byte addresses respectively.
-  bool const can_vectorize = hidden_size % 4 == 0;
+  // aligned at 32-byte and 16-byte addresses respectively.
+  bool const can_vectorize = hidden_size % 16 == 0;
 
   float absmax_val = 0.0f;
   if (can_vectorize) {
