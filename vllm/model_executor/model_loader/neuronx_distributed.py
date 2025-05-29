@@ -17,6 +17,8 @@ from neuronx_distributed_inference.models.config import (
     FusedSpecNeuronConfig, OnDeviceSamplingConfig)
 from neuronx_distributed_inference.models.mllama.utils import (
     create_vision_mask)
+from neuronx_distributed_inference.modules.lora_serving import (
+    LoraServingConfig)
 from neuronx_distributed_inference.utils.hf_adapter import (
     load_pretrained_config)
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
@@ -80,25 +82,26 @@ class NeuronCausalLM(nn.Module):
         # Lazy initialized
         self.model: nn.Module
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        input_block_ids: torch.Tensor,
-        sampling_params: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                input_block_ids: torch.Tensor,
+                sampling_params: torch.Tensor,
+                prev_hidden: Optional[torch.Tensor] = None,
+                adapter_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         # sort block ids sequentially for perf/neuron support reasons
         sorted_input_block_ids, sorted_indices = torch.sort(input_block_ids)
         input_ids = torch.index_select(input_ids, 0, sorted_indices)
         positions = torch.index_select(positions, 0, sorted_indices)
         sampling_params = torch.index_select(sampling_params, 0,
                                              sorted_indices)
-
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
                             seq_ids=sorted_input_block_ids,
-                            sampling_params=sampling_params)
+                            sampling_params=sampling_params,
+                            prev_hidden=prev_hidden,
+                            adapter_ids=adapter_ids)
         # on-device sampling
         if self.config.neuron_config.on_device_sampling_config:
             output = output.hidden_states
@@ -522,7 +525,8 @@ def _get_model_architecture(config: PretrainedConfig) -> str:
 
 def _get_default_neuron_config(model_config: ModelConfig,
                                parallel_config: ParallelConfig,
-                               scheduler_config: SchedulerConfig):
+                               scheduler_config: SchedulerConfig,
+                               lora_serving_config: LoraServingConfig):
     """Generate a neuron config based on vllm config args."""
     on_device_sampling_config = OnDeviceSamplingConfig(dynamic=True,
                                                        deterministic=False)
@@ -541,7 +545,7 @@ def _get_default_neuron_config(model_config: ModelConfig,
         padding_side="right",
         on_device_sampling_config=on_device_sampling_config,
         sequence_parallel_enabled=True,
-    )
+        lora_serving_config=lora_serving_config)
     return neuron_config
 
 
@@ -581,7 +585,8 @@ def _get_neuron_config_after_override(default_neuron_config,
 
 def get_neuron_model(model_config: ModelConfig,
                      parallel_config: ParallelConfig,
-                     scheduler_config: SchedulerConfig) -> nn.Module:
+                     scheduler_config: SchedulerConfig,
+                     lora_serving_config: LoraServingConfig) -> nn.Module:
     """Initializes a neuron-optimized model for inference."""
     model_arch = _get_model_architecture(model_config.hf_config)
     if model_arch == "MllamaForConditionalGeneration":
@@ -589,7 +594,7 @@ def get_neuron_model(model_config: ModelConfig,
     else:
         model = NeuronCausalLM(model_config.hf_config)
     default_neuron_config_args = _get_default_neuron_config(
-        model_config, parallel_config, scheduler_config)
+        model_config, parallel_config, scheduler_config, lora_serving_config)
     neuron_config = _get_neuron_config_after_override(
         default_neuron_config_args, model_config.override_neuron_config)
 
