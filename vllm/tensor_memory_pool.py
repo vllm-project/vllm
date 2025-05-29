@@ -36,9 +36,6 @@ class TensorMemoryPool:
 
         atexit.register(self.cleanup)
 
-        self.store_stream = torch.cuda.Stream()
-        self.load_stream = torch.cuda.Stream()
-
     def _round_to_power_of_two(self, size: int) -> int:
         return 1 << (size - 1).bit_length()
 
@@ -135,14 +132,12 @@ class TensorMemoryPool:
             buffer = (ctypes.c_byte * block.size).from_address(block.addr)
             cpu_tensor = torch.frombuffer(buffer,
                                           dtype=tensor.dtype,
-                                          count=tensor.numel())
+                                          count=tensor.numel()).reshape(tensor.shape)
         except ValueError as err:
             self.free(addr)
             raise MemoryError(f"Failed to create tensor view: {err}") from err
 
-        with torch.cuda.stream(self.store_stream):
-            ops.store_tensor(tensor, cpu_tensor)
-        self.store_stream.synchronize()
+        cpu_tensor.copy_(tensor)
 
         return addr
 
@@ -160,13 +155,13 @@ class TensorMemoryPool:
             raise ValueError("Requested tensor size exceeds block size")
 
         buffer = (ctypes.c_byte * block.size).from_address(block.addr)
-        cpu_tensor = torch.frombuffer(buffer, dtype=dtype, count=num_elements)
+        cpu_tensor = torch.frombuffer(buffer,
+                                      dtype=dtype,
+                                      count=num_elements).reshape(shape)
 
         cuda_tensor = torch.empty(shape, dtype=dtype, device=device)
 
-        with torch.cuda.stream(self.load_stream):
-            ops.load_tensor(cpu_tensor, cuda_tensor)
-        self.load_stream.synchronize()
+        cuda_tensor.copy_(cpu_tensor)
 
         return cuda_tensor
 
