@@ -38,7 +38,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_state_update)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
-    mamba_chunk_scan_combined)
+    mamba_chunk_scan_combined_varlen)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -415,17 +415,17 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
                     has_initial_states_p[:, None, None, None],
                     ssm_state[state_indices_tensor_p], 0)
 
-            varlen_state = mamba_chunk_scan_combined(
-                hidden_states_p.view(1, num_prefill_tokens,
+            varlen_state = mamba_chunk_scan_combined_varlen(
+                hidden_states_p.view(num_prefill_tokens,
                                      self.num_heads // self.tp_size,
                                      self.head_dim),
-                dt.unsqueeze(0),
+                dt,
                 self.A,
-                B.view(1, num_prefill_tokens, 1, -1),
-                C.view(1, num_prefill_tokens, 1, -1),
+                B.view(num_prefill_tokens, 1, -1),
+                C.view(num_prefill_tokens, 1, -1),
                 chunk_size=chunk_size,
                 D=self.D,
-                z=gate_p.view(1, num_prefill_tokens,
+                z=gate_p.view(num_prefill_tokens,
                               self.num_heads // self.tp_size, self.head_dim),
                 dt_bias=self.dt_bias,
                 seq_idx=seq_idx_p,
@@ -433,11 +433,9 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
                 chunk_offsets=chunk_offsets_p,
                 cu_seqlens=query_start_loc_p,
                 initial_states=initial_states,
-                return_varlen_states=True,
-                return_final_states=False,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
-                out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
+                out=preallocated_ssm_out_p.view(num_prefill_tokens, -1,
                                                 self.head_dim),
                 state_dtype=ssm_state.dtype,
             )
