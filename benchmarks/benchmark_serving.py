@@ -762,6 +762,10 @@ def main(args: argparse.Namespace):
     if "temperature" not in sampling_params:
         sampling_params["temperature"] = 0.0  # Default to greedy decoding.
 
+    if args.backend == "llama.cpp":
+        # Disable prompt caching in llama.cpp backend
+        sampling_params["cache_prompt"] = False
+
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
     gc.freeze()
