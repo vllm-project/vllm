@@ -12,6 +12,7 @@ import torch._inductor.compile_fx
 import torch.fx as fx
 
 import vllm.envs as envs
+from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.utils import is_torch_equal_or_newer
 
@@ -175,6 +176,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
+        compilation_counter.num_inductor_compiles += 1
         current_config = {}
         if compiler_config is not None:
             current_config.update(compiler_config)
@@ -262,6 +264,7 @@ class InductorAdaptor(CompilerInterface):
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
+        compilation_counter.num_inductor_compiles += 1
         from torch._inductor.compile_fx import compile_fx
         current_config = {}
         if compiler_config is not None:
@@ -528,6 +531,7 @@ class EagerAdaptor(CompilerInterface):
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
+        compilation_counter.num_eager_compiles += 1
         # we don't need to compile the graph, just return the graph itself.
         # It does not support caching, return None for the handle.
         return graph, None

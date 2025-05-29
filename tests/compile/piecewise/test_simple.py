@@ -74,11 +74,12 @@ class SillyModel(nn.Module):
         return x
 
 
-def test_simple_piecewise_compile():
+def _test_simple_piecewise_compile(*, use_inductor):
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
         use_cudagraph=True,
+        use_inductor=use_inductor,
         splitting_ops=["silly.attention"],
         cudagraph_copy_inputs=True,
         cudagraph_capture_sizes=[1, 2],
@@ -108,3 +109,11 @@ def test_simple_piecewise_compile():
         output = model(input)
         assert global_counter == 2
         assert torch.allclose(output.cpu(), torch.tensor([3., 1.]))
+
+
+def test_simple_piecewise_compile_inductor():
+    _test_simple_piecewise_compile(use_inductor=True)
+
+
+def test_simple_piecewise_compile_no_inductor():
+    _test_simple_piecewise_compile(use_inductor=False)

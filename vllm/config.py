@@ -4315,15 +4315,10 @@ class VllmConfig:
             self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
-            # NOTE(woosuk): Currently, we use inductor because the piecewise
-            # CUDA graphs do not work properly with the custom CUDA kernels.
-            # FIXME(woosuk): Disable inductor to reduce the compilation time
-            # and avoid any potential issues with the inductor.
             # FIXME(rob): Add function to set all of these.
             if not self.compilation_config.custom_ops:
                 self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
-            self.compilation_config.use_inductor = True
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
