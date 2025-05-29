@@ -743,7 +743,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert running_req.num_tokens_with_spec == 2 + len(spec_tokens[i])
 
     # No draft or accepted tokens counted yet
-    assert engine_core_outputs is None or (
+    assert not engine_core_outputs or (
         engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None)
 
     # Schedule the speculated tokens for validation

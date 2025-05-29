@@ -207,7 +207,8 @@ class InprocClient(EngineCoreClient):
         self.engine_core = EngineCore(*args, **kwargs)
 
     def get_output(self) -> EngineCoreOutputs:
-        return self.engine_core.step().get(0) or EngineCoreOutputs()
+        outputs, _ = self.engine_core.step()
+        return outputs.get(0) or EngineCoreOutputs()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         self.engine_core.add_request(request)
