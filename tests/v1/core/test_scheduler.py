@@ -731,7 +731,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         prompt_logprobs_dict={},
     )
     engine_core_outputs = scheduler.update_from_output(output,
-                                                       model_runner_output)[0]
+                                                       model_runner_output)
 
     for i in range(len(requests)):
         running_req = scheduler.running[i]
@@ -743,7 +743,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert running_req.num_tokens_with_spec == 2 + len(spec_tokens[i])
 
     # No draft or accepted tokens counted yet
-    assert engine_core_outputs.scheduler_stats.spec_decoding_stats is None
+    assert engine_core_outputs is None or (
+        engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None)
 
     # Schedule the speculated tokens for validation
     output = scheduler.schedule()
@@ -769,9 +770,10 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         prompt_logprobs_dict={},
     )
     engine_core_outputs = scheduler.update_from_output(output,
-                                                       model_runner_output)[0]
+                                                       model_runner_output)
 
-    scheduler_stats = engine_core_outputs.scheduler_stats
+    scheduler_stats = engine_core_outputs[0].scheduler_stats \
+        if engine_core_outputs else None
     if expected[0] == 0:
         assert scheduler_stats.spec_decoding_stats is None
     else:
