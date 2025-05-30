@@ -401,7 +401,7 @@ Specified using `--task embed`.
 
 !!! note
     `ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
-    You should manually set mean pooling by passing `--override-pooler-config '{"pooling_type": "MEAN"}'`.
+    You need to manually set mean pooling by passing `--override-pooler-config '{"pooling_type": "MEAN"}'`.
 
 !!! note
     For `Alibaba-NLP/gte-Qwen2-*`, you need to enable `--trust-remote-code` for the correct tokenizer to be loaded.
