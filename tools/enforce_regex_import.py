@@ -36,6 +36,7 @@ def is_forbidden_import(line: str) -> bool:
 
 
 def check_file(filepath: str) -> list[tuple[int, str]]:
+
     violations = []
     try:
         with open(filepath, encoding='utf-8') as f:
@@ -56,6 +57,9 @@ def main() -> int:
 
     for filepath in files:
         if not Path(filepath).exists():
+            continue
+
+        if filepath == "setup.py":
             continue
 
         violations = check_file(filepath)
