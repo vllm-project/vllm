@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
+Transfer = tuple[int, float]
 GET_META_MSG = b"get_meta_msg"
 
 logger = init_logger(__name__)
@@ -362,7 +363,7 @@ class NixlConnectorWorker:
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
-        self.kv_caches_base_addr: dict[str, list[int]] = dict()
+        self.kv_caches_base_addr: dict[str, list[int]] = {}
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -372,19 +373,17 @@ class NixlConnectorWorker:
         # nixl_prepped_dlist_handle.
         self.src_xfer_side_handle: int = 0
         # Map of engine_id -> nixl_prepped_dlist_handle (int)].
-        self.dst_xfer_side_handles: dict[str, int] = dict()
+        self.dst_xfer_side_handles: dict[str, int] = {}
 
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
-        self.dst_num_blocks: dict[str, int] = dict()
+        self.dst_num_blocks: dict[str, int] = {}
         self._registered_descs: list[Any] = []
 
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers: defaultdict[str,
-                                             list[tuple[int,
-                                                        float]]] = defaultdict(
-                                                            list[Any])
+        self._recving_transfers: defaultdict[
+            str, list[Transfer]] = defaultdict(list)
 
         # Complete transfer tracker. Used by the rank 0 to track finished
         # transactions on ranks 1 to N-1.
@@ -467,7 +466,7 @@ class NixlConnectorWorker:
                 return metadata
 
         # Handshake with remote agent-rank0 first to get the tp_size of remote
-        path = f"tcp://{host}:{port}"
+        path = make_zmq_path("tcp", host, port)
         logger.debug("Querying master rank metadata on path: %s", path)
         metadata = handshake(path, 0)
 
@@ -476,7 +475,7 @@ class NixlConnectorWorker:
         tp_rate = self._tp_size[self.engine_id] // metadata.tp_size
         p_remote_rank = self.tp_rank // tp_rate
         if p_remote_rank > 0:
-            path = f"tcp://{host}:{port + p_remote_rank}"
+            path = make_zmq_path("tcp", host, port + p_remote_rank)
             logger.debug("Querying metadata on path: %s at remote rank %s",
                          path, p_remote_rank)
             _ = handshake(path, p_remote_rank)
@@ -581,7 +580,7 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len
                 addr = base_addr + block_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, self.block_len, self.rank))
+                blocks_data.append((addr, self.block_len, self.tp_rank))
         logger.debug("Created %s blocks for src engine %s and rank %s",
                      len(blocks_data), self.engine_id, self.tp_rank)
 
@@ -663,6 +662,8 @@ class NixlConnectorWorker:
 
         # Number of D TP workers reading from a single P TP worker. This is
         # 1 when P and D `--tensor-parallel-size` match.
+        assert self._tp_size[self.engine_id] % self._tp_size[engine_id] == 0, \
+        "Local TP size must be divisible by remote TP size."
         tp_ratio = self._tp_size[self.engine_id] // self._tp_size[engine_id]
         assert tp_ratio > 0, "Decode TP cannot be smaller than"
         " prefill TP"
@@ -700,7 +701,7 @@ class NixlConnectorWorker:
         if p_remote_rank == remote_rank:
             self.kv_caches_base_addr[
                 engine_id] = nixl_agent_meta.kv_caches_base_addr
-            rank_offset = self.rank % tp_ratio * self.block_len \
+            rank_offset = self.tp_rank % tp_ratio * self.block_len \
                 if not self.use_mla else 0
             # Register all remote blocks, but only the corresponding kv heads.
             for base_addr in nixl_agent_meta.kv_caches_base_addr:
