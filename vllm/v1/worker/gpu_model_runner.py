@@ -1117,7 +1117,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for k, v in self.intermediate_tensors.items()
         })
 
-    def eplb_step(self) -> None:
+    def eplb_step(self, is_dummy: bool = False) -> None:
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
@@ -1126,7 +1126,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert is_mixture_of_experts(self.model)
         avg_tokens, max_tokens, balancedness = \
-            self.eplb_state.step(self.model)
+            self.eplb_state.step(self.model, is_dummy)
 
         if get_ep_group().is_first_rank:
             logger.debug(
@@ -1783,7 +1783,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter.dummy_run(num_tokens)
 
         # This is necessary to avoid blocking DP
-        self.eplb_step()
+        self.eplb_step(is_dummy=True)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]

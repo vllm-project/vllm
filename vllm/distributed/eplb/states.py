@@ -178,9 +178,17 @@ class EplbState:
             expert_rearrangement_step_interval=eplb_step_interval,
         )
 
-    def step(self, model: MixtureOfExperts) -> tuple[float, float, float]:
+    def step(self,
+             model: MixtureOfExperts,
+             is_dummy: bool = False) -> tuple[float, float, float]:
         """
         Step the EPLB state.
+
+        Args:
+            model (MixtureOfExperts): The MoE model.
+            is_dummy (bool): If `True`, this is a dummy step and the load
+              metrics recorded in this forward pass will not count. Defaults
+              to `False`.
 
         Returns:
             (avg_tokens, max_tokens, balancedness) (tuple[float, float, float]):
@@ -190,10 +198,14 @@ class EplbState:
             - `balancedness`: The ratio of average load to maximum load.
         """
 
+        if is_dummy:
+            # Do not record load metrics for dummy steps
+            self.expert_load_pass.zero_()
+        # `num_tokens`: (num_moe_layers,)
+        num_tokens = self.expert_load_pass.sum(dim=-1)
+
         # Collect load metrics from all ranks
         ep_group = get_ep_group().device_group
-        # (num_moe_layers,)
-        num_tokens = self.expert_load_pass.sum(dim=-1)
         num_tokens_list = [
             torch.empty_like(num_tokens) for _ in range(ep_group.size())
         ]
@@ -214,14 +226,18 @@ class EplbState:
         balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
 
         # Update the expert load sliding window
-        self.expert_load_window[self.expert_load_window_step] = (
-            self.expert_load_pass.clone())
-        self.expert_load_window_step += 1
-        if self.expert_load_window_step >= self.expert_load_window_size:
-            self.expert_load_window_step = 0
-        self.expert_load_pass.zero_()
+        if not is_dummy:
+            self.expert_load_window[self.expert_load_window_step] = (
+                self.expert_load_pass.clone())
+            self.expert_load_window_step += 1
+            if self.expert_load_window_step >= self.expert_load_window_size:
+                self.expert_load_window_step = 0
+            self.expert_load_pass.zero_()
 
         # Step the expert rearrangement step
+        # Note that even if this is a dummy step, we still increment the
+        # rearrangement step and perform rearrangement to ensure all ranks are
+        # performing collective communication.
         self.expert_rearrangement_step += 1
         if (self.expert_rearrangement_step
                 >= self.expert_rearrangement_step_interval):
