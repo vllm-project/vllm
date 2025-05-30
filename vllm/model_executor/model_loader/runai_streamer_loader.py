@@ -2,7 +2,8 @@
 # ruff: noqa: SIM117
 import glob
 import os
-from typing import Generator, List, Optional, Tuple
+from collections.abc import Generator
+from typing import Optional
 
 import torch
 from torch import nn
@@ -48,7 +49,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 os.environ["RUNAI_STREAMER_S3_ENDPOINT"] = aws_endpoint_url
 
     def _prepare_weights(self, model_name_or_path: str,
-                         revision: Optional[str]) -> List[str]:
+                         revision: Optional[str]) -> list[str]:
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
@@ -87,7 +88,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
 
     def _get_weights_iterator(
             self, model_or_path: str,
-            revision: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
+            revision: str) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
         return runai_safetensors_weights_iterator(
@@ -99,11 +100,10 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Download model if necessary"""
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> nn.Module:
         """Perform streaming of the model to destination"""
         device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
-
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:

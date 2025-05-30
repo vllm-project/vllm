@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: SIM117
 import copy
-from typing import Generator, Tuple
+from collections.abc import Generator
+from typing import Union
 
 import torch
 from torch import nn
@@ -36,7 +37,7 @@ class TensorizerLoader(BaseModelLoader):
         self.tensorizer_config.verify_with_parallel_config(parallel_config)
 
     def _get_weights_iterator(
-        self, ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        self, ) -> Generator[tuple[str, torch.Tensor], None, None]:
         tensorizer_args = self.tensorizer_config._construct_tensorizer_args()
         return tensorizer_weights_iterator(tensorizer_args)
 
@@ -47,7 +48,7 @@ class TensorizerLoader(BaseModelLoader):
         """Load a serialized model with tensorizer to the CPU.
 
         This is only necessary when the model isn't vLLM-tensorized (see
-        examples/other/tensorize_vllm_model.py) This should still
+        examples/others/tensorize_vllm_model.py) This should still
         be faster than default HuggingFace loading, but will be slower than
         loading a vLLM-tensorized model.
         """
@@ -67,7 +68,7 @@ class TensorizerLoader(BaseModelLoader):
         """Load a serialized model with tensorizer.
 
         Expects a vLLM-tensorized model. See the
-        examples/other/tensorize_vllm_model.py example script
+        examples/others/tensorize_vllm_model.py example script
         for serializing vLLM models."""
 
         device_config = vllm_config.device_config
@@ -92,8 +93,8 @@ class TensorizerLoader(BaseModelLoader):
         with self.tensorizer_config.open_stream():
             pass
 
-    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
-        model_config = vllm_config.model_config
+    def load_model(self, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> nn.Module:
         parallel_config = vllm_config.parallel_config
         self._verify_config(model_config, parallel_config)
 
@@ -111,8 +112,10 @@ class TensorizerLoader(BaseModelLoader):
     @staticmethod
     def save_model(
         model: torch.nn.Module,
-        tensorizer_config: TensorizerConfig,
+        tensorizer_config: Union[TensorizerConfig, dict],
     ) -> None:
+        if isinstance(tensorizer_config, dict):
+            tensorizer_config = TensorizerConfig(**tensorizer_config)
         serialize_vllm_model(
             model=model,
             tensorizer_config=tensorizer_config,

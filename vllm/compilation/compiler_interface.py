@@ -4,7 +4,7 @@ import copy
 import hashlib
 import os
 from contextlib import ExitStack
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Optional
 from unittest.mock import patch
 
 import torch
@@ -12,6 +12,7 @@ import torch._inductor.compile_fx
 import torch.fx as fx
 
 import vllm.envs as envs
+from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.utils import is_torch_equal_or_newer
 
@@ -39,7 +40,8 @@ class CompilerInterface:
         Gather all the relevant information from the vLLM config,
         to compute a hash so that we can cache the compiled model.
 
-        See {meth}`VllmConfig.compute_hash` to check what information
+        See [`VllmConfig.compute_hash`][vllm.config.VllmConfig.compute_hash]
+        to check what information
         is already considered by default. This function should only
         consider the information that is specific to the compiler.
         """
@@ -48,11 +50,11 @@ class CompilerInterface:
     def compile(
         self,
         graph: fx.GraphModule,
-        example_inputs: List[Any],
-        compiler_config: Dict[str, Any],
+        example_inputs: list[Any],
+        compiler_config: dict[str, Any],
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
-    ) -> Tuple[Optional[Callable], Optional[Any]]:
+    ) -> tuple[Optional[Callable], Optional[Any]]:
         """
         Compile the graph with the given example inputs and compiler config,
         with a runtime shape. If the `runtime_shape` is None, it means
@@ -82,7 +84,7 @@ class CompilerInterface:
     def load(self,
              handle: Any,
              graph: fx.GraphModule,
-             example_inputs: List[Any],
+             example_inputs: list[Any],
              graph_index: int,
              runtime_shape: Optional[int] = None) -> Callable:
         """
@@ -120,7 +122,7 @@ class AlwaysHitShapeEnv:
     """
 
     def __init__(self) -> None:
-        self.guards: List[Any] = []
+        self.guards: list[Any] = []
 
     def evaluate_guards_expression(self, *args, **kwargs):
         return True
@@ -132,8 +134,8 @@ class AlwaysHitShapeEnv:
         return ""
 
 
-def get_inductor_factors() -> List[Any]:
-    factors: List[Any] = []
+def get_inductor_factors() -> list[Any]:
+    factors: list[Any] = []
     # summarize system state
     from torch._inductor.codecache import CacheBase
     system_factors = CacheBase.get_system()
@@ -153,7 +155,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
     This is not on by default yet, but we plan to turn it on by default for
     PyTorch 2.8.
 
-    Use VLLM_TEST_STANDALONE_COMPILE to toggle this on or off.
+    Use VLLM_USE_STANDALONE_COMPILE to toggle this on or off.
     """
     name = "inductor_standalone"
 
@@ -169,11 +171,12 @@ class InductorStandaloneAdaptor(CompilerInterface):
     def compile(
         self,
         graph: fx.GraphModule,
-        example_inputs: List[Any],
-        compiler_config: Dict[str, Any],
+        example_inputs: list[Any],
+        compiler_config: dict[str, Any],
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
-    ) -> Tuple[Optional[Callable], Optional[Any]]:
+    ) -> tuple[Optional[Callable], Optional[Any]]:
+        compilation_counter.num_inductor_compiles += 1
         current_config = {}
         if compiler_config is not None:
             current_config.update(compiler_config)
@@ -201,7 +204,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
     def load(self,
              handle: Any,
              graph: fx.GraphModule,
-             example_inputs: List[Any],
+             example_inputs: list[Any],
              graph_index: int,
              runtime_shape: Optional[int] = None) -> Callable:
         assert isinstance(handle, tuple)
@@ -256,11 +259,12 @@ class InductorAdaptor(CompilerInterface):
     def compile(
         self,
         graph: fx.GraphModule,
-        example_inputs: List[Any],
-        compiler_config: Dict[str, Any],
+        example_inputs: list[Any],
+        compiler_config: dict[str, Any],
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
-    ) -> Tuple[Optional[Callable], Optional[Any]]:
+    ) -> tuple[Optional[Callable], Optional[Any]]:
+        compilation_counter.num_inductor_compiles += 1
         from torch._inductor.compile_fx import compile_fx
         current_config = {}
         if compiler_config is not None:
@@ -411,8 +415,14 @@ class InductorAdaptor(CompilerInterface):
         # compilation cache. So turn off the checks if we disable the
         # compilation cache.
         if not envs.VLLM_DISABLE_COMPILE_CACHE:
-            assert hash_str is not None, (
-                "failed to get the hash of the compiled graph")
+            if hash_str is None:
+                raise RuntimeError(
+                    "vLLM failed to compile the model. The most "
+                    "likely reason for this is that a previous compilation "
+                    "failed, leading to a corrupted compilation artifact. "
+                    "We recommend trying to "
+                    "remove ~/.cache/vllm/torch_compile_cache and try again "
+                    "to see the real issue. ")
             assert file_path is not None, (
                 "failed to get the file path of the compiled graph")
         return compiled_graph, (hash_str, file_path)
@@ -420,7 +430,7 @@ class InductorAdaptor(CompilerInterface):
     def load(self,
              handle: Any,
              graph: fx.GraphModule,
-             example_inputs: List[Any],
+             example_inputs: list[Any],
              graph_index: int,
              runtime_shape: Optional[int] = None) -> Callable:
         assert isinstance(handle, tuple)
@@ -522,11 +532,12 @@ class EagerAdaptor(CompilerInterface):
     def compile(
         self,
         graph: fx.GraphModule,
-        example_inputs: List[Any],
-        compiler_config: Dict[str, Any],
+        example_inputs: list[Any],
+        compiler_config: dict[str, Any],
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
-    ) -> Tuple[Optional[Callable], Optional[Any]]:
+    ) -> tuple[Optional[Callable], Optional[Any]]:
+        compilation_counter.num_eager_compiles += 1
         # we don't need to compile the graph, just return the graph itself.
         # It does not support caching, return None for the handle.
         return graph, None

@@ -20,6 +20,7 @@ class StructuredOutputRequest:
     sampling_params: SamplingParams
     _grammar: Optional[Union[Future[StructuredOutputGrammar],
                              StructuredOutputGrammar]] = None
+    reasoning_ended: bool = False
 
     def _check_grammar_completion(self) -> bool:
         # NOTE: We have to lazy import to gate circular imports

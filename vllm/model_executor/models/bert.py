@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -15,7 +16,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
+from vllm.model_executor.layers.pooler import (ClassifierPooler, Pooler,
                                                PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -349,8 +350,8 @@ class BertModel(nn.Module, SupportsQuant):
                 token_type_ids=token_type_ids)
         return self.encoder(hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "query", "q"),
@@ -359,7 +360,7 @@ class BertModel(nn.Module, SupportsQuant):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if self.pooler is None and "pooler" in name:
                 continue
@@ -424,7 +425,7 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights = self.hf_to_vllm_mapper.apply(weights)
         weights = ((name, data) for name, data in weights
                    if not name.startswith("lm_head."))
@@ -469,10 +470,10 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                               embedding_class=BertEmbedding,
                               add_pooling_layer=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = CrossEncodingPooler(config, self.classifier,
-                                           self.bert.pooler)
+        self._pooler = ClassifierPooler(vllm_config.model_config,
+                                        self.classifier, self.bert.pooler)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
         self_weights = []
 

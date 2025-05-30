@@ -138,7 +138,6 @@ def create_requests(num_requests: int,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
             eos_token_id=EOS_TOKEN_ID,
-            arrival_time=0,
         )
         requests.append(request)
     return requests
@@ -744,7 +743,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert running_req.num_tokens_with_spec == 2 + len(spec_tokens[i])
 
     # No draft or accepted tokens counted yet
-    assert engine_core_outputs.scheduler_stats.spec_decoding_stats is None
+    assert not engine_core_outputs or (
+        engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None)
 
     # Schedule the speculated tokens for validation
     output = scheduler.schedule()
@@ -772,7 +772,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     engine_core_outputs = scheduler.update_from_output(output,
                                                        model_runner_output)
 
-    scheduler_stats = engine_core_outputs.scheduler_stats
+    scheduler_stats = engine_core_outputs[0].scheduler_stats \
+        if engine_core_outputs else None
     if expected[0] == 0:
         assert scheduler_stats.spec_decoding_stats is None
     else:
@@ -843,7 +844,7 @@ def _step_until_done(
             # We should be in the decode phase now.
             assert num_scheduled_tokens == 1
         assert len(output.kv_connector_metadata.requests) == 0
-        ecos = scheduler.update_from_output(output, model_runner_output)
+        ecos = scheduler.update_from_output(output, model_runner_output)[0]
         all_done = True
         for eco in ecos.outputs:
             if eco.finish_reason is None:
@@ -870,7 +871,7 @@ def test_kv_connector_basic():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     ######################################################
     # FIRST SET OF REQUESTS - External Hit Only
@@ -981,7 +982,7 @@ def test_kv_connector_unable_to_allocate():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     # Create two requests. The second request will not be able to
     # allocate slots because it will not have enough blocks.
@@ -1060,7 +1061,7 @@ def test_kv_connector_handles_preemption():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     # Create two requests.
     # Both can be scheduled at first, but the second request

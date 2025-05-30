@@ -22,7 +22,7 @@
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Optional, Set, Tuple, TypedDict, Union
+from typing import Any, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -403,7 +403,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

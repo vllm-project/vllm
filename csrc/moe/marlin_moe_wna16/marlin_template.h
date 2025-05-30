@@ -473,15 +473,15 @@ __global__ void Marlin(
       if (mul_topk_weights) {
   #pragma unroll
         for (int i = 0; i < 4; i++) {
+          int idx = tid4 * 4 + i;
+          idx = idx < block_num_valid_tokens ? idx : 0;
           if constexpr (w_type == vllm::kFE2M1f) {
-            sh_block_topk_weights[tid4 * 4 + i] = __hmul2(
-                global_scale,
-                Dtype::num2num2(Dtype::float2num(
-                    topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]])));
+            sh_block_topk_weights[idx] = __hmul2(
+                global_scale, Dtype::num2num2(Dtype::float2num(
+                                  topk_weights_ptr[sh_block_sorted_ids[idx]])));
           } else {
-            sh_block_topk_weights[tid4 * 4 + i] =
-                Dtype::num2num2(Dtype::float2num(
-                    topk_weights_ptr[sh_block_sorted_ids[tid4 * 4 + i]]));
+            sh_block_topk_weights[idx] = Dtype::num2num2(
+                Dtype::float2num(topk_weights_ptr[sh_block_sorted_ids[idx]]));
           }
         }
       }
@@ -1767,17 +1767,20 @@ __global__ void Marlin(
 
       if constexpr (has_act_order) {
         slice_k_start += tb_k * stages;
-        slice_k_start_shared_fetch += tb_k * stages;
-        int first_group_id = g_idx[slice_k_start];
-        int last_g_idx = slice_k_start + stages * tb_k * 2;
-        if (last_g_idx >= prob_k) {
-          last_g_idx = prob_k - 1;
-        }
-        int last_group_id = g_idx[last_g_idx];
-        if (last_group_id >= sh_first_group_id + sh_num_groups) {
-          fetch_act_order_scales_to_shared(false, first_group_id,
-                                           last_group_id);
-          __syncthreads();
+
+        if (slice_k_start < prob_k) {
+          slice_k_start_shared_fetch += tb_k * stages;
+          int first_group_id = g_idx[slice_k_start];
+          int last_g_idx = slice_k_start + stages * tb_k * 2;
+          if (last_g_idx >= prob_k) {
+            last_g_idx = prob_k - 1;
+          }
+          int last_group_id = g_idx[last_g_idx];
+          if (last_group_id >= sh_first_group_id + sh_num_groups) {
+            fetch_act_order_scales_to_shared(false, first_group_id,
+                                             last_group_id);
+            __syncthreads();
+          }
         }
       }
       if (slice_iters == 0) {
