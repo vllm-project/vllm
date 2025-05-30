@@ -1380,7 +1380,8 @@ class EngineArgs:
 
         if (self.pipeline_parallel_size > 1
                 and self.distributed_executor_backend
-                not in ("ray", "mp", "external_launcher")):
+                not in (ParallelConfig.distributed_executor_backend, "ray",
+                        "mp", "external_launcher")):
             name = "Pipeline Parallelism without Ray distributed executor " \
                     "or multiprocessing executor or external launcher"
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
