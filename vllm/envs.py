@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = False
+    VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -142,10 +143,10 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
 
 def get_vllm_port() -> Optional[int]:
     """Get the port from VLLM_PORT environment variable.
-    
+
     Returns:
         The port number as an integer if VLLM_PORT is set, None otherwise.
-        
+
     Raises:
         ValueError: If VLLM_PORT is a URI, suggest k8s service discovery issue.
     """
@@ -158,17 +159,13 @@ def get_vllm_port() -> Optional[int]:
         return int(port)
     except ValueError as err:
         from urllib.parse import urlparse
-        try:
-            parsed = urlparse(port)
-            if parsed.scheme:
-                raise ValueError(
-                    f"VLLM_PORT '{port}' appears to be a URI. "
-                    "This may be caused by a Kubernetes service discovery issue"
-                    "check the warning in: https://docs.vllm.ai/en/stable/usage/env_vars.html"
-                )
-        except Exception:
-            pass
-
+        parsed = urlparse(port)
+        if parsed.scheme:
+            raise ValueError(
+                f"VLLM_PORT '{port}' appears to be a URI. "
+                "This may be caused by a Kubernetes service discovery issue,"
+                "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+            ) from None
         raise ValueError(
             f"VLLM_PORT '{port}' must be a valid integer") from err
 
@@ -290,6 +287,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
 
+    # Use separate prefill and decode kernels for V1 attention instead of
+    # the unified triton kernel.
+    "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+     ("true", "1")),
+
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
     # when using the flash-attention backend.
     "VLLM_FLASH_ATTN_VERSION":
@@ -300,9 +304,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
 
-    # Internal flag to enable/disable Inductor standalone compile
-    "VLLM_TEST_STANDALONE_COMPILE":
-    lambda: os.environ.get("VLLM_TEST_STANDALONE_COMPILE", "0") != "0",
+    # Feature flag to enable/disable Inductor standalone compile.
+    # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
+    # enabled by default.
+    "VLLM_USE_STANDALONE_COMPILE":
+    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -323,8 +329,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to log responses from API Server for debugging
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE":
-    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").
-    lower() == "true",
+    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False"
+                           ).lower() == "true",
 
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
@@ -884,7 +890,7 @@ def compute_hash() -> str:
         "VLLM_USE_TRITON_AWQ",
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",
-        "VLLM_TEST_STANDALONE_COMPILE",
+        "VLLM_USE_STANDALONE_COMPILE",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:
