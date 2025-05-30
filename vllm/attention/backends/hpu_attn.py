@@ -4,6 +4,7 @@
 # Copyright (C) 2024-2025 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -11,8 +12,8 @@ import torch
 import vllm_hpu_extension.kernels as kernels
 import vllm_hpu_extension.ops as ops
 from vllm_hpu_extension.flags import enabled_flags
-from vllm_hpu_extension.utils import (Matmul, ModuleFusedSDPA, Softmax,
-                                      VLLMKVCache)
+from vllm_hpu_extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA,
+                                      Softmax, VLLMFP8KVCache, VLLMKVCache)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
@@ -162,13 +163,19 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                alibi_slopes, sliding_window, kv_cache_dtype,
                                blocksparse_params, logits_soft_cap, attn_type,
                                **kwargs)
-
-        self.matmul_qk = Matmul()
+        self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get(
+            'QUANT_CONFIG', None) is None
+        self.matmul_qk = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
         self.softmax = Softmax()
-        self.matmul_av = Matmul()
-        self.batch2block_matmul = Matmul()
-        self.block2batch_matmul = Matmul()
-        self.latent_cache_k = VLLMKVCache()
+        self.matmul_av = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.latent_cache_k = VLLMKVCache() if not self.enable_fp8_attn \
+            else VLLMFP8KVCache()
         self.fused_scaled_dot_product_attention = kernels.fsdpa()
 
         if "fsdpa" in enabled_flags():
@@ -369,17 +376,25 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             logger.warning_once(
                 "Using irope in HPU is not supported yet, it will fall back "
                 "to global attention for long context.")
+        self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get(
+            'QUANT_CONFIG', None) is None
         self.kv_cache_dtype = kv_cache_dtype
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
-        self.matmul_qk = Matmul()
+        self.matmul_qk = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
         self.softmax = Softmax()
-        self.matmul_av = Matmul()
-        self.batch2block_matmul = Matmul()
-        self.block2batch_matmul = Matmul()
-        self.k_cache = VLLMKVCache()
-        self.v_cache = VLLMKVCache()
+        self.matmul_av = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.batch2block_matmul = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.block2batch_matmul = Matmul() if not self.enable_fp8_attn \
+            else FP8Matmul()
+        self.k_cache = VLLMKVCache() if not self.enable_fp8_attn \
+            else VLLMFP8KVCache()
+        self.v_cache = VLLMKVCache() if not self.enable_fp8_attn \
+            else VLLMFP8KVCache()
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
