@@ -452,16 +452,43 @@ class OpenAIServing:
         self, request: AnyRequest
     ) -> Union[tuple[None, None], tuple[LoRARequest, None], tuple[
             None, PromptAdapterRequest]]:
-        if self._is_model_supported(request.model):
-            return None, None
+        # NOTE - we check the lora adapters prior to checking if the model is
+        # directly supported in case we have multimodal loras active by default
+        # that are initialized in our static loras.
+        message_types = self._get_message_types(request.messages)
+
         for lora in self.models.lora_requests:
             if request.model == lora.lora_name:
                 return lora, None
+            # Best effort match for default multimodal lora adapters;
+            # There is probably a better way to do this, but currently
+            # this matches against the set of 'types' in any content lists
+            # up until '_', e.g., to match audio_url -> audio
+            if lora.lora_name in message_types:
+                return lora, None
+
+        if self._is_model_supported(request.model):
+            return None, None
+
         for prompt_adapter in self.models.prompt_adapter_requests:
             if request.model == prompt_adapter.prompt_adapter_name:
                 return None, prompt_adapter
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
+
+    def get_message_types(self, messages: AnyRequest) -> set[str]:
+        """Retrieve the set of types up from content dicts up until `_`;
+        we use this to match potential multimodal data with default per
+        modality loras.
+        """
+        message_types = set()
+        for message in messages:
+            if (isinstance(message, dict) and "content" in message
+                    and isinstance(message["content"], list)):
+                for content_dict in message["content"]:
+                    if "type" in content_dict:
+                        message_types.add(content_dict["type"].split("_")[0])
+        return message_types
 
     def _normalize_prompt_text_to_input(
         self,
