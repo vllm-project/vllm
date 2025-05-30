@@ -146,8 +146,8 @@ def _cached_get_attn_backend(
 
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
-        selected_backend, head_size, attn_dtype, kv_cache_dtype, block_size, use_v1,
-        use_mla)
+        selected_backend, head_size, attn_dtype, kv_cache_dtype, block_size,
+        use_v1, use_mla)
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}")

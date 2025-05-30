@@ -18,18 +18,19 @@ from pydantic import SkipValidation, TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, DecodingConfig,
-                         DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, GuidedDecodingBackend,
-                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
+from vllm.config import (AttnDType, BlockSize, CacheConfig, CacheDType,
+                         CompilationConfig, ConfigFormat, ConfigType,
+                         DecodingConfig, DetailedTraceModules, Device,
+                         DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackend, GuidedDecodingBackendV1,
+                         HfOverrides, KVEventsConfig, KVTransferConfig,
+                         LoadConfig, LoadFormat, LoRAConfig, ModelConfig,
+                         ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerMode, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field, AttnDType)
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -1293,8 +1294,9 @@ class EngineArgs:
         # Only Fp16 and Bf16 dtypes since we only support FA.
         V1_SUPPORTED_ATTN_DTYPES = [torch.bfloat16, torch.float16]
         if model_config.attn_dtype not in V1_SUPPORTED_ATTN_DTYPES:
-            _raise_or_fallback(feature_name=f"--attn_dtype {model_config.attn_dtype}",
-                               recommend_to_remove=False)
+            _raise_or_fallback(
+                feature_name=f"--attn_dtype {model_config.attn_dtype}",
+                recommend_to_remove=False)
             return False
 
         # No Embedding Models so far.

@@ -242,7 +242,8 @@ class Attention(nn.Module):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 return self.impl.forward(self, query, key, value,
-                                         self_kv_cache, attn_metadata).to(self.dtype)
+                                         self_kv_cache,
+                                         attn_metadata).to(self.dtype)
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name).to(self.dtype)
