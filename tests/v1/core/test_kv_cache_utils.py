@@ -45,7 +45,6 @@ def make_request(request_id,
         multi_modal_placeholders=mm_positions,
         sampling_params=SamplingParams(max_tokens=17),
         eos_token_id=100,
-        arrival_time=0,
         lora_request=None,
         cache_salt=cache_salt,
     )
