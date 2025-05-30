@@ -123,7 +123,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
 
-        self.cuda_graph_capture_time = 0.0
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
             scheduler_config=scheduler_config,
@@ -1544,9 +1543,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model.get_eagle3_aux_hidden_state_layers())
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
-        self.model_load_time = time_after_load - time_before_load
         logger.info("Model loading took %.4f GiB and %.6f seconds",
-                    self.model_memory_usage / GiB_bytes, self.model_load_time)
+                    self.model_memory_usage / GiB_bytes,
+                    time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
 
     def save_tensorized_model(
@@ -1923,7 +1922,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
-        self.cuda_graph_capture_time = elapsed_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",

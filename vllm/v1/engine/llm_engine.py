@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from copy import copy
+import time
 from typing import Any, Callable, Optional, Union
 
 from typing_extensions import TypeVar
@@ -51,6 +52,7 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+        self._startup_ts = time.time()
         if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 LLMEngine, but envs.VLLM_USE_V1=False. "
@@ -111,6 +113,9 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+        elapsed = time.time() - self._startup_ts
+        if self.stat_logger is not None:
+            self.stat_logger.log_engine_initialized(elapsed)
 
     @classmethod
     def from_vllm_config(
