@@ -258,8 +258,7 @@ void get_cutlass_pplx_moe_mm_data(
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
-    (defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM90)
+#if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
   get_cutlass_pplx_moe_mm_data_caller(
       expert_offsets, problem_sizes1, problem_sizes2, expert_num_tokens,
       non_zero_expert_idxs, num_local_experts, padded_m, n, k);

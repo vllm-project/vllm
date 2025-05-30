@@ -1544,12 +1544,12 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def workspace_shapes(
         self,
         a: torch.Tensor,
+        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         num_experts: int,
-        padded_M: int = 0,
     ) -> tuple[int, int, torch.dtype]:
         factor = num_experts if a.dim() == 3 else 1
         workspace1 = M * topk * max(N * 2, K) * factor

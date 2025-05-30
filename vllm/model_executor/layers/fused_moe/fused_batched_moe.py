@@ -512,12 +512,12 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def workspace_shapes(
         self,
         a: torch.Tensor,
+        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         num_experts: int,
-        padded_M: int = 0,
     ) -> tuple[int, int, torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
@@ -620,12 +620,12 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def workspace_shapes(
         self,
         a: torch.Tensor,
+        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         num_experts: int,
-        padded_M: int = 0,
     ) -> tuple[int, int, torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size

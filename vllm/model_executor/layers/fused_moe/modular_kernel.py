@@ -148,12 +148,12 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     def workspace_shapes(
         self,
         a: torch.Tensor,
+        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         num_experts: int,
-        padded_M: int = 0,
     ) -> tuple[int, int, torch.dtype]:
         """
         Compute the number of elements for the temporary outputs of the two
@@ -323,17 +323,13 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         output = a1 if inplace else torch.zeros_like(a1)
 
-        # compute padded_M for PplxPrepareAndFinalize
-        if (hasattr(self.prepare_finalize, 'max_num_tokens')
-                and hasattr(self.prepare_finalize, 'world_size')):
-            padded_M = (self.prepare_finalize.max_num_tokens *
-                        self.prepare_finalize.world_size)
-        else:
-            padded_M = M
+        a1q, a1q_scale, expert_num_tokens = self.prepare_finalize.prepare(
+            a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
+            expert_map, apply_router_weight_on_input)
 
         workspace13_shape, workspace2_shape, workspace_dtype = (
-            self.fused_experts.workspace_shapes(a1, M, N, K, top_k,
-                                                global_num_experts, padded_M))
+            self.fused_experts.workspace_shapes(a1, a1q, M, N, K, top_k,
+                                                global_num_experts))
 
         # We can reuse the memory between cache1 and cache3 because by the time
         # we need cache3, we're done with cache1
@@ -343,10 +339,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         workspace2 = torch.zeros(workspace2_shape,
                                  device=a1.device,
                                  dtype=workspace_dtype)
-
-        a1q, a1q_scale, expert_num_tokens = self.prepare_finalize.prepare(
-            a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
-            expert_map, apply_router_weight_on_input)
 
         fused_out = self.fused_experts.apply(
             a1q,

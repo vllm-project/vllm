@@ -78,12 +78,12 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def workspace_shapes(
         self,
         a: torch.Tensor,
+        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         num_experts: int,
-        padded_M: int = 0,
     ) -> tuple[int, int, torch.dtype]:
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)

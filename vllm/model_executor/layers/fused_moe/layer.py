@@ -311,15 +311,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             )
 
         if prepare_finalize is not None:
-            experts = self.select_gemm_impl(prepare_finalize)
+            experts = self.select_gemm_impl(prepare_finalize, moe)
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
             )
 
     def select_gemm_impl(
-        self, prepare_finalize: Optional[FusedMoEPrepareAndFinalize]
-    ) -> FusedMoEPermuteExpertsUnpermute:
+            self, prepare_finalize: Optional[FusedMoEPrepareAndFinalize],
+            moe: Optional[MoEConfig]) -> FusedMoEPermuteExpertsUnpermute:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
         raise NotImplementedError(
@@ -365,7 +365,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             self.rocm_aiter_fused_experts = None  # type: ignore
 
     def select_gemm_impl(
-            self, prepare_finalize: Optional[FusedMoEPrepareAndFinalize]):
+            self, prepare_finalize: Optional[FusedMoEPrepareAndFinalize],
+            moe: Optional[MoEConfig]):
 
         assert self.fused_experts == fused_experts
 
@@ -847,7 +848,6 @@ class FusedMoE(torch.nn.Module):
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
-        self.quant_method.moe = moe
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
+import importlib
 from enum import Enum
 from typing import Callable, Optional
 
@@ -10,7 +11,6 @@ from compressed_tensors.quantization import (ActivationOrdering,
                                              QuantizationStrategy)
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
@@ -28,6 +28,15 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+
+has_pplx = importlib.util.find_spec("pplx_kernels") is not None
+
+if current_platform.is_cuda_alike():
+    from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+        BatchedPrepareAndFinalize)
+    if has_pplx:
+        from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+            PplxPrepareAndFinalize)
 
 logger = init_logger(__name__)
 
@@ -76,8 +85,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             else:
                 logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
-        elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
-              and layer.activation == "silu"):
+        elif quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
@@ -424,6 +432,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp8)
         self.fused_experts = cutlass_moe_fp8  # type: ignore
+        self.disable_expert_map = False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -543,19 +552,24 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
-    def select_gemm_impl(self, prepare_finalize):
+    def select_gemm_impl(self, prepare_finalize, moe):
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             CutlassExpertsFp8)
 
-        # self.moe should have been set by the caller
-        assert self.moe is not None
+        assert moe is not None
 
+        max_experts_per_worker = (
+            (moe.num_experts + prepare_finalize.world_size - 1) //
+            prepare_finalize.world_size)
         experts = CutlassExpertsFp8(
-            ((self.moe.num_experts + prepare_finalize.world_size - 1) //
-             prepare_finalize.world_size), self.moe.in_dtype,
+            max_experts_per_worker, moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
 
+        if isinstance(prepare_finalize,
+                      (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
+            # no expert_map support in this case
+            self.disable_expert_map = True
         return experts
 
     def apply(
@@ -577,9 +591,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         activation: str = "silu",
     ) -> torch.Tensor:
 
-        assert activation == "silu", (
-            f"{activation} not supported for Cutlass MoE.")
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -590,7 +601,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=torch.uint32)
 
         return self.fused_experts(
             x,
@@ -598,8 +610,9 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w2_weight,
             topk_weights,
             topk_ids,
+            activation=activation,
             global_num_experts=global_num_experts,
-            expert_map=None,
+            expert_map=None if self.disable_expert_map else expert_map,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,

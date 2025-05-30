@@ -61,18 +61,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
         repeat_cols = 4
-        if self.per_act_token:
-            repeat_rows = 1
-            a1q, a1q_scale = moe_kernel_quantize_input(a1, None,
-                                                       self.quant_dtype,
-                                                       self.per_act_token,
-                                                       self.block_shape)
-        else:
-            repeat_rows = a1.shape[0]
-            a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
-                                                       self.quant_dtype,
-                                                       self.per_act_token,
-                                                       self.block_shape)
+        repeat_rows = 1 if self.per_act_token else a1.shape[0]
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1, (None if self.per_act_token else a1_scale), self.quant_dtype,
+            self.per_act_token, self.block_shape)
 
         if a1q_scale is not None:
             a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
@@ -121,7 +113,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             out_expert_x_scale=expert_x_scale,
             dp_x=a1q,
             dp_x_scale=a1q_scale,
-            indices=rank_topk_ids.to(torch.uint32),
+            indices=rank_topk_ids,
             bound_m=bound_m,
         )
         if expert_x_scale is not None:
@@ -153,7 +145,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights = torch.ones_like(topk_weights)
 
         self.a2a.combine(out_tokens=output,
-                         indices=topk_ids.to(torch.uint32),
+                         indices=topk_ids,
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
