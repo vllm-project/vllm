@@ -22,7 +22,7 @@ the failure?
 3. **Use this title format:**
 
    ```
-   [Bug][Test Failure]: failing-test-job - regex/matching/failing:test
+   [CI Failure]: failing-test-job - regex/matching/failing:test
    ```
 
 4. **For the environment field:**
