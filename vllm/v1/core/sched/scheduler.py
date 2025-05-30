@@ -557,11 +557,12 @@ class Scheduler(SchedulerInterface):
             scheduler_output.kv_connector_metadata = meta
 
         events = self.kv_cache_manager.take_events()
-        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-        batch = KVEventBatch(ts=time.time(),
-                             events=events,
-                             data_parallel_rank=dp_rank)
-        self.kv_event_publisher.publish(batch)
+        if events:
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            batch = KVEventBatch(ts=time.time(),
+                                 events=events,
+                                 data_parallel_rank=dp_rank)
+            self.kv_event_publisher.publish(batch)
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
