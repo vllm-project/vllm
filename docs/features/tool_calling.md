@@ -238,12 +238,13 @@ Flags: `--tool-call-parser hermes`
 ### DeepSeek-V3 Models (`deepseek_v3`)
 
 Supported models:
+
 * `deepseek-ai/DeepSeek-V3-0324`
 * `deepseek-ai/DeepSeek-R1-0528`
 
 Flags(DeepSeek-V3-0324): `--tool-call-parser deepseek_v3 --chat-template examples/tool_chat_template_deepseekv3.jinja`
-Flags(DeepSeek-R1-0528): `--tool-call-parser deepseek_v3 --chat-template examples/tool_chat_template_deepseekr1.jinja`
 
+Flags(DeepSeek-R1-0528): `--tool-call-parser deepseek_v3 --chat-template examples/tool_chat_template_deepseekr1.jinja`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
