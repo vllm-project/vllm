@@ -426,19 +426,19 @@ class PrometheusStatLogger(StatLoggerBase):
             self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
             self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
-            self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
+            self.gauge_gpu_cache_usage.set(scheduler_stats.kv_cache_usage)
             self.gauge_kv_cache_usage.set(scheduler_stats.kv_cache_usage)
 
             self.counter_gpu_prefix_cache_queries.inc(
                 scheduler_stats.prefix_cache_stats.queries)
             self.counter_gpu_prefix_cache_hits.inc(
                 scheduler_stats.prefix_cache_stats.hits)
-        
+
             self.counter_prefix_cache_queries.inc(
                 scheduler_stats.prefix_cache_stats.queries)
             self.counter_prefix_cache_hits.inc(
                 scheduler_stats.prefix_cache_stats.hits)
-            
+
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
                     scheduler_stats.spec_decoding_stats)
