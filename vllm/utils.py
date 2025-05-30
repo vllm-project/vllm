@@ -107,7 +107,7 @@ STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "currently not supported for encoder/decoder "
     "models.")
 
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is currently not currently "
+STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
                              "supported with encoder/decoder "
                              "models.")
 
@@ -1876,14 +1876,6 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
     assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
-
-
-def is_in_doc_build() -> bool:
-    try:
-        from sphinx.ext.autodoc.mock import _MockModule
-        return isinstance(zmq, _MockModule)
-    except ModuleNotFoundError:
-        return False
 
 
 def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):

@@ -10,18 +10,22 @@ from ...utils import check_embeddings_close
 @pytest.mark.parametrize(
     "model",
     [
-        # [Encoder-only]
-        pytest.param("BAAI/bge-base-en-v1.5",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
-        pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
-        pytest.param("intfloat/multilingual-e5-small"),
-        pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
+        # Be careful of the order of models, decoder-only models should be
+        # placed before encoder-only models, otherwise `Qwen2.5-0.5B-Instruct`
+        # case won't pass because gte-Qwen2-1.5B-instruct will cache custom
+        # model code with bidirectional attention.
         # [Decoder-only]
         pytest.param("BAAI/bge-multilingual-gemma2",
                      marks=[pytest.mark.core_model]),
         pytest.param("intfloat/e5-mistral-7b-instruct",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
+        # [Encoder-only]
+        pytest.param("BAAI/bge-base-en-v1.5",
+                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
+        pytest.param("intfloat/multilingual-e5-small"),
+        pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
         # [Cross-Encoder]
         pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
@@ -44,7 +48,7 @@ def test_models(
     vllm_extra_kwargs = {}
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
         vllm_extra_kwargs["override_pooler_config"] = \
-            PoolerConfig(pooling_type="MEAN")
+            PoolerConfig(pooling_type="MEAN", normalize=False)
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
