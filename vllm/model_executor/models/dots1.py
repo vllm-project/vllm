@@ -333,20 +333,17 @@ class Dots1Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
-        self.q_layernorm = Dots1RMSNorm(self.head_dim,
-                                            eps=config.rms_norm_eps)
-        self.k_layernorm = Dots1RMSNorm(self.head_dim,
-                                            eps=config.rms_norm_eps)
+        self.q_norm = Dots1RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = Dots1RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
     def forward(self, positions: torch.Tensor,
                 hidden_states: torch.Tensor) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q = self.q_norm(q.reshape(-1, self.num_heads,
-                                        self.head_dim)).reshape(q.shape)
-        k = self.k_norm(
-            k.reshape(-1, self.num_kv_heads,
-                        self.head_dim)).reshape(k.shape)
+                                  self.head_dim)).reshape(q.shape)
+        k = self.k_norm(k.reshape(-1, self.num_kv_heads,
+                                  self.head_dim)).reshape(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
