@@ -601,8 +601,7 @@ def wait_for_completion_or_failure(
 
             if actor_run_refs:
                 import ray
-                _, unready_refs = ray.wait(actor_run_refs, timeout=5)
-                actor_run_refs = unready_refs
+                _, actor_run_refs = ray.wait(actor_run_refs, timeout=5)
 
     except KeyboardInterrupt:
         logger.info("Received KeyboardInterrupt, shutting down API servers...")
