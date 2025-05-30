@@ -73,9 +73,8 @@ class Llama4PythonicToolParser(ToolParser):
                                                     tool_calls=[],
                                                     content=model_output)
         except TimeoutError:
-            logger.error(
-                "WARNING: Regex search timed out for model output: %s",
-                model_output)
+            logger.warning(
+                "Regex timeout occurred when matching tool call pattern.")
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
