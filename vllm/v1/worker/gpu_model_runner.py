@@ -1115,7 +1115,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
             num_tokens, dp_size, dp_rank)
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
-        return max_tokens_across_dp_cpu - num_tokens
+        return max_tokens_across_dp_cpu - num_tokens, num_tokens_across_dp
 
     @torch.inference_mode()
     def execute_model(
@@ -1155,7 +1155,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_input_tokens = num_scheduled_tokens
 
         # Padding for DP
-        num_input_tokens += self.get_dp_padding(num_input_tokens)
+        num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
+        num_input_tokens += num_pad
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -1202,7 +1203,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
-                                 num_tokens=num_input_tokens):
+                                 num_tokens=num_input_tokens,
+                                 num_tokens_across_dp=num_tokens_across_dp):
             self.maybe_setup_kv_connector(scheduler_output)
 
             model_output = self.model(
@@ -1675,7 +1677,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> torch.Tensor:
 
         # Padding for DP
-        num_tokens += self.get_dp_padding(num_tokens)
+        num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
+        num_tokens += num_pad
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -1741,9 +1744,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens, None, False)
 
-            with set_forward_context(attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=num_tokens):
+            with set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp):
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,
