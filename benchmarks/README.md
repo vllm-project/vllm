@@ -17,12 +17,6 @@ become available.
   </thead>
   <tbody>
     <tr>
-      <td><strong>Custom</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td>Local file: <code>data.jsonl</code></td>
-    </tr>
-    <tr>
       <td><strong>ShareGPT</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
@@ -69,6 +63,12 @@ become available.
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
       <td><code>lmms-lab/LLaVA-OneVision-Data</code>, <code>Aeala/ShareGPT_Vicuna_unfiltered</code></td>
+    </tr>
+    <tr>
+      <td><strong>Custom</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td>Local file: <code>data.jsonl</code></td>
     </tr>
   </tbody>
 </table>
