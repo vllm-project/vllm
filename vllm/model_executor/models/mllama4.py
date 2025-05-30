@@ -721,8 +721,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        self.use_data_parallel = (
-            vllm_config.parallel_config.enable_multimodal_encoder_data_parallel)
+        self.use_data_parallel = (vllm_config.parallel_config.
+                                  enable_multimodal_encoder_data_parallel)
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
@@ -777,7 +777,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # shard image input
         if self.use_data_parallel:
-            vision_embeddings_flat = run_dp_sharded_vision_model(flat_data, self.vision_model)
+            vision_embeddings_flat = run_dp_sharded_vision_model(
+                flat_data, self.vision_model)
         else:
             vision_embeddings_flat = self.vision_model(flat_data)
 
