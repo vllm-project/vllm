@@ -25,7 +25,7 @@ the failure?
    [CI Failure]: failing-test-job - regex/matching/failing:test
    ```
 
-4. **For the environment field:**
+3. **For the environment field:**
 
    ```
    Still failing on main as of commit abcdef123
