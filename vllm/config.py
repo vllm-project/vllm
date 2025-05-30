@@ -3085,6 +3085,11 @@ def _get_and_verify_dtype(
     if config_dtype is None:
         config_dtype = torch.float32
 
+    # convert config_dtype to torch.dtype if it is a str object
+    if isinstance(config_dtype,
+                  str) and config_dtype in _STR_DTYPE_TO_TORCH_DTYPE:
+        config_dtype = _STR_DTYPE_TO_TORCH_DTYPE[config_dtype]
+
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":
