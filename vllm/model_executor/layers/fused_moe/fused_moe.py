@@ -4,6 +4,7 @@ import functools
 import json
 import os
 from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
 
 import torch
 
@@ -864,6 +865,10 @@ def dispatch_topk_func() -> Callable[..., tuple[torch.Tensor, ...]]:
         return rocm_aiter_topk_softmax
     return vllm_topk_softmax
 
+@dataclass
+class TopKRoutingData(mk.RoutingData):
+    topk_weights: torch.Tensor = field()
+    topk_ids: torch.Tensor = field()
 
 def fused_topk(
     hidden_states: torch.Tensor,
@@ -1138,8 +1143,7 @@ def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
                   w2: torch.Tensor,
-                  topk_weights: torch.Tensor,
-                  topk_ids: torch.Tensor,
+                  routing_data: TopKRoutingData,
                   inplace: bool = False,
                   activation: str = "silu",
                   apply_router_weight_on_input: bool = False,
@@ -1161,6 +1165,8 @@ def fused_experts(hidden_states: torch.Tensor,
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
     N = w1.shape[1]
+    topk_ids = routing_data.topk_ids
+    topk_weights = routing_data.topk_weights
     if (allow_deep_gemm and use_fp8_w8a8 and N > 512
             and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
         assert apply_router_weight_on_input is False
@@ -1491,12 +1497,13 @@ def fused_moe(
     else:
         topk_weights, topk_ids = custom_routing_function(
             hidden_states, gating_output, topk, renormalize)
+        
+    routing_data = TopKRoutingData(topk_weights=topk_weights, topk_ids=topk_ids)
 
     return fused_experts(hidden_states,
                          w1,
                          w2,
-                         topk_weights,
-                         topk_ids,
+                         routing_data=routing_data,
                          inplace=inplace,
                          activation=activation,
                          use_fp8_w8a8=use_fp8_w8a8,
@@ -1514,6 +1521,10 @@ def fused_moe(
                          a2_scale=a2_scale,
                          block_shape=block_shape)
 
+@dataclass
+class TritonExpertsRoutingData(mk.RoutingData):
+    topk_weights: torch.Tensor = field()
+    topk_ids: torch.Tensor = field()
 
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
@@ -1559,7 +1570,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        topk_ids: torch.Tensor,
+        routing_data: TopKRoutingData,
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
@@ -1572,6 +1583,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        apply_router_weight_on_output: bool
     ) -> torch.Tensor:
         # Check constraints.
         if self.use_int4_w4a16:
@@ -1590,7 +1603,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert hidden_states.dtype in [
             torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn
         ]
-
+        
+        topk_ids = routing_data.topk_ids
         E, num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
 
