@@ -635,7 +635,8 @@ def batched_moe_kernel_quantize_input(
     per_channel_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    if (torch.compiler.is_compiling()
+    if (True or
+        torch.compiler.is_compiling()
         or torch.cuda.is_current_stream_capturing()):
         # Note: this does a bunch of extra work because expert_num_tokens is ignored
         # but it does support torch.compile + cudagraphs.
