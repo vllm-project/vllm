@@ -93,6 +93,38 @@ async def loop_until_done_async(client: EngineCoreClient, outputs: dict):
             break
 
 
+async def loop_until_fully_done_async(client: EngineCoreClient,
+                                      outputs: dict,
+                                      timeout: float = 20.0):
+    start_time = time.monotonic()
+
+    while True:
+        # Check for timeout
+        elapsed_time = time.monotonic() - start_time
+        if elapsed_time > timeout:
+            raise TimeoutError(
+                f"loop_until_fully_done_async timed out after {timeout} seconds"
+            )
+
+        engine_core_outputs = (await client.get_output_async()).outputs
+
+        if len(engine_core_outputs) == 0:
+            continue
+
+        # Add outputs to the dict
+        for out in engine_core_outputs:
+            outputs[out.request_id].append(out)
+
+        # Check if all request IDs in outputs have finished
+        for req_id in outputs:
+            request_finished = any(out.finished for out in outputs[req_id])
+            if not request_finished:
+                await asyncio.sleep(0.1)
+                continue
+
+        break
+
+
 # Dummy utility function to monkey-patch into engine core.
 def echo(self, msg: str, err_msg: Optional[str] = None) -> str:
     print(f"echo util function called: {msg}, {err_msg}")
@@ -355,7 +387,7 @@ async def test_kv_cache_events_dp(
         block_size = 16
         num_blocks = 2
         dp_size = 2
-        tp_size = 1
+        tp_size = 2
 
         engine_args = EngineArgs(
             model=MODEL_NAME,
@@ -396,9 +428,9 @@ async def test_kv_cache_events_dp(
             sampling_params = SamplingParams(max_tokens=1)
             all_request_ids = []
 
-            # Create and add 10 cloned requests
+            # Create and add 25 requests
             # NOTE: attempts to force routing to both dp groups but can be flaky
-            for i in range(10):
+            for i in range(25):
                 await asyncio.sleep(0.01)
                 request = make_request(sampling_params, custom_tokens)
                 await client.add_request_async(request)
@@ -413,13 +445,12 @@ async def test_kv_cache_events_dp(
             }
 
             print("processing requests...")
-            await loop_until_done_async(client, outputs)
+            await loop_until_fully_done_async(client, outputs)
 
             # Receive from subscriber until no more messages
             print("collecting results...")
             results = []
             while True:
-                # NOTE: timeout here can be flaky
                 result = subscriber.receive_one(timeout=1)
                 print(result)
                 if result is None:
