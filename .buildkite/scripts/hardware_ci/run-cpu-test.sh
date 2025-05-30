@@ -44,7 +44,7 @@ function cpu_tests() {
     pytest -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
     pytest -v -s tests/models/language/generation -m cpu_model
     pytest -v -s tests/models/language/pooling -m cpu_model
-    pytest -v -s tests/models/multimodal/generation --ignore=test_mllama.py -m cpu_model"
+    pytest -v -s tests/models/multimodal/generation --ignore=tests/models/multimodal/generation/test_mllama.py -m cpu_model"
 
   # Run compressed-tensor test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
