@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
+import os
 import subprocess
 import sys
 import time
@@ -25,10 +28,10 @@ def _query_server_long(prompt: str) -> dict:
 
 
 @pytest.fixture
-def api_server():
+def api_server(tokenizer_pool_size: int, distributed_executor_backend: str):
     script_path = Path(__file__).parent.joinpath(
         "api_server_async_engine.py").absolute()
-    uvicorn_process = subprocess.Popen([
+    commands = [
         sys.executable,
         "-u",
         str(script_path),
@@ -36,12 +39,24 @@ def api_server():
         "facebook/opt-125m",
         "--host",
         "127.0.0.1",
-    ])
+        "--tokenizer-pool-size",
+        str(tokenizer_pool_size),
+        "--distributed-executor-backend",
+        distributed_executor_backend,
+    ]
+
+    # API Server Test Requires V0.
+    my_env = os.environ.copy()
+    my_env["VLLM_USE_V1"] = "0"
+    uvicorn_process = subprocess.Popen(commands, env=my_env)
     yield
     uvicorn_process.terminate()
 
 
-def test_api_server(api_server):
+@pytest.mark.parametrize("tokenizer_pool_size", [0, 2])
+@pytest.mark.parametrize("distributed_executor_backend", ["mp", "ray"])
+def test_api_server(api_server, tokenizer_pool_size: int,
+                    distributed_executor_backend: str):
     """
     Run the API server and test it.
 

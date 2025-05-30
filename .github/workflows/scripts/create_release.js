@@ -1,4 +1,4 @@
-// Uses Github's API to create the release and wait for result.
+// Uses GitHub's API to create the release and wait for result.
 // We use a JS script since github CLI doesn't provide a way to wait for the release's creation and returns immediately.
 
 module.exports = async (github, context, core) => {
@@ -8,7 +8,7 @@ module.exports = async (github, context, core) => {
 			generate_release_notes: true,
 			name: process.env.RELEASE_TAG,
 			owner: context.repo.owner,
-			prerelease: false,
+			prerelease: true,
 			repo: context.repo.repo,
 			tag_name: process.env.RELEASE_TAG,
 		});

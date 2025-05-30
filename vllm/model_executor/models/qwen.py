@@ -1,61 +1,68 @@
-# coding=utf-8
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://huggingface.co/Qwen/Qwen-7B/blob/main/modeling_qwen.py
 # Copyright (c) Alibaba Cloud.
 # LICENSE: https://huggingface.co/Qwen/Qwen-7B/blob/main/LICENSE
 """Inference-only QWen model compatible with HuggingFace weights."""
-from typing import Any, Dict, List, Optional, Tuple
+import json
+from collections.abc import Iterable
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention import Attention
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
+    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
-from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.qwen import QWenConfig
+from vllm.sequence import IntermediateTensors
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+from .interfaces import SupportsLoRA, SupportsPP
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class QWenMLP(nn.Module):
+    """MLP for the language component of the Qwen model, which contains a
+    MergedColumnParallelLinear merging 2 outputs via silu activation."""
 
     def __init__(
         self,
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str = "silu",
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
             bias=False,
-            linear_method=linear_method)
+            quant_config=quant_config)
         self.c_proj = RowParallelLinear(intermediate_size,
                                         hidden_size,
                                         bias=False,
-                                        linear_method=linear_method)
+                                        quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.c_proj(x)
@@ -70,8 +77,10 @@ class QWenAttention(nn.Module):
         num_heads: int,
         max_position_embeddings: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        linear_method: Optional[LinearMethodBase] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -87,13 +96,13 @@ class QWenAttention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.c_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.scaling = self.head_dim**-0.5
 
@@ -104,21 +113,22 @@ class QWenAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = PagedAttention(self.num_heads, self.head_dim, self.scaling)
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
-
+        attn_output = self.attn(q, k, v)
         output, _ = self.c_proj(attn_output)
         return output
 
@@ -127,8 +137,10 @@ class QWenBlock(nn.Module):
 
     def __init__(
         self,
-        config: QWenConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -140,22 +152,22 @@ class QWenBlock(nn.Module):
                                   config.max_position_embeddings,
                                   rope_theta=rope_theta,
                                   rope_scaling=rope_scaling,
-                                  linear_method=linear_method)
+                                  cache_config=cache_config,
+                                  quant_config=quant_config,
+                                  prefix=f"{prefix}.attn")
 
         self.ln_2 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
         self.mlp = QWenMLP(config.hidden_size,
                            config.intermediate_size // 2,
-                           linear_method=linear_method)
+                           quant_config=quant_config)
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -165,8 +177,6 @@ class QWenBlock(nn.Module):
         hidden_states = self.attn(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            input_metadata=input_metadata,
         )
 
         # Fully Connected
@@ -175,14 +185,16 @@ class QWenBlock(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class QWenModel(nn.Module):
 
-    def __init__(
-        self,
-        config: QWenConfig,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         self.vocab_size = config.vocab_size
 
@@ -190,81 +202,99 @@ class QWenModel(nn.Module):
             config.vocab_size,
             config.hidden_size,
         )
-        self.h = nn.ModuleList([
-            QWenBlock(config, linear_method)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.start_layer, self.end_layer, self.h = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: QWenBlock(
+                config, cache_config, quant_config, prefix=prefix),
+            prefix=f"{prefix}.h")
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.wte(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
-    ) -> torch.Tensor:
-        hidden_states = self.wte(input_ids)
-        residual = None
-        for i in range(len(self.h)):
-            layer = self.h[i]
+        intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        for layer in self.h[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i],
-                input_metadata,
                 residual,
             )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
         hidden_states, _ = self.ln_f(hidden_states, residual)
         return hidden_states
 
 
-class QWenLMHeadModel(nn.Module):
+class QWenBaseModel(nn.Module):
 
     def __init__(
         self,
-        config: QWenConfig,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        transformer_type: type[QWenModel] = QWenModel,
+    ) -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
-        self.linear_method = linear_method
-        self.transformer = QWenModel(config, linear_method)
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
-        self.sampler = Sampler(config.vocab_size)
+        self.multimodal_config = multimodal_config
+        self.quant_config = quant_config
+        self.transformer = transformer_type(vllm_config=vllm_config,
+                                            prefix=maybe_prefix(
+                                                prefix, "transformer"))
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.transformer.wte.weight
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
-    ) -> torch.Tensor:
-        hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata)
-        return hidden_states
-
-    def sample(
+    def compute_logits(
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   sampling_metadata)
-        return next_tokens
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w2", 0),
             ("gate_up_proj", "w1", 1),
         ]
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -274,6 +304,9 @@ class QWenLMHeadModel(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -282,7 +315,47 @@ class QWenLMHeadModel(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
+
+class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
+    packed_modules_mapping = {
+        "c_attn": ["c_attn"],
+        "gate_up_proj": [
+            "w2",
+            "w1",
+        ],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+        if hasattr(config, "visual"):
+            hf_overrides = {
+                "architectures": ["QwenVLForConditionalGeneration"]
+            }
+            raise RuntimeError(
+                "The configuration of this model indicates that it supports "
+                "vision inputs, but you instantiated the text-only version "
+                "of this model. Please use the vision model by setting "
+                f"`--hf-overrides '{json.dumps(hf_overrides)}'`")
+
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.transformer(input_ids, positions,
+                                         intermediate_tensors, inputs_embeds)
+        return hidden_states
