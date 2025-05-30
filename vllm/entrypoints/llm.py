@@ -457,6 +457,10 @@ class LLM:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
 
+        # Add any modality specific loras to the corresponding prompts
+        lora_request = self._get_modality_specific_lora_reqs(
+            parsed_prompts, lora_request)
+
         self._validate_and_add_requests(
             prompts=parsed_prompts,
             params=sampling_params,
@@ -469,6 +473,63 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
+
+    def _get_modality_specific_lora_reqs(
+            self, parsed_prompts: Union[PromptType,
+                                        Sequence[PromptType]], lora_request):
+        # Grab the lora config off the vllm config on the engine,
+        # since this is the same for both v0 & v1.
+        lora_config = self.llm_engine.vllm_config.lora_config
+
+        # If there's no lora config / mm_loras, or the model isn't multimodal,
+        # leave the lora as is.
+        if (lora_config is None
+                or not self.llm_engine.model_config.is_multimodal_model
+                or (lora_config and lora_config.mm_loras is None)):
+            return lora_request
+
+        if not isinstance(parsed_prompts, Sequence):
+            return self._resolve_single_prompt_mm_lora(parsed_prompts,
+                                                       lora_request,
+                                                       lora_config.mm_loras)
+        return [
+            self._resolve_single_prompt_mm_lora(
+                parsed_prompt,
+                lora_req,
+                lora_config.mm_loras,
+            ) for parsed_prompt, lora_req in zip(parsed_prompts, lora_request)
+        ]
+
+    def _resolve_single_prompt_mm_lora(self, parsed_prompt: PromptType,
+                                       lora_request, mm_loras):
+        if not isinstance(parsed_prompt,
+                          dict) or "multi_modal_data" not in parsed_prompt:
+            return lora_request
+
+        intersection = set(
+            parsed_prompt["multi_modal_data"].keys()).intersection(
+                mm_loras.keys())
+        if not intersection:
+            return lora_request
+        if len(intersection) > 1:
+            # TODO: Would be nice to be able to have multiple loras per prompt
+            logger.warning(
+                "Multiple modality specific loras were registered and would be"
+                " used by a single prompt consuming several modalities; "
+                " currently we only support one lora per request; as such,"
+                " lora(s) registered with modalities: %s"
+                " will be skipped.", intersection)
+            return lora_request
+
+        modality_lora = mm_loras[intersection.pop()]
+        if (lora_request is not None
+                and lora_request.lora_int_id != modality_lora.lora_int_id):
+            logger.warning(
+                "A modality with a registered lora and a lora_request "
+                "with a different ID were provided; falling back to the "
+                "lora_request as we only apply one LoRARequest per prompt.")
+            return lora_request
+        return modality_lora
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
