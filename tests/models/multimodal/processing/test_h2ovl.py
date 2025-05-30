@@ -11,7 +11,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.processing import BaseMultiModalProcessor
 
-from ....conftest import _ImageAssets
+from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
@@ -137,7 +137,7 @@ def _run_check(
 @pytest.mark.parametrize("kwargs_on_init", [True, False])
 def test_processor_override(
     model_id: str,
-    image_assets: _ImageAssets,
+    image_assets: ImageTestAssets,
     size_factors: list[int],
     min_dynamic_patch: int,
     max_dynamic_patch: int,

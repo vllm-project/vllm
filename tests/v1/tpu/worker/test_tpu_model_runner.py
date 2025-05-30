@@ -77,12 +77,11 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                prompt="test",
                 mm_inputs=[],
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
-                block_ids=[0],
+                block_ids=[[0]],  # block_ids should be list[list[int]]
                 num_computed_tokens=0,
                 lora_request=None,
             ))
@@ -113,14 +112,35 @@ def _is_req_added(model_runner, req_id: str) -> bool:
 
 
 def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
+    """Check if the request state block IDs match the block table.
+    
+    This function handles both legacy BlockTable and new MultiGroupBlockTable
+    structures for backward compatibility.
+    """
+
     req_index = model_runner.input_batch.req_id_to_index[req_id]
-    block_table = model_runner.input_batch.block_table
+    multi_group_block_table = model_runner.input_batch.block_table
     req_state = model_runner.requests[req_id]
-    if block_table.num_blocks_per_row[req_index] != len(req_state.block_ids):
+
+    # Access the first block table from MultiGroupBlockTable
+    # This is safe since we currently only use single KV cache groups
+    block_table = multi_group_block_table[0]
+
+    # req_state.block_ids is now list[list[int]] for MultiGroupBlockTable
+    # Extract the first group's block IDs
+    if isinstance(req_state.block_ids[0], list):
+        # New format: list[list[int]] - extract first group
+        req_block_ids = req_state.block_ids[0]
+    else:
+        # Legacy format: list[int] - use directly
+        req_block_ids = req_state.block_ids
+
+    if block_table.num_blocks_per_row[req_index] != len(req_block_ids):
         return False
+
     num_blocks = block_table.num_blocks_per_row[req_index]
-    return (block_table.block_table_np[req_index, :num_blocks] ==
-            req_state.block_ids).all()
+    block_table_values = block_table.block_table_np[req_index, :num_blocks]
+    return (block_table_values == req_block_ids).all()
 
 
 def test_update_states_new_request(model_runner):
@@ -294,11 +314,19 @@ def test_update_states_request_unscheduled(model_runner):
 
 
 def test_get_paddings():
+    # Bucketed padding
     min_token_size, max_token_size, padding_gap = 16, 512, 64
     expected_paddings = [16, 32, 64, 128, 192, 256, 320, 384, 448, 512]
     actual_paddings = _get_token_paddings(min_token_size, max_token_size,
                                           padding_gap)
+
+    # Bucketed padding with max_token_size not a power of two.
+    max_token_size = 317
+    expected_paddings = [16, 32, 64, 128, 192, 256, 320]
+    actual_paddings = _get_token_paddings(min_token_size, max_token_size,
+                                          padding_gap)
     assert actual_paddings == expected_paddings
+
     # Exponential padding.
     max_token_size, padding_gap = 1024, 0
     expected_paddings = [16, 32, 64, 128, 256, 512, 1024]

@@ -18,6 +18,9 @@ class NgramProposer:
         # tokens follow the match, we will return the maximum amount of
         # tokens until the end.
         self.k = vllm_config.speculative_config.num_speculative_tokens
+        # Maximum length of the model.
+        self.max_model_len = vllm_config.model_config.max_model_len
+
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
         self.propose(np.zeros(1024, dtype=np.int32))
@@ -50,9 +53,14 @@ class NgramProposer:
               followed that pattern. Here we will return [4,2,3] because 
               we only have three tokens after the match.
         """
+        # Do not generate draft tokens beyond the max model length.
+        k = min(self.k, self.max_model_len - context_token_ids.shape[0])
+        if k <= 0:
+            return None
+
         # TODO(woosuk): Optimize this.
         for n in range(self.max_n, self.min_n - 1, -1):
-            result = _find_subarray_kmp(context_token_ids, n, self.k)
+            result = _find_subarray_kmp(context_token_ids, n, k)
             if result is not None:
                 return result
         return None

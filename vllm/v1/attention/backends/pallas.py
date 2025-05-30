@@ -10,7 +10,9 @@ import torch_xla.experimental.custom_kernel  # noqa: F401
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.utils import cdiv, next_power_of_2
 
 logger = init_logger(__name__)
 
@@ -50,6 +52,33 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> None:
         raise RuntimeError("swap_blocks is not used for the TPU backend.")
 
+    # In recent TPU generations, up to v6e, the SMEM size is 1MB. The
+    # block_tables within the PallasMetadata constitute almost the entire SMEM
+    # requirement. Its size is max_num_seqs * num_page_per_seq * 4 (Int). Here
+    # we simply make sure that the size is smaller than half of SMEM capacity.
+    @staticmethod
+    def get_min_page_size(vllm_config: VllmConfig) -> int:
+        max_num_page_per_req = (1024 * 1024 // 2 //
+                                vllm_config.scheduler_config.max_num_seqs // 4)
+        min_page_size = cdiv(vllm_config.model_config.max_model_len,
+                             max_num_page_per_req)
+        min_page_size = 1 << (min_page_size - 1).bit_length()
+        return min_page_size
+
+    # TPU has limited SREGs (scalar registers), if page_size is too small, we
+    # can spill SREGs easily which leads to bad performance. The strategy we
+    # apply here is trying to split max-model-len to 16 pages which make the
+    # spill less likely. Meanwhile we make sure the page size is in [16, 256].
+    @staticmethod
+    def get_page_size(vllm_config: VllmConfig) -> int:
+        page_size = next_power_of_2(
+            vllm_config.model_config.max_model_len) // 16
+        if page_size <= 16:
+            return 16
+        if page_size >= 256:
+            return 256
+        return page_size
+
 
 @dataclass
 class PallasMetadata:
@@ -66,7 +95,7 @@ class PallasMetadata:
     block_tables: torch.Tensor
     context_lens: torch.Tensor
     query_start_loc: torch.Tensor
-    num_seqs: int
+    num_seqs: torch.Tensor
 
 
 class PallasAttentionBackendImpl(AttentionImpl):

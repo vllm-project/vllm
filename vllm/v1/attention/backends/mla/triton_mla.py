@@ -115,4 +115,4 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                              attn_metadata.decode.seq_lens, attn_logits,
                              num_kv_splits, self.scale, PAGE_SIZE)
 
-        return self._v_up_proj_and_o_proj(o)
+        return self._v_up_proj(o)

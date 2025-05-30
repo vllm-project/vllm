@@ -19,15 +19,16 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
-from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+from vllm.multimodal.processing import (MultiModalHashes, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .intern_vit import InternVisionModel
 from .internvl import (IMG_CONTEXT, IMG_END, IMG_START,
+                       BaseInternVLDummyInputsBuilder,
+                       BaseInternVLMultiModalProcessor,
                        BaseInternVLProcessingInfo, BaseInternVLProcessor,
-                       InternVLChatModel, InternVLDummyInputsBuilder,
-                       InternVLMultiModalProcessor, build_transform,
+                       InternVLChatModel, build_transform,
                        find_closest_aspect_ratio, get_internvl_target_ratios)
 
 
@@ -430,8 +431,8 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
-                               ):
+class H2OVLMultiModalProcessor(
+        BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
 
     def _get_prompt_updates(
         self,
@@ -488,31 +489,33 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
         prompt: Union[str, list[int]],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], MultiModalKwargs, bool]:
+        *,
+        return_mm_hashes: bool,
+    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
         # The processor logic is different for len(images) <= 1 vs > 1
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
         # perform caching for the most common case
         if mm_data_items.get_count("image", strict=False) > 1:
-            # This code path corresponds to the cache being disabled
-            return self._apply_hf_processor_main(
+            return self._apply_hf_processor(
                 prompt=prompt,
-                mm_items=mm_data_items,
+                mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                enable_hf_prompt_update=True,
+                return_mm_hashes=return_mm_hashes,
             )
 
         return super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            return_mm_hashes=return_mm_hashes,
         )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
     H2OVLMultiModalProcessor,
     info=H2OVLProcessingInfo,
-    dummy_inputs=InternVLDummyInputsBuilder)
+    dummy_inputs=BaseInternVLDummyInputsBuilder)
 class H2OVLChatModel(InternVLChatModel):
 
     def _init_vision_model(

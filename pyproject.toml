@@ -3,10 +3,10 @@
 requires = [
     "cmake>=3.26",
     "ninja",
-    "packaging",
-    "setuptools>=61",
+    "packaging>=24.2",
+    "setuptools>=77.0.3,<80.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.6.0",
+    "torch == 2.7.0",
     "wheel",
     "jinja2",
 ]
@@ -15,7 +15,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vllm"
 authors = [{name = "vLLM Team"}]
-license = { "file"= "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 readme = "README.md"
 description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
 classifiers = [
@@ -23,7 +24,6 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: Apache Software License",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Intended Audience :: Science/Research",
@@ -35,57 +35,47 @@ dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
 Homepage="https://github.com/vllm-project/vllm"
-Documentation="https://vllm.readthedocs.io/en/latest/"
-Slack="http://slack.vllm.ai/"
+Documentation="https://docs.vllm.ai/en/latest/"
+Slack="https://slack.vllm.ai/"
 
 [project.scripts]
 vllm = "vllm.entrypoints.cli.main:main"
+
+[project.entry-points."vllm.general_plugins"]
+lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
 
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
 
 [tool.setuptools.packages.find]
 where = ["."]
-exclude = ["benchmarks", "csrc", "docs", "examples", "tests*"]
-namespaces = false
+include = ["vllm*"]
 
 [tool.yapfignore]
 ignore_patterns = [
+    ".buildkite/**",
+    "benchmarks/**",
     "build/**",
+    "examples/**",
 ]
 
 [tool.ruff]
 # Allow lines to be as long as 80.
 line-length = 80
-exclude = [
-    # External file, leaving license intact
-    "examples/other/fp8/quantizer/quantize.py"
-]
 
 [tool.ruff.lint.per-file-ignores]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
-# Python 3.8 typing. TODO: Remove these excludes after v1.0.0
-"vllm/adapter_commons/**/*.py" = ["UP006", "UP035"]
+# Python 3.8 typing - skip V0 code
 "vllm/attention/**/*.py" = ["UP006", "UP035"]
-"vllm/compilation/**/*.py" = ["UP006", "UP035"]
 "vllm/core/**/*.py" = ["UP006", "UP035"]
-"vllm/device_allocator/**/*.py" = ["UP006", "UP035"]
-"vllm/distributed/**/*.py" = ["UP006", "UP035"]
 "vllm/engine/**/*.py" = ["UP006", "UP035"]
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
-"vllm/lora/**/*.py" = ["UP006", "UP035"]
-"vllm/model_executor/**/*.py" = ["UP006", "UP035"]
-"vllm/platforms/**/*.py" = ["UP006", "UP035"]
-"vllm/plugins/**/*.py" = ["UP006", "UP035"]
-"vllm/profiler/**/*.py" = ["UP006", "UP035"]
 "vllm/prompt_adapter/**/*.py" = ["UP006", "UP035"]
 "vllm/spec_decode/**/*.py" = ["UP006", "UP035"]
-"vllm/transformers_utils/**/*.py" = ["UP006", "UP035"]
-"vllm/triton_utils/**/*.py" = ["UP006", "UP035"]
-"vllm/vllm_flash_attn/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
+# Python 3.8 typing - skip utils for ROCm
 "vllm/utils.py" = ["UP006", "UP035"]
 
 [tool.ruff.lint]
@@ -102,6 +92,7 @@ select = [
     "SIM",
     # isort
     # "I",
+    # flake8-logging-format
     "G",
 ]
 ignore = [
@@ -118,6 +109,7 @@ ignore = [
 ]
 
 [tool.mypy]
+plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
@@ -150,6 +142,11 @@ ignore-words-list = "dout, te, indicies, subtile, ElementE"
 skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora/data/*,build/*,vllm/third_party/*"
 
 [tool.isort]
+skip_glob = [
+    ".buildkite/*",
+    "benchmarks/*",
+    "examples/*",
+]
 use_parentheses = true
 skip_gitignore = true
 
@@ -158,7 +155,6 @@ markers = [
     "skip_global_cleanup",
     "core_model: enable this model test in each PR instead of only nightly",
     "cpu_model: enable this model test in CPU tests",
-    "quant_model: run this model test under Quantized category",
     "split: run this test as part of a split",
     "distributed: run this test only in distributed GPU tests",
     "skip_v1: do not run this test with v1",
@@ -167,7 +163,17 @@ markers = [
 
 [tool.pymarkdown]
 plugins.md004.style = "sublist" # ul-style
+plugins.md007.indent = 4 # ul-indent
+plugins.md007.start_indented = true # ul-indent
 plugins.md013.enabled = false # line-length
 plugins.md041.enabled = false # first-line-h1
 plugins.md033.enabled = false # inline-html
+plugins.md046.enabled = false # code-block-style
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
+
+[tool.ty.src]
+root = "./vllm"
+respect-ignore-files = true
+
+[tool.ty.environment]
+python = "./.venv"

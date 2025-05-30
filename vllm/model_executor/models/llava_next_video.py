@@ -2,8 +2,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -12,7 +11,6 @@ from transformers import (BatchFeature, LlavaNextVideoConfig,
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -37,7 +35,7 @@ from .vision import get_vision_encoder_info
 
 class LlavaNextVideoPixelInputs(TypedDict):
     type: Literal["pixel_values_videos"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: Union[torch.Tensor, list[torch.Tensor]]
     """
     Shape: `(batch_size, num_frames, num_channels, height, width)`
 
@@ -301,16 +299,9 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.model.make_empty_intermediate_tensors)
 
-    @cached_property
-    def sampler(self):
-        if hasattr(self.language_model, "sampler"):
-            return self.language_model.sampler
-
-        return get_sampler()
-
     def _validate_video_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        self, data: Union[torch.Tensor, list[torch.Tensor]]
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
 
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
@@ -335,7 +326,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         A legal video input should have the following dimensions:
         {
             "pixel_values_videos" : 
-                List[b, Tensor(nb_frames, nb_channels, height, width)]
+                list[b, Tensor(nb_frames, nb_channels, height, width)]
         }
         """
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
@@ -469,15 +460,8 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             # This model doesn't support images for now

@@ -114,8 +114,16 @@ COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false
 
+# ENV that can improve safe tensor loading, and end-to-end time
+ENV SAFETENSORS_FAST_GPU=1
+
+# User-friendly environment setting for multi-processing to avoid below RuntimeError.
+# RuntimeError: Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing,
+# you must use the 'spawn' start method 
+# See https://pytorch.org/docs/stable/notes/multiprocessing.html#cuda-in-multiprocessing
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
 
 CMD ["/bin/bash"]
-
