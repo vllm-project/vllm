@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
+from vllm.entrypoints.openai.tool_parsers.utils import REGEX_TIMEOUT
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -59,15 +60,25 @@ class Llama4PythonicToolParser(ToolParser):
         Extract the tool calls from a complete model response.
         """
 
+        no_tools_response = ExtractedToolCallInformation(tools_called=False,
+                                                         tool_calls=[],
+                                                         content=model_output)
+
         # remove <|python_start|> and <|python_end|>
         # as Llama 4 model sometime will output those tokens
         if model_output.startswith("<|python_start|>"):
             model_output = model_output[len("<|python_start|>"):]
             model_output = model_output.replace("<|python_end|>", "")
-        if not (self.TOOL_CALL_REGEX.match(model_output)):
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+
+        try:
+            if not (self.TOOL_CALL_REGEX.match(model_output,
+                                               timeout=REGEX_TIMEOUT)):
+                return no_tools_response
+        except TimeoutError:
+            logger.error(
+                "WARNING: Regex search timed out for model output: %s",
+                model_output)
+            return no_tools_response
 
         try:
             module = ast.parse(model_output)
@@ -87,9 +98,7 @@ class Llama4PythonicToolParser(ToolParser):
         except Exception:
             logger.exception("Error in extracting tool call from response.")
             # Treat as regular text
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+            return no_tools_response
 
     def extract_tool_calls_streaming(
         self,

@@ -7,6 +7,10 @@ from typing import Any
 import partial_json_parser
 from partial_json_parser.core.options import Allow
 
+# Global timeout for the `regex` module, for use in all of the tool parsers.
+# This is a safety measure to prevent regex operations from hanging.
+REGEX_TIMEOUT = 5
+
 
 def find_common_prefix(s1: str, s2: str) -> str:
     """
