@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from abc import abstractmethod
 from collections import defaultdict
 from typing import Callable
 
@@ -41,9 +42,6 @@ class KVCacheCoordinator:
                     kv_cache_group_id=i,
                     caching_hash_fn=caching_hash_fn,
                 ))
-
-        self.type0_group_ids, self.type1_group_ids = (
-            self.verify_support_find_longest_cache_hit())
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
@@ -172,6 +170,83 @@ class KVCacheCoordinator:
             for manager in self.single_type_managers
         ]
 
+    @abstractmethod
+    def find_longest_cache_hit(
+            self, request_id: str,
+            block_hashes_dict: dict[int, list[BlockHashType]],
+            max_cache_hit_length: int) -> tuple[list[list[KVCacheBlock]], int]:
+        pass
+
+
+class UnifiedKVCacheCoordinator(KVCacheCoordinator):
+
+    def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
+                 use_eagle: bool, enable_caching: bool,
+                 caching_hash_fn: Callable, enable_kv_cache_events: bool):
+        super().__init__(kv_cache_config, max_model_len, use_eagle,
+                         enable_caching, caching_hash_fn,
+                         enable_kv_cache_events)
+        self.block_size = self.kv_cache_config.kv_cache_groups[
+            0].kv_cache_spec.block_size
+        assert len(self.kv_cache_config.kv_cache_groups) == 1, (
+            "UnifiedKVCacheCoordinator assumes only one kv cache group")
+
+    def find_longest_cache_hit(
+            self, request_id: str,
+            block_hashes_dict: dict[int, list[BlockHashType]],
+            max_cache_hit_length: int) -> tuple[list[list[KVCacheBlock]], int]:
+        hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
+            block_hashes_dict[self.block_size], max_cache_hit_length, [0])
+        return hit_blocks, len(hit_blocks[0]) * self.block_size
+
+
+class HybridKVCacheCoordinator(KVCacheCoordinator):
+
+    def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
+                 use_eagle: bool, enable_caching: bool,
+                 caching_hash_fn: Callable, enable_kv_cache_events: bool):
+        super().__init__(kv_cache_config, max_model_len, use_eagle,
+                         enable_caching, caching_hash_fn,
+                         enable_kv_cache_events)
+        self.initialize_group_ids()
+
+    def initialize_group_ids(self) -> None:
+        """
+        For simplicity, find_longest_cache_hit makes some assumptions on the
+        model architecture instead of provides a general solution. This function
+        checks if the assumptions hold.
+        NOTE(Chen): Please open an issue to discuss if you need other cases.
+
+        TODO: add more notes
+        """
+        groups_by_type_id: dict[str, list[int]] = defaultdict(list)
+        full_attention_type_ids: set[str] = set()
+        for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
+            groups_by_type_id[g.kv_cache_spec.type_id].append(i)
+            if isinstance(g.kv_cache_spec, FullAttentionSpec):
+                full_attention_type_ids.add(g.kv_cache_spec.type_id)
+
+        assert len(full_attention_type_ids) == 1, (
+            "find_longest_cache_hit assumes hybrid models have exactly "
+            "one type of full attention groups now")
+        assert len(groups_by_type_id) == 2, (
+            "find_longest_cache_hit assumes hybrid models have exactly "
+            "one other type of groups except full attention now")
+
+        self.full_attention_group_ids = groups_by_type_id[next(
+            iter(full_attention_type_ids))]
+        self.other_group_ids = groups_by_type_id[next(
+            iter(groups_by_type_id.keys() - full_attention_type_ids))]
+
+        self.full_attention_block_size = self.kv_cache_config.kv_cache_groups[
+            self.full_attention_group_ids[0]].kv_cache_spec.block_size
+        self.other_block_size = self.kv_cache_config.kv_cache_groups[
+            self.other_group_ids[0]].kv_cache_spec.block_size
+        if self.other_block_size % self.full_attention_block_size != 0:
+            raise NotImplementedError(
+                "KVCacheCoordinator assumes the block_size of the full "
+                "attention layer is divisible by other layers now.")
+
     def find_longest_cache_hit(
         self,
         request_id: str,
@@ -191,128 +266,55 @@ class KVCacheCoordinator:
                 - A list of the cache hit blocks for each single type manager.
                 - The number of tokens of the longest cache hit.
         """
-        return [[] for _ in self.kv_cache_config.kv_cache_groups], 0
-        # if len(self.kv_cache_config.kv_cache_groups) == 1:
-        #     # Return the cache hit blocks for the only kv cache group.
-        #     block_size = self.kv_cache_config.kv_cache_groups[
-        #         0].kv_cache_spec.block_size
-        #     hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
-        #         block_hashes_dict[block_size], max_length=max_cache_hit_length) # noqa
-        #     if len(hit_blocks) > 0:
-        #         self.computed_blocks[request_id] = [hit_blocks]
-        #     return [hit_blocks], len(hit_blocks) * block_size
+        # For simplicity, we assume the first manager is for full
+        # attention layers, and the block_size of full attention layers
+        # is divisible by other attention layers. This has been verified
+        # in verify_support_find_longest_cache_hit().
 
-        # elif len(self.kv_cache_config.kv_cache_groups) > 1:
-        #     # For simplicity, we assume the first manager is for full
-        #     # attention layers, and the block_size of full attention layers
-        #     # is divisible by other attention layers. This has been verified
-        #     # in verify_support_find_longest_cache_hit().
+        # First, find the longest cache hit for full attention.
+        hit_blocks_full_attn = self.single_type_managers[
+            0].find_longest_cache_hit(
+                block_hashes_dict[self.full_attention_block_size],
+                max_length=max_cache_hit_length,
+                kv_cache_group_ids=self.full_attention_group_ids)
+        hit_length = len(
+            hit_blocks_full_attn[0]) * self.full_attention_block_size
 
-        #     block_size_0 = self.single_type_managers[0].block_size
-        #     block_size_1 = self.single_type_managers[1].block_size
+        # Next, find the cache hit for the other attention WITHIN
+        # the cache hit of full attention.
+        hit_blocks_other_attn = self.single_type_managers[
+            1].find_longest_cache_hit(block_hashes_dict[self.other_block_size],
+                                      max_length=hit_length,
+                                      kv_cache_group_ids=self.other_group_ids)
+        hit_length = len(hit_blocks_other_attn[0]) * self.other_block_size
+        assert hit_length % self.full_attention_block_size == 0
 
-        #     # First, find the longest cache hit for full attention.
-        #     hit_blocks_full_attn = self.single_type_managers[
-        #         0].find_longest_cache_hit(block_hashes_dict[block_size_0],
-        #                                   max_length=max_cache_hit_length)
-        #     hit_length = len(hit_blocks_full_attn) * block_size_0
+        # Truncate the full attention cache hit to the length of the
+        # cache hit of the other attention.
+        for i in range(len(hit_blocks_full_attn)):
+            del hit_blocks_full_attn[i][hit_length //
+                                        self.full_attention_block_size:]
+        # Merge the hit blocks of full attention and other attention.
+        hit_blocks = hit_blocks_other_attn
+        for group_id, blocks in enumerate(hit_blocks_full_attn):
+            del blocks[hit_length // self.full_attention_block_size:]
+            # NOTE: there is only one full attention group in most cases. So
+            # the time complexity of insert is fine.
+            hit_blocks.insert(group_id, blocks)
+        return hit_blocks, hit_length
 
-        #     # Next, find the cache hit for the other attention WITHIN
-        #     # the cache hit of full attention.
-        #     hit_blocks_other_attn = self.single_type_managers[
-        #         1].find_longest_cache_hit(block_hashes_dict[block_size_1],
-        #                                   max_length=hit_length)
-        #     hit_length = len(hit_blocks_other_attn) * block_size_1
-        #     assert hit_length % block_size_0 == 0
 
-        #     # Truncate the full attention cache hit to the length of the
-        #     # cache hit of the other attention.
-        #     del hit_blocks_full_attn[hit_length // block_size_0:]
-
-        #     hit_blocks_two_mgr = [hit_blocks_full_attn, hit_blocks_other_attn]
-        #     if hit_length > 0:
-        #         self.computed_blocks[request_id] = hit_blocks_two_mgr
-        #     return hit_blocks_two_mgr, hit_length
-
-        # else:
-        #     raise AssertionError("This line should be unreachable as "
-        #                          "unsupported cases should be caught by "
-        #                          "verify_support_find_longest_cache_hit()")
-
-    def generate_group_manager_map(
-            self) -> tuple[list[list[int]], list[tuple[int, int]]]:
-        """
-        Generate the mapping between kv cache groups and managers.
-
-        Returns:
-            manager_to_group: list[list[int]], the kv cache groups managed by
-                each manager.
-            group_to_manager: list[tuple[int, int]], the manager id and the
-                index of the group in the manager for each kv cache group.
-        """
-        groups_by_type_id: dict[str, list[int]] = defaultdict(list)
-        full_attention_type_ids: set[str] = set()
-        for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
-            groups_by_type_id[g.kv_cache_spec.type_id].append(i)
-            if isinstance(g.kv_cache_spec, FullAttentionSpec):
-                full_attention_type_ids.add(g.kv_cache_spec.type_id)
-
-        manager_to_group = []
-        for type_id in full_attention_type_ids:
-            manager_to_group.append(groups_by_type_id[type_id])
-        for type_id in groups_by_type_id.keys() - full_attention_type_ids:
-            manager_to_group.append(groups_by_type_id[type_id])
-
-        group_to_manager_dict = {
-            group_id: (manager_id, group_id_in_manager)
-            for manager_id, group_ids in enumerate(manager_to_group)
-            for group_id_in_manager, group_id in enumerate(group_ids)
-        }
-        group_to_manager = [
-            group_to_manager_dict[i]
-            for i in range(len(self.kv_cache_config.kv_cache_groups))
-        ]
-        return manager_to_group, group_to_manager
-
-    def verify_support_find_longest_cache_hit(
-            self) -> tuple[list[int], list[int]]:
-        """
-        For simplicity, find_longest_cache_hit makes some assumptions on the
-        model architecture instead of provides a general solution. This function
-        checks if the assumptions hold.
-        NOTE(Chen): Please open an issue to discuss if you need other cases.
-
-        TODO: add more notes
-        """
-        if len(self.kv_cache_config.kv_cache_groups) == 1:
-            return list(range(len(self.kv_cache_config.kv_cache_groups))), []
-        else:
-            groups_by_type_id: dict[str, list[int]] = defaultdict(list)
-            full_attention_type_ids: set[str] = set()
-            for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
-                groups_by_type_id[g.kv_cache_spec.type_id].append(i)
-                if isinstance(g.kv_cache_spec, FullAttentionSpec):
-                    full_attention_type_ids.add(g.kv_cache_spec.type_id)
-
-            assert len(full_attention_type_ids) == 1, (
-                "find_longest_cache_hit assumes hybrid models have exactly "
-                "one type of full attention groups now")
-            assert len(groups_by_type_id) == 2, (
-                "find_longest_cache_hit assumes hybrid models have exactly "
-                "one other type of groups except full attention now")
-
-            type0_group_ids = groups_by_type_id[next(
-                iter(full_attention_type_ids))]
-            type1_group_ids = groups_by_type_id[next(
-                iter(groups_by_type_id.keys() - full_attention_type_ids))]
-
-            block_size_0 = self.kv_cache_config.kv_cache_groups[
-                type0_group_ids[0]].kv_cache_spec.block_size
-            block_size_1 = self.kv_cache_config.kv_cache_groups[
-                type1_group_ids[0]].kv_cache_spec.block_size
-            if block_size_1 % block_size_0 != 0:
-                raise NotImplementedError(
-                    "KVCacheCoordinator assumes the block_size of the full "
-                    "attention layer is divisible by other layers now.")
-
-            return type0_group_ids, type1_group_ids
+def get_kv_cache_coordinator(
+        kv_cache_config: KVCacheConfig, max_model_len: int, use_eagle: bool,
+        enable_caching: bool, caching_hash_fn: Callable,
+        enable_kv_cache_events: bool) -> KVCacheCoordinator:
+    if len(kv_cache_config.kv_cache_groups) == 1:
+        return UnifiedKVCacheCoordinator(kv_cache_config, max_model_len,
+                                         use_eagle, enable_caching,
+                                         caching_hash_fn,
+                                         enable_kv_cache_events)
+    else:
+        return HybridKVCacheCoordinator(kv_cache_config, max_model_len,
+                                        use_eagle, enable_caching,
+                                        caching_hash_fn,
+                                        enable_kv_cache_events)

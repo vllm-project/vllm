@@ -191,8 +191,9 @@ class SingleTypeKVCacheManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
-                               max_length: int) -> list[KVCacheBlock]:
+    def find_longest_cache_hit(
+            self, block_hashes: list[BlockHashType], max_length: int,
+            kv_cache_group_ids: list[int]) -> list[list[KVCacheBlock]]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than 
         `max_length`. If no cache hit is found, return an empty list. 
@@ -230,24 +231,29 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
 
-    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
-                               max_length: int) -> list[KVCacheBlock]:
-        return []
-        # computed_blocks: list[KVCacheBlock] = []
-        # max_num_blocks = max_length // self.block_size
-        # for i in range(max_num_blocks):
-        #     block_hash = block_hashes[i]
-        #     # block_hashes is a chain of block hashes. If a block hash is not
-        #     # in the cached_block_hash_to_id, the following block hashes are
-        #     # not computed yet for sure.
-        #     if cached_block := self.block_pool.get_cached_block(
-        #             block_hash, self.manager_id):
-        #         computed_blocks.append(cached_block)
-        #     else:
-        #         break
-        # if self.use_eagle and len(computed_blocks) > 0:
-        #     computed_blocks.pop()
-        # return computed_blocks
+    def find_longest_cache_hit(
+            self, block_hashes: list[BlockHashType], max_length: int,
+            kv_cache_group_ids: list[int]) -> list[list[KVCacheBlock]]:
+        # NOTE: different from other list[list[KVCacheBlock]]
+        computed_blocks: list[list[KVCacheBlock]] = [
+            [] for _ in range(len(kv_cache_group_ids))
+        ]
+        max_num_blocks = max_length // self.block_size
+        for i in range(max_num_blocks):
+            block_hash = block_hashes[i]
+            # block_hashes is a chain of block hashes. If a block hash is not
+            # in the cached_block_hash_to_id, the following block hashes are
+            # not computed yet for sure.
+            if cached_block := self.block_pool.get_cached_block(
+                    block_hash, kv_cache_group_ids):
+                for j in range(len(kv_cache_group_ids)):
+                    computed_blocks[j].append(cached_block[j])
+            else:
+                break
+        if self.use_eagle and len(computed_blocks) > 0:
+            for j in range(len(kv_cache_group_ids)):
+                computed_blocks[j].pop()
+        return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
@@ -284,41 +290,46 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             self.sliding_window_contiguous_blocks += 1
         self.null_block = block_pool.null_block
 
-    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
-                               max_length: int) -> list[KVCacheBlock]:
-        return []
+    def find_longest_cache_hit(
+            self, block_hashes: list[BlockHashType], max_length: int,
+            kv_cache_group_ids: list[int]) -> list[list[KVCacheBlock]]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # # optimize the time complexity from O(len(block_hashes)) to
-        # # O(len(block_hashes) / sliding_window_contiguous_blocks +
-        # # sliding_window_contiguous_blocks),
-        # # which is good for low cache hit rate scenarios.
-        # max_num_blocks = max_length // self.block_size
-        # computed_blocks = [self.null_block] * max_num_blocks
-        # num_contiguous_blocks = 0
-        # match_found = False
-        # # Search from right to left and early stop when a match is found.
-        # for i in range(max_num_blocks - 1, -1, -1):
-        #     if cached_block := self.block_pool.get_cached_block(
-        #             block_hashes[i], self.manager_id):
-        #         computed_blocks[i] = cached_block
-        #         num_contiguous_blocks += 1
-        #         if (num_contiguous_blocks
-        #                 >= self.sliding_window_contiguous_blocks):
-        #             # Trim the trailing blocks.
-        #             # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-        #             # when sliding_window_contiguous_blocks=2.
-        #             del computed_blocks[i + num_contiguous_blocks:]
-        #             match_found = True
-        #             break
-        #     else:
-        #         num_contiguous_blocks = 0
-        # if not match_found:
-        #     # The first `num_contiguous_blocks` is a cache hit even if
-        #     # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
-        #     del computed_blocks[num_contiguous_blocks:]
-        # if self.use_eagle and len(computed_blocks) > 0:
-        #     computed_blocks.pop()
-        # return computed_blocks
+        # optimize the time complexity from O(len(block_hashes)) to
+        # O(len(block_hashes) / sliding_window_contiguous_blocks +
+        # sliding_window_contiguous_blocks),
+        # which is good for low cache hit rate scenarios.
+        max_num_blocks = max_length // self.block_size
+        computed_blocks = [[self.null_block] * max_num_blocks
+                           for _ in range(len(kv_cache_group_ids))]
+        num_contiguous_blocks = 0
+        match_found = False
+        # Search from right to left and early stop when a match is found.
+        for i in range(max_num_blocks - 1, -1, -1):
+            if cached_block := self.block_pool.get_cached_block(
+                    block_hashes[i], kv_cache_group_ids):
+                for j in range(len(kv_cache_group_ids)):
+                    computed_blocks[j][i] = cached_block[j]
+                num_contiguous_blocks += 1
+                if (num_contiguous_blocks
+                        >= self.sliding_window_contiguous_blocks):
+                    # Trim the trailing blocks.
+                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
+                    # when sliding_window_contiguous_blocks=2.
+                    for j in range(len(kv_cache_group_ids)):
+                        del computed_blocks[j][i + num_contiguous_blocks:]
+                    match_found = True
+                    break
+            else:
+                num_contiguous_blocks = 0
+        if not match_found:
+            # The first `num_contiguous_blocks` is a cache hit even if
+            # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
+            for j in range(len(kv_cache_group_ids)):
+                del computed_blocks[j][num_contiguous_blocks:]
+        if self.use_eagle and len(computed_blocks) > 0:
+            for j in range(len(kv_cache_group_ids)):
+                computed_blocks[j].pop()
+        return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
