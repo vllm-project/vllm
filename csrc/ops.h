@@ -245,6 +245,13 @@ void get_cutlass_moe_mm_data(
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k);
 
+void get_cutlass_moe_mm_data_full(
+    const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
+    torch::Tensor& blockscale_offsets,
+    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
+    torch::Tensor& input_permutation, torch::Tensor& output_permutation,
+    const int64_t num_experts, const int64_t n, const int64_t k);
+
 void moe_permute(
     const torch::Tensor& input_tensor,
     const torch::Tensor& dst2src_map,

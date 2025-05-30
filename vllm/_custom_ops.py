@@ -835,6 +835,20 @@ def get_cutlass_moe_mm_data(
                                                 output_permutation,
                                                 num_experts, n, k)
 
+def get_cutlass_moe_mm_data_full(
+        topk_ids: torch.Tensor, expert_offsets: torch.Tensor,
+        blockscale_offsets: torch.Tensor,
+        problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor,
+        input_permutation: torch.Tensor, output_permutation: torch.Tensor,
+        num_experts: int, n: int, k: int):
+    return torch.ops._C.get_cutlass_moe_mm_data_full(topk_ids, expert_offsets,
+                                                     blockscale_offsets,
+                                                     problem_sizes1,
+                                                     problem_sizes2,
+                                                     input_permutation,
+                                                     output_permutation,
+                                                     num_experts, n, k)
+
 def moe_permute(
         input_tensor: torch.Tensor, dst2src_map: torch.Tensor, output_tensor: torch.Tensor
 ):
@@ -1126,6 +1140,8 @@ def scaled_fp4_experts_quant(
                                       device=input_tensor.device,
                                       dtype=input_tensor.dtype)
         moe_permute(input_tensor, expert_map, input_tensor_permuted)
+    else:
+        input_tensor_permuted = input_tensor
 
 
     m_numtopk, k = input_tensor_permuted.shape

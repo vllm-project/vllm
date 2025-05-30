@@ -56,6 +56,13 @@ void get_cutlass_moe_mm_data_caller(
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k);
 
+void get_cutlass_moe_mm_data_full_caller(
+    const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
+    torch::Tensor& blockscale_offsets,
+    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
+    torch::Tensor& input_permutation, torch::Tensor& output_permutation,
+    const int64_t num_experts, const int64_t n, const int64_t k);
+
 void moe_permute_caller(const torch::Tensor& input_tensor,
                         const torch::Tensor& dst2src_map,
                         torch::Tensor& output_tensor);
@@ -242,6 +249,29 @@ void get_cutlass_moe_mm_data(
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled get_cutlass_moe_mm_data: no cutlass_scaled_mm kernel for "
+      "CUDA device capability: ",
+      version_num, ". Required capability: 90");
+}
+
+void get_cutlass_moe_mm_data_full(
+    const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
+    torch::Tensor& blockscale_offsets,
+    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
+    torch::Tensor& input_permutation, torch::Tensor& output_permutation,
+    const int64_t num_experts, const int64_t n, const int64_t k) {
+  // This function currently gets compiled only if we have a valid cutlass moe
+  // mm to run it for.
+  int32_t version_num = get_sm_version_num();
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+    (defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM90)
+  get_cutlass_moe_mm_data_full_caller(topk_ids, expert_offsets, blockscale_offsets, problem_sizes1,
+                                 problem_sizes2, input_permutation,
+                                 output_permutation, num_experts, n, k);
+  return;
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "No compiled get_cutlass_moe_mm_data_full: no cutlass_scaled_mm kernel for "
       "CUDA device capability: ",
       version_num, ". Required capability: 90");
 }

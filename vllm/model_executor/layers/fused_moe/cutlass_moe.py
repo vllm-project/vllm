@@ -333,6 +333,7 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     num_topk = topk_ids.shape[1]
 
     expert_offsets = torch.empty((e + 1), dtype=torch.int32, device=device)
+    blockscale_offsets = torch.empty((e + 1), dtype=torch.int32, device=device)
     # Problem size:  (num_experts, (m,2n,k))
     problem_sizes1 = torch.empty((e, 3), dtype=torch.int32, device=device)
     # Problem size:  (num_experts, (m,n,k))
@@ -343,13 +344,13 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
 
     # problem shapes should have [m, n, k]
     # Note that problem sizes are based on logical number of elements.
-    ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
+    ops.get_cutlass_moe_mm_data_full(topk_ids, expert_offsets, blockscale_offsets, problem_sizes1,
                                 problem_sizes2, a_map, c_map, e, n, k)
 
-    tokens_per_expert = problem_sizes1[:, 0]
-    rounded_tokens_per_expert = (tokens_per_expert + (128 - 1)) // 128 * 128
-    blockscale_offsets = torch.zeros(e + 1, dtype=torch.int32, device=device)
-    blockscale_offsets[1:] = torch.cumsum(rounded_tokens_per_expert, dim=0)
+    # tokens_per_expert = problem_sizes1[:, 0]
+    # rounded_tokens_per_expert = (tokens_per_expert + (128 - 1)) // 128 * 128
+    # blockscale_offsets = torch.zeros(e + 1, dtype=torch.int32, device=device)
+    # blockscale_offsets[1:] = torch.cumsum(rounded_tokens_per_expert, dim=0)
 
     rep_a_fp4, rep_a_blockscale = ops.scaled_fp4_experts_quant(
         a,
