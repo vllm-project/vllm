@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import time
 from collections.abc import Mapping
 from copy import copy
-import time
 from typing import Any, Callable, Optional, Union
 
 from typing_extensions import TypeVar
