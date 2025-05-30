@@ -41,11 +41,9 @@ function cpu_tests() {
     set -e
     pytest -v -s tests/kernels/attention/test_cache.py -m cpu_model
     pytest -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
-    pytest -v -s tests/models/decoder_only/language -m cpu_model
-    pytest -v -s tests/models/embedding/language -m cpu_model
-    pytest -v -s tests/models/encoder_decoder/language -m cpu_model
-    pytest -v -s tests/models/decoder_only/audio_language -m cpu_model
-    pytest -v -s tests/models/decoder_only/vision_language -m cpu_model"
+    pytest -v -s tests/models/language/generation -m cpu_model
+    pytest -v -s tests/models/language/pooling -m cpu_model
+    pytest -v -s tests/models/multimodal/generation -m cpu_model"
 
   # Run compressed-tensor test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
