@@ -66,16 +66,18 @@ class Llama4PythonicToolParser(ToolParser):
             model_output = model_output[len("<|python_start|>"):]
             model_output = model_output.replace("<|python_end|>", "")
 
+        is_tool_call_pattern = False
         try:
-            if not (self.TOOL_CALL_REGEX.match(
-                    model_output,
-                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS)):
-                return ExtractedToolCallInformation(tools_called=False,
-                                                    tool_calls=[],
-                                                    content=model_output)
+            is_tool_call_pattern = self.TOOL_CALL_REGEX.match(
+                model_output,
+                timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS) is not None
         except TimeoutError:
             logger.warning(
                 "Regex timeout occurred when matching tool call pattern.")
+            logger.debug("Regex timeout occurred when matching user input: %s",
+                         model_output)
+
+        if not is_tool_call_pattern:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
