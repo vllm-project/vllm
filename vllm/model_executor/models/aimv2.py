@@ -201,6 +201,7 @@ class AIMv2Model(torch.nn.Module):
         self.preprocessor = AIMv2ViTPreprocessor(config)
         self.trunk = AIMv2Transformer(config,
                                       quant_config=quant_config,
+                                      require_post_norm=require_post_norm,
                                       prefix=f"{prefix}.trunk")
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
@@ -222,7 +223,7 @@ class AIMv2Model(torch.nn.Module):
 
         for name, loaded_weight in weights:
             # post_layernorm is optional in SiglipVisionModel
-            if (name.startswith("vision_model.post_layernorm")
+            if (name.startswith("trunk.post_trunk_norm")
                     and self.trunk.post_trunk_norm is None):
                 continue
 
