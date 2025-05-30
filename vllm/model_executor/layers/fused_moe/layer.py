@@ -33,11 +33,14 @@ has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 has_deepep = importlib.util.find_spec("deep_ep") is not None
 
 if current_platform.is_cuda_alike():
-    from .fused_batched_moe import BatchedTritonExperts
-    from .fused_moe import TritonExperts, fused_experts
+    from .fused_batched_moe import (BatchedPrepareAndFinalize,
+                                    BatchedTritonExperts)
+    from .fused_moe import TritonExperts, fused_experts, TopKRoutingData
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
-                                 FusedMoEPrepareAndFinalize)
+                                 FusedMoEPrepareAndFinalize, 
+                                 RoutingData)
+    from .triton_kernels_moe import ExpTritonExpertsRoutingData, modular_triton_moe_kernels_forward
     if has_pplx:
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
     if has_deepep:
@@ -578,29 +581,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-        if envs.VLLM_USE_EXP_TRITON_KERNEL:
-            assert custom_routing_function is None, "custom_routing_function is not supported in new triton MoE kernel"
-
-            return torch.ops.vllm.forward_cuda_triton(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                router_logits=router_logits,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                # custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                activation=activation
-            )
-        else:
-            topk_weights, topk_ids = FusedMoE.select_experts(
+        routing_data = FusedMoE.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
                 use_grouped_topk=use_grouped_topk,
@@ -612,15 +593,36 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
                 indices_type=torch.uint32 if self.moe.use_pplx_kernels else None)
+        
+        if envs.VLLM_USE_EXP_TRITON_KERNEL:
+            assert isinstance(routing_data, ExpTritonExpertsRoutingData)
 
+            return torch.ops.vllm.modular_triton_moe_kernels_forward(
+                    x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    # custom routing
+                    gate_scal=routing_data.routing_data.gate_scal,
+                    expt_hist=routing_data.routing_data.expt_hist,
+                    n_expts_tot=routing_data.routing_data.n_expts_tot,
+                    n_expts_act=routing_data.routing_data.n_expts_act, 
+                    topk_indx=routing_data.gather_indx.src_indx,
+                    gate_indx=routing_data.gather_indx.dst_indx,
+                    use_fp8_w8a8=False,
+                    use_int8_w8a8=False,
+                    use_int8_w8a16=False,
+                    use_int4_w4a16=False,
+                    per_channel_quant=False,
+                )
+        else:
+            assert isinstance(routing_data, TopKRoutingData)
             if self.rocm_aiter_moe_enabled:
                 assert expert_map is None
                 return self.rocm_aiter_fused_experts(
                     hidden_states=x,
                     w1=layer.w13_weight,
                     w2=layer.w2_weight,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
+                    routing_data=routing_data,
                     activation=activation,
                     apply_router_weight_on_input=apply_router_weight_on_input)
             else:
@@ -628,8 +630,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     hidden_states=x,
                     w1=layer.w13_weight,
                     w2=layer.w2_weight,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
+                    routing_data=routing_data,
                     inplace=True,
                     activation=activation,
                     apply_router_weight_on_input=apply_router_weight_on_input,
@@ -1283,42 +1284,63 @@ class FusedMoE(torch.nn.Module):
                        custom_routing_function: Optional[Callable] = None,
                        scoring_func: str = "softmax",
                        e_score_correction_bias: Optional[torch.Tensor] = None,
-                       indices_type: Optional[torch.dtype] = None):
-        from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+                       indices_type: Optional[torch.dtype] = None) -> RoutingData:
+        if envs.VLLM_USE_EXP_TRITON_KERNEL:
+            # feature check
+            assert use_grouped_topk == False, "use_grouped_topk is not supported in new triton MoE kernel"
+            assert topk_group is None, "topk_group is not supported in new triton MoE kernel"
+            assert num_expert_group is None, "num_expert_group is not supported in new triton MoE kernel"
+            assert custom_routing_function is None, "custom_routing_function is not supported in new triton MoE kernel"
+            assert scoring_func == "softmax", "scoring_func is not supported in new triton MoE kernel"
+            assert e_score_correction_bias is None, "e_score_correction_bias is not supported in new triton MoE kernel"
+            
+            from triton_kernels.routing import routing
 
-        # DeekSeekv2 uses grouped_top_k
-        if use_grouped_topk:
-            assert topk_group is not None
-            assert num_expert_group is not None
-            topk_weights, topk_ids = grouped_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
-            if indices_type is not None:
-                topk_ids = topk_ids.to(dtype=indices_type)
-        elif custom_routing_function is None:
-            topk_weights, topk_ids, token_expert_indices = fused_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                indices_type=indices_type,
+            if not renormalize: 
+                router_logits = torch.softmax(router_logits, dim=-1)
+
+            routing_data, gather_indx, scatter_indx = routing(router_logits, top_k, renormalize)
+            return ExpTritonExpertsRoutingData(
+                routing_data=routing_data,
+                gather_indx=gather_indx,
+                scatter_indx=scatter_indx
             )
         else:
-            topk_weights, topk_ids = custom_routing_function(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize)
-            if indices_type is not None:
-                topk_ids = topk_ids.to(dtype=indices_type)
+            from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
-        return topk_weights, topk_ids
+            # DeekSeekv2 uses grouped_top_k
+            if use_grouped_topk:
+                assert topk_group is not None
+                assert num_expert_group is not None
+                topk_weights, topk_ids = grouped_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    scoring_func=scoring_func,
+                    e_score_correction_bias=e_score_correction_bias)
+                if indices_type is not None:
+                    topk_ids = topk_ids.to(dtype=indices_type)
+            elif custom_routing_function is None:
+                topk_weights, topk_ids, token_expert_indices = fused_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    indices_type=indices_type,
+                )
+            else:
+                topk_weights, topk_ids = custom_routing_function(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize)
+                if indices_type is not None:
+                    topk_ids = topk_ids.to(dtype=indices_type)
+
+            return TopKRoutingData(topk_weights, topk_ids)
 
     def must_reduce_shared_expert_outputs(self) -> bool:
         """
