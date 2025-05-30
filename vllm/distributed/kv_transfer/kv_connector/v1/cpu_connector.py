@@ -544,6 +544,14 @@ class CPUConnector(KVConnectorBase_V1):
             "total_num_tokens is %d", request_id, num_computed_tokens,
             num_tokens)
 
+        if num_tokens < self._block_size:
+            # If the request is smaller than the block size, we don't need
+            # to do anything special
+            logger.info(
+                "Request %s is smaller than block size %d, "
+                "no async loading", request_id, self._block_size)
+            return 0, False
+
         if request.request_id in self._should_be_ready_reqs:
             self._should_be_ready_reqs.remove(request.request_id)
             return 0, False
@@ -582,6 +590,13 @@ class CPUConnector(KVConnectorBase_V1):
             self._decode_req_metas[request.request_id].is_ready = True
             return
 
+        if request.request_id not in self._decode_req_id_to_prefill_req_id:
+            # This should not happen, but just in case
+            logger.warning(
+                "Request %s does not have prefill request id, "
+                "skipping decode meta creation", request.request_id)
+            return
+
         p_req_id = self._decode_req_id_to_prefill_req_id[request.request_id]
         block_ids = []
         for blks in blocks.get_block_ids():
@@ -611,8 +626,10 @@ class CPUConnector(KVConnectorBase_V1):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
-        print("In request_finished")
-        return False, None
+        if self.kv_role == "kv_consumer":
+            return False, None
+        # For prefiller, send back the prefiller request id
+        return False, dict(prefill_request_id=request.request_id)
 
     #############################################################
     # Worker Side Methods
