@@ -474,7 +474,7 @@ def pplx_moe(
                          w2_scale=w2_scale_chunk,
                          global_num_experts=num_experts)
 
-    if False and use_cudagraphs: #XXXXXXXXXXXX
+    if use_cudagraphs:
         out.fill_(0)
         stream = torch.cuda.Stream()
         graph = torch.cuda.CUDAGraph()
