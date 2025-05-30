@@ -375,18 +375,18 @@ class EngineCoreProc(EngineCore):
             (EngineCoreRequestType.EXECUTOR_FAILED, b''))
 
         self.engine_index = engine_index
-        self.identity = self.engine_index.to_bytes(length=2,
-                                                   byteorder="little")
+        identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.last_counts = (0, 0)
 
-        with self._perform_handshake(handshake_address, self.identity,
-                                     on_head_node, vllm_config) as addresses:
-            self.addresses = addresses
+        engine_addresses = None
+        with self._perform_handshake(handshake_address, identity, on_head_node,
+                                     vllm_config) as addresses:
+            engine_addresses = addresses
             self.client_count = len(addresses.outputs)
             self.has_coordinator = addresses.coordinator_output is not None
             # Set up data parallel environment
-            self._init_data_parallel(vllm_config, self.has_coordinator)
+            self._init_data_parallel(vllm_config)
             super().__init__(vllm_config, executor_class, log_stats,
                              executor_fail_callback)
 
@@ -399,14 +399,13 @@ class EngineCoreProc(EngineCore):
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
         threading.Thread(target=self.process_input_sockets,
-                         args=(self.addresses.inputs,
-                               self.addresses.coordinator_input,
-                               self.identity),
+                         args=(engine_addresses.inputs,
+                               engine_addresses.coordinator_input, identity),
                          daemon=True).start()
         self.output_thread = threading.Thread(
             target=self.process_output_sockets,
-            args=(self.addresses.outputs, self.addresses.coordinator_output,
-                  self.engine_index),
+            args=(engine_addresses.outputs,
+                  engine_addresses.coordinator_output, self.engine_index),
             daemon=True)
         self.output_thread.start()
 
@@ -422,7 +421,7 @@ class EngineCoreProc(EngineCore):
                              identity=identity,
                              linger=5000,
                              bind=False) as handshake_socket:
-            # Register engine with front-end
+            # Register engine with front-end.
             addresses = self.startup_handshake(handshake_socket, on_head_node,
                                                vllm_config.parallel_config)
 
@@ -522,8 +521,7 @@ class EngineCoreProc(EngineCore):
             if engine_core is not None:
                 engine_core.shutdown()
 
-    def _init_data_parallel(self, vllm_config: VllmConfig,
-                            has_coordinator: bool):
+    def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
     def run_busy_loop(self):
@@ -774,8 +772,7 @@ class DPEngineCoreProc(EngineCoreProc):
         _add_prefix(sys.stdout, process_name, pid)
         _add_prefix(sys.stderr, process_name, pid)
 
-    def _init_data_parallel(self, vllm_config: VllmConfig,
-                            has_coordinator: bool):
+    def _init_data_parallel(self, vllm_config: VllmConfig):
 
         # Configure GPUs and stateless process group for data parallel.
         dp_rank = vllm_config.parallel_config.data_parallel_rank

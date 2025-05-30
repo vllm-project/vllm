@@ -1094,16 +1094,14 @@ class RayDPClient(DPAsyncMPClient):
         assert parallel_config.data_parallel_rank == 0
         assert local_start_index == 0
 
-        if len(self.core_engines) > 1:
-            self.resources.coordinator = DPCoordinator(parallel_config)
-
         addresses = EngineZmqAddresses(
             inputs=[input_address],
             outputs=[output_address],
         )
 
-        coordinator = self.resources.coordinator
-        if coordinator is not None:
+        if len(self.core_engines) > 1:
+            coordinator = DPCoordinator(parallel_config)
+            self.resources.coordinator = coordinator
             addresses.coordinator_input, addresses.coordinator_output = (
                 coordinator.get_engine_socket_addresses())
 
