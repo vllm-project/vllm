@@ -7,6 +7,7 @@ import os
 from typing import Optional
 from torch.library import Library
 from torch.library import custom_op, register_kernel
+from vllm.distributed import (get_dp_group)
 
 from vllm.utils import current_stream
 from vllm import forward_context
@@ -53,7 +54,7 @@ class UBatchContext:
     def __exit__(self, exc_type, exc_val, exc_tb):
         global _CURRENT_CONTEXT
         _CURRENT_CONTEXT[threading.get_ident()] = None
-        print("Finishing ubatch %d\n" % self.id)
+        print("Finishing ubatch %d\n" % self.id, flush=True)
         self.cpu_signal_event.set()
         self.cpu_wait_event.clear()
         self.current_stream = self.compute_stream
@@ -81,49 +82,63 @@ class UBatchContext:
         self.gpu_compute_done_event.record(self.compute_stream)
 
     def _wait_compute_done(self):
-        print("Waiting on compute stream")
+        # print(f"{self.id} Waiting on COMPUTE stream", flush=True)
         self.ctx_valid_state()
         self.comm_stream.wait_event(self.gpu_compute_done_event)
-        print("Compute stream done")
+        # print("Compute stream done", flush=True)
 
     def _wait_comm_done(self):
-        print("Waiting on comm stream")
+        # print(f"{self.id} Waiting on COMM stream", flush=True)
         self.ctx_valid_state()
         self.compute_stream.wait_event(self.gpu_comm_done_event)
-        print("Comm stream done")
+        # print("Comm stream done", flush=True)
+
+    def stream_string(self):
+        if current_stream() == self.compute_stream:
+            assert self.current_stream == self.compute_stream
+            return "COMPUTE"
+        elif current_stream() == self.comm_stream:
+            assert self.current_stream == self.comm_stream
+            return "COMM"
 
     def _cpu_yield(self):
-        print("UBatchContext: %d yielding CPU\n" % self.id)
+        # print(f"UBatchContext: {self.id} yielding CPU", flush=True)
         self.ctx_valid_state()
         self.cpu_signal_event.set()
         self.cpu_wait_event.wait()
         self.cpu_wait_event.clear()
         self._restore_context()
         self.ctx_valid_state()
-        print("UBatchContext: %d resuming CPU\n" % self.id)
+        # print(f"UBatchContext: {self.id} resuming CPU", flush=True)
 
     def yield_and_switch_from_compute_to_comm(self):
-        print("Yield and switch from compute")
+        assert current_stream() == self.compute_stream
+        dp_rank = get_dp_group().rank_in_group 
+        print(f"DP: {dp_rank} UB: {self.id} Yield and switch from {self.stream_string()}", flush=True)
         self.ctx_valid_state()
-        self._signal_compute_done()
+        # self._signal_compute_done()
         self._cpu_yield()
         self.ctx_valid_state()
         assert self.current_stream == self.compute_stream
         self.update_stream(self.comm_stream)
-        self._wait_compute_done()
+        print(f"DP: {dp_rank} UB: {self.id} Resuming on stream {self.stream_string()}", flush=True)
+        # self._wait_compute_done()
 
     def yield_and_switch_from_comm_to_compute(self):
+        assert current_stream() == self.comm_stream
+        dp_rank = get_dp_group().rank_in_group 
+        print(f"DP: {dp_rank} UB: {self.id} Yield and switch from {self.stream_string()}", flush=True)
         self.ctx_valid_state()
-        self._signal_comm_done()
+        # self._signal_comm_done()
         self._cpu_yield()
         self.ctx_valid_state()
         assert self.current_stream == self.comm_stream
         self.update_stream(self.compute_stream)
-        self._wait_comm_done()
+        print(f"DP: {dp_rank} UB: {self.id} Resuming on stream {self.stream_string()}", flush=True)
+        # self._wait_comm_done()
         
 
 _CURRENT_CONTEXT: dict = {}
-
 def get_current_ubatch_context() -> Optional[UBatchContext]:
     global _CURRENT_CONTEXT
     """

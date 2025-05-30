@@ -19,7 +19,7 @@ from vllm.v1.worker.ubatching import (
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(self,
-                 a2a: pplx.AllToAll,
+                 a2as: list[pplx.AllToAll],
                  max_num_tokens: int,
                  world_size: int,
                  rank: int,
@@ -28,7 +28,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  block_shape: Optional[list[int]] = None):
         super().__init__()
         assert max_num_tokens > 0
-        self.a2a = a2a
+        self.a2as = a2as
         self.block_shape = block_shape
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
@@ -49,6 +49,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
+        ubatch_ctx = get_current_ubatch_context()
+        ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
+        a2a_idx = 0 if ubatch_id == -1 else ubatch_id
 
         assert rank_topk_ids.size(0) == num_tokens
         # assert expert_map is None, "NYI"
@@ -110,7 +113,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         bound_m: Optional[torch.Tensor] = None
 
         def dispatch(send: bool):
-            self.a2a.dispatch(
+            self.a2as[a2a_idx].dispatch(
                 out_expert_num_tokens=expert_num_tokens,
                 out_expert_x=expert_x,
                 out_expert_x_scale=expert_x_scale,
@@ -122,9 +125,15 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_recv=not send,
             )
         
+        ubatch_ctx = get_current_ubatch_context()
+        ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
         yield_and_switch_from_compute_to_comm_impl(schedule="default")
         dispatch(True) # Send
+        torch.cuda.synchronize()
+        # print(f"{ubatch_id} AFTER SEND SYNC", flush=True)
         dispatch(False) # Recv
+        # torch.cuda.synchronize()
+        # print(f"{ubatch_id} AFTER RECV SYNC", flush=True)
         yield_and_switch_from_comm_to_compute_impl(schedule="default")
 
         return expert_x, expert_x_scale, expert_num_tokens
@@ -141,6 +150,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
         bound_m: Optional[torch.Tensor] = None
+        ubatch_ctx = get_current_ubatch_context()
+        ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
+        a2a_idx = 0 if ubatch_id == -1 else ubatch_id
 
         assert topk_ids.size(0) == num_tokens, (
             f"{topk_ids.size(0)} == {num_tokens}")
@@ -153,7 +165,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights = torch.ones_like(topk_weights)
 
         def combine(send: bool):
-            self.a2a.combine(
+            self.a2as[a2a_idx].combine(
                 out_tokens=output,
                 indices=topk_ids,
                 weights=topk_weights,
@@ -162,8 +174,11 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_send=send,
                 do_recv=not send,
             )
-            
         yield_and_switch_from_compute_to_comm_impl(schedule="default")
         combine(True)
+        torch.cuda.synchronize()
+        # print(f"{ubatch_id} AFTER COMBINE SEND SYNC", flush=True)
         combine(False)
+        # torch.cuda.synchronize()
+        # print(f"{ubatch_id} AFTER COMBINE RECV SYNC", flush=True)
         yield_and_switch_from_comm_to_compute_impl(schedule="default")

@@ -307,13 +307,23 @@ class AllToAllCache:
             return instance
 
 
-# Global singleton
-_all_to_all_cache = AllToAllCache()
+from typing import List
+_all_to_all_cache: List[AllToAllCache] = [AllToAllCache(), AllToAllCache()]
 
 
-# Factory function as a cleaner interface
-def get_all_to_all(**kwargs):
-    return _all_to_all_cache.get_or_create(**kwargs)
+# Factory function with cache ID support
+def get_all_to_all(cache_id: int, **kwargs):
+    """Get or create an AllToAll instance from the specified cache.
+    
+    Args:
+        cache_id: Integer ID of the cache to use (0 or 1)
+        **kwargs: Arguments passed to AllToAll creation
+        
+    Returns:
+        AllToAll instance from the specified cache
+    """
+    assert cache_id in (0, 1), f"cache_id must be 0 or 1, got {cache_id}"
+    return _all_to_all_cache[cache_id].get_or_create(**kwargs)
 
 
 @CustomOp.register("unquantized_fused_moe")
@@ -692,25 +702,26 @@ def _construct_prepare_finalize(
 
     if moe.use_pplx_kernels:
         logger.debug("using PplxPrepareAndFinalize")
-
-        all_to_all = get_all_to_all(
-            max_num_tokens=max_num_tokens,
-            num_experts=moe.num_experts,
-            experts_per_token=moe.experts_per_token,  # topk
-            rank=rank,
-            world_size=world_size,
-            dp_size=dp_size,
-            hidden_dim=moe.hidden_dim,
-            hidden_dim_bytes=moe.hidden_dim * moe.in_dtype.itemsize,
-            # For blocked per token: set to
-            #   ceil_div(hidden_dim, block_size) * sizeof(float32)
-            # For per-token: set to sizeof(float32)
-            hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else
+ 
+        kwargs =  {
+            "max_num_tokens" :max_num_tokens,
+            "num_experts" :moe.num_experts,
+            "experts_per_token" :moe.experts_per_token,  # topk
+            "rank" :rank,
+            "world_size" :world_size,
+            "dp_size" :dp_size,
+            "hidden_dim":moe.hidden_dim,
+            "hidden_dim_bytes" :moe.hidden_dim * moe.in_dtype.itemsize,
+            "hidden_dim_scale_bytes" :(0 if moe.in_dtype.itemsize != 1 else
                                     ((moe.hidden_dim + moe.block_size - 1) //
-                                     moe.block_size * torch.float32.itemsize)))
+                                     moe.block_size * torch.float32.itemsize)),
+        }
+
+
+        a2as = [get_all_to_all(0, **kwargs),  get_all_to_all(1, **kwargs)]
 
         return PplxPrepareAndFinalize(
-            all_to_all,
+            a2as,
             max_num_tokens=max_num_tokens,
             world_size=world_size,
             rank=rank,
