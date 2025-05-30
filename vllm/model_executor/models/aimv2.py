@@ -3,6 +3,7 @@
 # A modified implementation of the AIMv2 Transformer
 # inserted here also the image tokenizer used by Ovis2
 from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -159,23 +160,32 @@ class AIMv2Block(nn.Module):
 
 class AIMv2Transformer(nn.Module):
 
-    def __init__(self, config: AIMv2Config, quant_config: QuantizationConfig,
-                 prefix: str):
+    def __init__(
+        self,
+        config: AIMv2Config,
+        quant_config: QuantizationConfig,
+        *,
+        require_post_norm: Optional[bool] = None,
+        prefix: str = "",
+    ):
         super().__init__()
 
         self.blocks = nn.ModuleList([
             AIMv2Block(config, quant_config, prefix=f"{prefix}.blocks.{i}")
             for i in range(config.num_hidden_layers)
         ])
-        self.post_trunk_norm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        if require_post_norm:
+            self.post_trunk_norm = RMSNorm(config.hidden_size,
+                                           eps=config.rms_norm_eps)
+        else:
+            self.post_trunk_norm = None
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         # they take the -1 as the ref embeddings, like a clip skip
         for block in self.blocks:
             tokens = block(tokens)
-        # NO NORM IN THE OG IMPLEMENTATION
-        # tokens = self.post_trunk_norm(tokens)
+        if self.post_trunk_norm is not None:
+            tokens = self.post_trunk_norm(tokens)
         return tokens
 
 
@@ -184,6 +194,8 @@ class AIMv2Model(torch.nn.Module):
     def __init__(self,
                  config: AIMv2Config,
                  quant_config: QuantizationConfig,
+                 *,
+                 require_post_norm: Optional[bool] = None,
                  prefix: str = ""):
         super().__init__()
         self.preprocessor = AIMv2ViTPreprocessor(config)
@@ -209,6 +221,11 @@ class AIMv2Model(torch.nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            # post_layernorm is optional in SiglipVisionModel
+            if (name.startswith("vision_model.post_layernorm")
+                    and self.trunk.post_trunk_norm is None):
+                continue
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
