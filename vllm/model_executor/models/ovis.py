@@ -109,7 +109,7 @@ class VisualTokenizer(torch.nn.Module):
         config: BaseVisualTokenizerConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-    ):
+    ) -> nn.Module:
         model_type = config.backbone_config.model_type
         if model_type == "aimv2":
             # No post rms_norm in Ovis2's AIMv2 ViT.
@@ -129,11 +129,11 @@ class VisualTokenizer(torch.nn.Module):
             f"Unsupported visual tokenizer model_type: {model_type}")
 
     @property
-    def dtype(self):
+    def dtype(self) -> torch.dtype:
         return next(self.head.parameters()).dtype
 
     @property
-    def device(self):
+    def device(self) -> torch.device:
         return next(self.head.parameters()).device
 
     def tokenize(self, logits: torch.Tensor) -> torch.Tensor:
