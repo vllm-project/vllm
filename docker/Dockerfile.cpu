@@ -109,8 +109,9 @@ WORKDIR /workspace/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
-    sed -i '/mamba_ssm/d' requirements/test.in && \
-    uv pip compile requirements/test.in -o requirements/cpu-test.txt && \
+    cp requirements/test.in requirements/test-cpu.in && \
+    sed -i '/mamba_ssm/d' requirements/test-cpu.in && \
+    uv pip compile requirements/test-cpu.in -o requirements/cpu-test.txt && \
     uv pip install -r requirements/cpu-test.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
