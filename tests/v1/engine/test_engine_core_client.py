@@ -116,13 +116,10 @@ async def loop_until_fully_done_async(client: EngineCoreClient,
             outputs[out.request_id].append(out)
 
         # Check if all request IDs in outputs have finished
-        for req_id in outputs:
-            request_finished = any(out.finished for out in outputs[req_id])
-            if not request_finished:
-                await asyncio.sleep(0.1)
-                continue
+        if all(outs and outs[-1].finished for outs in outputs.values()):
+            break
 
-        break
+        await asyncio.sleep(0.1)
 
 
 # Dummy utility function to monkey-patch into engine core.
