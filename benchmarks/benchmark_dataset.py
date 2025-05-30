@@ -778,7 +778,7 @@ class InstructCoderDataset(HuggingFaceDataset):
                 break
             prompt = f"{item['input']}\n\n{item['instruction']} Just output \
             the code, do not include any explanation."
-            
+
             # apply template
             prompt = tokenizer.apply_chat_template(
                 [{"role": "user", "content": prompt}],
