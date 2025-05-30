@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import re
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -10,6 +9,7 @@ from typing import Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
+import regex as re
 from fastapi import Request
 from pydantic import TypeAdapter
 
@@ -236,6 +236,7 @@ class OpenAIServingChat(OpenAIServing):
                         prompt=engine_prompt,
                         request_id=request_id,
                         params=sampling_params,
+                        lora_request=lora_request,
                     )
                 else:
                     generator = self.engine_client.generate(
@@ -987,7 +988,8 @@ class OpenAIServingChat(OpenAIServing):
                     tool_calls=[
                         tool_call_class(function=FunctionCall(
                             name=tool_call.name,
-                            arguments=json.dumps(tool_call.parameters)))
+                            arguments=json.dumps(tool_call.parameters,
+                                                 ensure_ascii=False)))
                         for tool_call in tool_calls
                     ])
 
