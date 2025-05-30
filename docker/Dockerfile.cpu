@@ -85,7 +85,7 @@ WORKDIR /workspace/vllm
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get install -y --no-install-recommends vim numactl
+    apt-get install -y --no-install-recommends vim numactl xz-utils
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
