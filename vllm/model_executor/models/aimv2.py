@@ -2,6 +2,7 @@
 
 # A modified implementation of the AIMv2 Transformer
 # inserted here also the image tokenizer used by Ovis2
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
@@ -16,6 +17,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.transformers_utils.configs.ovis import AIMv2Config
 
 
@@ -103,7 +105,7 @@ class AIMv2Attention(nn.Module):
                 f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
 
-        self.qkv_proj = QKVParallelLinear(
+        self.qkv = QKVParallelLinear(
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
             total_num_heads=self.num_heads,
@@ -111,7 +113,7 @@ class AIMv2Attention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
         )
 
-        self.out_proj = RowParallelLinear(
+        self.proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
             quant_config=quant_config,
@@ -199,3 +201,31 @@ class AIMv2Model(torch.nn.Module):
         x = self.trunk(x)
 
         return x
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            (".gate_up_proj", ".w1", 0),
+            (".gate_up_proj", ".w3", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
