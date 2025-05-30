@@ -377,16 +377,17 @@ class EngineCoreProc(EngineCore):
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
-        self.last_counts = (0, 0)
 
         engine_addresses = None
         with self._perform_handshake(handshake_address, identity, on_head_node,
                                      vllm_config) as addresses:
             engine_addresses = addresses
             self.client_count = len(addresses.outputs)
+
+            # Set up data parallel environment.
             self.has_coordinator = addresses.coordinator_output is not None
-            # Set up data parallel environment
             self._init_data_parallel(vllm_config)
+
             super().__init__(vllm_config, executor_class, log_stats,
                              executor_fail_callback)
 
@@ -757,6 +758,7 @@ class DPEngineCoreProc(EngineCoreProc):
         # finished with DP peers every N steps.
         self.counter = 0
         self.current_wave = 0
+        self.last_counts = (0, 0)
 
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank

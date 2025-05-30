@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
+from types import NoneType
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec.msgpack
