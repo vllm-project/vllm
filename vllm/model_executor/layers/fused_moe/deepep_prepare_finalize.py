@@ -92,8 +92,9 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_tokens_per_expert=expert_num_tokens,
             topk_idx=rank_topk_ids,
             topk_weights=rank_topk_weights,
-            expert_alignment=
-            1,  # TODO (varun) : set this properly and avoid moe_align kernel ?
+            # expert_alignment rounds the number of tokens per expert
+            # to this value.
+            expert_alignment=1,
             config=self._get_dispatch_config(),
             previous_event=None,
             async_finish=False,
