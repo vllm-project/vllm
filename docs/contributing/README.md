@@ -31,13 +31,13 @@ Check out the [building from source][build-from-source] documentation for detail
 
 ### Building the docs with MkDocs
 
-- Introduction to MkDocs
+#### Introduction to MkDocs
 
 [MkDocs](https://github.com/mkdocs/mkdocs) is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file.
 
-- Install MkDocs and Plugins
+#### Install MkDocs
 
-Install MkDocs along with the [plugins](https://github.com/vllm-project/vllm/blob/main/mkdocs.yaml) used in the vLLM documentation, as well as required dependencies:
+- Install MkDocs along with the [plugins](https://github.com/vllm-project/vllm/blob/main/mkdocs.yaml) used in the vLLM documentation, as well as required dependencies:
 
 ```bash
 pip install -r requirements/docs.txt
