@@ -24,7 +24,7 @@ MODELS = [
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-long",
                    is_matryoshka=False,
                    architecture="NomicBertModel",
-                   dtype="half",
+                   dtype="float32",
                    enable_test=True),
     EmbedModelInfo("Snowflake/snowflake-arctic-embed-l",
                    is_matryoshka=False,
