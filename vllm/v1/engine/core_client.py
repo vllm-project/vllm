@@ -11,7 +11,6 @@ from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from types import NoneType
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec.msgpack
@@ -492,7 +491,7 @@ class MPClient(EngineCoreClient):
                 coordinator.get_engine_socket_addresses())
 
         proc_manager = self.resources.engine_manager
-        assert isinstance(proc_manager, (NoneType, CoreEngineProcManager)), (
+        assert isinstance(proc_manager, (type(None), CoreEngineProcManager)), (
             "_wait_for_engine_startup should only be "
             "called with CoreEngineProcManager")
 

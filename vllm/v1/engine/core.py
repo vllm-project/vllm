@@ -431,7 +431,7 @@ class EngineCoreProc(EngineCore):
 
             yield addresses
 
-            # Send ready message
+            # Send ready message.
             num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
             handshake_socket.send(
                 msgspec.msgpack.encode({
