@@ -436,6 +436,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
     "EagleMiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-1B-sft-bf16",
                                             trust_remote_code=True,
+                                            is_available_online=False,
                                             speculative_model="openbmb/MiniCPM-2B-sft-bf16",
                                             tokenizer="openbmb/MiniCPM-2B-sft-bf16"),
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
