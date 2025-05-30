@@ -426,7 +426,7 @@ async def main(args):
                 continue
 
             response_futures.append(
-                run_request(score_handler_fn, request, tracker))
+                run_request(rerank_handler_fn, request, tracker))
             tracker.submitted()
         else:
             response_futures.append(
