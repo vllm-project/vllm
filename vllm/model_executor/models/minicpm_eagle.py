@@ -21,7 +21,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only MiniCPM model compatible with HuggingFace weights."""
+"""Inference-only EagleMiniCPM model compatible with HuggingFace weights."""
 import math
 from collections.abc import Iterable
 from typing import Any, Optional, Union
@@ -53,6 +53,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
@@ -60,7 +61,7 @@ from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     maybe_prefix)
 
 
-class MiniCPMMoE(nn.Module):
+class EagleMiniCPMMoE(nn.Module):
     """A tensor-parallel MoE implementation that shards each expert
     across all ranks.
 
@@ -149,7 +150,7 @@ class MiniCPMMoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
-class MiniCPMMLP(nn.Module):
+class EagleMiniCPMMLP(nn.Module):
 
     def __init__(
         self,
@@ -183,7 +184,7 @@ class MiniCPMMLP(nn.Module):
         return x
 
 
-class MiniCPMAttention(nn.Module):
+class EagleMiniCPMAttention(nn.Module):
 
     def __init__(
         self,
@@ -242,7 +243,6 @@ class MiniCPMAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
@@ -267,7 +267,7 @@ class MiniCPMAttention(nn.Module):
         return output
 
 
-class MiniCPMDecoderLayer(nn.Module):
+class EagleMiniCPMDecoderLayer(nn.Module):
 
     def __init__(
         self,
@@ -292,7 +292,7 @@ class MiniCPMDecoderLayer(nn.Module):
     def _init_attn_block(self):
         self.input_layernorm = RMSNorm(self.config.hidden_size,
                                        eps=self.config.rms_norm_eps)
-        self.self_attn = MiniCPMAttention(
+        self.self_attn = EagleMiniCPMAttention(
             hidden_size=self.hidden_size,
             num_heads=self.config.num_attention_heads,
             num_kv_heads=self.config.num_key_value_heads,
@@ -309,7 +309,7 @@ class MiniCPMDecoderLayer(nn.Module):
                                                 eps=self.config.rms_norm_eps)
         self.num_experts = getattr(self.config, "num_experts", 0)
         if self.num_experts == 0:
-            self.mlp = MiniCPMMLP(
+            self.mlp = EagleMiniCPMMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=self.config.intermediate_size,
                 hidden_act=self.config.hidden_act,
@@ -317,7 +317,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 quant_config=self.quant_config,
             )
         else:
-            self.mlp = MiniCPMMoE(
+            self.mlp = EagleMiniCPMMoE(
                 num_experts=self.config.num_experts,
                 top_k=self.config.num_experts_per_tok,
                 hidden_size=self.config.hidden_size,
@@ -337,25 +337,25 @@ class MiniCPMDecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
         hidden_states = residual + hidden_states * \
-            (self.config.scale_depth / math.sqrt(self.config.num_hidden_layers))
+            (self.config.scale_depth / math.sqrt(self.config.mup_denominator))
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states * \
-            (self.config.scale_depth / math.sqrt(self.config.num_hidden_layers))
+            (self.config.scale_depth / math.sqrt(self.config.mup_denominator))
 
         return hidden_states, None
 
 
 @support_torch_compile
-class MiniCPMModel(nn.Module):
+class EagleMiniCPMModel(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", start_layer: int = 0):
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -367,13 +367,18 @@ class MiniCPMModel(nn.Module):
                       (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
+        self.fc = torch.nn.Linear(self.config.hidden_size * 2,
+                                  self.config.hidden_size,
+                                  bias=False)
+        self.input_norm1 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_norm2 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
         self.num_experts = getattr(self.config, "num_experts", 0)
-        self._init_layers(prefix, config, cache_config, quant_config)
+        self._init_layers(prefix, config, cache_config, quant_config, start_layer)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
@@ -385,12 +390,13 @@ class MiniCPMModel(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig],
         quant_config: Optional[QuantizationConfig],
+        start_layer: int,
     ):
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            lambda prefix: MiniCPMDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix),
-            prefix=f"{prefix}.layers")
+        self.eagle_layers = nn.ModuleList([
+            EagleMiniCPMDecoderLayer(
+                config, cache_config, quant_config, f"{prefix}.eagle_layers.{i + start_layer}",
+            ) for i in range(self.config.num_hidden_layers)
+        ])
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         embedding = self.embed_tokens(input_ids)
@@ -400,32 +406,23 @@ class MiniCPMModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        hidden_states: torch.Tensor,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.get_input_embeddings(input_ids)
-            residual = None
-        else:
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+        input_embeds = self.get_input_embeddings(input_ids)
+        input_embeds = self.input_norm1(input_embeds)
+        hidden_states = self.input_norm2(hidden_states)
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        hidden_states = self.fc(
+            torch.cat((input_embeds, hidden_states), dim=-1))
+        residual = None
+        for layer in self.eagle_layers:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
             )
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual
-            })
-        hidden_states = self.norm(hidden_states)
-        return hidden_states
+
+        return hidden_states, hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -491,12 +488,13 @@ class MiniCPMModel(nn.Module):
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
+
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
-class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -518,7 +516,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -530,8 +528,12 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.cache_config = cache_config
         self.quant_config = quant_config
 
+        target_layer_num = vllm_config.model_config.get_num_layers(
+            vllm_config.parallel_config)
+
         self.model = self._init_model(vllm_config=vllm_config,
-                                      prefix=maybe_prefix(prefix, "model"))
+                                      prefix=maybe_prefix(prefix, "model"),
+                                      start_layer=target_layer_num)
 
         unpadded_vocab_size = config.vocab_size
         if lora_config:
@@ -555,8 +557,8 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        return MiniCPMModel(vllm_config=vllm_config, prefix=prefix)
+    def _init_model(self, *, vllm_config: VllmConfig, prefix: str = "", start_layer: int = 0):
+        return EagleMiniCPMModel(vllm_config=vllm_config, prefix=prefix, start_layer=start_layer)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -565,12 +567,10 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds) / self.scale_width
-        return hidden_states
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states, hidden_states2 = self.model(input_ids, positions, hidden_states) 
+        return hidden_states / self.scale_width, hidden_states2 / self.scale_width
 
     def compute_logits(
         self,
