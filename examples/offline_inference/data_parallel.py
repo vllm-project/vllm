@@ -33,6 +33,7 @@ from time import sleep
 from vllm import LLM, SamplingParams
 from vllm.utils import get_open_port, FlexibleArgumentParser
 from vllm import LLM, EngineArgs
+import torch
 
 def parse_args():
     parser = FlexibleArgumentParser()
@@ -82,7 +83,7 @@ def main(args, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-    ] * 100
+    ]
 
     # with DP, each rank should process different prompts.
     # usually all the DP ranks process a full dataset,

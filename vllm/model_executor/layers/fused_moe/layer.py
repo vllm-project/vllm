@@ -453,7 +453,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         if isinstance(prepare_finalize,
                       (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
-            print("BatchedTritonExperts %s", self.moe)
+            # print("BatchedTritonExperts %s", self.moe)
             
             experts = BatchedTritonExperts(
                 max_num_tokens=MOE_DP_CHUNK_SIZE,
@@ -466,7 +466,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 block_shape=None,
             )
         else:
-            print("TritonExperts %s", self.moe)
+            # print("TritonExperts %s", self.moe)
             experts = TritonExperts(
                 use_fp8_w8a8=False,
                 use_int8_w8a8=False,

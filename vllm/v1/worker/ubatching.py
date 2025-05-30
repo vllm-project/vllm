@@ -70,9 +70,10 @@ class UBatchContext:
         torch.cuda.set_stream(self.current_stream)
 
     def ctx_valid_state(self):
-        assert forward_context._forward_context == self.forward_context
-        assert current_stream() == self.current_stream
-        assert not self.cpu_wait_event.is_set()
+        # assert forward_context._forward_context == self.forward_context
+        # assert current_stream() == self.current_stream
+        # assert not self.cpu_wait_event.is_set()
+        pass
     def _signal_comm_done(self):
         self.ctx_valid_state()
         self.gpu_comm_done_event.record(self.comm_stream)

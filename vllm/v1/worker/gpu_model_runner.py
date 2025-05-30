@@ -1301,16 +1301,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_ids, positions, inputs_embeds, intermediate_tensors = \
                 model_inputs(token_slice, use_dummy_input)
             with context:
-                if isinstance(context, UBatchContext):
-                    print(f"Running ubatch {context.id} with input_ids {input_ids.shape} and positions {positions.shape} use_dummy_input {use_dummy_input} token_slice {token_slice}")
+                # if isinstance(context, UBatchContext):
+                #     print(f"Running ubatch {context.id} with input_ids {input_ids.shape} and positions {positions.shape} use_dummy_input {use_dummy_input} token_slice {token_slice}")
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
-                if isinstance(context, UBatchContext):
-                    print(f"Ran ubatch {context.id}putput {model_output.shape}")
+                # if isinstance(context, UBatchContext):
+                #     print(f"Ran ubatch {context.id}putput {model_output.shape}")
                 if isinstance(context, UBatchContext):
                     # Clone before we leave the ubatch context
                     model_output = model_output.clone()
@@ -1342,7 +1342,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     is_dummy_ubatch = tokens_slice.stop <= tokens_slice.start
                     assert not is_dummy_ubatch or i == len(ubatch_slices) - 1 or is_dummy_run
                     
-                    print("ubatch", i, "tokens slice", tokens_slice, "is dummy ubatch", is_dummy_ubatch, "is dummy run", is_dummy_run)
+                    # print("ubatch", i, "tokens slice", tokens_slice, "is dummy ubatch", is_dummy_ubatch, "is dummy run", is_dummy_run)
                     
                     num_tokens = num_dummy_tokens if is_dummy_ubatch or is_dummy_run else (tokens_slice.stop - tokens_slice.start)
                     ubatch_ctxs[i].forward_context = create_forward_context(
@@ -1363,6 +1363,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for thread in ubatch_threads:
                     thread.join()
 
+            torch.cuda.synchronize()
             torch.cuda.set_stream(root_stream)
             return torch.cat(results, dim=0)
 

@@ -135,7 +135,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER RECV SYNC", flush=True)
         yield_and_switch_from_comm_to_compute_impl(schedule="default")
-
+        torch.cuda.synchronize()
         return expert_x, expert_x_scale, expert_num_tokens
 
     def finalize(
@@ -179,6 +179,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER COMBINE SEND SYNC", flush=True)
         combine(False)
-        # torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER COMBINE RECV SYNC", flush=True)
         yield_and_switch_from_comm_to_compute_impl(schedule="default")
+        # torch.cuda.synchronize()

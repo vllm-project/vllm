@@ -289,8 +289,10 @@ class Worker(WorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         if is_start:
+            assert False
             self.profiler.start()
         else:
+            assert False
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:

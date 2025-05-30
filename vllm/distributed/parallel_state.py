@@ -972,7 +972,9 @@ def pplx_finalize():
         logger.debug("PPLX NVSHMEM finalize")
         from vllm.model_executor.layers.fused_moe.layer import (
             _all_to_all_cache)
-        _all_to_all_cache.destroy()
+        for cache in _all_to_all_cache:
+            cache.destroy()
+        # _all_to_all_cache.destroy()
         nvshmem_finalize()
 
 
