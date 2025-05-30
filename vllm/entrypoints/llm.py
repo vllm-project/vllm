@@ -515,8 +515,8 @@ class LLM:
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def _get_modality_specific_lora_reqs(
-            self, parsed_prompts: Union[PromptType,
-                                        Sequence[PromptType]], lora_request):
+            self, parsed_prompts: Union[PromptType, Sequence[PromptType]],
+            lora_request: Optional[LoRARequest]):
         # Grab the lora config off the vllm config on the engine,
         # since this is the same for both v0 & v1.
         lora_config = self.llm_engine.vllm_config.lora_config
@@ -545,7 +545,8 @@ class LLM:
         ]
 
     def _resolve_single_prompt_mm_lora(self, parsed_prompt: PromptType,
-                                       lora_request, default_mm_loras):
+                                       lora_request: LoRARequest,
+                                       default_mm_loras: dict[str, str]):
         if not isinstance(parsed_prompt,
                           dict) or "multi_modal_data" not in parsed_prompt:
             return lora_request
@@ -565,15 +566,25 @@ class LLM:
                 " will be skipped.", intersection)
             return lora_request
 
-        modality_lora = default_mm_loras[intersection.pop()]
+        # Build the LoRA request; the ID of the default mm lora is the
+        # index of the modality name sorted alphabetically + 1.
+        modality_name = intersection.pop()
+        modality_lora_path = default_mm_loras[modality_name]
+        modality_lora_id = sorted(default_mm_loras).index(modality_name) + 1
+
         if (lora_request is not None
-                and lora_request.lora_int_id != modality_lora.lora_int_id):
+                and lora_request.lora_int_id != modality_lora_id):
             logger.warning(
                 "A modality with a registered lora and a lora_request "
                 "with a different ID were provided; falling back to the "
                 "lora_request as we only apply one LoRARequest per prompt.")
             return lora_request
-        return modality_lora
+
+        return LoRARequest(
+            modality_name,
+            modality_lora_id,
+            modality_lora_path,
+        )
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],

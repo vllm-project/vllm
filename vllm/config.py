@@ -33,7 +33,6 @@ import vllm.envs as envs
 from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      QuantizationMethods,
                                                      get_quantization_config)
@@ -2994,15 +2993,16 @@ class LoRAConfig:
     trained with those scaling factors to be used at the same time. If not
     specified, only adapters trained with the base model scaling factor are
     allowed."""
-    default_mm_loras: Optional[dict[str, LoRARequest]] = None
-    """Dictionary mapping specific modalities to LoRA adapters; this field
-    is only applicable to multimodal models and should be leveraged when
-    a model always expects a LoRA to be active when a given modality is
-    provided. Note that currently, if a request provides multiple additional
-    modalities, each of which have their own lora, we do NOT apply
+    default_mm_loras: Optional[dict[str, str]] = None
+    """Dictionary mapping specific modalities to LoRA model paths; this field
+    is only applicable to multimodal models and should be leveraged when a
+    model always expects a LoRA to be active when a given modality is present.
+    Note that currently, if a request provides multiple additional
+    modalities, each of which have their own LoRA, we do NOT apply
     default_mm_loras because we currently only support one lora adapter
-    per prompt.
-    """
+    per prompt. When run in offline mode, the lora IDs for n modalities
+    will be automatically assigned to 1-n with the names of the modalities
+    in alphabetic order."""
     bias_enabled: bool = False
     """Enable bias for LoRA adapters."""
 
