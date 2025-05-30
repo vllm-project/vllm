@@ -1023,6 +1023,8 @@ class Scheduler:
             # Put the sequence back into the waiting queue
             waiting_queue.appendleft(seq_group)
 
+            self.free_waiting_seq_cached_buffer(seq_group)
+
         waiting_queue = deque(sorted(waiting_queue, key=self._get_priority))
 
         self.waiting = waiting_queue
@@ -1125,6 +1127,7 @@ class Scheduler:
             can_allocate = self.block_manager.can_allocate(
                 seq_group, num_lookahead_slots=num_lookahead_slots)
             if can_allocate == AllocStatus.LATER:
+                self.free_waiting_seq_cached_buffer(seq_group)
                 break
             elif can_allocate == AllocStatus.NEVER:
                 logger.warning(
@@ -1167,6 +1170,7 @@ class Scheduler:
                 # We've reached the budget limit - since there might be
                 # continuous prefills in the running queue, we should break
                 # to avoid scheduling any new prefills.
+                self.free_waiting_seq_cached_buffer(seq_group)
                 break
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
@@ -1174,6 +1178,7 @@ class Scheduler:
                     num_new_tokens=num_new_tokens_uncached,
                     num_new_seqs=num_new_seqs,
             ):
+                self.free_waiting_seq_cached_buffer(seq_group)
                 break
 
             # Can schedule this request.
@@ -1686,6 +1691,20 @@ class Scheduler:
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
         self.block_manager.free(seq)
+
+    def free_waiting_seq_cached_buffer(self, seq_group: SequenceGroup) -> None:
+        seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
+        for seq in seqs:
+            self._free_seq_cached_tokens(seq)
+            seq.reset_state_for_recompute()
+        self._free_seq_group_cross_attn_blocks(seq_group)
+
+    def _free_seq_cached_tokens(self, seq: Sequence) -> None:
+        """
+        Free a sequence computed blocks tracker _seq_id_to_blocks_hashes and _seq_id_to_num_tokens_computed.
+        """
+        self.block_manager.free_seq_cached_tokens(seq)
+
 
     def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:
         """Free finished seqs in a sequence group."""
