@@ -771,7 +771,7 @@ class InstructCoderDataset(HuggingFaceDataset):
     code editing scenario.
     """
 
-    DEFAULT_OUTPUT_LEN = 128  # this is the average default output length
+    DEFAULT_OUTPUT_LEN = 200  # this is the average default output length
     SUPPORTED_DATASET_PATHS = {
         "likaixin/InstructCoder",
     }
