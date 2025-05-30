@@ -107,7 +107,7 @@ STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "currently not supported for encoder/decoder "
     "models.")
 
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is currently not currently "
+STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
                              "supported with encoder/decoder "
                              "models.")
 
