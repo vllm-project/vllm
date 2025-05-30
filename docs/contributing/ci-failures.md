@@ -16,7 +16,7 @@ the failure?
 ## Filing a CI Test Failure Issue
 
 1. **File a bug report:**  
-   👉 [New Bug Report](https://github.com/vllm-project/vllm/issues/new?template=400-bug-report.yml)
+   👉 [New CI Failure Report](https://github.com/vllm-project/vllm/issues/new?template=450-ci-failure.yml)
 
 2. **Set the `ci-failure` label.**
 
