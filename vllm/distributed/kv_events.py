@@ -28,6 +28,7 @@ class EventBatch(
 ):
     ts: float
     events: list[Any]
+    data_parallel_rank: Optional[int] = None
 
 
 class KVCacheEvent(
@@ -57,7 +58,6 @@ class AllBlocksCleared(KVCacheEvent):
 
 class KVEventBatch(EventBatch):
     events: list[Union[BlockStored, BlockRemoved, AllBlocksCleared]]
-    data_parallel_rank: Optional[int] = None
 
 
 class EventPublisher(ABC):
@@ -115,6 +115,7 @@ class ZmqEventPublisher(EventPublisher):
     def __init__(
         self,
         endpoint: str = "tcp://*:5557",
+        data_parallel_rank: Optional[int] = None,
         replay_endpoint: Optional[str] = None,
         buffer_steps: int = 10_000,
         hwm: int = 100_000,
@@ -129,6 +130,7 @@ class ZmqEventPublisher(EventPublisher):
         self._ctx = zmq.Context.instance()
         self._pub: Optional[zmq.Socket] = None
         self._replay: Optional[zmq.Socket] = None
+        self._dp_rank = data_parallel_rank
         self._endpoint = endpoint
         self._replay_endpoint = replay_endpoint
         self._hwm = hwm
@@ -150,6 +152,8 @@ class ZmqEventPublisher(EventPublisher):
     def publish(self, events: EventBatch) -> None:
         if not self._running:
             raise RuntimeError("Publisher is closed")
+        if events.data_parallel_rank is None:
+            events.data_parallel_rank = self._dp_rank
         self._event_queue.put(events)
 
     def shutdown(self) -> None:
@@ -363,6 +367,7 @@ def get_kv_event_publisher(
     original_endpoint = modified_config.endpoint
     modified_config.endpoint = _offset_endpoint_port(original_endpoint,
                                                      data_parallel_rank)
+    modified_config.data_parallel_rank = data_parallel_rank
 
     # Apply port offsetting to the replay_endpoint if it exists
     if modified_config.replay_endpoint:
