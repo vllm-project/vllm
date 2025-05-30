@@ -881,6 +881,7 @@ class CPUConnector(KVConnectorBase_V1):
 
             return None, ret
         else:
+            self._kv_sender.progress()
             return None, None
 
     def close(self):

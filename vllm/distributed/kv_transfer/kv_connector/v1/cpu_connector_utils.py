@@ -249,8 +249,9 @@ class KVSenderInterface(ABC):
         # Update after going through all send tasks
         self.post_progress_hook()
 
-        logger.info("KVSender progress: sent %d, freed %d", num_sent,
-                    num_freed)
+        if num_sent > 0 or num_freed > 0:
+            logger.debug("KVSender progress: sent %d, freed %d", num_sent,
+                         num_freed)
 
     ######################################################
     # Abstract methods (to be implemented by subclasses) #
