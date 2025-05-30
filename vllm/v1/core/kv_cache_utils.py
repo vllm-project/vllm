@@ -53,9 +53,8 @@ class BlockHashTypeWithGroupId(NamedTuple):
 # variable if set such that processes can share the seed if needed.
 # This aligns with the behavior of Python's hash() function, which also uses
 # a random seed if PYTHONHASHSEED is not set.
-NONE_HASH = (int.from_bytes(os.urandom(32), byteorder="big")
-             if os.getenv("PYTHONHASHSEED") is None else sha256(
-                 os.getenv("PYTHONHASHSEED")))
+NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
+    "PYTHONHASHSEED") is None else sha256(os.getenv("PYTHONHASHSEED"))
 
 
 class PrefixCachingMetrics:
@@ -123,7 +122,6 @@ class PrefixCachingMetrics:
 @dataclass
 class KVCacheBlock:
     """KV-cache block metadata."""
-
     # Block ID, ranging from 0 to num_gpu_blocks - 1.
     block_id: int
     # Reference count.
@@ -160,10 +158,10 @@ class KVCacheBlock:
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
         # on KVCacheBlock object recursively.
-        prev_block_id = (self.prev_free_block.block_id
-                         if self.prev_free_block else None)
-        next_block_id = (self.next_free_block.block_id
-                         if self.next_free_block else None)
+        prev_block_id = self.prev_free_block.block_id \
+                         if self.prev_free_block else None
+        next_block_id = self.next_free_block.block_id \
+                         if self.next_free_block else None
         return (f"KVCacheBlock(block_id={self.block_id}, "
                 f"ref_cnt={self.ref_cnt}, "
                 f"_block_hash={self._block_hash}, "
@@ -289,8 +287,9 @@ def need_extra_keys(request: Request) -> bool:
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA ID.
     # Request with provided cache salt need to include the salt.
-    return (bool(request.mm_positions) or (request.lora_request is not None)
-            or (request.cache_salt is not None))
+    return bool(request.mm_positions) or (request.lora_request
+                                          is not None) or (request.cache_salt
+                                                           is not None)
 
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
@@ -377,11 +376,8 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
 
 
 def generate_block_hash_extra_keys(
-    request: Request,
-    start_token_idx: int,
-    end_token_idx: int,
-    start_mm_idx: int,
-) -> tuple[Optional[tuple[Any, ...]], int]:
+        request: Request, start_token_idx: int, end_token_idx: int,
+        start_mm_idx: int) -> tuple[Optional[tuple[Any, ...]], int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
 
@@ -434,7 +430,6 @@ def hash_block_tokens(
         parent_block_hash = NONE_HASH
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
-    # NOTE: not add group_id.
     return BlockHashType(
         hash_function(
             (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
@@ -473,12 +468,8 @@ def hash_request_tokens(hash_function: Any, block_size: int,
             req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start, end, curr_mm_idx)
 
-        block_hash = hash_block_tokens(
-            hash_function,
-            parent_block_hash_value,
-            block_token_ids,
-            req_extra_keys,
-        )
+        block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
+                                       block_token_ids, req_extra_keys)
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
     return ret
@@ -722,8 +713,8 @@ def _get_kv_cache_config_uniform_page_size(
     group_size = min([len(layers) for layers in same_type_layers.values()])
     grouped_layers = []
     for layers in same_type_layers.values():
-        num_padding_layers = len(layers) % group_size
-        if num_padding_layers > 0:
+        num_padding_layers = group_size - len(layers) % group_size
+        if num_padding_layers != group_size:
             logger.warning(
                 "Add %d padding layers, may waste at most %.2f%% KV cache memory",  # noqa
                 num_padding_layers,
