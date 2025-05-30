@@ -51,7 +51,7 @@ from vllm.transformers_utils.configs.ovis import (BaseVisualTokenizerConfig,
                                                   OvisConfig)
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import merge_multimodal_embeddings
 
 # Cannot find the following number from hf config.
@@ -398,7 +398,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(OvisMultiModalProcessor,
                                         info=OvisProcessingInfo,
                                         dummy_inputs=OvisDummyInputsBuilder)
-class Ovis(nn.Module, SupportsMultiModal):
+class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -430,7 +430,7 @@ class Ovis(nn.Module, SupportsMultiModal):
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
         # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
         # seems to avoid vision encoder sections for some models.
-        # See: https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct-GPTQ-Int4
+        # See: https://huggingface.co/AIDC-AI/Ovis2-2B-GPTQ-Int4
         if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
             return None
         return quant_config
