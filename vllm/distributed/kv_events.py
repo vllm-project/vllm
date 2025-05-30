@@ -326,8 +326,7 @@ def _offset_endpoint_port(endpoint: str, data_parallel_rank: int) -> str:
             new_port = base_port + data_parallel_rank
             return f"{base_addr}:{new_port}"
         return endpoint
-    else:
-        raise ValueError("Invalid endpoint: must contain 'inproc' or 'tcp'")
+    raise ValueError("Invalid endpoint: must contain 'inproc' or 'tcp'")
 
 
 def get_kv_event_publisher(
