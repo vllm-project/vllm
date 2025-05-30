@@ -130,11 +130,11 @@ class LLMEngine:
     iteration-level scheduling and efficient memory management to maximize the
     serving throughput.
 
-    The [LLM][vllm.LLM] class wraps this class for offline batched inference
-    and the [AsyncLLMEngine][] class wraps this class for online serving.
+    The [`LLM`][vllm.LLM] class wraps this class for offline batched inference
+    and the [`AsyncLLMEngine`][vllm.engine.async_llm_engine.AsyncLLMEngine]
+    class wraps this class for online serving.
 
-    The config arguments are derived from [EngineArgs][vllm.EngineArgs]. (See
-    [engine-args][])
+    The config arguments are derived from [`EngineArgs`][vllm.EngineArgs].
 
     Args:
         vllm_config: The configuration for initializing and running vLLM.
@@ -1650,6 +1650,20 @@ class LLMEngine:
         gpu_prefix_cache_hit_rate = self.scheduler[
             0].get_prefix_cache_hit_rate(Device.GPU)
 
+        # Exchange the uasge and cache hit stats between gpu and cpu when
+        # running on cpu because the cpu_worker.py intentionally reports the
+        # number of cpu blocks as gpu blocks in favor of cache management.
+        if self.device_config.device_type == "cpu":
+            num_total_gpu, num_total_cpu = num_total_cpu, num_total_gpu
+            gpu_cache_usage_sys, cpu_cache_usage_sys = (
+                cpu_cache_usage_sys,
+                gpu_cache_usage_sys,
+            )
+            gpu_prefix_cache_hit_rate, cpu_prefix_cache_hit_rate = (
+                cpu_prefix_cache_hit_rate,
+                gpu_prefix_cache_hit_rate,
+            )
+
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
@@ -1666,9 +1680,6 @@ class LLMEngine:
         time_inference_requests: List[float] = []
         time_prefill_requests: List[float] = []
         time_decode_requests: List[float] = []
-        time_in_queue_requests: List[float] = []
-        model_forward_time_requests: List[float] = []
-        model_execute_time_requests: List[float] = []
         #   Metadata
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
@@ -1776,15 +1787,6 @@ class LLMEngine:
                             now - seq_group.metrics.first_token_time)
                         time_inference_requests.append(
                             now - seq_group.metrics.first_scheduled_time)
-                    if seq_group.metrics.time_in_queue is not None:
-                        time_in_queue_requests.append(
-                            seq_group.metrics.time_in_queue)
-                    if seq_group.metrics.model_forward_time is not None:
-                        model_forward_time_requests.append(
-                            seq_group.metrics.model_forward_time)
-                    if seq_group.metrics.model_execute_time is not None:
-                        model_execute_time_requests.append(
-                            seq_group.metrics.model_execute_time * 1000)
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))
@@ -1853,9 +1855,6 @@ class LLMEngine:
             time_inference_requests=time_inference_requests,
             time_prefill_requests=time_prefill_requests,
             time_decode_requests=time_decode_requests,
-            time_in_queue_requests=time_in_queue_requests,
-            model_forward_time_requests=model_forward_time_requests,
-            model_execute_time_requests=model_execute_time_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,

@@ -56,8 +56,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         scheduled computation.
 
         Args:
-          seq_group: the outputs are associated with this {class}`SequenceGroup`
-          outputs: the {class}`SequenceGroupOutput`s for all scheduler steps
+          seq_group: the outputs are associated with this
+              [`SequenceGroup`][vllm.sequence.SequenceGroup]
+          outputs: the
+              [`SequenceGroupOutput`][vllm.sequence.SequenceGroupOutput]s
+              for all scheduler steps
         """
         for output in outputs:
             # Concatenate single-step prompt logprob processing results.

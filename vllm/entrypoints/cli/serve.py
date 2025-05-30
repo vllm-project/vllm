@@ -11,6 +11,8 @@ from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
+from vllm.entrypoints.utils import (VLLM_SERVE_PARSER_EPILOG,
+                                    show_filtered_argument_or_group_from_help)
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, get_tcp_uri
@@ -77,7 +79,10 @@ class ServeSubcommand(CLISubcommand):
             "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference"
         )
 
-        return make_arg_parser(serve_parser)
+        serve_parser = make_arg_parser(serve_parser)
+        show_filtered_argument_or_group_from_help(serve_parser)
+        serve_parser.epilog = VLLM_SERVE_PARSER_EPILOG
+        return serve_parser
 
 
 def cmd_init() -> list[CLISubcommand]:

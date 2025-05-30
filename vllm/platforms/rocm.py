@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, Optional
 
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
+from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -93,6 +96,12 @@ def with_amdsmi_context(fn):
             amdsmi_shut_down()
 
     return wrapper
+
+
+@cache
+def on_gfx1x() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
 
 @cache
@@ -194,8 +203,9 @@ class RocmPlatform(Platform):
                     f" The selected backend, {selected_backend.name},"
                     f"is not MLA type while requested for MLA backend.")
 
-        selected_backend = (_Backend.ROCM_FLASH if selected_backend
-                            == _Backend.FLASH_ATTN else selected_backend)
+        if selected_backend is None or selected_backend == _Backend.FLASH_ATTN:
+            selected_backend = _Backend.ROCM_FLASH
+
         if envs.VLLM_USE_V1:
             logger.info("Using Triton Attention backend on V1 engine.")
             return ("vllm.v1.attention.backends."
@@ -386,3 +396,33 @@ class RocmPlatform(Platform):
     @classmethod
     def get_piecewise_backend_cls(cls) -> str:
         return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        assert is_nccl_available()
+        pg: ProcessGroup = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
+        from torch.distributed.distributed_c10d import ProcessGroupNCCL
+
+        backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupNCCL(prefix_store, group_rank, group_size,
+                                         backend_options)
+        backend_type = ProcessGroup.BackendType.NCCL
+        device = torch.device("cuda")
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(device, backend_type, backend_class)
+        return pg

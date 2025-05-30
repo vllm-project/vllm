@@ -70,7 +70,8 @@ class KVConnectorFactory:
             connector_module = importlib.import_module(connector_module_path)
             connector_cls = getattr(connector_module, connector_name)
         assert issubclass(connector_cls, KVConnectorBase_V1)
-        logger.info("Creating v1 connector with name: %s", connector_name)
+        logger.info("Creating v1 connector with name: %s and engine_id: %s",
+                    connector_name, kv_transfer_config.engine_id)
         # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
         # Scheduler connector:
         # - Co-locate with scheduler process
