@@ -112,7 +112,7 @@ class AIMv2Attention(nn.Module):
             total_num_heads=self.num_heads,
             bias=config.qkv_bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+            prefix=f"{prefix}.qkv",
         )
 
         self.proj = RowParallelLinear(
@@ -120,7 +120,7 @@ class AIMv2Attention(nn.Module):
             output_size=self.embed_dim,
             bias=config.use_bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.out_proj",
+            prefix=f"{prefix}.proj",
         )
 
         self.tp_size = get_tensor_model_parallel_world_size()
