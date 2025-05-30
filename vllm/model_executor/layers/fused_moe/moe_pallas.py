@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn.functional as F
+import torch_xla.experimental.custom_kernel  # noqa: F401
 
 
 def _histogram(input: torch.Tensor, min: int, max: int) -> torch.Tensor:
@@ -66,15 +67,10 @@ def fused_moe(
     token_indices = token_indices[topk_argsort_indices]
     group_sizes = _histogram(topk_indices.to(torch.int32), 0, num_experts - 1)
 
-    # NOTE(woosuk): The GMM Pallas kernel requires a different weight layout
-    # from HF Transformers.
-    w1 = w1.transpose(1, 2)
-    w2 = w2.transpose(1, 2)
-
     x = hidden_states[token_indices]
-    x = torch.ops.xla.gmm(x, w1, group_sizes)
+    x = torch.ops.xla.gmm(x, w1, group_sizes, transpose_rhs=True)
     x = F.silu(x[..., :intermediate_size]) * x[..., intermediate_size:]
-    x = torch.ops.xla.gmm(x, w2, group_sizes)
+    x = torch.ops.xla.gmm(x, w2, group_sizes, transpose_rhs=True)
     x = x[topk_argsort_revert_indices].reshape(-1, topk, hidden_size)
 
     x = x * topk_weights.unsqueeze(dim=-1)
