@@ -60,10 +60,6 @@ class Llama4PythonicToolParser(ToolParser):
         Extract the tool calls from a complete model response.
         """
 
-        no_tools_response = ExtractedToolCallInformation(tools_called=False,
-                                                         tool_calls=[],
-                                                         content=model_output)
-
         # remove <|python_start|> and <|python_end|>
         # as Llama 4 model sometime will output those tokens
         if model_output.startswith("<|python_start|>"):
@@ -73,12 +69,16 @@ class Llama4PythonicToolParser(ToolParser):
         try:
             if not (self.TOOL_CALL_REGEX.match(model_output,
                                                timeout=REGEX_TIMEOUT)):
-                return no_tools_response
+                return ExtractedToolCallInformation(tools_called=False,
+                                                    tool_calls=[],
+                                                    content=model_output)
         except TimeoutError:
             logger.error(
                 "WARNING: Regex search timed out for model output: %s",
                 model_output)
-            return no_tools_response
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
 
         try:
             module = ast.parse(model_output)
@@ -98,7 +98,9 @@ class Llama4PythonicToolParser(ToolParser):
         except Exception:
             logger.exception("Error in extracting tool call from response.")
             # Treat as regular text
-            return no_tools_response
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
 
     def extract_tool_calls_streaming(
         self,

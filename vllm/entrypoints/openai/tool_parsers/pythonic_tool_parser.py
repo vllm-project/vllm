@@ -62,18 +62,18 @@ class PythonicToolParser(ToolParser):
         """
         Extract the tool calls from a complete model response.
         """
-        no_tools_response = ExtractedToolCallInformation(tools_called=False,
-                                                         tool_calls=[],
-                                                         content=model_output)
-
         try:
             if not (self.TOOL_CALL_REGEX.match(model_output,
                                                timeout=REGEX_TIMEOUT)):
-                return no_tools_response
+                return ExtractedToolCallInformation(tools_called=False,
+                                                    tool_calls=[],
+                                                    content=model_output)
         except TimeoutError:
             logger.warning(
                 "Regex timeout occurred when matching tool call pattern.")
-            return no_tools_response
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
 
         try:
             module = ast.parse(model_output)
@@ -93,7 +93,9 @@ class PythonicToolParser(ToolParser):
         except Exception:
             logger.exception("Error in extracting tool call from response.")
             # Treat as regular text
-            return no_tools_response
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
 
     def extract_tool_calls_streaming(
         self,
