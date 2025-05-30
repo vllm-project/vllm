@@ -19,7 +19,7 @@ the failure?
    👉 [New CI Failure Report](https://github.com/vllm-project/vllm/issues/new?template=450-ci-failure.yml)
 
 
-3. **Use this title format:**
+2. **Use this title format:**
 
    ```
    [CI Failure]: failing-test-job - regex/matching/failing:test
