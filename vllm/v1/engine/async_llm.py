@@ -120,15 +120,13 @@ class AsyncLLM(EngineClient):
                                                 log_stats=self.log_stats)
 
         # EngineCore (starts the engine in background process).
-        core_client_class: Union[type[RayDPClient], type[DPAsyncMPClient],
-                                 type[AsyncMPClient]]
-        if vllm_config.parallel_config.data_parallel_size > 1:
-            if vllm_config.parallel_config.data_parallel_backend == "ray":
-                core_client_class = RayDPClient
-            else:
-                core_client_class = DPAsyncMPClient
-        else:
+        core_client_class: type[AsyncMPClient]
+        if vllm_config.parallel_config.data_parallel_size == 1:
             core_client_class = AsyncMPClient
+        elif vllm_config.parallel_config.data_parallel_backend == "ray":
+            core_client_class = RayDPClient
+        else:
+            core_client_class = DPAsyncMPClient
 
         self.engine_core = core_client_class(
             vllm_config=vllm_config,
