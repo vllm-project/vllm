@@ -4,7 +4,6 @@
 import argparse
 import dataclasses
 import json
-import re
 import sys
 import threading
 import warnings
@@ -13,7 +12,9 @@ from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
 
+import regex as re
 import torch
+from pydantic import SkipValidation, TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
@@ -38,7 +39,7 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
-                        GiB_bytes, is_in_doc_build, is_in_ray_actor)
+                        GiB_bytes, is_in_ray_actor)
 
 # yapf: enable
 
@@ -156,7 +157,8 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the set of possible types for the field
         type_hints: set[TypeHint] = set()
         if get_origin(field.type) in {Union, Annotated}:
-            type_hints.update(get_args(field.type))
+            predicate = lambda arg: not isinstance(arg, SkipValidation)
+            type_hints.update(filter(predicate, get_args(field.type)))
         else:
             type_hints.add(field.type)
 
@@ -168,10 +170,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         if field.default is not MISSING:
             default = field.default
         elif field.default_factory is not MISSING:
-            if is_dataclass(field.default_factory) and is_in_doc_build():
-                default = {}
-            else:
-                default = field.default_factory()
+            default = field.default_factory()
 
         # Get the help text for the field
         name = field.name
@@ -189,12 +188,16 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
         - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n"""
         if dataclass_cls is not None:
-            dataclass_init = lambda x, f=dataclass_cls: f(**json.loads(x))
-            # Special case for configs with a from_cli method
-            if hasattr(dataclass_cls, "from_cli"):
-                from_cli = dataclass_cls.from_cli
-                dataclass_init = lambda x, f=from_cli: f(x)
-            kwargs[name]["type"] = dataclass_init
+
+            def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
+                try:
+                    if hasattr(cls, "from_cli"):
+                        return cls.from_cli(val)
+                    return TypeAdapter(cls).validate_json(val)
+                except ValidationError as e:
+                    raise argparse.ArgumentTypeError(repr(e)) from e
+
+            kwargs[name]["type"] = parse_dataclass
             kwargs[name]["help"] += json_tip
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
@@ -225,12 +228,11 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
                 kwargs[name]["type"] = human_readable_int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
-        elif contains_type(type_hints,
-                           dict) and (contains_type(type_hints, str) or any(
-                               is_not_builtin(th) for th in type_hints)):
+        elif (contains_type(type_hints, dict)
+              and (contains_type(type_hints, str)
+                   or any(is_not_builtin(th) for th in type_hints))):
             kwargs[name]["type"] = union_dict_and_str
         elif contains_type(type_hints, dict):
-            # Dict arguments will always be optional
             kwargs[name]["type"] = parse_type(json.loads)
             kwargs[name]["help"] += json_tip
         elif (contains_type(type_hints, str)
@@ -317,8 +319,7 @@ class EngineArgs:
     rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
     rope_theta: Optional[float] = ModelConfig.rope_theta
     hf_token: Optional[Union[bool, str]] = ModelConfig.hf_token
-    hf_overrides: Optional[HfOverrides] = \
-        get_field(ModelConfig, "hf_overrides")
+    hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
@@ -398,7 +399,8 @@ class EngineArgs:
         get_field(ModelConfig, "override_neuron_config")
     override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
         ModelConfig.override_pooler_config
-    compilation_config: Optional[CompilationConfig] = None
+    compilation_config: CompilationConfig = \
+        get_field(VllmConfig, "compilation_config")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -413,7 +415,8 @@ class EngineArgs:
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
-    additional_config: Optional[Dict[str, Any]] = None
+    additional_config: dict[str, Any] = \
+        get_field(VllmConfig, "additional_config")
     enable_reasoning: Optional[bool] = None  # DEPRECATED
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
@@ -577,7 +580,7 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             deprecated=True,
             help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
-            "of v0.8.6. Use `--reasoning-parser` to specify the reasoning "
+            "of v0.9.0. Use `--reasoning-parser` to specify the reasoning "
             "parser backend instead. This flag (`--enable-reasoning`) will be "
             "removed in v0.10.0. When `--reasoning-parser` is specified, "
             "reasoning mode is automatically enabled.")
@@ -737,7 +740,9 @@ class EngineArgs:
             title="DeviceConfig",
             description=DeviceConfig.__doc__,
         )
-        device_group.add_argument("--device", **device_kwargs["device"])
+        device_group.add_argument("--device",
+                                  **device_kwargs["device"],
+                                  deprecated=True)
 
         # Speculative arguments
         speculative_group = parser.add_argument_group(
@@ -977,7 +982,7 @@ class EngineArgs:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
-        device_config = DeviceConfig(device=self.device)
+        device_config = DeviceConfig(device=current_platform.device_type)
         model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
@@ -1082,7 +1087,7 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
         )
 
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:
@@ -1193,8 +1198,7 @@ class EngineArgs:
         #############################################################
         # Unsupported Feature Flags on V1.
 
-        if (self.load_format == LoadFormat.TENSORIZER.value
-                or self.load_format == LoadFormat.SHARDED_STATE.value):
+        if self.load_format == LoadFormat.SHARDED_STATE.value:
             _raise_or_fallback(
                 feature_name=f"--load_format {self.load_format}",
                 recommend_to_remove=False)
@@ -1290,14 +1294,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Some quantization is not compatible with torch.compile.
-        V1_UNSUPPORTED_QUANT = ["gguf"]
-        if model_config.quantization in V1_UNSUPPORTED_QUANT:
-            _raise_or_fallback(
-                feature_name=f"--quantization {model_config.quantization}",
-                recommend_to_remove=False)
-            return False
-
         # No Embedding Models so far.
         if model_config.task not in ["generate"]:
             _raise_or_fallback(feature_name=f"--task {model_config.task}",
@@ -1337,7 +1333,7 @@ class EngineArgs:
                     is_ngram_enabled = True
                 elif speculative_method == "medusa":
                     is_medusa_enabled = True
-                elif speculative_method in ("eagle", "eagle3"):
+                elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
                     is_eagle_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")
