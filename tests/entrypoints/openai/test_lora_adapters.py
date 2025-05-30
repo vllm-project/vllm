@@ -313,3 +313,37 @@ async def test_loading_invalid_adapters_does_not_break_others(
         prompt=["Hello there", "Foo bar bazz buzz"],
         max_tokens=5,
     )
+
+
+@pytest.mark.asyncio
+async def test_beam_search_with_lora_adapters(
+    client: openai.AsyncOpenAI,
+    tmp_path,
+    zephyr_lora_files,
+):
+    """Validate that async beam search can be used with lora."""
+
+    async def load_and_run_adapter(adapter_name: str):
+        await client.post("load_lora_adapter",
+                          cast_to=str,
+                          body={
+                              "lora_name": adapter_name,
+                              "lora_path": str(zephyr_lora_files)
+                          })
+        for _ in range(3):
+            await client.completions.create(
+                model=adapter_name,
+                prompt=["Hello there", "Foo bar bazz buzz"],
+                max_tokens=5,
+                extra_body=dict(use_beam_search=True),
+            )
+
+    lora_tasks = []
+    for i in range(3):
+        lora_tasks.append(
+            asyncio.create_task(load_and_run_adapter(f"adapter_{i}")))
+
+    results, _ = await asyncio.wait(lora_tasks)
+
+    for r in results:
+        assert not isinstance(r, Exception), f"Got exception {r}"

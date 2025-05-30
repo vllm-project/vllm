@@ -823,10 +823,17 @@ def try_get_generation_config(
 
 
 def get_cross_encoder_activation_function(config: PretrainedConfig):
-    if (hasattr(config, "sbert_ce_default_activation_function")
-            and config.sbert_ce_default_activation_function is not None):
 
+    function_name: Optional[str] = None
+    if hasattr(config, "sentence_transformers") and "activation_fn" in \
+        config.sentence_transformers:
+        function_name = config.sentence_transformers["activation_fn"]
+
+    elif (hasattr(config, "sbert_ce_default_activation_function")
+          and config.sbert_ce_default_activation_function is not None):
         function_name = config.sbert_ce_default_activation_function
+
+    if function_name is not None:
         assert function_name.startswith("torch.nn.modules."), \
             "Loading of activation functions is restricted to " \
             "torch.nn.modules for security reasons"
