@@ -6,7 +6,7 @@ import pytest
 
 from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VllmConfig)
+                         SchedulerConfig, VllmConfig, set_current_vllm_config)
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
@@ -86,16 +86,17 @@ def get_vllm_config():
         scheduler_config=scheduler_config,
         parallel_config=parallel_config,
     )
-    num_heads = model_config.get_num_kv_heads(parallel_config)
-    head_size = model_config.get_head_size()
-    vllm_config.compilation_config.static_forward_context[
-        "layer.0"] = Attention(num_heads, head_size, 0.1)
     return vllm_config
 
 
 @pytest.fixture
 def model_runner():
     vllm_config = get_vllm_config()
+    model_config = vllm_config.model_config
+    num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+    head_size = model_config.get_head_size()
+    vllm_config.compilation_config.static_forward_context[
+        "layer.0"] = Attention(num_heads, head_size, 0.1)
     runner = GPUModelRunner(vllm_config, DEVICE)
     initialize_kv_cache(runner)
     return runner
@@ -396,7 +397,8 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
-    with pytest.raises(ValueError, match="KV sharing target is not valid"):
+    error_msg = f"{layer_1} must come before the current layer"
+    with pytest.raises(ValueError, match=error_msg):
         fwd_context = {
             # initialization below will fail because target layer is invalid;
             # the target layer needs to come before layer 1
@@ -406,7 +408,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
                 head_size=64,
                 scale=1.0,
                 prefix=layer_0,
-                kv_sharing_target_layer_name="model.layers.1.self_attn.attn",
+                kv_sharing_target_layer_name=layer_1,
             ),
             layer_1:
             Attention(
@@ -424,53 +426,83 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     invalid_layer = "model.layers.0.cross_attn.attn"
-    vllm_config = get_vllm_config()
-    fwd_context = {
-        layer_0:
-        Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-            prefix=layer_0,
-        ),
-        layer_1:
-        Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-            prefix=layer_1,
-            # invalid layer: cross_attn.atn doesn't exist!
-            kv_sharing_target_layer_name=invalid_layer,
-        )
-    }
-    vllm_config.compilation_config.static_forward_context = fwd_context
-    runner = GPUModelRunner(vllm_config, DEVICE)
-
-    error_msg = f"{invalid_layer} is not a Attention layer in the model"
+    error_msg = f"{invalid_layer} is not a valid Attention layer in the model"
     with pytest.raises(ValueError, match=error_msg):
-        runner.get_kv_cache_spec()
+        fwd_context = {
+            layer_0:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_0,
+            ),
+            layer_1:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_1,
+                # invalid layer: cross_attn.atn doesn't exist!
+                kv_sharing_target_layer_name=invalid_layer,
+            )
+        }
+        # suppress var not used error
+        assert fwd_context is not None
+
+
+def test_init_kv_cache_with_kv_sharing_target_same_as_current():
+    layer_0 = "model.layers.0.self_attn.attn"
+    layer_1 = "model.layers.1.self_attn.attn"
+    error_msg = f"{layer_1} cannot be the same as the current layer"
+    with pytest.raises(ValueError, match=error_msg):
+        fwd_context = {
+            # initialization below will fail because target layer is invalid;
+            # the target layer needs to come before layer 1
+            layer_0:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_0,
+            ),
+            layer_1:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_1,
+                kv_sharing_target_layer_name=layer_1,
+            )
+        }
+        # suppress var not used error
+        assert fwd_context is not None
 
 
 def test_init_kv_cache_without_kv_sharing():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
-    fwd_context = {
-        layer_0: Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-        ),
-        layer_1: Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-        )
-    }
     vllm_config = get_vllm_config()
+    with set_current_vllm_config(vllm_config):
+        fwd_context = {
+            layer_0:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_0,
+            ),
+            layer_1:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_1,
+            )
+        }
+        # suppress var not used error
+        assert fwd_context is not None
     # Set high context length to test max context length estimation
     vllm_config.model_config.max_model_len = 3_000_000
-    # Hacky way to initialize forward context without initializing the model.
-    vllm_config.compilation_config.static_forward_context = fwd_context
     vllm_ctx = vllm_config.compilation_config.static_forward_context
     runner = GPUModelRunner(vllm_config, DEVICE)
     kv_cache_spec = runner.get_kv_cache_spec()
@@ -516,27 +548,29 @@ def test_init_kv_cache_without_kv_sharing():
 def test_init_kv_cache_with_kv_sharing_valid():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
-    fwd_context = {
-        layer_0:
-        Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-            prefix=layer_0,
-        ),
-        layer_1:
-        Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-            prefix=layer_1,
-            kv_sharing_target_layer_name="model.layers.0.self_attn.attn",
-        )
-    }
     vllm_config = get_vllm_config()
+    with set_current_vllm_config(vllm_config):
+        fwd_context = {
+            layer_0:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_0,
+            ),
+            layer_1:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_1,
+                kv_sharing_target_layer_name="model.layers.0.self_attn.attn",
+            )
+        }
+        # suppress var not used error
+        assert fwd_context is not None
     # Set high context length to test max context length estimation
     vllm_config.model_config.max_model_len = 3_000_000
-    vllm_config.compilation_config.static_forward_context = fwd_context
     vllm_ctx = vllm_config.compilation_config.static_forward_context
     runner = GPUModelRunner(vllm_config, DEVICE)
     kv_cache_spec = runner.get_kv_cache_spec()
@@ -580,4 +614,3 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
     assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
->>>>>>> 794f6c84c ([V1] Support cross-layer KV sharing)

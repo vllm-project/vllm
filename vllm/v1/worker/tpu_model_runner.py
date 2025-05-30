@@ -31,7 +31,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata)
-from vllm.v1.attention.backends.utils import validate_kv_target_layer
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
@@ -44,7 +43,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from .utils import sanity_check_mm_encoder_outputs
+from .utils import add_shared_kv_layers, sanity_check_mm_encoder_outputs
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -459,8 +458,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         for layer_name, attn_module in layers.items():
             if (kv_tgt_layer :=
                     attn_module.kv_sharing_target_layer_name) is not None:
-                validate_kv_target_layer(layer_name, kv_tgt_layer, layers)
-                # KV cache is shared with earlier layer, don't create a spec
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
 
@@ -1387,14 +1384,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     raise NotImplementedError
 
-        # with KV sharing, some layers can share KV caches with earlier layers
-        for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
-        ):
-            kv_caches[layer_name] = kv_caches[target_layer_name]
-            group_idx = layer_to_kv_cache_group_idx[target_layer_name]
-            # attention metadata is assigned for each layer in layer_names
-            kv_cache_config.kv_cache_groups[group_idx].layer_names.append(
-                layer_name)
+        add_shared_kv_layers(
+            self.shared_kv_cache_layers,
+            kv_caches,
+            kv_cache_config.kv_cache_groups,
+            layer_to_kv_cache_group_idx,
+        )
 
         bind_kv_cache(
             kv_caches,

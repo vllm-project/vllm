@@ -622,8 +622,6 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     assert len(page_sizes) == 1
     page_size = page_sizes.pop()
 
-    # with cross-layer KV sharing, len(kv_cache_spec) may be less than no. of
-    # attention layers, in which case more KV cache blocks can be allocated
     num_blocks = int(available_memory // page_size // len(kv_cache_spec))
     num_blocks = max(num_blocks, 0)
 

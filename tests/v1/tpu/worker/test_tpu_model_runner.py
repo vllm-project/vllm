@@ -4,7 +4,8 @@ import unittest.mock as mock
 import pytest
 
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import (CacheConfig, ModelConfig, SchedulerConfig, VllmConfig,
+                         set_current_vllm_config)
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
@@ -368,58 +369,116 @@ def test_get_req_paddings():
     assert _get_req_paddings(8, 36) == [8, 16, 32, 36]
 
 
-def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(model_runner):
+def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
+    layer_0 = "model.layers.0.self_attn.attn"
+    layer_1 = "model.layers.1.self_attn.attn"
+    error_msg = f"{layer_1} must come before the current layer"
+    with pytest.raises(ValueError, match=error_msg):
+        fwd_context = {
+            # initialization below will fail because target layer is invalid;
+            # the target layer needs to come before layer 1
+            layer_0:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_0,
+                kv_sharing_target_layer_name=layer_1,
+            ),
+            layer_1:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_1,
+            )
+        }
+        # suppress var not used error
+        assert fwd_context is not None
+
+
+def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     invalid_layer = "model.layers.0.cross_attn.attn"
-    fwd_context = {
-        layer_0:
-        Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-            prefix=layer_0,
-        ),
-        layer_1:
-        Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-            prefix=layer_1,
-            # invalid layer: cross_attn.atn doesn't exist!
-            kv_sharing_target_layer_name=invalid_layer,
-        )
-    }
-    model_runner.vllm_config.compilation_config.static_forward_context = (
-        fwd_context)
-    error_msg = f"{invalid_layer} is not a Attention layer in the model"
+    error_msg = f"{invalid_layer} is not a valid Attention layer in the model"
     with pytest.raises(ValueError, match=error_msg):
-        model_runner.get_kv_cache_spec()
+        fwd_context = {
+            layer_0:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_0,
+            ),
+            layer_1:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_1,
+                # invalid layer: cross_attn.atn doesn't exist!
+                kv_sharing_target_layer_name=invalid_layer,
+            )
+        }
+        # suppress var not used error
+        assert fwd_context is not None
+
+
+def test_init_kv_cache_with_kv_sharing_target_same_as_current():
+    layer_0 = "model.layers.0.self_attn.attn"
+    layer_1 = "model.layers.1.self_attn.attn"
+    error_msg = f"{layer_1} cannot be the same as the current layer"
+    with pytest.raises(ValueError, match=error_msg):
+        fwd_context = {
+            # initialization below will fail because target layer is invalid;
+            # the target layer needs to come before layer 1
+            layer_0:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_0,
+            ),
+            layer_1:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_1,
+                kv_sharing_target_layer_name=layer_1,
+            )
+        }
+        # suppress var not used error
+        assert fwd_context is not None
 
 
 def test_init_kv_cache_without_kv_sharing(model_runner):
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
-    fwd_context = {
-        layer_0: Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-        ),
-        layer_1: Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-        )
-    }
     vllm_config = model_runner.vllm_config
+    with set_current_vllm_config(vllm_config):
+        fwd_context = {
+            layer_0:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_0,
+            ),
+            layer_1:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_1,
+            )
+        }
+        # suppress var not used error
+        assert fwd_context is not None
     # Set high context length to test max context length estimation
-    model_runner.vllm_config.model_config.max_model_len = 3_000_000
-    # Hacky way to initialize forward context without initializing the model.
-    model_runner.vllm_config.compilation_config.static_forward_context = (
-        fwd_context)
-    vllm_ctx = (
-        model_runner.vllm_config.compilation_config.static_forward_context)
+    vllm_config.model_config.max_model_len = 3_000_000
+    vllm_ctx = vllm_config.compilation_config.static_forward_context
     kv_cache_spec = model_runner.get_kv_cache_spec()
     assert len(kv_cache_spec) == 2
     assert len(model_runner.shared_kv_cache_layers) == 0
@@ -463,30 +522,30 @@ def test_init_kv_cache_without_kv_sharing(model_runner):
 def test_init_kv_cache_with_kv_sharing_valid(model_runner):
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
-    fwd_context = {
-        layer_0:
-        Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-            prefix=layer_0,
-        ),
-        layer_1:
-        Attention(
-            num_heads=8,
-            head_size=64,
-            scale=1.0,
-            prefix=layer_1,
-            kv_sharing_target_layer_name="model.layers.0.self_attn.attn",
-        )
-    }
     vllm_config = model_runner.vllm_config
+    with set_current_vllm_config(vllm_config):
+        fwd_context = {
+            layer_0:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_0,
+            ),
+            layer_1:
+            Attention(
+                num_heads=8,
+                head_size=64,
+                scale=1.0,
+                prefix=layer_1,
+                kv_sharing_target_layer_name="model.layers.0.self_attn.attn",
+            )
+        }
+        # suppress var not used error
+        assert fwd_context is not None
     # Set high context length to test max context length estimation
-    model_runner.vllm_config.model_config.max_model_len = 3_000_000
-    model_runner.vllm_config.compilation_config.static_forward_context = (
-        fwd_context)
-    vllm_ctx = (
-        model_runner.vllm_config.compilation_config.static_forward_context)
+    vllm_config.model_config.max_model_len = 3_000_000
+    vllm_ctx = vllm_config.compilation_config.static_forward_context
     kv_cache_spec = model_runner.get_kv_cache_spec()
     assert len(kv_cache_spec) == 1
     assert layer_0 in kv_cache_spec
