@@ -69,7 +69,7 @@ def test_active_default_mm_lora(
         vllm_runner,
         audio_assets,
         lora_request=None,
-        default_mm_loras={"audio": LoRARequest("speech", 1, MODEL)},
+        default_mm_loras={"audio": MODEL},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
     )
 
@@ -83,7 +83,7 @@ def test_inactive_default_mm_lora(
         vllm_runner,
         audio_assets,
         lora_request=None,
-        default_mm_loras={"image": LoRARequest("vision", 1, MODEL)},
+        default_mm_loras={"image": MODEL},
         expected_suffix=RESPONSE_SUFFIX_WITHOUT_LORA,
     )
 
@@ -96,8 +96,8 @@ def test_default_mm_lora_succeeds_with_redundant_lora_request(
     run_test(
         vllm_runner,
         audio_assets,
-        lora_request=LoRARequest("speech", 1, MODEL),
-        default_mm_loras={"audio": LoRARequest("speech", 1, MODEL)},
+        lora_request=LoRARequest("audio", 1, MODEL),
+        default_mm_loras={"audio": MODEL},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
     )
 
@@ -112,6 +112,6 @@ def test_default_mm_lora_fails_with_overridden_lora_request(
         vllm_runner,
         audio_assets,
         lora_request=LoRARequest("speech", 2, MODEL),
-        default_mm_loras={"audio": LoRARequest("something", 1, "never used")},
+        default_mm_loras={"audio": "this path is overridden"},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
     )
