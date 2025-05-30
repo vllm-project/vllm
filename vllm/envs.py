@@ -159,17 +159,13 @@ def get_vllm_port() -> Optional[int]:
         return int(port)
     except ValueError as err:
         from urllib.parse import urlparse
-        try:
-            parsed = urlparse(port)
-            if parsed.scheme:
-                raise ValueError(
-                    f"VLLM_PORT '{port}' appears to be a URI. "
-                    "This may be caused by a Kubernetes service discovery issue"
-                    "check the warning in: https://docs.vllm.ai/en/stable/usage/env_vars.html"
-                )
-        except Exception:
-            pass
-
+        parsed = urlparse(port)
+        if parsed.scheme:
+            raise ValueError(
+                f"VLLM_PORT '{port}' appears to be a URI. "
+                "This may be caused by a Kubernetes service discovery issue,"
+                "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+            ) from None
         raise ValueError(
             f"VLLM_PORT '{port}' must be a valid integer") from err
 
