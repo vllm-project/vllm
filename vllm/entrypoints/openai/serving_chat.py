@@ -236,6 +236,7 @@ class OpenAIServingChat(OpenAIServing):
                         prompt=engine_prompt,
                         request_id=request_id,
                         params=sampling_params,
+                        lora_request=lora_request,
                     )
                 else:
                     generator = self.engine_client.generate(
@@ -987,7 +988,8 @@ class OpenAIServingChat(OpenAIServing):
                     tool_calls=[
                         tool_call_class(function=FunctionCall(
                             name=tool_call.name,
-                            arguments=json.dumps(tool_call.parameters)))
+                            arguments=json.dumps(tool_call.parameters,
+                                                 ensure_ascii=False)))
                         for tool_call in tool_calls
                     ])
 
