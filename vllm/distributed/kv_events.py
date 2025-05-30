@@ -317,7 +317,7 @@ def _offset_endpoint_port(endpoint: str, data_parallel_rank: int) -> str:
     """
     if "inproc" in endpoint:
         return f"{endpoint}_dp{data_parallel_rank}"
-    elif "tcp" in endpoint:
+    if "tcp" in endpoint:
         if endpoint and ":" in endpoint:
             # Get everything after the last colon (the port)
             last_colon_idx = endpoint.rfind(":")
