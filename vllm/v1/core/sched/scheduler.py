@@ -8,8 +8,7 @@ from collections.abc import Iterable
 from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_events import (KVEventBatch, ZmqEventPublisher,
-                                        get_kv_event_publisher)
+from vllm.distributed.kv_events import KVEventBatch, get_kv_event_publisher
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
@@ -147,7 +146,6 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
 
-        # create a KV event publisher only one for each dp group
         self.data_parallel_rank = \
             self.vllm_config.parallel_config.data_parallel_rank
         self.kv_event_publisher = get_kv_event_publisher(
@@ -560,14 +558,11 @@ class Scheduler(SchedulerInterface):
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
-        # Clear events even if not publishing to avoid memory buildup
         events = self.kv_cache_manager.take_events()
-        # Only collect and publish KV events if this is the DP master
-        if isinstance(self.kv_event_publisher, ZmqEventPublisher) and events:
-            batch = KVEventBatch(ts=time.time(),
-                                 events=events,
-                                 data_parallel_rank=self.data_parallel_rank)
-            self.kv_event_publisher.publish(batch)
+        batch = KVEventBatch(ts=time.time(),
+                             events=events,
+                             data_parallel_rank=self.data_parallel_rank)
+        self.kv_event_publisher.publish(batch)
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
