@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
-from vllm.entrypoints.openai.tool_parsers.utils import REGEX_TIMEOUT
+from vllm.envs import VLLM_TOOL_PARSE_REGEX_TIMEOUT
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -67,8 +67,8 @@ class Llama4PythonicToolParser(ToolParser):
             model_output = model_output.replace("<|python_end|>", "")
 
         try:
-            if not (self.TOOL_CALL_REGEX.match(model_output,
-                                               timeout=REGEX_TIMEOUT)):
+            if not (self.TOOL_CALL_REGEX.match(
+                    model_output, timeout=VLLM_TOOL_PARSE_REGEX_TIMEOUT)):
                 return ExtractedToolCallInformation(tools_called=False,
                                                     tool_calls=[],
                                                     content=model_output)
