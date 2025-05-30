@@ -585,7 +585,7 @@ def pplx_moe(
         w1_scale_chunk = None
         w2_scale_chunk = None
 
-    if False and use_compile:
+    if use_compile:
         _fused_experts = torch.compile(fused_experts,
                                        backend='inductor',
                                        fullgraph=True)
@@ -601,7 +601,7 @@ def pplx_moe(
                          w2_scale=w2_scale_chunk,
                          global_num_experts=num_experts)
 
-    if False and use_cudagraphs: #XXXXXXXXXXXX
+    if use_cudagraphs:
         out.fill_(0)
         stream = torch.cuda.Stream()
         graph = torch.cuda.CUDAGraph()
