@@ -124,11 +124,8 @@ class KVCacheCoordinator:
         for manager in self.single_type_managers:
             manager.free(request_id)
 
-    def get_num_common_prefix_blocks(
-        self,
-        request_id: str,
-        num_running_requests: int,
-    ) -> list[int]:
+    def get_num_common_prefix_blocks(self, request_id: str,
+                                     num_running_requests: int) -> list[int]:
         """
         Get the number of common prefix blocks for a request.
 
@@ -176,6 +173,10 @@ class KVCacheCoordinator:
 
 
 class UnifiedKVCacheCoordinator(KVCacheCoordinator):
+    """
+    KV cache coordinator for unified models with only one KV cache type, and
+    thus one kv cache group.
+    """
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, enable_caching: bool,
@@ -197,6 +198,13 @@ class UnifiedKVCacheCoordinator(KVCacheCoordinator):
 
 
 class HybridKVCacheCoordinator(KVCacheCoordinator):
+    """
+    KV cache coordinator for hybrid models with multiple KV cache types, and
+    thus multiple kv cache groups.
+    To simplify `find_longest_cache_hit`, it only supports the combination of 
+    two types of KV cache groups, and one of them must be full attention.
+    May extend to more general cases in the future.
+    """
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, enable_caching: bool,
@@ -204,16 +212,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         super().__init__(kv_cache_config, max_model_len, use_eagle,
                          enable_caching, caching_hash_fn,
                          enable_kv_cache_events)
-        self.initialize_group_ids()
+        self.verify_and_split_kv_cache_groups()
 
-    def initialize_group_ids(self) -> None:
+    def verify_and_split_kv_cache_groups(self) -> None:
         """
-        For simplicity, find_longest_cache_hit makes some assumptions on the
-        model architecture instead of provides a general solution. This function
-        checks if the assumptions hold.
-        NOTE(Chen): Please open an issue to discuss if you need other cases.
-
-        TODO: add more notes
+        Verifies that the model has exactly two types of KV cache groups, and 
+        one of them is full attention. Then, split the kv cache groups into full
+        attention groups and other groups.
         """
         groups_by_type_id: dict[str, list[int]] = defaultdict(list)
         full_attention_type_ids: set[str] = set()
@@ -260,11 +265,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 - A list of the cache hit blocks for each single type manager.
                 - The number of tokens of the longest cache hit.
         """
-        # For simplicity, we assume the first manager is for full
-        # attention layers, and the block_size of full attention layers
-        # is divisible by other attention layers. This has been verified
-        # in verify_support_find_longest_cache_hit().
-
         # First, find the longest cache hit for full attention.
         hit_blocks_full_attn = self.single_type_managers[
             0].find_longest_cache_hit(
@@ -288,6 +288,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         for i in range(len(hit_blocks_full_attn)):
             del hit_blocks_full_attn[i][hit_length //
                                         self.full_attention_block_size:]
+
         # Merge the hit blocks of full attention and other attention.
         hit_blocks = hit_blocks_other_attn
         for group_id, blocks in enumerate(hit_blocks_full_attn):

@@ -196,7 +196,9 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_group_ids: list[int]) -> list[list[KVCacheBlock]]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than 
-        `max_length`. If no cache hit is found, return an empty list. 
+        `max_length`. The prefix should be a common prefix hit for all the 
+        kv cache groups in `kv_cache_group_ids`. If no cache hit is found, 
+        return an empty list. 
         If eagle is enabled, drop the last matched block to force recompute the 
         last block to get the required hidden states for eagle drafting head. 
         Need to be customized for each attention type.
@@ -204,6 +206,7 @@ class SingleTypeKVCacheManager(ABC):
         Args:
             block_hashes: The block hashes of the request.
             max_length: The maximum length of the cache hit prefix.
+            kv_cache_group_ids: The ids of the kv cache groups.
 
         Returns:
             A list of cached blocks with skipped blocks replaced by null block.
