@@ -628,7 +628,10 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
         multimodal_kwargs = {}
         if model_input.multi_modal_kwargs is not None:
             multimodal_kwargs = MultiModalKwargs.as_kwargs(
-                model_input.multi_modal_kwargs, device=self.device)
+                model_input.multi_modal_kwargs,
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
         execute_model_kwargs = {}
         if previous_hidden_states is not None:
             execute_model_kwargs.update(

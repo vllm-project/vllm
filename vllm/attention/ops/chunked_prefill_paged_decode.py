@@ -264,8 +264,8 @@ def chunked_prefill_paged_decode(
     # Conversion of FP8 Tensor from uint8 storage to
     # appropriate torch.dtype for interpretation by Triton
     if "fp8" in kv_cache_dtype:
-        assert key_cache.dtype == torch.uint8
-        assert value_cache.dtype == torch.uint8
+        assert key_cache.dtype in [torch.uint8, current_platform.fp8_dtype()]
+        assert value_cache.dtype in [torch.uint8, current_platform.fp8_dtype()]
 
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             target_dtype = current_platform.fp8_dtype()
