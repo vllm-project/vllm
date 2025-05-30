@@ -31,7 +31,7 @@ the failure?
    Still failing on main as of commit abcdef123
    ```
 
-5. **In the description, include failing tests:**
+4. **In the description, include failing tests:**
 
    ```text
    FAILED failing/test.py:failing_test1 - Failure description  
