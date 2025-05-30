@@ -7,6 +7,7 @@ from typing import Any, Union
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -14,7 +15,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
-from vllm.envs import VLLM_TOOL_PARSE_REGEX_TIMEOUT
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -68,7 +68,8 @@ class Llama4PythonicToolParser(ToolParser):
 
         try:
             if not (self.TOOL_CALL_REGEX.match(
-                    model_output, timeout=VLLM_TOOL_PARSE_REGEX_TIMEOUT)):
+                    model_output,
+                    timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS)):
                 return ExtractedToolCallInformation(tools_called=False,
                                                     tool_calls=[],
                                                     content=model_output)
