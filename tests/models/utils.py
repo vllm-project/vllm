@@ -314,6 +314,7 @@ def check_embeddings_close(
                                   dim=0)
 
         fail_msg = (f"Test{prompt_idx}:"
+                    f"\nCosine similarity: \t{sim:.4f}"
                     f"\n{name_0}:\t{embeddings_0[:16]!r}"
                     f"\n{name_1}:\t{embeddings_1[:16]!r}")
 
