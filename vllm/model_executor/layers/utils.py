@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Utility methods for model layers."""
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
 import torch
 
@@ -13,7 +13,7 @@ def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,
     num_seqs: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     # Compute the bin counts for the tokens.
     # vocab_size + 1 for padding.
     bin_counts = torch.zeros((num_seqs, vocab_size + 1),
@@ -84,7 +84,7 @@ def rocm_unquantized_gemm(x: torch.Tensor,
     m = weight.shape[0]
     cu_count = current_platform.get_cu_count()
 
-    if m > 8 and 0 < n < 4:
+    if m > 8 and 0 < n <= 4:
         out = ops.wvSplitK(weight, x_view, cu_count)
         return out.view(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192:

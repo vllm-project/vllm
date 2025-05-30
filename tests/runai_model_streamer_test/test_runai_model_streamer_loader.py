@@ -2,8 +2,7 @@
 
 from vllm import SamplingParams
 from vllm.config import LoadConfig, LoadFormat
-from vllm.model_executor.model_loader.loader import (RunaiModelStreamerLoader,
-                                                     get_model_loader)
+from vllm.model_executor.model_loader import get_model_loader
 
 test_model = "openai-community/gpt2"
 
@@ -24,7 +23,7 @@ def get_runai_model_loader():
 
 def test_get_model_loader_with_runai_flag():
     model_loader = get_runai_model_loader()
-    assert isinstance(model_loader, RunaiModelStreamerLoader)
+    assert model_loader.__class__.__name__ == "RunaiModelStreamerLoader"
 
 
 def test_runai_model_loader_download_files(vllm_runner):

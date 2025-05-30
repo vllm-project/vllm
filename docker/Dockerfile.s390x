@@ -84,16 +84,40 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     rustup default stable && \
     rustup show
 
+FROM python-install AS torch
+ARG TORCH_VERSION=2.7.0
+ENV export _GLIBCXX_USE_CXX11_ABI=1
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH="$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
+
+WORKDIR /tmp
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=rust,source=/root/.cargo,target=/root/.cargo,rw \
+    --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
+    git clone https://github.com/pytorch/pytorch.git && \
+    cd pytorch && \
+    git checkout v2.7.0 && \
+    git submodule sync && \
+    git submodule update --init --recursive && \
+    uv pip install cmake ninja && \
+    uv pip install -r requirements.txt && \
+    python setup.py bdist_wheel
+    
+
 FROM python-install AS torch-vision
 # Install torchvision
-ARG TORCH_VERSION=2.7.0.dev20250304
+ARG TORCH_VERSION=2.7.0
 ARG TORCH_VISION_VERSION=v0.20.1
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=torch,source=/tmp/pytorch/dist,target=/tmp/torch-wheels/ \
     git clone https://github.com/pytorch/vision.git && \
     cd vision && \
     git checkout $TORCH_VISION_VERSION && \
-    uv pip install -v torch==${TORCH_VERSION} --extra-index-url https://download.pytorch.org/whl/nightly/cpu && \
+    TORCH_WHL_FILE=$(ls /tmp/torch-wheels/*.whl | head -n 1) && \
+    uv pip install -v $TORCH_WHL_FILE && \
     python setup.py bdist_wheel
 
 FROM python-install AS hf-xet-builder
@@ -138,15 +162,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=pyarrow,source=/tmp/arrow/python/dist,target=/tmp/arrow-wheels \
     --mount=type=bind,from=torch-vision,source=/tmp/vision/dist,target=/tmp/vision-wheels/ \
     --mount=type=bind,from=hf-xet-builder,source=/tmp/hf-xet/dist,target=/tmp/hf-xet-wheels/ \
+    --mount=type=bind,from=torch,source=/tmp/pytorch/dist,target=/tmp/torch-wheels/ \
      sed -i '/^torch/d' requirements/build.txt && \
      ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/pyarrow-*.whl | head -n 1) && \
      VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl | head -n 1) && \
      HF_XET_WHL_FILE=$(ls /tmp/hf-xet-wheels/*.whl | head -n 1) && \
+     TORCH_WHL_FILE=$(ls /tmp/torch-wheels/*.whl | head -n 1) && \
     uv pip install -v \    
         $ARROW_WHL_FILE  \
         $VISION_WHL_FILE \
         $HF_XET_WHL_FILE \
-        --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
+        $TORCH_WHL_FILE \
         --index-strategy unsafe-best-match \
         -r requirements/build.txt \
         -r requirements/cpu.txt 

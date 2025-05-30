@@ -3,7 +3,7 @@
 import math
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -713,8 +713,8 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -723,7 +723,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -922,8 +922,8 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 'Florence2 only supports COSINE as temporal embedding.')
 
     def _validate_pixel_values(
-        self, data: Union[torch.Tensor, List[torch.Tensor]]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+        self, data: Union[torch.Tensor, list[torch.Tensor]]
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
 
         size = self.processor_config["size"]
         h, w = size["height"], size["width"]
@@ -944,12 +944,12 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
         return data
 
     def _parse_and_validate_image_input(self, **kwargs: object):
-        pixel_values: Optional[Union[List[List[torch.Tensor]],
-                                     List[torch.Tensor],
+        pixel_values: Optional[Union[list[list[torch.Tensor]],
+                                     list[torch.Tensor],
                                      torch.Tensor]] = kwargs.pop(
                                          "pixel_values", None)
-        image_embeds: Optional[Union[List[List[torch.Tensor]],
-                                     List[torch.Tensor],
+        image_embeds: Optional[Union[list[list[torch.Tensor]],
+                                     list[torch.Tensor],
                                      torch.Tensor]] = kwargs.pop(
                                          "image_embeds", None)
 
@@ -1096,7 +1096,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

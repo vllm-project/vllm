@@ -15,6 +15,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -161,7 +162,8 @@ class TPUWorker:
             runner_kv_caches)
 
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
-        self.model_runner.profile_run(self.model_runner.max_num_tokens)
+        with self.model_runner.maybe_setup_dummy_loras(self.lora_config):
+            self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
@@ -211,6 +213,9 @@ class TPUWorker:
             else:
                 xp.stop_trace()
 
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_runner.add_lora(lora_request)
+
     def load_model(self) -> None:
         self.model_runner.load_model()
 
@@ -258,3 +263,11 @@ def init_tpu_worker_distributed_environment(
     )
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
+
+try:
+    from tpu_commons.worker import TPUWorker as TPUCommonsWorker
+    TPUWorker = TPUCommonsWorker  # type: ignore
+except ImportError:
+    logger.info("tpu_commons not found, using vLLM's TPUWorker.")
+    pass

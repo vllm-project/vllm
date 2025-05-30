@@ -15,10 +15,10 @@ import importlib.metadata
 import importlib.util
 import inspect
 import ipaddress
+import json
 import multiprocessing
 import os
 import pickle
-import re
 import signal
 import socket
 import subprocess
@@ -33,7 +33,8 @@ import uuid
 import warnings
 import weakref
 from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError)
+                      ArgumentTypeError, RawDescriptionHelpFormatter,
+                      _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
@@ -53,6 +54,7 @@ import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
+import regex as re
 import torch
 import torch.types
 import yaml
@@ -70,13 +72,21 @@ import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
+    from argparse import Namespace
+
     from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
+# This value is chosen to have a balance between ITL and TTFT. Note it is
+# not optimized for throughput.
+DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
+
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/features/compatibility_matrix.md
+# Reminder: Please update docs/features/compatibility_matrix.md
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
@@ -97,7 +107,7 @@ STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "currently not supported for encoder/decoder "
     "models.")
 
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is currently not currently "
+STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
                              "supported with encoder/decoder "
                              "models.")
 
@@ -151,6 +161,7 @@ STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
 STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
+STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 GB_bytes = 1_000_000_000
@@ -610,6 +621,10 @@ def is_valid_ipv6_address(address: str) -> bool:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
+    return get_tcp_uri(ip, port)
+
+
+def get_tcp_uri(ip: str, port: int) -> str:
     # Brackets are not permitted in ipv4 addresses,
     # see https://github.com/python/cpython/issues/103848
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
@@ -704,6 +719,13 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
+def next_power_of_2(n) -> int:
+    """The next power of 2 (inclusive)"""
+    if n < 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
 def round_up(x: int, y: int) -> int:
     return ((x + y - 1) // y) * y
 
@@ -737,16 +759,15 @@ def get_kv_cache_torch_dtype(
         model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
-            if isinstance(model_dtype, str):
+            if isinstance(model_dtype,
+                          str) and model_dtype in STR_DTYPE_TO_TORCH_DTYPE:
                 torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
             elif isinstance(model_dtype, torch.dtype):
                 torch_dtype = model_dtype
             else:
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
-        elif cache_dtype in ["half", "bfloat16", "float"]:
+        elif cache_dtype in STR_DTYPE_TO_TORCH_DTYPE:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype == "fp8":
-            torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     elif isinstance(cache_dtype, torch.dtype):
@@ -983,7 +1004,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
     """
-    Unlike {class}`itertools.groupby`, groups are not broken by
+    Unlike [`itertools.groupby`][], groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)
@@ -1302,7 +1323,8 @@ class StoreBoolean(Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter,
+                          RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
@@ -1326,13 +1348,51 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
 class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
+    _deprecated: set[Action] = set()
+
     def __init__(self, *args, **kwargs):
         # Set the default 'formatter_class' to SortedHelpFormatter
         if 'formatter_class' not in kwargs:
             kwargs['formatter_class'] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
 
-    def parse_args(self, args=None, namespace=None):
+    if sys.version_info < (3, 13):
+        # Enable the deprecated kwarg for Python 3.12 and below
+
+        def parse_known_args(self, args=None, namespace=None):
+            namespace, args = super().parse_known_args(args, namespace)
+            for action in FlexibleArgumentParser._deprecated:
+                if (hasattr(namespace, dest := action.dest)
+                        and getattr(namespace, dest) != action.default):
+                    logger.warning_once("argument '%s' is deprecated", dest)
+            return namespace, args
+
+        def add_argument(self, *args, **kwargs):
+            deprecated = kwargs.pop("deprecated", False)
+            action = super().add_argument(*args, **kwargs)
+            if deprecated:
+                FlexibleArgumentParser._deprecated.add(action)
+            return action
+
+        class _FlexibleArgumentGroup(_ArgumentGroup):
+
+            def add_argument(self, *args, **kwargs):
+                deprecated = kwargs.pop("deprecated", False)
+                action = super().add_argument(*args, **kwargs)
+                if deprecated:
+                    FlexibleArgumentParser._deprecated.add(action)
+                return action
+
+        def add_argument_group(self, *args, **kwargs):
+            group = self._FlexibleArgumentGroup(self, *args, **kwargs)
+            self._action_groups.append(group)
+            return group
+
+    def parse_args(  # type: ignore[override]
+        self,
+        args: list[str] | None = None,
+        namespace: Namespace | None = None,
+    ):
         if args is None:
             args = sys.argv[1:]
 
@@ -1366,6 +1426,51 @@ class FlexibleArgumentParser(ArgumentParser):
                 processed_args.append(arg[2:])
             else:
                 processed_args.append(arg)
+
+        def create_nested_dict(keys: list[str], value: str):
+            """Creates a nested dictionary from a list of keys and a value.
+
+            For example, `keys = ["a", "b", "c"]` and `value = 1` will create:
+            `{"a": {"b": {"c": 1}}}`
+            """
+            nested_dict: Any = value
+            for key in reversed(keys):
+                nested_dict = {key: nested_dict}
+            return nested_dict
+
+        def recursive_dict_update(original: dict, update: dict):
+            """Recursively updates a dictionary with another dictionary."""
+            for k, v in update.items():
+                if isinstance(v, dict) and isinstance(original.get(k), dict):
+                    recursive_dict_update(original[k], v)
+                else:
+                    original[k] = v
+
+        delete = set()
+        dict_args: dict[str, dict] = defaultdict(dict)
+        for i, processed_arg in enumerate(processed_args):
+            if processed_arg.startswith("--") and "." in processed_arg:
+                if "=" in processed_arg:
+                    processed_arg, value = processed_arg.split("=", 1)
+                    if "." not in processed_arg:
+                        # False positive, . was only in the value
+                        continue
+                else:
+                    value = processed_args[i + 1]
+                    delete.add(i + 1)
+                key, *keys = processed_arg.split(".")
+                # Merge all values with the same key into a single dict
+                arg_dict = create_nested_dict(keys, value)
+                recursive_dict_update(dict_args[key], arg_dict)
+                delete.add(i)
+        # Filter out the dict args we set to None
+        processed_args = [
+            a for i, a in enumerate(processed_args) if i not in delete
+        ]
+        # Add the dict args back as if they were originally passed as JSON
+        for dict_arg, dict_value in dict_args.items():
+            processed_args.append(dict_arg)
+            processed_args.append(json.dumps(dict_value))
 
         return super().parse_args(processed_args, namespace)
 
@@ -1812,11 +1917,11 @@ class _PlaceholderBase:
     Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
-    {meth}`__getattr__` is not called when they are accessed.
+    [`__getattr__`][vllm.utils._PlaceholderBase.__getattr__]
+    is not called when they are accessed.
 
-    :::{seealso}
-    [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
-    :::
+    Info:
+        [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
     """
 
     def __getattr__(self, key: str) -> Never:
@@ -2290,6 +2395,24 @@ def split_zmq_path(path: str) -> Tuple[str, str, str]:
     return scheme, host, port
 
 
+def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
+    """Make a ZMQ path from its parts.
+
+    Args:
+        scheme: The ZMQ transport scheme (e.g. tcp, ipc, inproc).
+        host: The host - can be an IPv4 address, IPv6 address, or hostname.
+        port: Optional port number, only used for TCP sockets.
+
+    Returns:
+        A properly formatted ZMQ path string.
+    """
+    if not port:
+        return f"{scheme}://{host}"
+    if is_valid_ipv6_address(host):
+        return f"{scheme}://[{host}]:{port}"
+    return f"{scheme}://{host}:{port}"
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
@@ -2297,6 +2420,7 @@ def make_zmq_socket(
     socket_type: Any,
     bind: Optional[bool] = None,
     identity: Optional[bytes] = None,
+    linger: Optional[int] = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2316,7 +2440,7 @@ def make_zmq_socket(
         buf_size = -1  # Use system default buffer size
 
     if bind is None:
-        bind = socket_type != zmq.PUSH
+        bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
 
     if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.RCVHWM, 0)
@@ -2328,6 +2452,9 @@ def make_zmq_socket(
 
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
+
+    if linger is not None:
+        socket.setsockopt(zmq.LINGER, linger)
 
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
@@ -2400,7 +2527,7 @@ def _maybe_force_spawn():
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-            "See https://docs.vllm.ai/en/latest/getting_started/"
+            "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
             "for more information. Reason: %s", reason)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -2665,14 +2792,17 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
 
 # Only relevant for models using ALiBi (e.g, MPT)
 def check_use_alibi(model_config: ModelConfig) -> bool:
-    return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
+    cfg = model_config.hf_text_config
+    return (getattr(cfg, "alibi", False)  # Falcon
             or ("BloomForCausalLM" in getattr(model_config.hf_config,
                                               "architectures", []))  # Bloom
-            or getattr(model_config.hf_text_config, "position_encoding_type",
-                       "") == "alibi"  # codellm_1b_alibi
-            or
-            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
-             and model_config.hf_text_config.attn_config.get("alibi", False)))
+            or getattr(cfg, "position_encoding_type", "") ==
+            "alibi"  # codellm_1b_alibi
+            or (hasattr(cfg, "attn_config")  # MPT
+                and ((isinstance(cfg.attn_config, dict)
+                      and cfg.attn_config.get("alibi", False)) or
+                     (not isinstance(cfg.attn_config, dict)
+                      and getattr(cfg.attn_config, "alibi", False)))))
 
 
 def sha256(input) -> int:

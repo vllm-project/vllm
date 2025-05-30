@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Custom normalization layers."""
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -31,7 +31,7 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor,
 
 def fused_add_rms_norm(
         x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-        variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
     ops.fused_add_rms_norm(
         x,
@@ -46,25 +46,32 @@ def rocm_aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor,
                         variance_epsilon: float) -> torch.Tensor:
 
     import aiter as rocm_aiter
+    if x.dim() > 2:
+        x_original_shape = x.shape
+        x = x.reshape(-1, x_original_shape[-1])
+        x = rocm_aiter.rms_norm(x, weight, variance_epsilon)
+        return x.reshape(x_original_shape)
+
     return rocm_aiter.rms_norm(x, weight, variance_epsilon)
 
 
 def rocm_aiter_fused_add_rms_norm(
         x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-        variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
 
     import aiter as rocm_aiter
 
-    # Assuming the correct signature for rmsnorm2d_fwd_with_add
+    residual_out = torch.empty_like(residual)
+    output = torch.empty_like(x)
     rocm_aiter.rmsnorm2d_fwd_with_add(
-        x,  # output
+        output,  # output
         x,  # input
         residual,  # residual input
-        residual,  # residual output
+        residual_out,  # residual output
         weight,
         variance_epsilon,
     )
-    return x, residual
+    return output, residual_out
 
 
 def dispatch_cuda_rmsnorm_func(add_residual: bool):
@@ -112,7 +119,7 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
         x = x.to(torch.float32)
@@ -150,7 +157,7 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
@@ -167,7 +174,7 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         from vllm_hpu_extension.kernels import rms_norm
         HPUFusedRMSNorm = rms_norm()
         if HPUFusedRMSNorm is None:
@@ -187,7 +194,7 @@ class RMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
@@ -237,7 +244,7 @@ class GemmaRMSNorm(CustomOp):
         variance_epsilon: float,
         x: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
         if residual is not None:
@@ -260,7 +267,7 @@ class GemmaRMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         return self.forward_static(self.weight.data, self.variance_epsilon, x,
                                    residual)
@@ -269,7 +276,7 @@ class GemmaRMSNorm(CustomOp):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if torch.compiler.is_compiling():
             return self.forward_native(x, residual)
 

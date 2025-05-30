@@ -20,6 +20,7 @@ from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
@@ -39,6 +40,7 @@ from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import sanity_check_mm_encoder_outputs
 
@@ -90,7 +92,7 @@ MIN_NUM_SEQS = 8
 # The dummy_run should be comprehensive, ensuring all potential input shapes and
 # branch predictions are included as subgraph inputs to facilitate
 # pre-compilation.
-class TPUModelRunner:
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -151,6 +153,9 @@ class TPUModelRunner:
         self.hidden_size = model_config.get_hidden_size()
         self.vocab_size = model_config.get_vocab_size()
 
+        if self.lora_config is not None:
+            self.vocab_size += self.lora_config.lora_extra_vocab_size
+
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
@@ -173,14 +178,16 @@ class TPUModelRunner:
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
-        # Persistent batch.
+
+        # Initialize input batch early to avoid AttributeError in _update_states
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
-            vocab_size=self.vocab_size,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_size=self.block_size,
         )
 
         # Cached torch/numpy tensor
@@ -189,20 +196,15 @@ class TPUModelRunner:
         self.input_ids_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int32,
                                          device="cpu")
-        self.input_ids_np = self.input_ids_cpu.numpy()
 
         self.positions_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int32,
                                          device="cpu")
         self.positions_np = self.positions_cpu.numpy()
 
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int64,
-                                            device="cpu")
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.block_table_cpu = torch.zeros(
             (self.max_num_reqs, self.max_num_blocks_per_req),
-            dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
+            dtype=torch.int32,
             device="cpu")
 
         self.query_start_loc_cpu = torch.zeros(self.max_num_tokens + 1,
@@ -527,12 +529,13 @@ class TPUModelRunner:
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
-        block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
+        block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
         block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
         np.add(block_numbers * self.block_size,
                block_offsets,
-               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+               out=self.input_batch.block_table[0].
+               slot_mapping_np[:total_num_scheduled_tokens])
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -556,17 +559,30 @@ class TPUModelRunner:
         self.position_ids = self.positions_cpu[:
                                                padded_total_num_scheduled_tokens].to(
                                                    self.device)
-        self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
-        slot_mapping = self.slot_mapping_cpu[:
-                                             padded_total_num_scheduled_tokens].to(
-                                                 self.device)
+        self.input_batch.block_table[0].slot_mapping_cpu[
+            total_num_scheduled_tokens:] = _PAD_SLOT_ID
+        slot_mapping = (
+            self.input_batch.block_table[0].
+            slot_mapping_cpu[:padded_total_num_scheduled_tokens].to(
+                self.device))
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
-            self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
+            self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
         block_tables = block_tables.to(self.device)
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
+
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -588,7 +604,25 @@ class TPUModelRunner:
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
-        return attn_metadata, logits_indices, padded_num_reqs
+
+        if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
+            self.set_active_loras(self.input_batch,
+                                  padded_num_scheduled_tokens_per_req)
+
+        layer_names = get_layers_from_vllm_config(self.vllm_config,
+                                                  Attention).keys()
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata
+            for layer_name in layer_names
+        }
+        return per_layer_attn_metadata, logits_indices, padded_num_reqs
 
     def _scatter_placeholders(
         self,
@@ -643,8 +677,11 @@ class TPUModelRunner:
         encoder_outputs = []
         for grouped_mm_inputs in grouped_mm_inputs_list:
             batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
-            batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
-                                                           device=self.device)
+            batched_mm_inputs = MultiModalKwargs.as_kwargs(
+                batched_mm_inputs,
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
 
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -900,6 +937,12 @@ class TPUModelRunner:
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
+        if self.lora_config is not None:
+            model = self.load_lora_model(model, self.model_config,
+                                         self.scheduler_config,
+                                         self.lora_config, self.device)
+            replace_set_lora(model)
+
         # Sync all pending XLA execution during model initialization and weight
         # loading.
         xm.mark_step()
@@ -956,11 +999,28 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        with set_forward_context(attn_metadata, self.vllm_config, 0):
+        layer_names = get_layers_from_vllm_config(self.vllm_config,
+                                                  Attention).keys()
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata
+            for layer_name in layer_names
+        }
+
+        with self.maybe_select_dummy_loras(
+                self.lora_config,
+                np.array([num_tokens], dtype=np.int32)), set_forward_context(
+                    per_layer_attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
                              positions=position_ids,
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
+
+    def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping,
+                          lora_requests) -> None:
+        xm.mark_step()  # Captures input updates
+        super()._set_active_loras(prompt_lora_mapping, token_lora_mapping,
+                                  lora_requests)
+        xm.mark_step()  # Captures metadata updates
 
     def _precompile_mm_encoder(self) -> None:
         # Pre-compile MM encoder for all supported data modalities.
@@ -1124,7 +1184,10 @@ class TPUModelRunner:
                         generate_params_if_all_greedy,
                     ))
                 sampling_metadata.all_greedy = all_greedy
-                self.sample_from_logits(dummy_logits, sampling_metadata)
+                with self.maybe_select_dummy_loras(
+                        self.lora_config, np.array([num_reqs],
+                                                   dtype=np.int32)):
+                    self.sample_from_logits(dummy_logits, sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -1140,7 +1203,9 @@ class TPUModelRunner:
                                        dtype=self._hidden_states_dtype)
             dummy_tokens = torch.zeros((num_reqs, 1),
                                        dtype=torch.int64).to(self.device)
-            self.gather_logprobs(dummy_logits, dummy_tokens)
+            with self.maybe_select_dummy_loras(
+                    self.lora_config, np.array([num_reqs], dtype=np.int32)):
+                self.gather_logprobs(dummy_logits, dummy_tokens)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -1151,13 +1216,14 @@ class TPUModelRunner:
         """
         Precompile all the subgraphs with possible input shapes.
         """
-        self._precompile_mm_encoder()
-        self._precompile_backbone()
-        self._precompile_select_hidden_states()
-        self._precompile_compute_logits()
-        self._precompile_structured_decoding()
-        self._precompile_sample_from_logits()
-        self._precompile_gather_logprobs()
+        with self.maybe_setup_dummy_loras(self.lora_config):
+            self._precompile_mm_encoder()
+            self._precompile_backbone()
+            self._precompile_select_hidden_states()
+            self._precompile_compute_logits()
+            self._precompile_structured_decoding()
+            self._precompile_sample_from_logits()
+            self._precompile_gather_logprobs()
 
     def profile_run(
         self,
@@ -1229,6 +1295,22 @@ class TPUModelRunner:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
+
+        if kv_cache_config.kv_cache_groups[
+                0].kv_cache_spec.block_size != self.block_size:
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_size=kv_cache_config.kv_cache_groups[0].kv_cache_spec.
+                block_size,
+            )
+        # Verify dtype compatibility between block_table_cpu and input_batch
+        assert self.block_table_cpu.dtype == self.input_batch.block_table[
+            0].get_cpu_tensor().dtype
 
         kv_caches: dict[str, torch.Tensor] = {}
 
@@ -1398,8 +1480,11 @@ class TPUModelRunner:
 
         batched_dummy_mm_inputs = MultiModalKwargs.batch([dummy_mm_kwargs] *
                                                          batch_size)
-        return MultiModalKwargs.as_kwargs(batched_dummy_mm_inputs,
-                                          device=self.device)
+        return MultiModalKwargs.as_kwargs(
+            batched_dummy_mm_inputs,
+            dtype=self.model_config.dtype,
+            device=self.device,
+        )
 
 
 def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
@@ -1424,11 +1509,11 @@ def _get_token_paddings(min_token_size: int, max_token_size: int,
                         padding_gap: int) -> list[int]:
     """Generate a list of padding size, starting from min_token_size, 
     ending with a number that can cover max_token_size
-    
+
     If padding_gap == 0 then:
         increase 2X each time (exponential)
     else:
-        first increase the size to twice, 
+        first increase the size to twice,
         then increase the padding size by padding_gap.
     """
     # assert min_token_size is power of 2
@@ -1465,3 +1550,32 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
+
+
+def replace_set_lora(model):
+
+    def _tpu_set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor] = None,
+    ):
+        # TODO: The integer index leads to a recompilation, but converting it
+        # to a tensor doesn't seem to work anymore. This might be fixed with a
+        # later release of torch_xla.
+        self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
+        xm.mark_step()
+
+    def _tpu_reset_lora(self, index: int):
+        self._original_reset_lora(index)
+        xm.mark_step()
+
+    for _, module in model.named_modules():
+        if isinstance(module, BaseLayerWithLoRA):
+            module._original_set_lora = module.set_lora
+            module._original_reset_lora = module.reset_lora
+            module.set_lora = _tpu_set_lora.__get__(module, module.__class__)
+            module.reset_lora = _tpu_reset_lora.__get__(
+                module, module.__class__)

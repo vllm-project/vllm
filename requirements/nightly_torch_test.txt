@@ -8,7 +8,6 @@ pytest-rerunfailures
 pytest-shard
 pytest-timeout
 
-
 librosa # required by audio tests in entrypoints/openai
 sentence-transformers
 numba == 0.61.2; python_version > '3.9'
@@ -31,3 +30,12 @@ bitsandbytes>=0.45.3
 # required for minicpmo_26 test
 vector_quantize_pytorch
 vocos
+
+# required for Basic Models Test
+blobfile # required for kimi-vl test
+matplotlib # required for qwen-vl test
+
+# required for  Multi-Modal Models Test (Standard)
+num2words # required for smolvlm test
+pqdm
+timm # required for internvl test

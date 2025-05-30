@@ -31,7 +31,10 @@ TEMPLATE = ("template __global__ void Marlin<"
 
 # int8 with zero point case (vllm::kU8) is also supported,
 # we don't add it to reduce wheel size.
-SCALAR_TYPES = ["vllm::kU4", "vllm::kU4B8", "vllm::kU8B128", "vllm::kFE4M3fn"]
+SCALAR_TYPES = [
+    "vllm::kU4", "vllm::kU4B8", "vllm::kU8B128", "vllm::kFE4M3fn",
+    "vllm::kFE2M1f"
+]
 THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128),
                   (128, 64, 128)]
 
@@ -40,7 +43,7 @@ THREAD_M_BLOCKS = [0.5, 1, 2, 3, 4]
 #   = 0 : act order case
 #   = -1 : channelwise quantization
 #   > 0 : group_size=16*group_blocks
-GROUP_BLOCKS = [0, -1, 2, 4, 8]
+GROUP_BLOCKS = [0, 1, -1, 2, 4, 8]
 DTYPES = ["fp16", "bf16"]
 
 
@@ -72,6 +75,12 @@ def generate_new_kernels():
             # we only support channelwise quantization and group_size == 128
             # for fp8
             if scalar_type == "vllm::kFE4M3fn" and group_blocks not in [-1, 8]:
+                continue
+            # nvfp4 only supports group_size == 16
+            if scalar_type == "vllm::kFE2M1f" and group_blocks != 1:
+                continue
+            # other quantization methods don't support group_size = 16
+            if scalar_type != "vllm::kFE2M1f" and group_blocks == 1:
                 continue
 
             k_blocks = thread_configs[0] // 16

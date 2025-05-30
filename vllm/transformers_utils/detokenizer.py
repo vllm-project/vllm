@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Optional
+from typing import Optional
 
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Logprob, SamplingParams,
                            Sequence, SequenceGroup)
@@ -22,7 +22,7 @@ class Detokenizer:
         return self.tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
     def decode_prompt_logprobs_inplace(self, seq_group: SequenceGroup,
-                                       prompt_logprobs: List[Optional[Dict[
+                                       prompt_logprobs: list[Optional[dict[
                                            int, Logprob]]],
                                        position_offset: int) -> None:
         """Decodes the logprobs for the prompt of a sequence group.
@@ -49,7 +49,7 @@ class Detokenizer:
         read_offset = 0
         next_iter_prefix_offset = 0
         next_iter_read_offset = 0
-        next_iter_tokens: List[str] = []
+        next_iter_tokens: list[str] = []
         prev_tokens = None
 
         for token_position_in_logprob, prompt_logprobs_for_token in enumerate(
