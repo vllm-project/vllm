@@ -1176,9 +1176,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_ids, mm_embeds)
             else:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
-            # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            if num_scheduled_tokens != num_input_tokens:
+                self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+                inputs_embeds = self.inputs_embeds[:num_input_tokens]
             input_ids = None
         else:
             # For text-only models, we use token ids as input.
