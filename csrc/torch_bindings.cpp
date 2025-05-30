@@ -495,6 +495,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor output_scale_offset_by_experts) -> ()");
   ops.impl("scaled_fp4_experts_quant", torch::kCUDA, &scaled_fp4_experts_quant);
 
+  // Permute for MoE
+  ops.def(
+      "moe_permute(Tensor input_tensor, Tensor dst2src_map, Tensor! output_tensor) -> ()");
+  ops.impl("moe_permute", torch::kCUDA, &moe_permute);
+
   // Check if cutlass_scaled_mm_fp4 is supported for CUDA devices
   // of the given capability
   ops.def("cutlass_scaled_mm_supports_fp4(int cuda_device_capability) -> bool");

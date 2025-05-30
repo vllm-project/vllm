@@ -835,6 +835,14 @@ def get_cutlass_moe_mm_data(
                                                 output_permutation,
                                                 num_experts, n, k)
 
+def moe_permute(
+        input_tensor: torch.Tensor, dst2src_map: torch.Tensor, output_tensor: torch.Tensor
+):
+    """
+    Permute the input tensor according to the dst2src_map and store the result in output_tensor.
+    This is used in MoE to permute the input tensor before performing grouped matrix multiplications.
+    """
+    return torch.ops._C.moe_permute(input_tensor, dst2src_map, output_tensor)
 
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                    b_tensors: torch.Tensor, a_scales: torch.Tensor,
@@ -1112,6 +1120,15 @@ def scaled_fp4_experts_quant(
     # from running out of memory. This value can also be increased to support
     # larger models.
     MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+    if expert_map is not None:        
+        num_tokens_expanded = expert_map.shape[0]
+        input_tensor_permuted = torch.empty((num_tokens_expanded, input_tensor.shape[1]),
+                                      device=input_tensor.device,
+                                      dtype=input_tensor.dtype)
+        moe_permute(input_tensor, expert_map, input_tensor_permuted)
+
+
+    m_numtopk, k = input_tensor_permuted.shape
     assert (m_numtopk <= MAX_TOKENS_PER_EXPERT * topk), (
         f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
         f"{MAX_TOKENS_PER_EXPERT})"
@@ -1129,7 +1146,7 @@ def scaled_fp4_experts_quant(
                                 padded_k,
                                 dtype=torch.int32,
                                 device=input_tensor.device)
-    torch.ops._C.scaled_fp4_experts_quant(output, output_scales, input_tensor,
+    torch.ops._C.scaled_fp4_experts_quant(output, output_scales, input_tensor_permuted,
                                           input_global_scale, expert_offsets,
                                           blockscale_offsets)
     output_scales = output_scales.view(torch.float8_e4m3fn)
