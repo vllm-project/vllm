@@ -304,7 +304,7 @@ class ModelConfig:
     - 25.6k -> 25,600"""
     spec_target_max_model_len: Optional[int] = None
     """Specify the maximum length for spec decoding draft models."""
-    quantization: Optional[QuantizationMethods] = None
+    quantization: SkipValidation[Optional[QuantizationMethods]] = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
@@ -380,7 +380,7 @@ class ModelConfig:
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
     configure the neuron config that can not be gathered from the vllm
-    arguments. e.g. `{"cast_logits_dtype": "bloat16"}`."""
+    arguments. e.g. `{"cast_logits_dtype": "bfloat16"}`."""
     pooler_config: Optional["PoolerConfig"] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
@@ -2231,7 +2231,7 @@ Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
-    device: Union[Device, torch.device] = "auto"
+    device: SkipValidation[Union[Device, torch.device]] = "auto"
     """Device type for vLLM execution.
     This parameter is deprecated and will be 
     removed in a future release. 
@@ -4282,25 +4282,22 @@ class VllmConfig:
             self.model_config.verify_dual_chunk_attention_config(
                 self.load_config)
 
-        if self.cache_config is not None:
-            self.cache_config.verify_with_parallel_config(self.parallel_config)
+        self.cache_config.verify_with_parallel_config(self.parallel_config)
 
-        if self.lora_config:
+        if self.lora_config is not None:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_lora_support()
-        if self.prompt_adapter_config:
+        if self.prompt_adapter_config is not None:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-        if self.quant_config is None and \
-            self.model_config is not None and self.load_config is not None:
+        if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
 
         from vllm.platforms import current_platform
-        if self.scheduler_config is not None and \
-            self.model_config is not None and \
+        if self.model_config is not None and \
             self.scheduler_config.chunked_prefill_enabled and \
             self.model_config.dtype == torch.float32 and \
             current_platform.get_device_capability() == (7, 5):
@@ -4318,15 +4315,10 @@ class VllmConfig:
             self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
-            # NOTE(woosuk): Currently, we use inductor because the piecewise
-            # CUDA graphs do not work properly with the custom CUDA kernels.
-            # FIXME(woosuk): Disable inductor to reduce the compilation time
-            # and avoid any potential issues with the inductor.
             # FIXME(rob): Add function to set all of these.
             if not self.compilation_config.custom_ops:
                 self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
-            self.compilation_config.use_inductor = True
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
@@ -4335,8 +4327,7 @@ class VllmConfig:
 
         self._set_cudagraph_sizes()
 
-        if self.cache_config is not None and \
-            self.cache_config.cpu_offload_gb > 0 and \
+        if self.cache_config.cpu_offload_gb > 0 and \
             self.compilation_config.level != CompilationLevel.NO_COMPILATION \
                 and not envs.VLLM_USE_V1:
             logger.warning(
@@ -4358,16 +4349,16 @@ class VllmConfig:
                 "full_cuda_graph is not supported with "
                 "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
-            if self.cache_config is not None:
-                self.cache_config.enable_prefix_caching = False
+            self.cache_config.enable_prefix_caching = False
 
-        if (self.kv_events_config
+        if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events
                 and not self.cache_config.enable_prefix_caching):
             logger.warning(
                 "KV cache events are on, but prefix caching is not enabled."
                 "Use --enable-prefix-caching to enable.")
-        if (self.kv_events_config and self.kv_events_config.publisher != "null"
+        if (self.kv_events_config is not None
+                and self.kv_events_config.publisher != "null"
                 and not self.kv_events_config.enable_kv_cache_events):
             logger.warning("KV cache events are disabled,"
                            "but the scheduler is configured to publish them."
