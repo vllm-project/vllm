@@ -30,13 +30,16 @@ class Request:
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
+        priority: int = 0,
     ) -> None:
         self.request_id = request_id
+        self.priority = priority
         self.sampling_params = sampling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
+        self.arrival_time = arrival_time
 
         self.status = (RequestStatus.WAITING_FOR_FSM
                        if sampling_params.guided_decoding is not None else
@@ -101,6 +104,7 @@ class Request:
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
             cache_salt=request.cache_salt,
+            priority=request.priority,
         )
 
     def append_output_token_ids(
