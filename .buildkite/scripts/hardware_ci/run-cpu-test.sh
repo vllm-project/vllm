@@ -7,7 +7,8 @@ set -ex
 # allow to bind to different cores
 CORE_RANGE=${CORE_RANGE:-48-95}
 NUMA_NODE=${NUMA_NODE:-1}
-MAX_JOBS=32
+
+export CMAKE_BUILD_PARALLEL_LEVEL=32
 
 # Setup cleanup
 remove_docker_container() { 
