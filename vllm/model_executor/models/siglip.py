@@ -130,11 +130,10 @@ class SiglipVisionEmbeddings(nn.Module):
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
 
         if interpolate_pos_encoding:
-            embeddings = embeddings + self.interpolate_pos_encoding(
+            embeddings += self.interpolate_pos_encoding(
                 embeddings, height, width)
         else:
-            embeddings = embeddings + self.position_embedding(
-                self.position_ids)
+            embeddings += self.position_embedding(self.position_ids)
         return embeddings
 
 
@@ -271,12 +270,12 @@ class SiglipEncoderLayer(nn.Module):
 
         hidden_states = self.layer_norm1(hidden_states)
         hidden_states, _ = self.self_attn(hidden_states=hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         return hidden_states, None
 
@@ -354,7 +353,8 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
 
         residual = hidden_state
         hidden_state = self.layernorm(hidden_state)
-        hidden_state = residual + self.mlp(hidden_state)
+        hidden_state = self.mlp(hidden_state)
+        hidden_state += residual
 
         return hidden_state[:, 0]
 
