@@ -1199,7 +1199,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 with self.maybe_select_dummy_loras(
                         self.lora_config, np.array([num_reqs],
                                                    dtype=np.int32)):
-                    self.sample_from_logits(dummy_logits, sampling_metadata)
+                    self.sample_from_logits_func(dummy_logits,
+                                                 sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
