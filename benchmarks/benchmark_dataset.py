@@ -780,10 +780,7 @@ class InstructCoderDataset(HuggingFaceDataset):
             the code, do not include any explanation."
             # apply template
             prompt = tokenizer.apply_chat_template(
-                [{
-                    "role": "user",
-                    "content": prompt
-                }],
+                [{"role": "user", "content": prompt}],
                 add_generation_prompt=True,
                 tokenize=False,
             )
