@@ -424,6 +424,9 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/quantization
   commands:
+  # temporary install here since we need nightly, will move to requirements/test.in
+  # after torchao 0.12 release
+  - pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
 
 - label: LM Eval Small Models # 53min
