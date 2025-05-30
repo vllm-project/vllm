@@ -462,16 +462,17 @@ class NixlConnectorWorker:
                 return metadata
 
         # Handshake with remote agent-rank0 first to get the tp_size of remote
-        path = f"tcp://{host}:{port}"
+        path = make_zmq_path("tcp", host, port)
         logger.debug("Querying master rank metadata on path: %s", path)
         metadata = handshake(path, 0)
 
         # Handshake only with the other TP remote the current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
         tp_rate = self._tp_size[self.engine_id] // metadata.tp_size
+        # TODO (NickLucche) this is not compatible with DP as is.
         p_remote_rank = self.rank // tp_rate
         if p_remote_rank > 0:
-            path = f"tcp://{host}:{port + p_remote_rank}"
+            path = make_zmq_path("tcp", host, port + p_remote_rank)
             logger.debug("Querying metadata on path: %s at remote rank %s",
                          path, p_remote_rank)
             _ = handshake(path, p_remote_rank)
