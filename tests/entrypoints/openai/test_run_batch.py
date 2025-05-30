@@ -2,7 +2,6 @@
 
 import json
 import subprocess
-import sys
 import tempfile
 
 from vllm.entrypoints.openai.protocol import BatchRequestOutput
@@ -35,9 +34,8 @@ def test_empty_file():
         input_file.write("")
         input_file.flush()
         proc = subprocess.Popen([
-            sys.executable, "-m", "vllm.entrypoints.openai.run_batch", "-i",
-            input_file.name, "-o", output_file.name, "--model",
-            "intfloat/multilingual-e5-small"
+            "vllm", "run-batch", "-i", input_file.name, "-o", output_file.name,
+            "--model", "intfloat/multilingual-e5-small"
         ], )
         proc.communicate()
         proc.wait()
@@ -54,9 +52,8 @@ def test_completions():
         input_file.write(INPUT_BATCH)
         input_file.flush()
         proc = subprocess.Popen([
-            sys.executable, "-m", "vllm.entrypoints.openai.run_batch", "-i",
-            input_file.name, "-o", output_file.name, "--model",
-            "NousResearch/Meta-Llama-3-8B-Instruct"
+            "vllm", "run-batch", "-i", input_file.name, "-o", output_file.name,
+            "--model", "NousResearch/Meta-Llama-3-8B-Instruct"
         ], )
         proc.communicate()
         proc.wait()
@@ -79,9 +76,8 @@ def test_completions_invalid_input():
         input_file.write(INVALID_INPUT_BATCH)
         input_file.flush()
         proc = subprocess.Popen([
-            sys.executable, "-m", "vllm.entrypoints.openai.run_batch", "-i",
-            input_file.name, "-o", output_file.name, "--model",
-            "NousResearch/Meta-Llama-3-8B-Instruct"
+            "vllm", "run-batch", "-i", input_file.name, "-o", output_file.name,
+            "--model", "NousResearch/Meta-Llama-3-8B-Instruct"
         ], )
         proc.communicate()
         proc.wait()
@@ -95,9 +91,8 @@ def test_embeddings():
         input_file.write(INPUT_EMBEDDING_BATCH)
         input_file.flush()
         proc = subprocess.Popen([
-            sys.executable, "-m", "vllm.entrypoints.openai.run_batch", "-i",
-            input_file.name, "-o", output_file.name, "--model",
-            "intfloat/multilingual-e5-small"
+            "vllm", "run-batch", "-i", input_file.name, "-o", output_file.name,
+            "--model", "intfloat/multilingual-e5-small"
         ], )
         proc.communicate()
         proc.wait()
@@ -117,9 +112,8 @@ def test_score():
         input_file.write(INPUT_SCORE_BATCH)
         input_file.flush()
         proc = subprocess.Popen([
-            sys.executable,
-            "-m",
-            "vllm.entrypoints.openai.run_batch",
+            "vllm",
+            "run-batch",
             "-i",
             input_file.name,
             "-o",

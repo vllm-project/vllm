@@ -134,11 +134,9 @@ class RequestProcessingMixin(BaseModel):
     Mixin for request processing, 
     handling prompt preparation and engine input.
     """
-    request_prompts: Optional[Sequence[RequestPrompt]] = \
-                            Field(default_factory=list)
+    request_prompts: Optional[Sequence[RequestPrompt]] = []
     engine_prompts: Optional[Union[list[EngineTokensPrompt],
-                                   list[EngineEmbedsPrompt]]] = Field(
-                                       default_factory=list)
+                                   list[EngineEmbedsPrompt]]] = []
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -528,12 +526,14 @@ class OpenAIServing:
         if isinstance(request,
                       (EmbeddingChatRequest, EmbeddingCompletionRequest,
                        ScoreRequest, RerankRequest, ClassificationRequest)):
-            operation = {
-                ScoreRequest: "score",
-                ClassificationRequest: "classification"
-            }.get(type(request), "embedding generation")
 
             if token_num > self.max_model_len:
+                operations: dict[type[AnyRequest], str] = {
+                    ScoreRequest: "score",
+                    ClassificationRequest: "classification"
+                }
+                operation = operations.get(type(request),
+                                           "embedding generation")
                 raise ValueError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
@@ -582,7 +582,8 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
-        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of
+        [`_tokenize_prompt_input_or_inputs`][vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs]
         that assumes single input.
         """
         return next(
@@ -603,7 +604,8 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
         """
-        A simpler implementation of {meth}`_tokenize_prompt_input_or_inputs`
+        A simpler implementation of
+        [`_tokenize_prompt_input_or_inputs`][vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs]
         that assumes multiple inputs.
         """
         for text in prompt_inputs:

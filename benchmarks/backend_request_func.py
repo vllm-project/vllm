@@ -194,6 +194,11 @@ async def async_request_deepspeed_mii(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    assert api_url.endswith(("completions", "profile")), (
+        "OpenAI Completions API URL must end with 'completions' or 'profile'."
+    )
+
     async with aiohttp.ClientSession(
         trust_env=True, timeout=AIOHTTP_TIMEOUT
     ) as session:
@@ -204,6 +209,8 @@ async def async_request_deepspeed_mii(
             "temperature": 0.01,  # deepspeed-mii does not accept 0.0 temp.
             "top_p": 1.0,
         }
+        headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
@@ -215,7 +222,7 @@ async def async_request_deepspeed_mii(
         st = time.perf_counter()
         try:
             async with session.post(
-                url=request_func_input.api_url, json=payload
+                url=api_url, json=payload, headers=headers
             ) as response:
                 if response.status == 200:
                     parsed_resp = await response.json()
@@ -317,7 +324,7 @@ async def async_request_openai_completions(
 
                                 most_recent_timestamp = timestamp
                                 generated_text += text or ""
-                            elif usage := data.get("usage"):
+                            if usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
                     if first_chunk_received:
                         output.success = True
@@ -604,6 +611,7 @@ ASYNC_REQUEST_FUNCS = {
     "tensorrt-llm": async_request_trt_llm,
     "scalellm": async_request_openai_completions,
     "sglang": async_request_openai_completions,
+    "llama.cpp": async_request_openai_completions,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [
