@@ -18,7 +18,6 @@ the failure?
 1. **File a bug report:**  
    👉 [New CI Failure Report](https://github.com/vllm-project/vllm/issues/new?template=450-ci-failure.yml)
 
-2. **Set the `ci-failure` label.**
 
 3. **Use this title format:**
 
