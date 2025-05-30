@@ -121,10 +121,12 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
                 local_rank=local_rank,
                 rank=rank,
                 distributed_init_method=distributed_init_method,
-                cpus_allow_list=cpus_allow_list,
                 is_driver_worker=(not self.parallel_config)
                 or (rank % self.parallel_config.tensor_parallel_size == 0),
             )
+            # pass cpus_allow_list only to CPU worker
+            if current_platform.device_type == "cpu":
+                kwargs.update({'cpus_allow_list': cpus_allow_list})
             all_kwargs.append(kwargs)
         self._run_workers("init_worker", all_kwargs)
         self._run_workers("init_device")
