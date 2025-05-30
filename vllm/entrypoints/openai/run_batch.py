@@ -415,9 +415,9 @@ async def main(args):
                 run_request(score_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url.endswith("/rerank"):
-            score_handler_fn = (None if openai_serving_scores is None else
-                                openai_serving_scores.do_rerank)
-            if score_handler_fn is None:
+            rerank_handler_fn = openai_serving_scores.do_rerank if \
+                openai_serving_scores is not None else None
+            if rerank_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
                         request,
