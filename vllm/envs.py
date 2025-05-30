@@ -119,6 +119,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
+    VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
 
 
 def get_default_cache_root():
@@ -828,6 +829,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is used to prevent the kernel from running out of memory.
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
+
+    # Regex timeout for use by the vLLM tool parsing plugins.
+    "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
+    lambda: int(os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")),
 }
 
 # --8<-- [end:env-vars-definition]
