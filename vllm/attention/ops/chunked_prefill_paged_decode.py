@@ -50,12 +50,12 @@ def kernel_paged_attention_2d(
         stride_k_cache_0: tl.int64,  # int
         stride_k_cache_1: tl.int64,  # int
         stride_k_cache_2: tl.int64,  # int
-        stride_k_cache_3: tl.int64,  # int
-        stride_k_cache_4: tl.int64,  # int
+        stride_k_cache_3: tl.constexpr,  # int
+        stride_k_cache_4: tl.constexpr,  # int
         stride_v_cache_0: tl.int64,  # int
         stride_v_cache_1: tl.int64,  # int
         stride_v_cache_2: tl.int64,  # int
-        stride_v_cache_3: tl.int64,  # int
+        stride_v_cache_3: tl.constexpr,  # int
         filter_by_query_len: tl.constexpr,  # bool
         query_start_len_ptr,  # [num_seqs+1]
 ):
@@ -223,23 +223,23 @@ def kernel_paged_attention_3d(
         num_query_heads: tl.constexpr,  # int
         num_queries_per_kv: tl.constexpr,  # int
         num_queries_per_kv_padded: tl.constexpr,  # int
-        block_table_stride: tl.constexpr,
-        query_stride_0: tl.constexpr,
-        query_stride_1: tl.constexpr,
+        block_table_stride: tl.int64,
+        query_stride_0: tl.int64,
+        query_stride_1: tl.int64,
         BLOCK_SIZE: tl.constexpr,  # int
         HEAD_SIZE: tl.constexpr,  # int
         HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
         USE_ALIBI_SLOPES: tl.constexpr,  # bool
         SLIDING_WINDOW: tl.constexpr,  # int
         x: tl.constexpr,  # int
-        stride_k_cache_0: tl.constexpr,
-        stride_k_cache_1: tl.constexpr,
-        stride_k_cache_2: tl.constexpr,
+        stride_k_cache_0: tl.int64,
+        stride_k_cache_1: tl.int64,
+        stride_k_cache_2: tl.int64,
         stride_k_cache_3: tl.constexpr,
         stride_k_cache_4: tl.constexpr,
-        stride_v_cache_0: tl.constexpr,
-        stride_v_cache_1: tl.constexpr,
-        stride_v_cache_2: tl.constexpr,
+        stride_v_cache_0: tl.int64,
+        stride_v_cache_1: tl.int64,
+        stride_v_cache_2: tl.int64,
         stride_v_cache_3: tl.constexpr,
         filter_by_query_len: tl.constexpr,  # bool
         query_start_len_ptr,  # [num_seqs+1]
@@ -418,9 +418,9 @@ def reduce_segments(
         seq_lens_ptr,  # [num_seqs]
         num_seqs,  # int
         num_query_heads: tl.constexpr,  # int
-        output_stride_0: tl.constexpr,
-        output_stride_1: tl.constexpr,
-        block_table_stride: tl.constexpr,
+        output_stride_0: tl.int64,
+        output_stride_1: tl.int64,
+        block_table_stride: tl.int64,
         BLOCK_SIZE: tl.constexpr,  # int
         HEAD_SIZE: tl.constexpr,  # int, must be power of 2
         HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
