@@ -27,7 +27,6 @@ class BlockPool:
     Args:
         num_gpu_blocks: The number of blocks in the pool.
         enable_caching: Whether to enable prefix caching.
-        num_single_type_managers: The number of single_type_managers.
         enable_kv_cache_events: Whether to enable kv cache events.
     """
 
@@ -49,7 +48,7 @@ class BlockPool:
         # enabled).
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
-        # {tuple[block_hash, manager_id]: {block ID: block}}. A cached block is
+        # {block_hash: {block ID: block}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.
         # The cached block may be used by running requests or in the
         # free_block_queue that could potentially be evicted.
@@ -72,16 +71,16 @@ class BlockPool:
     def get_cached_block(
             self, block_hash: BlockHashType,
             kv_cache_group_ids: list[int]) -> Optional[list[KVCacheBlock]]:
-        """Get a cached block by the block hash, or None if cache miss.
+        """Get the cached block by the block hash for each group in 
+        `kv_cache_group_ids`, or None if cache miss for any group.
         If there are duplicated blocks, we return the first block in the cache.
-        TODO: update notes
 
         Args:
             block_hash: The hash value of the block.
-            kv_cache_group_id: The id of the KV cache group.
+            kv_cache_group_ids: The ids of the KV cache groups.
 
         Returns:
-            The cached block if it exists, or None.
+            The cached blocks if exists, or None.
         """
         cached_blocks = []
         for group_id in kv_cache_group_ids:
@@ -205,8 +204,7 @@ class BlockPool:
         Note that we do not check block cache in this function.
 
         Args:
-            num_block_bundle: The number of KVCacheBlockBundle to allocate.
-            bundle_size: The number of blocks in each KVCacheBlockBundle.
+            num_blocks: The number of blocks to allocate.
 
         Returns:
             A list of new block.

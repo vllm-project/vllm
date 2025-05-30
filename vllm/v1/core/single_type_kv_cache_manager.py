@@ -219,8 +219,9 @@ class SingleTypeKVCacheManager(ABC):
                               num_computed_tokens: int) -> None:
         """
         Remove the blocks that are no longer needed from `blocks`. The removed 
-        blocks should be replaced by null_block. Need to be customized for each 
-        attention type.
+        blocks should be replaced by null_block. Return the removed blocks in 
+        eviction order, where the first returned block should be evicted first.
+        Need to be customized for each attention type.
 
         Args:
             request_id: The request ID.
@@ -234,7 +235,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
     def find_longest_cache_hit(
             self, block_hashes: list[BlockHashType], max_length: int,
             kv_cache_group_ids: list[int]) -> list[list[KVCacheBlock]]:
-        # NOTE: different from other list[list[KVCacheBlock]]
         computed_blocks: list[list[KVCacheBlock]] = [
             [] for _ in range(len(kv_cache_group_ids))
         ]
@@ -288,7 +288,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # contiguous blocks needed for prefix cache hit by one and dropping
             # the last matched block.
             self.sliding_window_contiguous_blocks += 1
-        self.null_block = block_pool.null_block
+        self._null_block = block_pool.null_block
 
     def find_longest_cache_hit(
             self, block_hashes: list[BlockHashType], max_length: int,
@@ -299,7 +299,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // self.block_size
-        computed_blocks = [[self.null_block] * max_num_blocks
+        computed_blocks = [[self._null_block] * max_num_blocks
                            for _ in range(len(kv_cache_group_ids))]
         num_contiguous_blocks = 0
         match_found = False
@@ -340,13 +340,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
-            if blocks[i] == self.null_block:
+            if blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
             removed_blocks.append(blocks[i])
-            blocks[i] = self.null_block
+            blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
 
     def get_num_common_prefix_blocks(self, request_id: str,

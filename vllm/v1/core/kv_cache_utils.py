@@ -156,7 +156,6 @@ class KVCacheBlock:
     def reset_hash(self):
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
-        self.manager_id = -1
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -294,12 +293,9 @@ def need_extra_keys(request: Request) -> bool:
             or (request.cache_salt is not None))
 
 
-def _gen_mm_extra_hash_keys(
-    request: Request,
-    start_token_idx: int,
-    end_token_idx: int,
-    start_mm_idx: int,
-) -> tuple[list[Any], int]:
+def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
+                            end_token_idx: int,
+                            start_mm_idx: int) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
     (mm_hash, start_offset) that indicate a mm input contained in the
@@ -402,9 +398,8 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx)
     lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[str] = ([request.cache_salt] if
-                                  (start_token_idx == 0
-                                   and request.cache_salt) else [])
+    cache_salt_keys: list[str] = [request.cache_salt] if (
+        start_token_idx == 0 and request.cache_salt) else []
 
     extra_keys: list[Any] = lora_extra_keys + mm_extra_keys + cache_salt_keys
 
@@ -415,11 +410,10 @@ def generate_block_hash_extra_keys(
 
 
 def hash_block_tokens(
-    hash_function: Callable,
-    parent_block_hash: Optional[int],
-    curr_block_token_ids: Sequence[int],
-    extra_keys: Optional[tuple[Any, ...]] = None,
-) -> BlockHashType:
+        hash_function: Callable,
+        parent_block_hash: Optional[int],
+        curr_block_token_ids: Sequence[int],
+        extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHashType:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
@@ -444,9 +438,7 @@ def hash_block_tokens(
     return BlockHashType(
         hash_function(
             (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
-        curr_block_token_ids_tuple,
-        extra_keys,
-    )
+        curr_block_token_ids_tuple, extra_keys)
 
 
 def hash_request_tokens(hash_function: Any, block_size: int,
@@ -492,11 +484,9 @@ def hash_request_tokens(hash_function: Any, block_size: int,
     return ret
 
 
-def estimate_max_model_len(
-    vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
-    available_memory: int,
-) -> int:
+def estimate_max_model_len(vllm_config: VllmConfig,
+                           kv_cache_spec: dict[str, KVCacheSpec],
+                           available_memory: int) -> int:
     """
     Estimates the maximum model length that can fit in the available memory
     using binary search.
@@ -542,11 +532,9 @@ def estimate_max_model_len(
     return result
 
 
-def check_enough_kv_cache_memory(
-    vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
-    available_memory: int,
-):
+def check_enough_kv_cache_memory(vllm_config: VllmConfig,
+                                 kv_cache_spec: dict[str, KVCacheSpec],
+                                 available_memory: int):
     """
     Checks whether `available_memory` is enough for the KV cache to hold at
     least one request with the model's max_model_len.
@@ -581,9 +569,9 @@ def check_enough_kv_cache_memory(
 
         raise ValueError(
             f"To serve at least one request with the models's max seq len "
-            f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
+            f"({max_model_len}), ({needed_memory/GiB_bytes:.2f} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory / GiB_bytes:.2f} GiB)."
+            f"memory ({available_memory/GiB_bytes:.2f} GiB)."
             f"{estimated_msg} "
             f" Try increasing `gpu_memory_utilization` or decreasing "
             f"`max_model_len` when initializing the engine.")
@@ -633,11 +621,9 @@ def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     return len(layer_keys) == 1
 
 
-def _get_kv_cache_config_uniform_type(
-    vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
-    available_memory: int,
-) -> KVCacheConfig:
+def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
+                                      kv_cache_spec: dict[str, KVCacheSpec],
+                                      available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model with one type of KV cache.
     Divide the available memory equally among all layers.
@@ -659,14 +645,11 @@ def _get_kv_cache_config_uniform_type(
     num_blocks = max(num_blocks, 0)
 
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
-        num_gpu_blocks_override = (
-            vllm_config.cache_config.num_gpu_blocks_override)
+        num_gpu_blocks_override = \
+            vllm_config.cache_config.num_gpu_blocks_override
         logger.info(
-            "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
-            num_blocks,
-            num_gpu_blocks_override,
-        )
-        num_blocks = num_gpu_blocks_override
+            "Overriding num_gpu_blocks=%d with "
+            "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
 
     num_tokens = num_blocks * vllm_config.cache_config.block_size
     num_tokens_str = f"{num_tokens:,}"
@@ -698,7 +681,7 @@ def _get_kv_cache_config_uniform_type(
 
 
 def is_kv_cache_page_size_uniform(
-    kv_cache_spec: dict[str, KVCacheSpec], ) -> bool:
+        kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     """
     Whether all layers in the given KVCacheSpec have the same page size.
     Args:
@@ -713,10 +696,8 @@ def is_kv_cache_page_size_uniform(
 
 
 def _get_kv_cache_config_uniform_page_size(
-    vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
-    available_memory: int,
-) -> KVCacheConfig:
+        vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
+        available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model with one page size.
     Args:

@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable, ClassVar, Optional
+from typing import ClassVar, Optional
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
@@ -78,6 +78,12 @@ class KVCacheManager:
         self.log_stats = log_stats
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
+        assert len(
+            set(g.kv_cache_spec.block_size
+                for g in kv_cache_config.kv_cache_groups)
+        ) == 1, "Only one block size is supported for now"
+        self.block_size = kv_cache_config.kv_cache_groups[
+            0].kv_cache_spec.block_size
 
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
@@ -92,18 +98,11 @@ class KVCacheManager:
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
 
-        self.all_block_sizes = set(g.kv_cache_spec.block_size
-                                   for g in kv_cache_config.kv_cache_groups)
         # Mapping from request ID to kv block hashes of all block sizes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
-        empty_block_hash_fn: Callable[[], dict[int, list[BlockHashType]]] = (
-            lambda: {
-                block_size: []
-                for block_size in self.all_block_sizes
-            })
-        self.req_to_block_hashes: defaultdict[str, dict[
-            int, list[BlockHashType]]] = defaultdict(empty_block_hash_fn)
+        self.req_to_block_hashes: defaultdict[
+            str, list[BlockHashType]] = defaultdict(list)
 
     @property
     def usage(self) -> float:
@@ -147,13 +146,10 @@ class KVCacheManager:
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
-        block_hashes = self.req_to_block_hashes.get(request.request_id, None)
-        if block_hashes is None:
-            block_hashes = {
-                block_size:
-                hash_request_tokens(self.caching_hash_fn, block_size, request)
-                for block_size in self.all_block_sizes
-            }
+        block_hashes = self.req_to_block_hashes[request.request_id]
+        if not block_hashes:
+            block_hashes = hash_request_tokens(self.caching_hash_fn,
+                                               self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         if self.log_stats:
@@ -168,8 +164,7 @@ class KVCacheManager:
         # could slightly improve performance in the future.
         max_cache_hit_length = request.num_tokens - 1
         computed_blocks, num_new_computed_tokens = (
-            self.coordinator.find_longest_cache_hit(request.request_id,
-                                                    block_hashes,
+            self.coordinator.find_longest_cache_hit(block_hashes,
                                                     max_cache_hit_length))
 
         if self.log_stats:
@@ -250,11 +245,11 @@ class KVCacheManager:
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)
 
-        num_blocks_to_allocate = (self.coordinator.get_num_blocks_to_allocate(
+        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
-        ))
+        )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
             # Cannot allocate new blocks

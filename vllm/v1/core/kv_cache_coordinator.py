@@ -100,8 +100,7 @@ class KVCacheCoordinator:
                 manager.allocate_new_blocks(request_id, num_tokens))
         return new_blocks
 
-    def cache_blocks(self, request: Request,
-                     block_hashes: dict[int, list[BlockHashType]],
+    def cache_blocks(self, request: Request, block_hashes: list[BlockHashType],
                      num_computed_tokens: int) -> None:
         """
         Cache the blocks for the request.
@@ -113,8 +112,7 @@ class KVCacheCoordinator:
                 (including tokens that are already cached).
         """
         for manager in self.single_type_managers:
-            manager.cache_blocks(request, block_hashes[manager.block_size],
-                                 num_computed_tokens)
+            manager.cache_blocks(request, block_hashes, num_computed_tokens)
 
     def free(self, request_id: str) -> None:
         """
@@ -172,8 +170,7 @@ class KVCacheCoordinator:
 
     @abstractmethod
     def find_longest_cache_hit(
-            self, request_id: str,
-            block_hashes_dict: dict[int, list[BlockHashType]],
+            self, block_hashes: list[BlockHashType],
             max_cache_hit_length: int) -> tuple[list[list[KVCacheBlock]], int]:
         pass
 
@@ -192,11 +189,10 @@ class UnifiedKVCacheCoordinator(KVCacheCoordinator):
             "UnifiedKVCacheCoordinator assumes only one kv cache group")
 
     def find_longest_cache_hit(
-            self, request_id: str,
-            block_hashes_dict: dict[int, list[BlockHashType]],
+            self, block_hashes: list[BlockHashType],
             max_cache_hit_length: int) -> tuple[list[list[KVCacheBlock]], int]:
         hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
-            block_hashes_dict[self.block_size], max_cache_hit_length, [0])
+            block_hashes, max_cache_hit_length, [0])
         return hit_blocks, len(hit_blocks[0]) * self.block_size
 
 
@@ -249,16 +245,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def find_longest_cache_hit(
         self,
-        request_id: str,
-        block_hashes_dict: dict[int, list[BlockHashType]],
+        block_hashes: list[BlockHashType],
         max_cache_hit_length: int,
     ) -> tuple[list[list[KVCacheBlock]], int]:
         """
         Find the longest cache hit for the request.
 
         Args:
-            request_id: The request ID.
-            block_hashes_dict: The block hashes of the request.
+            block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
 
         Returns:
@@ -274,7 +268,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # First, find the longest cache hit for full attention.
         hit_blocks_full_attn = self.single_type_managers[
             0].find_longest_cache_hit(
-                block_hashes_dict[self.full_attention_block_size],
+                block_hashes,
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=self.full_attention_group_ids)
         hit_length = len(
@@ -283,7 +277,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Next, find the cache hit for the other attention WITHIN
         # the cache hit of full attention.
         hit_blocks_other_attn = self.single_type_managers[
-            1].find_longest_cache_hit(block_hashes_dict[self.other_block_size],
+            1].find_longest_cache_hit(block_hashes,
                                       max_length=hit_length,
                                       kv_cache_group_ids=self.other_group_ids)
         hit_length = len(hit_blocks_other_attn[0]) * self.other_block_size
