@@ -33,7 +33,7 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import FatreluAndMul, SiluAndMul
@@ -53,12 +53,10 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+                    make_empty_intermediate_tensors_factory, maybe_prefix)
 
 
 class EagleMiniCPMMoE(nn.Module):
@@ -352,7 +350,11 @@ class EagleMiniCPMDecoderLayer(nn.Module):
 @support_torch_compile
 class EagleMiniCPMModel(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", start_layer: int = 0):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 start_layer: int = 0):
         super().__init__()
 
         config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -378,7 +380,8 @@ class EagleMiniCPMModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.num_experts = getattr(self.config, "num_experts", 0)
-        self._init_layers(prefix, config, cache_config, quant_config, start_layer)
+        self._init_layers(prefix, config, cache_config, quant_config,
+                          start_layer)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
@@ -394,7 +397,10 @@ class EagleMiniCPMModel(nn.Module):
     ):
         self.eagle_layers = nn.ModuleList([
             EagleMiniCPMDecoderLayer(
-                config, cache_config, quant_config, f"{prefix}.eagle_layers.{i + start_layer}",
+                config,
+                cache_config,
+                quant_config,
+                f"{prefix}.eagle_layers.{i + start_layer}",
             ) for i in range(self.config.num_hidden_layers)
         ])
 
@@ -557,8 +563,14 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def _init_model(self, *, vllm_config: VllmConfig, prefix: str = "", start_layer: int = 0):
-        return EagleMiniCPMModel(vllm_config=vllm_config, prefix=prefix, start_layer=start_layer)
+    def _init_model(self,
+                    *,
+                    vllm_config: VllmConfig,
+                    prefix: str = "",
+                    start_layer: int = 0):
+        return EagleMiniCPMModel(vllm_config=vllm_config,
+                                 prefix=prefix,
+                                 start_layer=start_layer)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -569,8 +581,11 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states, hidden_states2 = self.model(input_ids, positions, hidden_states) 
-        return hidden_states / self.scale_width, hidden_states2 / self.scale_width
+        hidden_states, hidden_states2 = self.model(input_ids, positions,
+                                                   hidden_states)
+        hidden_states = hidden_states / self.scale_width
+        hidden_states2 = hidden_states2 / self.scale_width
+        return hidden_states, hidden_states2
 
     def compute_logits(
         self,
