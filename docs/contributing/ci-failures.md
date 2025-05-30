@@ -41,7 +41,7 @@ the failure?
    FAILED failing/test.py:failing_test3 - Failure description  
    ```
 
-6. **Attach logs** (collapsible section example):
+5. **Attach logs** (collapsible section example):
 
    <details>
    <summary>Logs:</summary>
