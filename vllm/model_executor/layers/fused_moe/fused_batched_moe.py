@@ -661,7 +661,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 f"Hidden size mismatch {hidden_states.size(-1)} "
                 f"!= {w1.size(2)}")
 
-        print("in batched triton experts", hidden_states.shape, expert_num_tokens)
+        # print("in batched triton experts", hidden_states.shape, expert_num_tokens)
 
         assert hidden_states.is_contiguous(
         ), "Hidden_states must be contiguous"
