@@ -1701,7 +1701,8 @@ class Scheduler:
 
     def _free_seq_cached_tokens(self, seq: Sequence) -> None:
         """
-        Free a sequence computed blocks tracker _seq_id_to_blocks_hashes and _seq_id_to_num_tokens_computed.
+        Free a sequence computed blocks tracker _seq_id_to_blocks_hashes
+        and _seq_id_to_num_tokens_computed.
         """
         self.block_manager.free_seq_cached_tokens(seq)
 
