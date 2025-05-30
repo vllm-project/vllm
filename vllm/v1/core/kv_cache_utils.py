@@ -816,7 +816,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     sliding_window=spec.sliding_window,
                 )
 
-    if not is_hybrid(kv_cache_spec):
+    if is_hybrid(kv_cache_spec):
         raise ValueError("Hybrid KV cache manager is disabled but failed to "
                          "convert the KV cache specs to one unified type.")
 
