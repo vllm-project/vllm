@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
 from typing import Any, Optional, cast
+
+from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config.model_config import ModelConfig

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import field
 from typing import Any, Literal, Optional, get_args
+
+from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 

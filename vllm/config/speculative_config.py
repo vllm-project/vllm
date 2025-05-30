@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
+from pydantic import SkipValidation
+from pydantic.dataclasses import dataclass
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -18,8 +19,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-SpeculativeMethod = Literal["ngram", "eagle", "medusa", "mlp_speculator",
-                            "draft_model", "deepseek_mtp"]
+SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
+                            "mlp_speculator", "draft_model", "deepseek_mtp"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
 
@@ -30,8 +31,7 @@ class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
     # General speculative decoding control
-    num_speculative_tokens: int = field(default=None,
-                                        init=True)  # type: ignore
+    num_speculative_tokens: SkipValidation[int] = None  # type: ignore
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
     model: Optional[str] = None
@@ -107,26 +107,23 @@ class SpeculativeConfig:
     """Specifies the tree structure for speculative token generation.
     """
     # required configuration params passed from engine
-    target_model_config: ModelConfig = field(default=None,
-                                             init=True)  # type: ignore
+    target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
-    target_parallel_config: ParallelConfig = field(default=None,
-                                                   init=True)  # type: ignore
+    target_parallel_config: SkipValidation[
+        ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
-    enable_chunked_prefill: bool = field(default=None,
-                                         init=True)  # type: ignore
+    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """Whether vLLM is configured to use chunked prefill or not. Used for
     raising an error since it's not yet compatible with speculative decode."""
-    disable_log_stats: bool = field(default=None, init=True)  # type: ignore
+    disable_log_stats: SkipValidation[bool] = None  # type: ignore
     """Whether to disable the periodic printing of stage times in speculative
     decoding."""
 
     # params generated in the post-init stage
-    draft_model_config: ModelConfig = field(default=None,
-                                            init=True)  # type: ignore
+    draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
-    draft_parallel_config: ParallelConfig = field(default=None,
-                                                  init=True)  # type: ignore
+    draft_parallel_config: SkipValidation[
+        ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
     def compute_hash(self) -> str:

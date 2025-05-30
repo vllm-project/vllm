@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-from __future__ import annotations
-
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
+
+from pydantic import SkipValidation
+from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config.utils import config
@@ -25,7 +26,7 @@ PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: BlockSize = None  # type: ignore
+    block_size: SkipValidation[BlockSize] = None  # type: ignore
     """Size of a contiguous cache block in number of tokens. This is ignored on
     neuron devices and set to `--max-model-len`. On CUDA devices, only block
     sizes up to 32 are supported. On HPU devices, block size defaults to 128.
@@ -154,7 +155,7 @@ class CacheConfig:
 
     def verify_with_parallel_config(
         self,
-        parallel_config: ParallelConfig,
+        parallel_config: "ParallelConfig",
     ) -> None:
         total_cpu_memory = get_cpu_memory()
         # FIXME(woosuk): Here, it is assumed that the GPUs in a tensor parallel

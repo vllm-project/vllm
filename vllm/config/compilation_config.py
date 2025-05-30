@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections import Counter
-from dataclasses import MISSING, asdict, dataclass, field
+from dataclasses import field
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+
+from pydantic import TypeAdapter
+from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.pass_config import PassConfig
-from vllm.config.utils import config, get_field
+from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
@@ -35,23 +37,27 @@ class CompilationConfig:
     """Configuration for compilation. It has three parts:
 
     - Top-level Compilation control:
-        - {attr}`level`
-        - {attr}`debug_dump_path`
-        - {attr}`cache_dir`
-        - {attr}`backend`
-        - {attr}`custom_ops`
-        - {attr}`splitting_ops`
+        - [`level`][vllm.config.CompilationConfig.level]
+        - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
+        - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
+        - [`backend`][vllm.config.CompilationConfig.backend]
+        - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
+        - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
     - CudaGraph capture:
-        - {attr}`use_cudagraph`
-        - {attr}`cudagraph_capture_sizes`
-        - {attr}`cudagraph_num_of_warmups`
-        - {attr}`cudagraph_copy_inputs`
-        - {attr}`full_cuda_graph`
+        - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
+        - [`cudagraph_capture_sizes`]
+        [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+        - [`cudagraph_num_of_warmups`]
+        [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
+        - [`cudagraph_copy_inputs`]
+        [vllm.config.CompilationConfig.cudagraph_copy_inputs]
+        - [`full_cuda_graph`][vllm.config.CompilationConfig.full_cuda_graph]
     - Inductor compilation:
-        - {attr}`use_inductor`
-        - {attr}`compile_sizes`
-        - {attr}`inductor_compile_config`
-        - {attr}`inductor_passes`
+        - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
+        - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+        - [`inductor_compile_config`]
+        [vllm.config.CompilationConfig.inductor_compile_config]
+        - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
         - custom inductor passes
 
     Why we have different sizes for cudagraph and inductor:
@@ -226,17 +232,11 @@ class CompilationConfig:
             "pass_config",
             "traced_files",
         }
-        include = dict()
-        for k, v in asdict(self).items():
-            if k in exclude:
-                continue
-            f = get_field(CompilationConfig, k)
-            if (d := f.default) is not MISSING and d == v:
-                continue
-            if (df := f.default_factory) is not MISSING and df() == v:
-                continue
-            include[k] = v
-        return json.dumps(include)
+        # The cast to string is necessary because Pydantic is mocked in docs
+        # builds and sphinx-argparse doesn't know the return type of decode()
+        return str(
+            TypeAdapter(CompilationConfig).dump_json(
+                self, exclude=exclude, exclude_unset=True).decode())
 
     __str__ = __repr__
 
@@ -245,7 +245,7 @@ class CompilationConfig:
         """Parse the CLI value for the compilation config."""
         if cli_value in ["0", "1", "2", "3"]:
             return cls(level=int(cli_value))
-        return cls(**json.loads(cli_value))
+        return TypeAdapter(CompilationConfig).validate_json(cli_value)
 
     def __post_init__(self) -> None:
         count_none = self.custom_ops.count("none")

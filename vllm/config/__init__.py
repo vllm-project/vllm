@@ -14,8 +14,9 @@ from vllm.config.kvevents_config import KVEventsConfig
 from vllm.config.kvtransformer_config import KVTransferConfig
 from vllm.config.load_config import LoadConfig, LoadFormat
 from vllm.config.lora_config import LoRAConfig
-from vllm.config.model_config import (HfOverrides, ModelConfig, ModelDType,
-                                      ModelImpl, TaskOption, TokenizerMode)
+from vllm.config.model_config import (ConfigFormat, HfOverrides, ModelConfig,
+                                      ModelDType, ModelImpl, TaskOption,
+                                      TokenizerMode)
 from vllm.config.multimodal_config import MultiModalConfig
 from vllm.config.obervability_config import (DetailedTraceModules,
                                              ObservabilityConfig)
@@ -37,12 +38,9 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
-    from vllm.transformers_utils.config import ConfigFormat
-
     ConfigType = type[DataclassInstance]
 else:
     QuantizationConfig = Any
-    ConfigFormat = type
     ConfigType = type
 
 logger = init_logger(__name__)

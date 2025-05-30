@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, field
 from pathlib import Path
+
+from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import InductorPass
 from vllm.config.utils import config

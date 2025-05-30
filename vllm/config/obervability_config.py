@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from __future__ import annotations
-
 import hashlib
-from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, Literal, Optional, cast
+
+from pydantic.dataclasses import dataclass
 
 from vllm import version
 from vllm.config.utils import config

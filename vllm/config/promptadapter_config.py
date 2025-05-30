@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from __future__ import annotations
-
 import hashlib
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 
@@ -15,7 +14,7 @@ if TYPE_CHECKING:
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class PromptAdapterConfig:
     """Configuration for PromptAdapters."""
 
@@ -59,7 +58,7 @@ class PromptAdapterConfig:
         if self.max_cpu_prompt_adapters is None:
             self.max_cpu_prompt_adapters = self.max_prompt_adapters
 
-    def verify_with_model_config(self, model_config: ModelConfig):
+    def verify_with_model_config(self, model_config: "ModelConfig"):
         if self.prompt_adapter_dtype == "auto":
             self.prompt_adapter_dtype = model_config.dtype
         elif isinstance(self.prompt_adapter_dtype, str):

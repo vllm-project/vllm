@@ -6,13 +6,16 @@ import enum
 import hashlib
 import json
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import field
 from importlib.util import find_spec
 from typing import (TYPE_CHECKING, Any, Callable, Literal, Optional, TypeVar,
                     Union, cast, get_args)
 
 import regex as re
 import torch
+from pydantic import (ConfigDict, SkipValidation, field_validator,
+                      model_validator)
+from pydantic.dataclasses import dataclass
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -39,10 +42,13 @@ if TYPE_CHECKING:
     from vllm.config.multimodal_config import MultiModalConfig
     from vllm.config.parallel_config import ParallelConfig
     from vllm.config.pooler_config import PoolerConfig
-    from vllm.config.vllm_config import VllmConfig
     ConfigType = type[DataclassInstance]
 else:
     ConfigType = type
+    LoadConfig = type
+    MultiModalConfig = type
+    ParallelConfig = type
+    PoolerConfig = type
 
 logger = init_logger(__name__)
 
@@ -110,17 +116,6 @@ def assert_hashable(text):
 
 
 T = TypeVar("T")
-
-
-def get_layers_from_vllm_config(vllm_config: VllmConfig,
-                                layer_type: type[T]) -> dict[str, T]:
-    return {
-        layer_name: layer
-        for layer_name, layer in
-        vllm_config.compilation_config.static_forward_context.items()
-        if isinstance(layer, layer_type)
-    }
-
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
@@ -392,7 +387,7 @@ def get_served_model_name(model: str,
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
 
@@ -405,7 +400,7 @@ class ModelConfig:
     task, even if the same model can be used for multiple tasks. When the model
     only supports one task, "auto" can be used to select it; otherwise, you
     must specify explicitly which task to use."""
-    tokenizer: str = None  # type: ignore
+    tokenizer: SkipValidation[str] = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode = "auto"
@@ -453,7 +448,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: int = None  # type: ignore
+    max_model_len: SkipValidation[int] = None  # type: ignore
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 
@@ -464,7 +459,7 @@ class ModelConfig:
     - 25.6k -> 25,600"""
     spec_target_max_model_len: Optional[int] = None
     """Specify the maximum length for spec decoding draft models."""
-    quantization: Optional[QuantizationMethods] = None
+    quantization: SkipValidation[Optional[QuantizationMethods]] = None
     """Method used to quantize the weights. If `None`, we first check the
     `quantization_config` attribute in the model config file. If that is
     `None`, we assume the model weights are not quantized and use `dtype` to
@@ -540,7 +535,7 @@ class ModelConfig:
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
     configure the neuron config that can not be gathered from the vllm
-    arguments. e.g. `{"cast_logits_dtype": "bloat16"}`."""
+    arguments. e.g. `{"cast_logits_dtype": "bfloat16"}`."""
     pooler_config: Optional[PoolerConfig] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
@@ -771,6 +766,22 @@ class ModelConfig:
         self._verify_cuda_graph()
         self._verify_bnb_config()
 
+    @field_validator("quantization", mode="before")
+    @classmethod
+    def validate_quantization_before(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower()
+        return value
+
+    @model_validator(mode="after")
+    def validate_model_config_after(self: ModelConfig) -> ModelConfig:
+        if not isinstance(self.tokenizer, str):
+            raise ValueError("tokenizer must be a string after __post_init__.")
+        if not isinstance(self.max_model_len, int):
+            raise ValueError(
+                "max_model_len must be an integer after __post_init__.")
+        return self
+
     @property
     def registry(self):
         return ModelRegistry
@@ -812,6 +823,7 @@ class ModelConfig:
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional[MultiModalConfig]:
+        from vllm.config.multimodal_config import MultiModalConfig
         if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
@@ -836,7 +848,7 @@ class ModelConfig:
             self.model, self.revision)
 
     def _init_pooler_config(self) -> Optional[PoolerConfig]:
-
+        from vllm.config.pooler_config import PoolerConfig
         if self.runner_type == "pooling":
             if isinstance(self.override_pooler_config, dict):
                 self.override_pooler_config = PoolerConfig(
@@ -992,8 +1004,7 @@ class ModelConfig:
             "quark", "modelopt_fp4", "bitblas", "gptq_bitblas"
         ]
         if self.quantization is not None:
-            self.quantization = cast(QuantizationMethods,
-                                     self.quantization.lower())
+            self.quantization = cast(QuantizationMethods, self.quantization)
 
         # Parse quantization method from the HF model config, if available.
         quant_cfg = self._parse_quant_hf_config()

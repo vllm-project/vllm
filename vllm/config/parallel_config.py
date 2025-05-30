@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import torch
+from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 
 import vllm.envs as envs
@@ -19,6 +20,10 @@ if TYPE_CHECKING:
 
     from vllm.config.tokenizerpool_config import TokenizerPoolConfig
     from vllm.executor.executor_base import ExecutorBase
+else:
+    TokenizerPoolConfig = type
+    PlacementGroup = Any
+    ExecutorBase = Any
 
 logger = init_logger(__name__)
 

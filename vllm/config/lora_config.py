@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from __future__ import annotations
-
 import hashlib
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Union
 
 import torch
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config.utils import config
@@ -20,7 +19,7 @@ LoRADType = Literal["auto", "float16", "bfloat16"]
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class LoRAConfig:
     """Configuration for LoRA."""
 
@@ -99,12 +98,12 @@ class LoRAConfig:
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})")
 
-    def verify_with_cache_config(self, cache_config: CacheConfig):
+    def verify_with_cache_config(self, cache_config: "CacheConfig"):
         if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:
             raise ValueError(
                 "V0 LoRA does not support CPU offload, please use V1.")
 
-    def verify_with_model_config(self, model_config: ModelConfig):
+    def verify_with_model_config(self, model_config: "ModelConfig"):
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):

@@ -5,11 +5,15 @@ import copy
 import enum
 import hashlib
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import field, replace
 from typing import Any, Optional, Protocol, Union
 
+import pydantic
 import torch
+from pydantic import ConfigDict
+from pydantic.dataclasses import dataclass
 from transformers import PretrainedConfig
+from typing_extensions import runtime_checkable
 
 import vllm.envs as envs
 from vllm.config.cache_config import CacheConfig
@@ -35,6 +39,7 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
+@runtime_checkable
 class SupportsHash(Protocol):
 
     def compute_hash(self) -> str:
@@ -54,7 +59,7 @@ class ModelImpl(str, enum.Enum):
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
@@ -284,25 +289,22 @@ class VllmConfig:
             self.model_config.verify_dual_chunk_attention_config(
                 self.load_config)
 
-        if self.cache_config is not None:
-            self.cache_config.verify_with_parallel_config(self.parallel_config)
+        self.cache_config.verify_with_parallel_config(self.parallel_config)
 
-        if self.lora_config:
+        if self.lora_config is not None:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_lora_support()
-        if self.prompt_adapter_config:
+        if self.prompt_adapter_config is not None:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-        if self.quant_config is None and \
-            self.model_config is not None and self.load_config is not None:
+        if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
 
         from vllm.platforms import current_platform
-        if self.scheduler_config is not None and \
-            self.model_config is not None and \
+        if self.model_config is not None and \
             self.scheduler_config.chunked_prefill_enabled and \
             self.model_config.dtype == torch.float32 and \
             current_platform.get_device_capability() == (7, 5):
@@ -310,9 +312,6 @@ class VllmConfig:
                 "Turing devices tensor cores do not support float32 matmul. "
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
-
-        if self.compilation_config is None:
-            self.compilation_config = CompilationConfig()
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
@@ -323,15 +322,10 @@ class VllmConfig:
             self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
-            # NOTE(woosuk): Currently, we use inductor because the piecewise
-            # CUDA graphs do not work properly with the custom CUDA kernels.
-            # FIXME(woosuk): Disable inductor to reduce the compilation time
-            # and avoid any potential issues with the inductor.
             # FIXME(rob): Add function to set all of these.
             if not self.compilation_config.custom_ops:
                 self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
-            self.compilation_config.use_inductor = True
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
@@ -340,8 +334,7 @@ class VllmConfig:
 
         self._set_cudagraph_sizes()
 
-        if self.cache_config is not None and \
-            self.cache_config.cpu_offload_gb > 0 and \
+        if self.cache_config.cpu_offload_gb > 0 and \
             self.compilation_config.level != CompilationLevel.NO_COMPILATION \
                 and not envs.VLLM_USE_V1:
             logger.warning(
@@ -363,16 +356,16 @@ class VllmConfig:
                 "full_cuda_graph is not supported with "
                 "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
-            if self.cache_config is not None:
-                self.cache_config.enable_prefix_caching = False
+            self.cache_config.enable_prefix_caching = False
 
-        if (self.kv_events_config
+        if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events
                 and not self.cache_config.enable_prefix_caching):
             logger.warning(
                 "KV cache events are on, but prefix caching is not enabled."
                 "Use --enable-prefix-caching to enable.")
-        if (self.kv_events_config and self.kv_events_config.publisher != "null"
+        if (self.kv_events_config is not None
+                and self.kv_events_config.publisher != "null"
                 and not self.kv_events_config.enable_kv_cache_events):
             logger.warning("KV cache events are disabled,"
                            "but the scheduler is configured to publish them."
@@ -488,6 +481,13 @@ class VllmConfig:
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
 
+    def recalculate_max_model_len(self, max_model_len: int):
+        model_config = self.model_config
+        max_model_len = model_config.get_and_verify_max_len(max_model_len)
+        self.model_config.max_model_len = max_model_len
+        self.scheduler_config.max_model_len = max_model_len
+        self.compute_hash()
+
     def __str__(self):
         return (
             f"model={self.model_config.model!r},"
@@ -521,3 +521,7 @@ class VllmConfig:
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")
+
+
+# Avoid pydantic.errors.PydanticUserError: `VllmConfig` is not fully defined;
+pydantic.dataclasses.rebuild_dataclass(VllmConfig)

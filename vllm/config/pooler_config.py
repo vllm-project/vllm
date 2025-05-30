@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-
-from __future__ import annotations
-
 import hashlib
-from dataclasses import dataclass
 from typing import Any, Optional
+
+from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 
@@ -17,7 +15,7 @@ class PoolerConfig:
     pooling_type: Optional[str] = None
     """
     The pooling method of the pooling model. This should be a key in
-    {class}`vllm.model_executor.layers.pooler.PoolingType`.
+    [`vllm.model_executor.layers.pooler.PoolingType`][].
     """
 
     normalize: Optional[bool] = None

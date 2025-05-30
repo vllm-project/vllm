@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
-
 from __future__ import annotations
 
 import enum
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import field
 from typing import TYPE_CHECKING, Any, Optional, Union
+
+from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader import BaseModelLoader
-
+    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+else:
+    BaseModelLoader = type
+    TensorizerConfig = type
 logger = init_logger(__name__)
 
 
@@ -63,7 +67,8 @@ class LoadConfig:
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    model_loader_extra_config: dict = field(default_factory=dict)
+    model_loader_extra_config: Union[dict, TensorizerConfig] = field(
+        default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
     ignore_patterns: Optional[Union[list[str], str]] = None

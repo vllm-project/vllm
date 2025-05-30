@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import field
+
+from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
