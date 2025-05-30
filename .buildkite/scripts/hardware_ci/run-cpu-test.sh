@@ -39,8 +39,8 @@ function cpu_tests() {
   # Run basic model test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
-    pytest -v -s tests/kernels/test_cache.py -m cpu_model
-    pytest -v -s tests/kernels/test_mla_decode_cpu.py -m cpu_model
+    pytest -v -s tests/kernels/attention/test_cache.py -m cpu_model
+    pytest -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
     pytest -v -s tests/models/decoder_only/language -m cpu_model
     pytest -v -s tests/models/embedding/language -m cpu_model
     pytest -v -s tests/models/encoder_decoder/language -m cpu_model
