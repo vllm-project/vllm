@@ -24,6 +24,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import GiB_bytes
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
@@ -43,6 +44,7 @@ class Worker(WorkerBase):
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        structured_output_manager: StructuredOutputManager,
         is_driver_worker: bool = False,
     ):
 
@@ -51,7 +53,7 @@ class Worker(WorkerBase):
                          rank=rank,
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
-
+        self.structured_output_manager = structured_output_manager
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -142,7 +144,7 @@ class Worker(WorkerBase):
 
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device)
+            self.vllm_config, self.device, self.structured_output_manager)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.

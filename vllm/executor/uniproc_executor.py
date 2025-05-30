@@ -35,13 +35,15 @@ class UniProcExecutor(ExecutorBase):
             local_rank = int(device_info[1])
         rank = 0
         is_driver_worker = True
-        kwargs = dict(
-            vllm_config=self.vllm_config,
-            local_rank=local_rank,
-            rank=rank,
-            distributed_init_method=distributed_init_method,
-            is_driver_worker=is_driver_worker,
-        )
+        kwargs = dict(vllm_config=self.vllm_config,
+                      local_rank=local_rank,
+                      rank=rank,
+                      distributed_init_method=distributed_init_method,
+                      is_driver_worker=is_driver_worker)
+        if self.structured_output_manager is not None:
+            kwargs["structured_output_manager"] = \
+                            self.structured_output_manager
+
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")

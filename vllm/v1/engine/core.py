@@ -70,8 +70,11 @@ class EngineCore:
 
         self.log_stats = log_stats
 
+        self.structured_output_manager = StructuredOutputManager(vllm_config)
+
         # Setup Model.
-        self.model_executor = executor_class(vllm_config)
+        self.model_executor = executor_class(vllm_config,
+                                             self.structured_output_manager)
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(
                 executor_fail_callback)
@@ -82,8 +85,6 @@ class EngineCore:
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
         if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
