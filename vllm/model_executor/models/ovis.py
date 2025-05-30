@@ -134,7 +134,7 @@ class VisualTokenizer(torch.nn.Module):
     def device(self):
         return next(self.head.parameters()).device
 
-    def tokenize(self, logits):
+    def tokenize(self, logits: torch.Tensor) -> torch.Tensor:
         if self.config.tokenize_function == 'softmax':
             tokens = softmax(logits, dim=-1)
         elif self.config.tokenize_function == 'gumbel_argmax':
@@ -147,7 +147,7 @@ class VisualTokenizer(torch.nn.Module):
                 f'or st_argmax, but got {self.config.tokenize_function}')
         return tokens
 
-    def encode(self, pixel_values):
+    def encode(self, pixel_values: torch.Tensor) -> torch.Tensor:
         features = self.backbone(pixel_values)
         if self.config.drop_cls_token:
             features = features[:, 1:, :]
