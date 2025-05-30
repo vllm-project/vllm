@@ -30,14 +30,14 @@ class AIMv2SwiGLUFFN(nn.Module):
         in_features = config.hidden_size
         bias = config.use_bias
 
-        self.gate_up_proj = MergedColumnParallelLinear(
+        self.fc13 = MergedColumnParallelLinear(
             in_features,
             [hidden_features] * 2,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
         )
-        self.down_proj = RowParallelLinear(
+        self.fc2 = RowParallelLinear(
             input_size=hidden_features,
             output_size=in_features,
             bias=bias,
@@ -47,9 +47,9 @@ class AIMv2SwiGLUFFN(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, _ = self.gate_up_proj(x)
+        x, _ = self.fc13(x)
         x = self.act_fn(x)
-        x, _ = self.down_proj(x)
+        x, _ = self.fc2(x)
         return x
 
 
@@ -109,6 +109,7 @@ class AIMv2Attention(nn.Module):
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
             total_num_heads=self.num_heads,
+            bias=config.qkv_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
@@ -116,6 +117,7 @@ class AIMv2Attention(nn.Module):
         self.proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
+            bias=config.use_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
@@ -127,16 +129,10 @@ class AIMv2Attention(nn.Module):
                                        self.head_dim, self.scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, N, C = x.shape
         qkv, _ = self.qkv(x)
-
-        qkv = qkv.reshape(B, N, 3, self.num_heads,
-                          C // self.num_heads).permute(2, 0, 3, 1, 4)
-
-        q, k, v = qkv.unbind(0)
+        q, k, v = qkv.chunk(3, dim=-1)
 
         x = self.attn(q, k, v)
-        x = x.transpose(1, 2).contiguous().reshape(B, N, C)
         x, _ = self.proj(x)
         return x
 
@@ -206,8 +202,8 @@ class AIMv2Model(torch.nn.Module):
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            (".gate_up_proj", ".w1", 0),
-            (".gate_up_proj", ".w3", 1),
+            (".fc13", ".fc1", 0),
+            (".fc13", ".fc3", 1),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
