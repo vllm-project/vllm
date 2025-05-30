@@ -5,7 +5,7 @@ from typing import Callable
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlockBundle
+from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         SlidingWindowSpec)
 from vllm.v1.request import Request
@@ -22,8 +22,7 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_spec: KVCacheSpec,
         block_pool: BlockPool,
         use_eagle: bool,
-        num_kv_cache_groups: int,
-        manager_id: int,
+        kv_cache_group_id: int,
         caching_hash_fn: Callable,
     ) -> None:
         """
@@ -32,9 +31,7 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_spec: The kv_cache_spec for this manager.
             block_pool: The block pool.
             use_eagle: Whether to use eagle.
-            num_kv_cache_groups: The number of kv cache groups managed by this 
-                manager.
-            manager_id: The id of this manager.
+            kv_cache_group_id: The id of the kv cache group of this manager.
             caching_hash_fn: The caching hash function.
         """
 
@@ -48,11 +45,8 @@ class SingleTypeKVCacheManager(ABC):
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: defaultdict[
-            str, list[KVCacheBlockBundle]] = defaultdict(list)
-
-        self.req_to_hit_blocks: defaultdict[
-            str, list[KVCacheBlockBundle]] = defaultdict(list)
+        self.req_to_blocks: defaultdict[str,
+                                        list[KVCacheBlock]] = defaultdict(list)
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
@@ -60,13 +54,12 @@ class SingleTypeKVCacheManager(ABC):
         # data for reempted ones.
         self.num_cached_block: dict[str, int] = {}
 
-        self.num_kv_cache_groups = num_kv_cache_groups
         self.caching_hash_fn = caching_hash_fn
-        self.manager_id = manager_id
+        self.kv_cache_group_id = kv_cache_group_id
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
-            new_computed_blocks: list[KVCacheBlockBundle]) -> int:
+            new_computed_blocks: list[KVCacheBlock]) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -90,12 +83,11 @@ class SingleTypeKVCacheManager(ABC):
         # it as needed to be allocated.
         num_evictable_computed_blocks = sum(blk.ref_cnt == 0
                                             for blk in new_computed_blocks)
-        return ((num_new_blocks + num_evictable_computed_blocks) *
-                self.num_kv_cache_groups)
+        return num_new_blocks + num_evictable_computed_blocks
 
     def save_new_computed_blocks(
             self, request_id: str,
-            new_computed_blocks: list[KVCacheBlockBundle]) -> None:
+            new_computed_blocks: list[KVCacheBlock]) -> None:
         """
         Add the new computed blocks to the request.
 
@@ -115,7 +107,7 @@ class SingleTypeKVCacheManager(ABC):
             assert len(new_computed_blocks) == 0
 
     def allocate_new_blocks(self, request_id: str,
-                            num_tokens: int) -> list[KVCacheBlockBundle]:
+                            num_tokens: int) -> list[KVCacheBlock]:
         """
         Allocate new blocks for the request to give it at least `num_tokens` 
         token slots.
@@ -134,8 +126,7 @@ class SingleTypeKVCacheManager(ABC):
         if num_new_blocks <= 0:
             return []
         else:
-            new_blocks = self.block_pool.get_new_block_bundles(
-                num_new_blocks, self.num_kv_cache_groups)
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
             return new_blocks
 
@@ -160,7 +151,7 @@ class SingleTypeKVCacheManager(ABC):
             num_cached_blocks=num_cached_blocks,
             num_full_blocks=num_full_blocks,
             block_size=self.block_size,
-            manager_id=self.manager_id,
+            kv_cache_group_id=self.kv_cache_group_id,
             hash_fn=self.caching_hash_fn,
         )
 
@@ -201,7 +192,7 @@ class SingleTypeKVCacheManager(ABC):
 
     @abstractmethod
     def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
-                               max_length: int) -> list[KVCacheBlockBundle]:
+                               max_length: int) -> list[KVCacheBlock]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than 
         `max_length`. If no cache hit is found, return an empty list. 
@@ -240,22 +231,23 @@ class SingleTypeKVCacheManager(ABC):
 class FullAttentionManager(SingleTypeKVCacheManager):
 
     def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
-                               max_length: int) -> list[KVCacheBlockBundle]:
-        computed_blocks: list[KVCacheBlockBundle] = []
-        max_num_blocks = max_length // self.block_size
-        for i in range(max_num_blocks):
-            block_hash = block_hashes[i]
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
-            # not computed yet for sure.
-            if cached_block := self.block_pool.get_cached_block(
-                    block_hash, self.manager_id):
-                computed_blocks.append(cached_block)
-            else:
-                break
-        if self.use_eagle and len(computed_blocks) > 0:
-            computed_blocks.pop()
-        return computed_blocks
+                               max_length: int) -> list[KVCacheBlock]:
+        return []
+        # computed_blocks: list[KVCacheBlock] = []
+        # max_num_blocks = max_length // self.block_size
+        # for i in range(max_num_blocks):
+        #     block_hash = block_hashes[i]
+        #     # block_hashes is a chain of block hashes. If a block hash is not
+        #     # in the cached_block_hash_to_id, the following block hashes are
+        #     # not computed yet for sure.
+        #     if cached_block := self.block_pool.get_cached_block(
+        #             block_hash, self.manager_id):
+        #         computed_blocks.append(cached_block)
+        #     else:
+        #         break
+        # if self.use_eagle and len(computed_blocks) > 0:
+        #     computed_blocks.pop()
+        # return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
@@ -290,44 +282,43 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # contiguous blocks needed for prefix cache hit by one and dropping
             # the last matched block.
             self.sliding_window_contiguous_blocks += 1
-        single_null_block = block_pool.null_block
-        self.null_block = KVCacheBlockBundle(
-            tuple([single_null_block] * self.num_kv_cache_groups))
+        self.null_block = block_pool.null_block
 
     def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
-                               max_length: int) -> list[KVCacheBlockBundle]:
+                               max_length: int) -> list[KVCacheBlock]:
+        return []
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(len(block_hashes)) to
-        # O(len(block_hashes) / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
-        max_num_blocks = max_length // self.block_size
-        computed_blocks = [self.null_block] * max_num_blocks
-        num_contiguous_blocks = 0
-        match_found = False
-        # Search from right to left and early stop when a match is found.
-        for i in range(max_num_blocks - 1, -1, -1):
-            if cached_block := self.block_pool.get_cached_block(
-                    block_hashes[i], self.manager_id):
-                computed_blocks[i] = cached_block
-                num_contiguous_blocks += 1
-                if (num_contiguous_blocks
-                        >= self.sliding_window_contiguous_blocks):
-                    # Trim the trailing blocks.
-                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-                    # when sliding_window_contiguous_blocks=2.
-                    del computed_blocks[i + num_contiguous_blocks:]
-                    match_found = True
-                    break
-            else:
-                num_contiguous_blocks = 0
-        if not match_found:
-            # The first `num_contiguous_blocks` is a cache hit even if
-            # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
-            del computed_blocks[num_contiguous_blocks:]
-        if self.use_eagle and len(computed_blocks) > 0:
-            computed_blocks.pop()
-        return computed_blocks
+        # # optimize the time complexity from O(len(block_hashes)) to
+        # # O(len(block_hashes) / sliding_window_contiguous_blocks +
+        # # sliding_window_contiguous_blocks),
+        # # which is good for low cache hit rate scenarios.
+        # max_num_blocks = max_length // self.block_size
+        # computed_blocks = [self.null_block] * max_num_blocks
+        # num_contiguous_blocks = 0
+        # match_found = False
+        # # Search from right to left and early stop when a match is found.
+        # for i in range(max_num_blocks - 1, -1, -1):
+        #     if cached_block := self.block_pool.get_cached_block(
+        #             block_hashes[i], self.manager_id):
+        #         computed_blocks[i] = cached_block
+        #         num_contiguous_blocks += 1
+        #         if (num_contiguous_blocks
+        #                 >= self.sliding_window_contiguous_blocks):
+        #             # Trim the trailing blocks.
+        #             # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
+        #             # when sliding_window_contiguous_blocks=2.
+        #             del computed_blocks[i + num_contiguous_blocks:]
+        #             match_found = True
+        #             break
+        #     else:
+        #         num_contiguous_blocks = 0
+        # if not match_found:
+        #     # The first `num_contiguous_blocks` is a cache hit even if
+        #     # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
+        #     del computed_blocks[num_contiguous_blocks:]
+        # if self.use_eagle and len(computed_blocks) > 0:
+        #     computed_blocks.pop()
+        # return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
@@ -336,7 +327,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         last_useful_token = num_computed_tokens - self.sliding_window + 1
         last_useful_block = last_useful_token // self.block_size
         blocks = self.req_to_blocks[request_id]
-        removed_blocks: list[KVCacheBlockBundle] = []
+        removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
             if blocks[i] == self.null_block:
                 # If the block is already a null block, the blocks before it

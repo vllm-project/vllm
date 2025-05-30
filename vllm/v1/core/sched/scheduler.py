@@ -400,6 +400,7 @@ class Scheduler(SchedulerInterface):
                     request,
                     num_new_tokens + num_external_computed_tokens,
                     num_native_computed_tokens,
+                    new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
                 )

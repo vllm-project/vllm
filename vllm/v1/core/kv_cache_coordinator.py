@@ -3,11 +3,9 @@ from collections import defaultdict
 from typing import Callable
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
-                                         KVCacheBlockBundle)
+from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
-    FullAttentionManager, SingleTypeKVCacheManager,
-    get_manager_for_kv_cache_spec)
+    SingleTypeKVCacheManager, get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.request import Request
 
@@ -29,33 +27,27 @@ class KVCacheCoordinator:
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
 
-        # One manager for each different kv_cache_spec, managing all kv cache
-        # groups with the same kv_cache_spec.
-        self.manager_to_group, self.group_to_manager = (
-            self.generate_group_manager_map())
         self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
-                                    len(self.manager_to_group),
                                     enable_kv_cache_events)
         self.single_type_managers: list[SingleTypeKVCacheManager] = []
-        for i in range(len(self.manager_to_group)):
-            group_ids = self.manager_to_group[i]
-            kv_cache_spec = kv_cache_config.kv_cache_groups[
-                group_ids[0]].kv_cache_spec
+        for i in range(len(self.kv_cache_config.kv_cache_groups)):
+            kv_cache_spec = self.kv_cache_config.kv_cache_groups[
+                i].kv_cache_spec
             self.single_type_managers.append(
                 get_manager_for_kv_cache_spec(
                     kv_cache_spec=kv_cache_spec,
                     block_pool=self.block_pool,
                     use_eagle=use_eagle,
-                    num_kv_cache_groups=len(self.manager_to_group[i]),
-                    manager_id=i,
+                    kv_cache_group_id=i,
                     caching_hash_fn=caching_hash_fn,
                 ))
-        self.computed_blocks: dict[str, list[list[KVCacheBlockBundle]]] = {}
-        self.verify_support_find_longest_cache_hit()
+
+        self.type0_group_ids, self.type1_group_ids = (
+            self.verify_support_find_longest_cache_hit())
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
-            new_computed_blocks: list[list[KVCacheBlockBundle]]) -> int:
+            new_computed_blocks: list[list[KVCacheBlock]]) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -77,7 +69,7 @@ class KVCacheCoordinator:
 
     def save_new_computed_blocks(
             self, request_id: str,
-            new_computed_blocks: list[list[KVCacheBlockBundle]]) -> None:
+            new_computed_blocks: list[list[KVCacheBlock]]) -> None:
         """
         Add the new computed blocks to the request.
 
@@ -91,7 +83,7 @@ class KVCacheCoordinator:
                                              new_computed_blocks[i])
 
     def allocate_new_blocks(self, request_id: str,
-                            num_tokens: int) -> list[list[KVCacheBlockBundle]]:
+                            num_tokens: int) -> list[list[KVCacheBlock]]:
         """
         Allocate new blocks for the request to give it at least `num_tokens` 
         token slots.
@@ -151,14 +143,10 @@ class KVCacheCoordinator:
         Returns:
             The number of common prefix blocks.
         """
-        num_blocks_per_manager = [
+        num_blocks_per_group = [
             manager.get_num_common_prefix_blocks(request_id,
                                                  num_running_requests)
             for manager in self.single_type_managers
-        ]
-        num_blocks_per_group = [
-            num_blocks_per_manager[manager_id]
-            for manager_id, _ in self.group_to_manager
         ]
         return num_blocks_per_group
 
@@ -175,7 +163,7 @@ class KVCacheCoordinator:
         for manager in self.single_type_managers:
             manager.remove_skipped_blocks(request_id, num_computed_tokens)
 
-    def get_blocks(self, request_id: str) -> list[list[KVCacheBlockBundle]]:
+    def get_blocks(self, request_id: str) -> list[list[KVCacheBlock]]:
         """
         Get the blocks for the request.
         """
@@ -189,7 +177,7 @@ class KVCacheCoordinator:
         request_id: str,
         block_hashes_dict: dict[int, list[BlockHashType]],
         max_cache_hit_length: int,
-    ) -> tuple[list[list[KVCacheBlockBundle]], int]:
+    ) -> tuple[list[list[KVCacheBlock]], int]:
         """
         Find the longest cache hit for the request.
 
@@ -203,67 +191,53 @@ class KVCacheCoordinator:
                 - A list of the cache hit blocks for each single type manager.
                 - The number of tokens of the longest cache hit.
         """
-        if len(self.single_type_managers) == 1:
-            # Return the cache hit blocks for the only kv cache group.
-            block_size = self.kv_cache_config.kv_cache_groups[
-                0].kv_cache_spec.block_size
-            hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
-                block_hashes_dict[block_size], max_length=max_cache_hit_length)
-            if len(hit_blocks) > 0:
-                self.computed_blocks[request_id] = [hit_blocks]
-            return [hit_blocks], len(hit_blocks) * block_size
+        return [[] for _ in self.kv_cache_config.kv_cache_groups], 0
+        # if len(self.kv_cache_config.kv_cache_groups) == 1:
+        #     # Return the cache hit blocks for the only kv cache group.
+        #     block_size = self.kv_cache_config.kv_cache_groups[
+        #         0].kv_cache_spec.block_size
+        #     hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
+        #         block_hashes_dict[block_size], max_length=max_cache_hit_length) # noqa
+        #     if len(hit_blocks) > 0:
+        #         self.computed_blocks[request_id] = [hit_blocks]
+        #     return [hit_blocks], len(hit_blocks) * block_size
 
-        elif len(self.single_type_managers) == 2:
-            # For simplicity, we assume the first manager is for full
-            # attention layers, and the block_size of full attention layers
-            # is divisible by other attention layers. This has been verified
-            # in verify_support_find_longest_cache_hit().
+        # elif len(self.kv_cache_config.kv_cache_groups) > 1:
+        #     # For simplicity, we assume the first manager is for full
+        #     # attention layers, and the block_size of full attention layers
+        #     # is divisible by other attention layers. This has been verified
+        #     # in verify_support_find_longest_cache_hit().
 
-            block_size_0 = self.single_type_managers[0].block_size
-            block_size_1 = self.single_type_managers[1].block_size
+        #     block_size_0 = self.single_type_managers[0].block_size
+        #     block_size_1 = self.single_type_managers[1].block_size
 
-            # First, find the longest cache hit for full attention.
-            hit_blocks_full_attn = self.single_type_managers[
-                0].find_longest_cache_hit(block_hashes_dict[block_size_0],
-                                          max_length=max_cache_hit_length)
-            hit_length = len(hit_blocks_full_attn) * block_size_0
+        #     # First, find the longest cache hit for full attention.
+        #     hit_blocks_full_attn = self.single_type_managers[
+        #         0].find_longest_cache_hit(block_hashes_dict[block_size_0],
+        #                                   max_length=max_cache_hit_length)
+        #     hit_length = len(hit_blocks_full_attn) * block_size_0
 
-            # Next, find the cache hit for the other attention WITHIN
-            # the cache hit of full attention.
-            hit_blocks_other_attn = self.single_type_managers[
-                1].find_longest_cache_hit(block_hashes_dict[block_size_1],
-                                          max_length=hit_length)
-            hit_length = len(hit_blocks_other_attn) * block_size_1
-            assert hit_length % block_size_0 == 0
+        #     # Next, find the cache hit for the other attention WITHIN
+        #     # the cache hit of full attention.
+        #     hit_blocks_other_attn = self.single_type_managers[
+        #         1].find_longest_cache_hit(block_hashes_dict[block_size_1],
+        #                                   max_length=hit_length)
+        #     hit_length = len(hit_blocks_other_attn) * block_size_1
+        #     assert hit_length % block_size_0 == 0
 
-            # Truncate the full attention cache hit to the length of the
-            # cache hit of the other attention.
-            del hit_blocks_full_attn[hit_length // block_size_0:]
+        #     # Truncate the full attention cache hit to the length of the
+        #     # cache hit of the other attention.
+        #     del hit_blocks_full_attn[hit_length // block_size_0:]
 
-            hit_blocks_two_mgr = [hit_blocks_full_attn, hit_blocks_other_attn]
-            if hit_length > 0:
-                self.computed_blocks[request_id] = hit_blocks_two_mgr
-            return hit_blocks_two_mgr, hit_length
+        #     hit_blocks_two_mgr = [hit_blocks_full_attn, hit_blocks_other_attn]
+        #     if hit_length > 0:
+        #         self.computed_blocks[request_id] = hit_blocks_two_mgr
+        #     return hit_blocks_two_mgr, hit_length
 
-        else:
-            raise NotImplementedError(
-                "KVCacheCoordinator does not support more than 2 different"
-                "types of layers yet.")
-
-    def get_computed_blocks(
-            self, request_id: str,
-            num_computed_tokens: int) -> list[list[KVCacheBlockBundle]]:
-        """
-        Get the computed blocks for the request.
-        """
-        if num_computed_tokens == 0:
-            assert request_id not in self.computed_blocks
-            return [[] for _ in self.single_type_managers]
-        computed_blocks = self.computed_blocks.pop(request_id)
-        for i, manager in enumerate(self.single_type_managers):
-            assert len(computed_blocks[i] *
-                       manager.block_size) == num_computed_tokens
-        return computed_blocks
+        # else:
+        #     raise AssertionError("This line should be unreachable as "
+        #                          "unsupported cases should be caught by "
+        #                          "verify_support_find_longest_cache_hit()")
 
     def generate_group_manager_map(
             self) -> tuple[list[list[int]], list[tuple[int, int]]]:
@@ -300,44 +274,45 @@ class KVCacheCoordinator:
         ]
         return manager_to_group, group_to_manager
 
-    def verify_support_find_longest_cache_hit(self) -> None:
+    def verify_support_find_longest_cache_hit(
+            self) -> tuple[list[int], list[int]]:
         """
         For simplicity, find_longest_cache_hit makes some assumptions on the
         model architecture instead of provides a general solution. This function
         checks if the assumptions hold.
         NOTE(Chen): Please open an issue to discuss if you need other cases.
+
+        TODO: add more notes
         """
-        if len(self.single_type_managers) == 1:
-            return
-        if len(self.single_type_managers) == 2:
-            if not isinstance(self.single_type_managers[0],
-                              FullAttentionManager):
-                raise NotImplementedError(
-                    "KVCacheCoordinator assumes hybrid models have at least one"
-                    " full attention layer now")
-            block_size_0 = self.single_type_managers[0].block_size
-            block_size_1 = self.single_type_managers[1].block_size
+        if len(self.kv_cache_config.kv_cache_groups) == 1:
+            return list(range(len(self.kv_cache_config.kv_cache_groups))), []
+        else:
+            groups_by_type_id: dict[str, list[int]] = defaultdict(list)
+            full_attention_type_ids: set[str] = set()
+            for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
+                groups_by_type_id[g.kv_cache_spec.type_id].append(i)
+                if isinstance(g.kv_cache_spec, FullAttentionSpec):
+                    full_attention_type_ids.add(g.kv_cache_spec.type_id)
+
+            assert len(full_attention_type_ids) == 1, (
+                "find_longest_cache_hit assumes hybrid models have exactly "
+                "one type of full attention groups now")
+            assert len(groups_by_type_id) == 2, (
+                "find_longest_cache_hit assumes hybrid models have exactly "
+                "one other type of groups except full attention now")
+
+            type0_group_ids = groups_by_type_id[next(
+                iter(full_attention_type_ids))]
+            type1_group_ids = groups_by_type_id[next(
+                iter(groups_by_type_id.keys() - full_attention_type_ids))]
+
+            block_size_0 = self.kv_cache_config.kv_cache_groups[
+                type0_group_ids[0]].kv_cache_spec.block_size
+            block_size_1 = self.kv_cache_config.kv_cache_groups[
+                type1_group_ids[0]].kv_cache_spec.block_size
             if block_size_1 % block_size_0 != 0:
                 raise NotImplementedError(
                     "KVCacheCoordinator assumes the block_size of the full "
                     "attention layer is divisible by other layers now.")
-        else:
-            raise NotImplementedError(
-                "KVCacheCoordinator does not support more than 2 different "
-                "types of layers yet.")
 
-    def to_group_format(
-        self, block_bundles: list[list[KVCacheBlockBundle]]
-    ) -> list[list[KVCacheBlock]]:
-        """
-        Convert the blocks from `list[list[KVCacheBlockBundle]` 
-        (`list[KVCacheBlockBundle]` for each manager) to 
-        `list[list[KVCacheBlock]]`(`list[KVCacheBlock]` for each group).
-        """
-        blocks = []
-        for manager_id, group_id_in_manager in self.group_to_manager:
-            blocks.append([
-                blk.blocks[group_id_in_manager]
-                for blk in block_bundles[manager_id]
-            ])
-        return blocks
+            return type0_group_ids, type1_group_ids

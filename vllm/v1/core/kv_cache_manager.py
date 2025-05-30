@@ -21,8 +21,7 @@ logger = init_logger(__name__)
 class KVCacheBlocks:
     blocks: list[list[KVCacheBlock]]
     """
-    blocks[i][j].blocks[k] refers to the i-th kv_cache_group and the j-th 
-    block of the tokens.
+    blocks[i][j] refers to the i-th kv_cache_group and the j-th block of tokens.
     """
     num_kv_cache_groups: ClassVar[int]
 
@@ -91,6 +90,7 @@ class KVCacheManager:
         KVCacheBlocks.num_kv_cache_groups = len(
             kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
+        self.kv_cache_config = kv_cache_config
 
         self.all_block_sizes = set(g.kv_cache_spec.block_size
                                    for g in kv_cache_config.kv_cache_groups)
@@ -177,14 +177,14 @@ class KVCacheManager:
             self.prefix_cache_stats.queries += len(request.all_token_ids)
             self.prefix_cache_stats.hits += num_new_computed_tokens
 
-        return KVCacheBlocks(self.coordinator.to_group_format(
-            computed_blocks)), num_new_computed_tokens
+        return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
     def allocate_slots(
         self,
         request: Request,
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
+        new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
@@ -226,9 +226,12 @@ class KVCacheManager:
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")
 
-        # Get the new computed blocks detected by get_computed_blocks.
-        new_computed_blocks = self.coordinator.get_computed_blocks(
-            request.request_id, num_new_computed_tokens)
+        if new_computed_blocks is not None:
+            new_computed_block_list = new_computed_blocks.blocks
+        else:
+            new_computed_block_list = [
+                [] for _ in range(len(self.kv_cache_config.kv_cache_groups))
+            ]
 
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
@@ -250,7 +253,7 @@ class KVCacheManager:
         num_blocks_to_allocate = (self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
-            new_computed_blocks=new_computed_blocks,
+            new_computed_blocks=new_computed_block_list,
         ))
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
@@ -259,16 +262,16 @@ class KVCacheManager:
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self.block_pool.touch(new_computed_blocks)
+            self.block_pool.touch(new_computed_block_list)
         else:
-            assert all(not blocks for blocks in new_computed_blocks), (
+            assert all(not blocks for blocks in new_computed_block_list), (
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
         self.coordinator.save_new_computed_blocks(request.request_id,
-                                                  new_computed_blocks)
+                                                  new_computed_block_list)
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id, num_tokens_need_slot)
@@ -276,7 +279,7 @@ class KVCacheManager:
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
-            return KVCacheBlocks(self.coordinator.to_group_format(new_blocks))
+            return KVCacheBlocks(new_blocks)
 
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
@@ -285,7 +288,7 @@ class KVCacheManager:
             request, self.req_to_block_hashes[request.request_id],
             num_computed_tokens + num_new_tokens - len(request.spec_token_ids))
 
-        return KVCacheBlocks(self.coordinator.to_group_format(new_blocks))
+        return KVCacheBlocks(new_blocks)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -375,5 +378,4 @@ class KVCacheManager:
     def get_block_ids(self, request_id: str) -> list[list[int]]:
         """Get the block ids of a request."""
         return KVCacheBlocks(
-            self.coordinator.to_group_format(
-                self.coordinator.get_blocks(request_id))).get_block_ids()
+            self.coordinator.get_blocks(request_id)).get_block_ids()
