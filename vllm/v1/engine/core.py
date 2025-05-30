@@ -378,10 +378,8 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
-        engine_addresses = None
         with self._perform_handshake(handshake_address, identity, on_head_node,
                                      vllm_config) as addresses:
-            engine_addresses = addresses
             self.client_count = len(addresses.outputs)
 
             # Set up data parallel environment.
@@ -400,13 +398,13 @@ class EngineCoreProc(EngineCore):
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
         threading.Thread(target=self.process_input_sockets,
-                         args=(engine_addresses.inputs,
-                               engine_addresses.coordinator_input, identity),
+                         args=(addresses.inputs, addresses.coordinator_input,
+                               identity),
                          daemon=True).start()
         self.output_thread = threading.Thread(
             target=self.process_output_sockets,
-            args=(engine_addresses.outputs,
-                  engine_addresses.coordinator_output, self.engine_index),
+            args=(addresses.outputs, addresses.coordinator_output,
+                  self.engine_index),
             daemon=True)
         self.output_thread.start()
 
