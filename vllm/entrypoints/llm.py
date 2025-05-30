@@ -521,34 +521,38 @@ class LLM:
         # since this is the same for both v0 & v1.
         lora_config = self.llm_engine.vllm_config.lora_config
 
-        # If there's no lora config / mm_loras, or the model isn't multimodal,
-        # leave the lora as is.
+        # If there's no lora config / default_mm_loras, or the model
+        # isn't multimodal, leave the lora as is.
         if (lora_config is None
                 or not self.llm_engine.model_config.is_multimodal_model
-                or (lora_config and lora_config.mm_loras is None)):
+                or (lora_config and lora_config.default_mm_loras is None)):
             return lora_request
 
         if not isinstance(parsed_prompts, Sequence):
-            return self._resolve_single_prompt_mm_lora(parsed_prompts,
-                                                       lora_request,
-                                                       lora_config.mm_loras)
+            return self._resolve_single_prompt_mm_lora(
+                parsed_prompts,
+                lora_request,
+                lora_config.default_mm_loras,
+            )
+        if not isinstance(lora_request, Sequence):
+            lora_request = [lora_request] * len(parsed_prompts)
         return [
             self._resolve_single_prompt_mm_lora(
                 parsed_prompt,
                 lora_req,
-                lora_config.mm_loras,
+                lora_config.default_mm_loras,
             ) for parsed_prompt, lora_req in zip(parsed_prompts, lora_request)
         ]
 
     def _resolve_single_prompt_mm_lora(self, parsed_prompt: PromptType,
-                                       lora_request, mm_loras):
+                                       lora_request, default_mm_loras):
         if not isinstance(parsed_prompt,
                           dict) or "multi_modal_data" not in parsed_prompt:
             return lora_request
 
         intersection = set(
             parsed_prompt["multi_modal_data"].keys()).intersection(
-                mm_loras.keys())
+                default_mm_loras.keys())
         if not intersection:
             return lora_request
         if len(intersection) > 1:
@@ -561,7 +565,7 @@ class LLM:
                 " will be skipped.", intersection)
             return lora_request
 
-        modality_lora = mm_loras[intersection.pop()]
+        modality_lora = default_mm_loras[intersection.pop()]
         if (lora_request is not None
                 and lora_request.lora_int_id != modality_lora.lora_int_id):
             logger.warning(
