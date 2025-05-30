@@ -36,14 +36,14 @@ class AIMv2SwiGLUFFN(nn.Module):
             [hidden_features] * 2,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj",
+            prefix=f"{prefix}.fc13",
         )
         self.fc2 = RowParallelLinear(
             input_size=hidden_features,
             output_size=in_features,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.down_proj",
+            prefix=f"{prefix}.fc2",
         )
         self.act_fn = SiluAndMul()
 
