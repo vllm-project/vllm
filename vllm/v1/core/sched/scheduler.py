@@ -558,10 +558,7 @@ class Scheduler(SchedulerInterface):
 
         events = self.kv_cache_manager.take_events()
         if events:
-            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-            batch = KVEventBatch(ts=time.time(),
-                                 events=events,
-                                 data_parallel_rank=dp_rank)
+            batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
         # Advance the number of computed tokens for the request AFTER
