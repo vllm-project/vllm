@@ -3,6 +3,8 @@ from typing import Optional
 
 import torch
 
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
 
 def sanity_check_mm_encoder_outputs(
     mm_embeddings: object,
@@ -72,3 +74,17 @@ def gather_mm_placeholders(
         return placeholders
 
     return placeholders[is_embed]
+
+
+def add_shared_kv_layers(
+    shared_kv_cache_layers: dict[str, str],
+    kv_caches: dict[str, torch.Tensor],
+    kv_cache_groups: list[KVCacheGroupSpec],
+    layer_to_kv_cache_group_idx: dict[str, int],
+) -> None:
+    for layer_name, target_layer_name in shared_kv_cache_layers.items():
+        # store reference to allocated KV cache of target layer
+        kv_caches[layer_name] = kv_caches[target_layer_name]
+        # Add layer to KV cache group so attention metadata is assigned
+        group_idx = layer_to_kv_cache_group_idx[target_layer_name]
+        kv_cache_groups[group_idx].layer_names.append(layer_name)
