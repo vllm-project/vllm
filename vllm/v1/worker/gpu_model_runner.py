@@ -1110,7 +1110,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
         if dp_size == 1:
             # Early exit.
-            return 0
+            return 0, torch.tensor([num_tokens],
+                                   device="cpu",
+                                   dtype=torch.int32)
 
         num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
             num_tokens, dp_size, dp_rank)
