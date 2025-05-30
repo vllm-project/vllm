@@ -70,9 +70,7 @@ class EngineCoreClient(ABC):
             if vllm_config.parallel_config.data_parallel_size > 1:
                 if vllm_config.parallel_config.data_parallel_backend == "ray":
                     return RayDPClient(vllm_config, executor_class, log_stats)
-                else:
-                    return DPAsyncMPClient(vllm_config, executor_class,
-                                           log_stats)
+                return DPAsyncMPClient(vllm_config, executor_class, log_stats)
 
             return AsyncMPClient(vllm_config, executor_class, log_stats)
 
