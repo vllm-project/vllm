@@ -63,7 +63,7 @@ class CPUCacheEngine:
         # Get attention backend.
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
-            self.model_config.dtype,
+            self.model_config.attn_dtype,
             cache_config.cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,

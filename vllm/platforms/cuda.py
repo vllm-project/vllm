@@ -161,7 +161,7 @@ class CudaPlatformBase(Platform):
         return torch.cuda.max_memory_allocated(device)
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
+    def get_attn_backend_cls(cls, selected_backend, head_size, attn_dtype,
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
         if use_mla:
@@ -233,9 +233,9 @@ class CudaPlatformBase(Platform):
                 "Cannot use FlashAttention-2 backend for Volta and Turing "
                 "GPUs.")
             target_backend = _Backend.XFORMERS
-        elif dtype not in (torch.float16, torch.bfloat16):
+        elif attn_dtype not in (torch.float16, torch.bfloat16):
             logger.info(
-                "Cannot use FlashAttention-2 backend for dtype other than "
+                "Cannot use FlashAttention-2 backend for attn_dtype other than "
                 "torch.float16 or torch.bfloat16.")
             target_backend = _Backend.XFORMERS
         elif block_size % 16 != 0:
