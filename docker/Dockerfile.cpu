@@ -75,6 +75,7 @@ RUN --mount=type=bind,source=.git,target=.git \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/workspace/vllm/.deps,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel 
 
