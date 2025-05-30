@@ -30,9 +30,7 @@ from transformers.models.llama4.image_processing_llama4_fast import (
 
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_gather)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import InputProcessingContext
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -52,6 +50,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.utils import run_dp_sharded_vision_model
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -723,7 +722,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.use_data_parallel = (
-            vllm_config.parallel_config.enable_vision_encoder_data_parallel)
+            vllm_config.parallel_config.enable_multimodal_encoder_data_parallel)
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
@@ -778,19 +777,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # shard image input
         if self.use_data_parallel:
-            num_chunks = flat_data.shape[0]
-            mp_world_size = get_tensor_model_parallel_world_size()
-            chunk_per_rank = (num_chunks + mp_world_size - 1) // mp_world_size
-            pad = (0, 0, 0, 0, 0, 0, 0,
-                   chunk_per_rank * mp_world_size - num_chunks)
-            flat_data_padded = torch.nn.functional.pad(flat_data, pad)
-            rank = get_tensor_model_parallel_rank()
-            data_per_rank = flat_data_padded[rank * chunk_per_rank:(rank + 1) *
-                                             chunk_per_rank, ...].clone()
-            vision_embeddings_flat = self.vision_model(data_per_rank)
-            vision_embeddings_flat = tensor_model_parallel_all_gather(
-                vision_embeddings_flat, dim=0)
-            vision_embeddings_flat = vision_embeddings_flat[:num_chunks, ...]
+            vision_embeddings_flat = run_dp_sharded_vision_model(flat_data, self.vision_model)
         else:
             vision_embeddings_flat = self.vision_model(flat_data)
 
