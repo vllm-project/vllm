@@ -199,12 +199,16 @@ class Worker(WorkerBase):
 
         # Check for any memory left around that may have been allocated on the
         # gpu outside of `torch`. NCCL operations, for example, can use a few
-        # GB during a forward pass
+        # GB during a forward pass.
         torch.cuda.empty_cache()
         torch_allocated_bytes = torch.cuda.memory_stats(
         )["allocated_bytes.all.current"]
-        total_allocated_bytes = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+
+        # Reset after emptying torch cache
+        free_gpu_memory = torch.cuda.mem_get_info()[0]
+
+        # Total forward allocation is equal to the change in free memory
+        total_allocated_bytes = self.init_gpu_memory - free_gpu_memory
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
