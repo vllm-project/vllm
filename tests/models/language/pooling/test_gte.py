@@ -35,12 +35,15 @@ MODELS = [
     ########### NewModel
     EmbedModelInfo("Alibaba-NLP/gte-multilingual-base",
                    architecture="GteNewModel",
+                   dtype="half",
                    enable_test=True),
     EmbedModelInfo("Alibaba-NLP/gte-base-en-v1.5",
                    architecture="GteNewModel",
+                   dtype="half",
                    enable_test=True),
     EmbedModelInfo("Alibaba-NLP/gte-large-en-v1.5",
                    architecture="GteNewModel",
+                   dtype="half",
                    enable_test=True),
     ########### Qwen2ForCausalLM
     EmbedModelInfo("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
@@ -50,6 +53,7 @@ MODELS = [
     ########## ModernBertModel
     EmbedModelInfo("Alibaba-NLP/gte-modernbert-base",
                    architecture="ModernBertModel",
+                   dtype="half",
                    enable_test=True),
 ]
 
