@@ -67,7 +67,42 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv pip install --system --index-url https://download.pytorch.org/whl/nightly/cu128 --pre pytorch_triton==3.3.0+gitab727c40; \
     fi
 
+
+# must put before installing xformers, so it can install the correct version of xfomrers.
+ARG torch_cuda_arch_list='8.0;8.6;8.9;9.0'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+
+# Build xformers with cuda and torch nightly
+# following official xformers guidance: https://github.com/facebookresearch/xformers#build
+ARG max_jobs=16
+ENV MAX_JOBS=${max_jobs}
+ARG XFORMERS_COMMIT=da84ce3a8fc07e8b1fa0de5fce08c87bf7e713df
+
 COPY requirements/common.txt requirements/common.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system numba==0.61.2
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+uv pip install --system -r requirements/common.txt
+
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+     --mount=type=cache,target=/root/.cache/uv \
+    echo 'git clone xformers...' \
+    && git clone https://github.com/facebookresearch/xformers.git --recursive \
+    && cd xformers \
+    && git checkout ${XFORMERS_COMMIT} \
+    && git submodule update --init --recursive \
+    && echo 'finish git clone xformers...' \
+    && rm -rf build \
+    && python3 setup.py bdist_wheel --dist-dir=../xformers-dist --verbose \
+    && cd .. \
+    && rm -rf xformers
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system xformers-dist/*.whl --verbose
+
+
 COPY requirements/cuda-nightly.txt requirements/cuda-nightly.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/cuda-nightly.txt \
