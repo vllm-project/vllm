@@ -143,7 +143,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.activation(activation, workspace2, workspace1.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None
-        # to _fp8_quantize ?
         a2q, a2q_scale = per_token_group_quant_fp8(workspace2,
                                                    self.block_shape[1],
                                                    column_major_scales=True)

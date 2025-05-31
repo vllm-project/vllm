@@ -6,7 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import (
-    per_token_group_quant_fp8)
+    moe_kernel_quantize_input)
 
 
 class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -55,13 +55,9 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def _do_quant(self, tokens: torch.Tensor,
                   token_scales: Optional[torch.Tensor], per_act_token: bool):
-        #tokens, token_scales = moe_kernel_quantize_input(
-        #    tokens, token_scales, self.quant_dtype, per_act_token,
-        #    self.block_shape)
-        #return tokens, token_scales
-        tokens, token_scales = per_token_group_quant_fp8(
-            tokens, self.block_shape[1], column_major_scales=False)
-        #token_scales = token_scales.contiguous()
+        tokens, token_scales = moe_kernel_quantize_input(
+            tokens, token_scales, self.quant_dtype, per_act_token,
+            self.block_shape)
         return tokens, token_scales
 
     def _do_dispatch(self, tokens: torch.Tensor,
@@ -151,7 +147,6 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         if per_act_token:
             a1q, a1q_scale = self._do_quant(a1, a1_scale, per_act_token=True)
-            print(f"a1q scale {a1q_scale.shape} {a1q_scale.stride()} ")
             (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1q,
