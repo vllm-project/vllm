@@ -527,7 +527,6 @@ def main(args: argparse.Namespace):
     validate_args(args)
     if args.seed is None:
         args.seed = 0
-    print(args)
     random.seed(args.seed)
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(
