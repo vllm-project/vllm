@@ -49,11 +49,11 @@ class KVConnectorFactory:
         return connector_cls(rank, local_rank, config)
 
     @classmethod
-    def create_connector_v1(
-        cls,
-        config: "VllmConfig",
-        role: KVConnectorRole,
-    ) -> KVConnectorBase_V1:
+    def create_connector_v1(cls,
+                            config: "VllmConfig",
+                            role: KVConnectorRole,
+                            rank: int = 0,
+                            local_rank: int = 0) -> KVConnectorBase_V1:
         if not envs.VLLM_USE_V1:
             raise ValueError("Attempting to initialize a V1 Connector, "
                              f"but found {envs.VLLM_USE_V1=}")
@@ -80,7 +80,7 @@ class KVConnectorFactory:
         # - Co-locate with worker process
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
-        return connector_cls(config, role)
+        return connector_cls(config, role, rank, local_rank)
 
 
 # Register various connectors here.
@@ -110,6 +110,11 @@ KVConnectorFactory.register_connector(
     "SharedStorageConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector",
     "SharedStorageConnector")
+
+KVConnectorFactory.register_connector(
+    "P2pNcclConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_connector",
+    "P2pNcclConnector")
 
 KVConnectorFactory.register_connector(
     "LMCacheConnectorV1",

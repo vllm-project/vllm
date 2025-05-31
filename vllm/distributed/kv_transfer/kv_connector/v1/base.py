@@ -57,13 +57,19 @@ class KVConnectorMetadata:
 
 class KVConnectorBase_V1(ABC):
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+    def __init__(self,
+                 vllm_config: "VllmConfig",
+                 role: KVConnectorRole,
+                 rank: int = 0,
+                 local_rank: int = 0):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design.")
         self._connector_metadata = KVConnectorMetadata()
         self._vllm_config = vllm_config
         self._role = role
+        self._rank = rank
+        self._local_rank = local_rank
 
     @property
     def role(self) -> KVConnectorRole:
@@ -176,8 +182,8 @@ class KVConnectorBase_V1(ABC):
         pass
 
     def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+            self, finished_req_ids: set[str],
+            **kwargs) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.

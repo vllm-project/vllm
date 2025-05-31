@@ -1504,7 +1504,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
-                scheduler_output.finished_req_ids)
+                scheduler_output.finished_req_ids,
+                forward_context=get_forward_context())
         return None, None
 
     def generate_draft_token_ids(
