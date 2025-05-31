@@ -60,6 +60,7 @@ from benchmark_dataset import (
     ASRDataset,
     BurstGPTDataset,
     ConversationDataset,
+    CustomDataset,
     HuggingFaceDataset,
     InstructCoderDataset,
     MTBenchDataset,
@@ -627,7 +628,16 @@ def main(args: argparse.Namespace):
             "'--dataset-path' if required."
         )
 
-    if args.dataset_name == "sonnet":
+    if args.dataset_name == "custom":
+        dataset = CustomDataset(dataset_path=args.dataset_path)
+        input_requests = dataset.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            output_len=args.custom_output_len,
+            skip_chat_template=args.custom_skip_chat_template,
+        )
+
+    elif args.dataset_name == "sonnet":
         dataset = SonnetDataset(dataset_path=args.dataset_path)
         # For the "sonnet" dataset, formatting depends on the backend.
         if args.backend == "openai-chat":
@@ -838,6 +848,8 @@ def main(args: argparse.Namespace):
             ]:
                 if field in result_json:
                     del result_json[field]
+                if field in benchmark_result:
+                    del benchmark_result[field]
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
@@ -850,6 +862,7 @@ def main(args: argparse.Namespace):
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:
+            os.makedirs(args.result_dir, exist_ok=True)
             file_name = os.path.join(args.result_dir, file_name)
         with open(
             file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
@@ -890,7 +903,7 @@ if __name__ == "__main__":
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf"],
+        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "custom"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
@@ -1060,6 +1073,19 @@ if __name__ == "__main__":
     )
 
     # group for dataset specific arguments
+    custom_group = parser.add_argument_group("custom dataset options")
+    custom_group.add_argument(
+        "--custom-output-len",
+        type=int,
+        default=256,
+        help="Number of output tokens per request, used only for custom dataset.",
+    )
+    custom_group.add_argument(
+        "--custom-skip-chat-template",
+        action="store_true",
+        help="Skip applying chat template to prompt, used only for custom dataset.",
+    )
+
     sonnet_group = parser.add_argument_group("sonnet dataset options")
     sonnet_group.add_argument(
         "--sonnet-input-len",
