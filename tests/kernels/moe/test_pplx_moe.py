@@ -357,7 +357,7 @@ def torch_moe2(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     use_fp8_w8a8: bool = False,
-    per_act_token_quant = False,
+    per_act_token_quant=False,
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
     M, K = a.shape
@@ -455,7 +455,6 @@ def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
 
     topk = topk_ids.shape[1]
     num_tokens, hidden_dim = a.shape
-    block_size = 128
     device = pgi.device
     rank = pgi.rank
     world_size = pgi.world_size
@@ -597,7 +596,7 @@ def pplx_moe(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     qtype: Optional[torch.dtype] = None,
-    per_act_token_quant = False,
+    per_act_token_quant=False,
     block_shape: Optional[list[int]] = None,
     use_compile: bool = True,
     use_cudagraphs: bool = True,
@@ -647,7 +646,7 @@ def pplx_moe(
     experts = BatchedTritonExperts(max_num_tokens=max_num_tokens,
                                    world_size=world_size,
                                    dp_size=dp_size,
-                                   use_fp8_w8a8=qtype==torch.float8_e4m3fn,
+                                   use_fp8_w8a8=qtype == torch.float8_e4m3fn,
                                    block_shape=block_shape)
 
     fused_experts = FusedMoEModularKernel(
@@ -788,9 +787,12 @@ def _pplx_moe(
 
     with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s, w2_s, use_fp8_w8a8, per_act_token_quant, block_shape)
+        torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s, w2_s,
+                                  use_fp8_w8a8, per_act_token_quant,
+                                  block_shape)
         pplx_output = pplx_moe(pgi.rank, pgi.world_size, dp_size, a, w1, w2,
-                               topk_weight, topk_ids, w1_s, w2_s, qtype, per_act_token_quant, block_shape)
+                               topk_weight, topk_ids, w1_s, w2_s, qtype,
+                               per_act_token_quant, block_shape)
         # TODO (bnell): fix + re-enable
         #batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight,
         #                              topk_ids)
@@ -810,7 +812,8 @@ def _pplx_moe(
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
-@pytest.mark.parametrize("block_shape", [None, [128, 128]]) #[None, [128, 128]])
+@pytest.mark.parametrize("block_shape",
+                         [None, [128, 128]])  #[None, [128, 128]])
 @requires_pplx
 def test_pplx_moe(
     mnk: tuple[int, int, int],
@@ -864,4 +867,5 @@ def test_pplx_moe(
         w1_s = None
         w2_s = None
 
-    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk, w1_s, w2_s, quant_type, per_act_token_quant, block_shape)
+    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk,
+                    w1_s, w2_s, quant_type, per_act_token_quant, block_shape)

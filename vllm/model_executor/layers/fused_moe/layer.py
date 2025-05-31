@@ -8,13 +8,10 @@ from typing import Callable, Optional
 
 import torch
 import torch.nn.functional as F
-from compressed_tensors.quantization import (QuantizationArgs,
-                                             QuantizationStrategy,
-                                             QuantizationType)
+from compressed_tensors.quantization import QuantizationArgs, QuantizationType
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
-from vllm.scalar_type import scalar_types
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_rank,
@@ -30,7 +27,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import direct_register_custom_op, cdiv
+from vllm.utils import direct_register_custom_op
 
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 
@@ -308,7 +305,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 dp_size=all2all_manager.tp_group.world_size,
                 quant_dtype=moe.quant_dtype,
                 per_act_token_quant=False,  # TODO (bnell): quantization
-                block_shape=None,           # TODO (bnell): quantization
+                block_shape=None,  # TODO (bnell): quantization
             )
 
         if prepare_finalize is not None:

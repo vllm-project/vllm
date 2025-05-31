@@ -81,6 +81,7 @@ class FusedMoEPrepareAndFinalize(ABC):
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above.
     """
+
     def __init__(
         self,
         quant_dtype: Optional[torch.dtype],
@@ -152,6 +153,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     An abstract base class for the [Permute-Experts-Unpermute] step described
     above.
     """
+
     def __init__(
         self,
         quant_dtype: Optional[torch.dtype],
