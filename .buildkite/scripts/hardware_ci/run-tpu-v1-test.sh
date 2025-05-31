@@ -2,14 +2,45 @@
 
 set -xu
 
+
+remove_docker_container() { 
+    docker rm -f tpu-test || true; 
+    docker rm -f vllm-tpu || true;
+}
+
+trap remove_docker_container EXIT
+
+# Remove the container that might not be cleaned up in the previous run.
+remove_docker_container
+
 # Build the docker image.
 docker build -f docker/Dockerfile.tpu -t vllm-tpu .
 
 # Set up cleanup.
-remove_docker_container() { docker rm -f tpu-test || true; }
-trap remove_docker_container EXIT
-# Remove the container that might not be cleaned up in the previous run.
-remove_docker_container
+cleanup_docker() {
+  # Get Docker's root directory
+  docker_root=$(docker info -f '{{.DockerRootDir}}')
+  if [ -z "$docker_root" ]; then
+    echo "Failed to determine Docker root directory."
+    exit 1
+  fi
+  echo "Docker root directory: $docker_root"
+  # Check disk usage of the filesystem where Docker's root directory is located
+  disk_usage=$(df "$docker_root" | tail -1 | awk '{print $5}' | sed 's/%//')
+  # Define the threshold
+  threshold=70
+  if [ "$disk_usage" -gt "$threshold" ]; then
+    echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
+    # Remove dangling images (those that are not tagged and not used by any container)
+    docker image prune -f
+    # Remove unused volumes / force the system prune for old images as well.
+    docker volume prune -f && docker system prune --force --filter "until=72h" --all
+    echo "Docker images and volumes cleanup completed."
+  else
+    echo "Disk usage is below $threshold%. No cleanup needed."
+  fi
+}
+cleanup_docker
 
 # For HF_TOKEN.
 source /etc/environment
