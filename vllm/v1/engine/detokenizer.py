@@ -34,6 +34,9 @@ class IncrementalDetokenizer:
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         return ""
 
+    def decode_next(self, next_token_id: int) -> str:
+        raise NotImplementedError
+
     @classmethod
     def from_new_request(
         cls,

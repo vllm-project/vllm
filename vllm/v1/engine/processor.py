@@ -211,7 +211,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> tuple[Optional[str], EngineCoreRequest]:
+    ) -> EngineCoreRequest:
 
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
@@ -316,7 +316,7 @@ class Processor:
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
 
-        return decoder_inputs.get("prompt"), EngineCoreRequest(
+        return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
             mm_inputs=sorted_mm_inputs,

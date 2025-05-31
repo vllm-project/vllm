@@ -69,8 +69,8 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
     ]
 
     # Add requests to the detokenizer.
-    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
-        output_processor.add_request(request, prompt)
+    for request in requests:
+        output_processor.add_request(request)
 
     gen_strings = {}
     gen_tokens = {}
@@ -418,8 +418,8 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
     ]
 
     # Add requests to the detokenizer.
-    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
-        output_processor.add_request(request, prompt)
+    for request in requests:
+        output_processor.add_request(request)
 
     gen_tokens = {}
     gen_logprobs = {}
@@ -546,7 +546,6 @@ def test_stop_token(include_stop_str_in_output: bool,
         generation_logprobs = (
             dummy_test_vectors.generation_logprobs[0] +
             2 * [dummy_test_vectors.generation_logprobs[0][-1]])
-    prompt_string = dummy_test_vectors.prompt_strings[0]
     prompt_tokens = dummy_test_vectors.prompt_tokens[0]
     engine_core = MockEngineCore(
         tokens_list=[generation_tokens],
@@ -581,7 +580,7 @@ def test_stop_token(include_stop_str_in_output: bool,
         ))
 
     # Add request to the detokenizer.
-    output_processor.add_request(request, prompt_string)
+    output_processor.add_request(request)
 
     # Loop over engine core steps; run output processor
     gen_string = ""
@@ -678,8 +677,8 @@ def test_stop_string(include_stop_str_in_output: bool,
     ]
 
     # Add requests to the detokenizer.
-    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
-        output_processor.add_request(request, prompt)
+    for request in requests:
+        output_processor.add_request(request)
 
     gen_strings = {}
     gen_tokens = {}
@@ -786,7 +785,7 @@ def test_iteration_stats(dummy_test_vectors):
     # Add all requests except one to the OutputProcessor.
     num_active = len(dummy_test_vectors.generation_tokens) - 1
     for request in requests[:num_active]:
-        output_processor.add_request(request, None)
+        output_processor.add_request(request)
     inactive_request = requests[num_active]
 
     # First iteration has 2 prefills.
@@ -812,7 +811,7 @@ def test_iteration_stats(dummy_test_vectors):
     assert iteration_stats.num_generation_tokens == num_active
 
     # Add a new request - prefill and 2 decodes in this step.
-    output_processor.add_request(inactive_request, None)
+    output_processor.add_request(inactive_request)
     num_active += 1
     outputs = engine_core.get_outputs()[:num_active]
     iteration_stats = IterationStats()
