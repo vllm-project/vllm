@@ -363,6 +363,7 @@ class MPClient(EngineCoreClient):
             local_engine_count = parallel_config.data_parallel_size_local
             local_start_index = parallel_config.data_parallel_rank_local
             dp_size = parallel_config.data_parallel_size
+            dp_rank = parallel_config.data_parallel_rank
 
             # SPMD mode is where there is an LLM instance per DP rank and
             # one core engine per LLM, see
@@ -370,11 +371,9 @@ class MPClient(EngineCoreClient):
             spmd_mode = local_start_index is not None
             if spmd_mode:
                 assert local_engine_count == 1
-                self.core_engines = [
-                    CoreEngine(index=local_start_index, local=True)
-                ]
+                self.core_engines = [CoreEngine(index=dp_rank, local=True)]
             else:
-                assert parallel_config.data_parallel_rank == 0
+                assert dp_rank == 0
                 local_start_index = 0
                 self.core_engines = [
                     CoreEngine(index=i, local=(i < local_engine_count))
