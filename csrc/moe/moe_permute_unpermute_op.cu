@@ -142,7 +142,7 @@ void moe_permute(const torch::Tensor& input, const torch::Tensor& topk_weights,
                  torch::Tensor& expert_first_token_offset,
                  torch::Tensor& src_row_id2dst_row_id_map,
                  torch::Tensor& m_indices) {
-  TORCH_CHECK(false, "moe_unpermute is not supported on CUDA < 12.0");
+  TORCH_CHECK(false, "moe_permute is not supported on CUDA < 12.0");
 }
 
 void moe_unpermute(const torch::Tensor& input,
