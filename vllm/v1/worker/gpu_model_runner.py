@@ -500,6 +500,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed or batch_reordered:
             self.input_batch.refresh_sampling_metadata()
 
+    def _get_cumsum_and_arange(
+        self,
+        num_tokens: np.ndarray,
+        cumsum_dtype: Optional[np.dtype] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Get the cumulative sum and batched arange of the given array.
+        # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
+        # Equivalent to but faster than:
+        # np.concatenate([np.arange(n) for n in num_tokens])
+        """
+        # Step 1. [2, 5, 3] -> [2, 7, 10]
+        cu_num_tokens = np.cumsum(num_tokens, dtype=cumsum_dtype)
+        total_num_tokens = cu_num_tokens[-1]
+        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
+        cumsums_offsets = np.repeat(cu_num_tokens - num_tokens, num_tokens)
+        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        arange = self.arange_np[:total_num_tokens] - cumsums_offsets
+
+        return cu_num_tokens, arange
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -525,17 +545,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
 
-        # Get batched arange.
-        # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # Equivalent to but faster than:
-        # np.concatenate([np.arange(n) for n in num_scheduled_tokens])
-        # Step 1. [2, 5, 3] -> [2, 7, 10]
-        cu_num_tokens = np.cumsum(num_scheduled_tokens)
-        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
-        cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
-                                    num_scheduled_tokens)
-        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
+        # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
+        # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        cu_num_tokens, arange = self._get_cumsum_and_arange(
+            num_scheduled_tokens)
 
         # Get positions.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
@@ -841,32 +854,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Compute the logits indices.
         # [4, 1, 3, 1, 2]
         num_sampled_tokens = num_draft_tokens + 1
-        # Step 1. [4, 5, 8, 9, 11]
-        cu_num_sampled_tokens = np.cumsum(num_sampled_tokens, dtype=np.int32)
-        total_num_sampled_tokens = cu_num_sampled_tokens[-1]
-        # Step 2. [0, 0, 0, 0, 4, 5, 5, 5, 8, 9, 9]
-        cumsums_offsets = np.repeat(cu_num_sampled_tokens - num_sampled_tokens,
-                                    num_sampled_tokens)
-        # Step 3. [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
-        arange = self.arange_np[:total_num_sampled_tokens] - cumsums_offsets
-        # Step 4. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
+
+        # Step 1. cu_num_sampled_tokens: [4, 5, 8, 9, 11]
+        # arange: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
+        cu_num_sampled_tokens, arange = self._get_cumsum_and_arange(
+            num_sampled_tokens, cumsum_dtype=np.int32)
+        # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
         logits_indices = np.repeat(
             cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
-        # Step 5. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
+        # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
         logits_indices += arange
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
 
         # Compute the draft logits indices.
-        # [3, 3, 5, 5, 6]
-        cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
-        total_num_draft_tokens = cu_num_draft_tokens[-1]
-        # [0, 0, 0, 3, 3, 5]
-        cumsums_offsets = np.repeat(cu_num_draft_tokens - num_draft_tokens,
-                                    num_draft_tokens)
-        # [0, 1, 2, 0, 1, 0]
-        arange = self.arange_np[:total_num_draft_tokens] - cumsums_offsets
+        # cu_num_draft_tokens: [3, 3, 5, 5, 6]
+        # arange: [0, 1, 2, 0, 1, 0]
+        cu_num_draft_tokens, arange = self._get_cumsum_and_arange(
+            num_draft_tokens, cumsum_dtype=np.int32)
         # [0, 0, 0, 5, 5, 9]
         target_logits_indices = np.repeat(
             cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
