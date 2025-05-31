@@ -5,9 +5,10 @@ import json
 import os
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
+from itertools import islice, repeat
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 
-import cloudpickle
 import msgspec
 
 import vllm.envs as envs
@@ -212,8 +213,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     num_gpus=num_gpus,
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
-                                           rpc_rank=rank)
+                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
             else:
                 worker = ray.remote(
                     num_cpus=0,
@@ -221,8 +221,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     resources={current_platform.ray_device_key: num_gpus},
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
-                                           rpc_rank=rank)
+                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
             worker_metadata.append(
                 RayWorkerMetaData(worker=worker, created_rank=rank))
 
@@ -244,7 +243,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     # as the resource holder for the driver process.
                     self.driver_dummy_worker = worker
                     self.driver_worker = RayWorkerWrapper(
-                        vllm_config=self.vllm_config, rpc_rank=0)
+                        vllm_config=self.vllm_config)
                     worker_metadata.pop(i)
                     break
 
@@ -283,11 +282,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
         for i, item in enumerate(sorted_worker_metadata):
             item.adjusted_rank = i + start_rank
         self.workers = [item.worker for item in sorted_worker_metadata]
-        rerank_mapping = {
-            item.created_rank: item.adjusted_rank
-            for item in sorted_worker_metadata
-        }
-        self._run_workers("adjust_rank", rerank_mapping)
 
         # Get the set of GPU IDs used on each node.
         worker_node_and_gpu_ids = []
@@ -328,10 +322,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 " each node.")
 
         # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables = [{
+        all_args_to_update_environment_variables = [({
             current_platform.device_control_env_var:
             ",".join(map(str, node_gpus[node_id])),
-        } for (node_id, _) in worker_node_and_gpu_ids]
+        }, ) for (node_id, _) in worker_node_and_gpu_ids]
 
         # Environment variables to copy from driver to workers
         env_vars_to_copy = [
@@ -347,7 +341,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             # TODO: refactor platform-specific env vars
             for name in env_vars_to_copy:
                 if name in os.environ:
-                    args[name] = os.environ[name]
+                    args[0][name] = os.environ[name]
 
         logger.info("non_carry_over_env_vars from config: %s",
                     self.non_carry_over_env_vars)
@@ -362,7 +356,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             all_args_to_update_environment_variables)
 
         self._run_workers("update_environment_variables",
-                          self._get_env_vars_to_be_updated())
+                          all_args=self._get_env_vars_to_be_updated())
 
         if len(node_gpus) == 1:
             # in single node case, we don't need to get the IP address.
@@ -390,7 +384,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 or (rank % self.parallel_config.tensor_parallel_size == 0),
             )
             all_kwargs.append(kwargs)
-        self._run_workers("init_worker", all_kwargs)
+        self._run_workers("init_worker", all_kwargs=all_kwargs)
 
         self._run_workers("init_device")
         self._run_workers("load_model",
@@ -466,6 +460,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         method: Union[str, Callable],
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
+        all_args: Optional[List[Tuple[Any, ...]]] = None,
+        all_kwargs: Optional[List[Dict[str, Any]]] = None,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
@@ -479,11 +475,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
           rather than blocking on the results.
         - args/kwargs: All workers share the same args/kwargs
         """
-        if isinstance(method, str):
-            sent_method = method
-        else:
-            sent_method = cloudpickle.dumps(method)
-        del method
         if self.use_ray_spmd_worker:
             assert not async_run_tensor_parallel_workers_only, (
                 "async_run_tensor_parallel_workers_only is not supported for "
@@ -493,13 +484,27 @@ class RayDistributedExecutor(DistributedExecutorBase):
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
 
+        count = len(self.workers) if not \
+            async_run_tensor_parallel_workers_only \
+            else len(self.non_driver_workers)
+
+        # If using SPMD worker, all workers are the same, so we should execute
+        # the args on all workers. Otherwise, we skip the first worker's args
+        # because those args will go to the driver worker.
+        first_worker_args_index: int = 0 if self.use_ray_spmd_worker else 1
+        all_worker_args = repeat(args, count) if all_args is None \
+            else islice(all_args, first_worker_args_index, None)
+        all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
+            else islice(all_kwargs, first_worker_args_index, None)
+
         # Start the ray workers first.
         ray_workers = self.workers
         if async_run_tensor_parallel_workers_only:
             ray_workers = self.non_driver_workers
         ray_worker_outputs = [
-            worker.execute_method.remote(sent_method, *args, **kwargs)
-            for worker in ray_workers
+            worker.execute_method.remote(method, *worker_args, **worker_kwargs)
+            for (worker, worker_args, worker_kwargs
+                 ) in zip(ray_workers, all_worker_args, all_worker_kwargs)
         ]
 
         if async_run_tensor_parallel_workers_only:
@@ -511,9 +516,13 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # so we only explicitly execute on the driver worker if using a
         # non-SPMD worker class.
         if not self.use_ray_spmd_worker:
+            driver_args = args if all_args is None else all_args[0]
+            driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
+
             # Start the driver worker after all the ray workers.
             driver_worker_output = [
-                self.driver_worker.execute_method(sent_method, *args, **kwargs)
+                self.driver_worker.execute_method(method, *driver_args,
+                                                  **driver_kwargs)
             ]
 
         # Get the results of the ray workers.
