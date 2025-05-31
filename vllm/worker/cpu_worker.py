@@ -132,6 +132,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        cpus_allow_list: List[int],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[CPUModelRunner]] = None,
@@ -155,8 +156,51 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
-        if omp_cpuids == "all":
-            self.local_omp_cpuid = "all"
+        self.local_omp_cpuid = "all"
+        if omp_cpuids == "auto":
+            # Setup OpenMP thread affinity based on NUMA nodes automatically
+            world_size = self.vllm_config.parallel_config.world_size
+
+            from importlib import util
+            libnuma_found = util.find_spec("numa") is not None
+            psutil_found = util.find_spec("psutil") is not None
+            if libnuma_found and psutil_found:
+                import psutil
+                from numa import info
+                cpu_count = psutil.cpu_count(logical=False)
+                numa_size = info.get_num_configured_nodes()
+                cpu_count_per_numa = cpu_count // numa_size
+                num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU,
+                                          cpu_count_per_numa // 2)
+
+                # check allow node_to_cpus list
+                node_to_cpus = []
+                for i in range(numa_size):
+                    node_intersect = set(
+                        info.node_to_cpus(i)).intersection(cpus_allow_list)
+                    if bool(node_intersect):
+                        node_to_cpus.append(list(node_intersect))
+
+                if world_size > len(node_to_cpus):
+                    logger.error(
+                        "Auto thread-binding failed due to "
+                        "world size: %d is larger than "
+                        "allowed NUMA nodes number: %d."
+                        "Please try to bind threads manually.", world_size,
+                        len(node_to_cpus))
+                else:
+                    rank_to_cpus = str(node_to_cpus[self.rank][0]) + '-' + str(
+                        node_to_cpus[self.rank][cpu_count_per_numa - 1 -
+                                                num_of_reserved_cpu])
+                    self.local_omp_cpuid = rank_to_cpus
+                    logger.info("auto thread-binding list: %s",
+                                self.local_omp_cpuid)
+            else:
+                logger.warning(
+                    "Auto thread-binding is not supported due to "
+                    "the lack of package numa and psutil,"
+                    "fallback to no thread-binding. To get better performance,"
+                    "please try to manually bind threads.")
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
