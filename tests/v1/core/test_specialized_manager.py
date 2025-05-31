@@ -41,8 +41,10 @@ def test_sliding_window_possible_cached_prefix():
         for i, (block_hash,
                 is_cached) in enumerate(zip(block_hash_list, block_is_cached)):
             if is_cached:
+                # blocks[i+9] is with block_id=i+10, as null_block with
+                # block_id=0 is not included in block_pool.blocks.
                 block_pool.cached_block_hash_to_block[block_hash] = {
-                    i: block_pool.blocks[i + 10]
+                    i: block_pool.blocks[i + 9]
                 }
 
         computed_blocks = manager.find_longest_cache_hit(
