@@ -152,7 +152,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             (a2q, a2q_scale), (w2, w2_scale), workspace3, expert_ids)
 
         workspace3 = workspace3[inv_perm, ...]
-        torch.cuda.synchronize()
 
         return workspace3
 

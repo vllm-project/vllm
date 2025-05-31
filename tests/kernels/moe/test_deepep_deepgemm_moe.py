@@ -347,7 +347,7 @@ def triton_impl(a: torch.Tensor, topk_ids: torch.Tensor,
                          w2_scale=w2_scale,
                          a1_scale=a1_scale,
                          block_shape=block_shape,
-                         allow_deep_gemm=True)
+                         allow_deep_gemm=False)
 
 
 def _deep_ep_moe(
