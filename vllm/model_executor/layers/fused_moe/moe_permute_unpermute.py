@@ -26,6 +26,13 @@ def _moe_permute(
 
     tokens_in_chunk = curr_hidden_states.size(0)
 
+    do_debug = torch.cuda.current_device() == 0 and False
+    if do_debug:
+        torch.set_printoptions(profile="full")
+        print (f"topk_ids : {curr_topk_ids.shape} {curr_topk_ids}", flush=True)
+        print(f"expert map {expert_map}", flush=True)
+        torch.set_printoptions(profile="default")
+
     sorted_token_ids, expert_ids, num_tokens_post_padded = (
         moe_align_block_size(curr_topk_ids,
                              block_m,
@@ -33,14 +40,22 @@ def _moe_permute(
                              expert_map,
                              pad_sorted_ids=True))
 
+    if do_debug:
+        torch.set_printoptions(profile="full")
+        print (f"from within moe_permute :: expert_ids {expert_ids.shape} {expert_ids}", flush=True)
+        print (f"sorted token ids {sorted_token_ids.shape} {sorted_token_ids}")
+        torch.set_printoptions(profile="default")
+
+
     inv_perm: Optional[torch.Tensor] = None
 
     num_tokens = top_k_num * tokens_in_chunk
-    sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
     expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
     inv_perm = torch.argsort(sorted_token_ids)[:num_tokens]
 
     # Permute according to sorted token ids.
+    sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
+
     curr_hidden_states = _fp8_perm(curr_hidden_states,
                                    sorted_token_ids // top_k_num)
 

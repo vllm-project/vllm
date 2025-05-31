@@ -213,8 +213,9 @@ def moe_align_block_size(
     num_tokens_post_pad = torch.empty((1),
                                       dtype=torch.int32,
                                       device=topk_ids.device)
-    if num_experts >= 224:
+    if num_experts >= 224 or True:
         if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts != 256:
+            print (f"doing triton align block size ...")
             moe_align_block_size_triton(
                 topk_ids,
                 num_experts,
@@ -236,6 +237,7 @@ def moe_align_block_size(
     else:
         ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
                                  expert_ids, num_tokens_post_pad)
+
     if expert_map is not None:
         expert_ids = expert_map[expert_ids]
 

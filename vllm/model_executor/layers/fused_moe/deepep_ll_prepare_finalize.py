@@ -1,9 +1,9 @@
-# SPDX-License-Identifier: Apache-2.0
-from typing import Optional
+# SPDX-License-Identifier: Apache-2.0 from typing import Optional
 
 import deep_ep
 import torch
 
+from typing import Optional
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)

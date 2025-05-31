@@ -12,7 +12,8 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
-                                                        _resize_cache)
+                                                        _resize_cache,
+                                                        per_token_group_quant_fp8)
 from vllm.utils import round_up
 
 logger = init_logger(__name__)
@@ -114,6 +115,14 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert w2.size(1) == K
 
+        torch.cuda.synchronize()
+
+        did = 79 
+        do_debug = torch.cuda.current_device() == 0 and False
+        if do_debug:
+            print (f"topk_ids : {topk_ids[did]}", flush=True)
+            print (f"{torch.cuda.current_device()} - a1q {did} {a1q[did]} | a1q_scale {did} {a1q_scale[did]}", flush=True)
+
         a1q, a1q_scale, _, expert_ids, inv_perm = _moe_permute(
             a1q,
             a1q_scale,
@@ -122,6 +131,13 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             expert_map,
             self.block_shape[0],
         )
+
+        torch.cuda.synchronize()
+        if do_debug:
+            print (f"{torch.cuda.current_device()} - moe-perm {did} {a1q[inv_perm[did*2]]} | scale {a1q_scale[inv_perm[did*2]]} | expert {expert_ids[inv_perm[did*2]]}", flush=True)
+            print (f"{torch.cuda.current_device()} - moe-perm {did} {a1q[inv_perm[did*2 + 1]]} | scale {a1q_scale[inv_perm[did*2+1]]} | expert {expert_ids[inv_perm[did*2+1]]}", flush=True)
+            print (f"{torch.cuda.current_device()} - expert_ids {expert_ids.shape} {did} {expert_ids[inv_perm[did * 2]]} -- {expert_ids[inv_perm[did * 2 + 1]]}", flush=True)
+
         if expert_map is not None:
             # DeepGemm (Grouped Contiguous) kernel needs a valid B index
             # for all rows of A. To that effect, simply compute with
@@ -136,21 +152,87 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2 = _resize_cache(workspace2, (M_sum, N // 2))
         workspace3 = _resize_cache(workspace13, (M_sum, K))
 
-        a1q_scale = dg.get_col_major_tma_aligned_tensor(a1q_scale).contiguous()
+        #a1q_scale = dg.get_col_major_tma_aligned_tensor(a1q_scale)# .contiguous()
+        #a1q_scale.fill_(1)
+
+        #w1_scale = w1_scale.transpose(1,2).contiguous()
+        #w2_scale = w2_scale.transpose(1,2).contiguous()
+
+        #w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
+        #w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
+
+
+        if do_debug:
+            print (f"DG a1q scale {a1q_scale.shape} {a1q_scale.stride()} ")
+            s = ""
+            s += "mm1: \n"
+            s += f"  - a1q {a1q.shape} {a1q.stride()}\n"
+            s += f"  - a1q_scale {a1q_scale.shape} {a1q_scale.stride()}\n"
+            s += f"  - w1 {w1.shape} {w1.stride()}\n"
+            s += f"  - w1_scale {w1_scale.shape} {w1_scale.stride()}\n"
+            s += f"  - out {workspace1.shape} {workspace1.stride()}\n"
+            print (s, flush=True)
+
+        torch.cuda.synchronize()
+        if do_debug:
+            print (f"{torch.cuda.current_device()} - w1_scale (expert {expert_ids[inv_perm[did*2]]}) {w1_scale[expert_ids[inv_perm[did*2]]]} ", flush=True)
+            print (f"{torch.cuda.current_device()} - w1_scale (expert {expert_ids[inv_perm[did*2+1]]}) {w1_scale[expert_ids[inv_perm[did*2 + 1]]]} ", flush=True)
+
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a1q, a1q_scale), (w1, w1_scale), workspace1, expert_ids)
+
+        torch.cuda.synchronize()
+        if do_debug:
+            print (f"{torch.cuda.current_device()} - mm1 {did} {workspace1[inv_perm[did*2]]} ", flush=True)
+            print (f"{torch.cuda.current_device()} - mm1 {did} {workspace1[inv_perm[did*2 + 1]]} ", flush=True)
 
         self.activation(activation, workspace2, workspace1.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None
-        a2q, a2q_scale = _fp8_quantize(workspace2, a2_scale, False,
-                                       self.block_shape)
+        a2q, a2q_scale = per_token_group_quant_fp8(workspace2, self.block_shape[1],
+                                                   column_major_scales=True) 
 
-        a2q_scale = dg.get_col_major_tma_aligned_tensor(a2q_scale).contiguous()
+        #a2q, a2q_scale = _fp8_quantize(workspace2, a2_scale, False,
+        #                               self.block_shape)
+
+        #a2q_scale = dg.get_col_major_tma_aligned_tensor(a2q_scale) #.contiguous()
+        #a2q_scale.fill_(1)
+
+        if do_debug:
+            print (f"DG a2q scale {a2q_scale.shape} {a2q_scale.stride()} ")
+
+            s = ""
+            s += "mm2: \n"
+            s += f"  - a2q {a2q.shape} {a2q.stride()}\n"
+            s += f"  - a2q_scale {a2q_scale.shape} {a2q_scale.stride()}\n"
+            s += f"  - w2 {w2.shape} {w2.stride()}\n"
+            s += f"  - w2_scale {w2_scale.shape} {w2_scale.stride()}\n"
+            s += f"  - out {workspace3.shape} {workspace3.stride()}\n"
+            print (s, flush=True)
+
+        if do_debug:
+            print (f"actquant {a2q[inv_perm[did*2]]}")
+            print (f"actquant {a2q[inv_perm[did*2 + 1]]}")
+            print (f"a2q scales : {a2q_scale[inv_perm[did * 2]]} and {a2q_scale[inv_perm[did * 2 + 1]]}")
+
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a2q, a2q_scale), (w2, w2_scale), workspace3, expert_ids)
 
+        torch.cuda.synchronize()
+        if do_debug:
+            print (f"{torch.cuda.current_device()} - mm2 {did} {workspace3[inv_perm[did*2]]}", flush=True)
+            print (f"{torch.cuda.current_device()} - mm2 {did} {workspace3[inv_perm[did*2 + 1]]}", flush=True)
+
+            torch.set_printoptions(profile="full")
+            print (f"inv perm {inv_perm.shape} {inv_perm}", flush=True)
+            torch.set_printoptions(profile="default")
+
         workspace3 = workspace3[inv_perm, ...]
+        torch.cuda.synchronize()
+
+        if do_debug:
+            print (f"{torch.cuda.current_device()} - mm2 {did} {workspace3[did*2]}", flush=True)
+            print (f"{torch.cuda.current_device()} - mm2 {did} {workspace3[did*2 + 1]}", flush=True)
 
         return workspace3
 

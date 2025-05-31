@@ -8,6 +8,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
+                                                        _resize_cache,
+                                                        per_token_group_quant_fp8)
 
 
 class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -56,10 +59,15 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def _do_quant(self, tokens: torch.Tensor,
                   token_scales: Optional[torch.Tensor], per_act_token: bool):
-        tokens, token_scales = moe_kernel_quantize_input(
-            tokens, token_scales, self.quant_dtype, per_act_token,
-            self.block_shape)
+        #tokens, token_scales = moe_kernel_quantize_input(
+        #    tokens, token_scales, self.quant_dtype, per_act_token,
+        #    self.block_shape)
+        #return tokens, token_scales
+        tokens, token_scales = per_token_group_quant_fp8(
+            tokens, self.block_shape[1], column_major_scales=False) 
+        #token_scales = token_scales.contiguous()
         return tokens, token_scales
+        
 
     def _do_dispatch(self, tokens: torch.Tensor,
                      token_scales: Optional[torch.Tensor],
@@ -148,6 +156,7 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         if per_act_token:
             a1q, a1q_scale = self._do_quant(a1, a1_scale, per_act_token=True)
+            print (f"a1q scale {a1q_scale.shape} {a1q_scale.stride()} ")
             (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1q,
@@ -182,18 +191,27 @@ class DeepEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hidden_dim = fused_expert_output.size(-1)
         num_tokens = topk_ids.size(0)
 
+        print (f"fused_expert_output {fused_expert_output.shape} | topk_weights {topk_weights.shape}", flush=True)
+
+        if fused_expert_output.ndim == 2:
+            fused_expert_output = fused_expert_output.view(num_tokens, -1, hidden_dim)
+
         # The DeepEP combine kernels don't do the topk weight multiplication.
         # We multiply the weights locally.
         if not apply_router_weight_on_input:
-            # TODO (varun) : Perform inplace sum.
-            fused_expert_output.mul_(
-                topk_weights.view(fused_expert_output.size(0), -1, 1))
-            local_out_shape = (num_tokens, hidden_dim)
-            local_out = torch.zeros(local_out_shape,
-                                    device="cuda",
-                                    dtype=torch.float32)
-            ops.moe_sum(fused_expert_output, local_out)
-            fused_expert_output = local_out
+            fused_expert_output = fused_expert_output.to(torch.float32)
+            fused_expert_output = fused_expert_output * topk_weights.view(fused_expert_output.size(0), -1, 1)
+            fused_expert_output = fused_expert_output.to(output.dtype)
+
+        fused_expert_output = fused_expert_output.sum(dim=1).to(output.dtype)
+        ## TODO (varun) : Perform inplace sum.
+        #local_out_shape = (num_tokens, hidden_dim)
+        #local_out = torch.zeros(local_out_shape,
+        #                       device="cuda",
+        #                       dtype=output.dtype)
+        #print (f"moe sum : feo {fused_expert_output.dtype} | local_out {local_out.dtype}")
+        #ops.moe_sum(fused_expert_output, local_out)
+        #fused_expert_output = local_out
 
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,
