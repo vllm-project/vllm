@@ -415,6 +415,10 @@ class InternVisionEncoder(nn.Module):
 
 class InternVisionModel(nn.Module):
 
+    packed_modules_mapping = {
+        "wqkv": ["wqkv"],
+    }
+
     def __init__(
         self,
         config: PretrainedConfig,
