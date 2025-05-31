@@ -84,7 +84,8 @@ void run_cutlass_moe_mm_sm90(
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch) {
   TORCH_CHECK(a_tensors.size(0) > 0, "No input A tensors provided.");
   TORCH_CHECK(b_tensors.size(0) > 0, "No input B tensors provided.");
   TORCH_CHECK(out_tensors.size(0) > 0, "No output tensors provided.");
@@ -113,19 +114,23 @@ void run_cutlass_moe_mm_sm90(
   if (n >= 8192) {
     cutlass_group_gemm_caller<Cutlass3xGemmN8192>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   } else if (k >= 8192) {
     cutlass_group_gemm_caller<Cutlass3xGemmK8192>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   } else if (m <= 16) {
     cutlass_group_gemm_caller<Cutlass3xGemmM16>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   } else {
     cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   }
 }
 
@@ -134,15 +139,18 @@ void dispatch_moe_mm_sm90(
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch) {
   if (out_tensors.dtype() == torch::kBFloat16) {
     run_cutlass_moe_mm_sm90<cutlass::float_e4m3_t, cutlass::bfloat16_t>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   } else {
     run_cutlass_moe_mm_sm90<cutlass::float_e4m3_t, cutlass::half_t>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
   }
 }
 
@@ -153,8 +161,9 @@ void cutlass_moe_mm_sm90(
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch) {
   dispatch_moe_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
                        expert_offsets, problem_sizes, a_strides, b_strides,
-                       c_strides);
+                       c_strides, per_act_token, per_out_ch);
 }
