@@ -1109,7 +1109,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                        num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-        if dp_size == 1:
+        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
             # Early exit.
             return 0, None
 
