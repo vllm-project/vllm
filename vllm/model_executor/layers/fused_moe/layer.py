@@ -15,6 +15,7 @@ from compressed_tensors.quantization import (QuantizationArgs,
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
+from vllm.scalar_type import scalar_types
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_rank,
@@ -42,7 +43,8 @@ if current_platform.is_cuda_alike():
                                  FusedMoEPermuteExpertsUnpermute,
                                  FusedMoEPrepareAndFinalize)
     if has_pplx:
-        from .pplx_prepare_finalize import PplxPrepareAndFinalize
+        from .pplx_prepare_finalize import (PplxPrepareAndFinalize,
+                                            pplx_hidden_dim_scale_bytes)
     if has_deepep:
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import DeepEPLLPrepareAndFinalize
@@ -311,16 +313,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                                          DeepEPHTPrepareAndFinalize,
                                          DeepEPLLPrepareAndFinalize]] = None
         if moe.use_pplx_kernels:
-            # For blocked per token: set to
-            #   ceil_div(hidden_dim, block_size) * sizeof(float32)
-            # For per-token: set to sizeof(float32)
-            if moe.quant_dtype is not None and moe.quant_dtype.itemsize == 1:
-                hidden_dim_bytes = moe.hidden_dim * moe.quant_dtype.itemsize
-                hidden_scale_bytes = (cdiv(moe.hidden_dim, moe.block_size) *
-                               torch.float32.itemsize)
-            else:
-                hidden_dim_bytes = moe.hidden_dim * moe.in_dtype.itemsize
-                hidden_scale_bytes = 0
+            hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
+                moe.hidden_dim,
+                moe.in_dtype,
+                moe.quant_dtype,
+                per_act_token_quant=False,
+                block_shape=[moe.block_size, moe.block_size],
+            )
 
             all_to_all_args = dict(
                 max_num_tokens=moe.max_num_tokens,
@@ -357,6 +356,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 per_act_token=(input_activations.strategy
                                == QuantizationStrategy.TOKEN
                                if input_activations is not None else False),
+                block_shape=None,           # TODO (bnell): quantization
             )
         elif moe.use_deepep_ht_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size
@@ -891,7 +891,13 @@ class FusedMoE(torch.nn.Module):
             from vllm_hpu_extension.ops import DynamicFusedMOE
             self.hpu_fused_moe = DynamicFusedMOE(self.global_num_experts)
 
-        logger.debug("MODEL DTYPE %s", vllm_config.model_config.dtype)
+        if vllm_config.model_config is not None:
+            model_dtype = vllm_config.model_config.dtype
+        else:
+            # TODO (bnell): This is hacky to get test_mixtral_moey to work
+            model_dtype = params_dtype
+
+        logger.debug("MODEL DTYPE %s", model_dtype)
         quant_dtype: Optional[torch.dtype] = None
         if quant_config is not None:
             input_activations = get_quant_config_input_activations(
@@ -915,7 +921,7 @@ class FusedMoE(torch.nn.Module):
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
-            in_dtype=vllm_config.model_config.dtype,
+            in_dtype=model_dtype,
             quant_dtype=quant_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
         )

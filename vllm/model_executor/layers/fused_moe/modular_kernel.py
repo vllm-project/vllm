@@ -87,6 +87,15 @@ class FusedMoEPrepareAndFinalize(ABC):
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above.
     """
+    def __init__(
+        self,
+        quant_dtype: Optional[torch.dtype],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]],
+    ):
+        self.quant_dtype = quant_dtype
+        self.per_act_token_quant = per_act_token_quant
+        self.block_shape = block_shape
 
     @abstractmethod
     def prepare(
@@ -175,6 +184,15 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     An abstract base class for the [Permute-Experts-Unpermute] step described
     above.
     """
+    def __init__(
+        self,
+        quant_dtype: Optional[torch.dtype],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]],
+    ):
+        self.quant_dtype = quant_dtype
+        self.per_act_token_quant = per_act_token_quant
+        self.block_shape = block_shape
 
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod

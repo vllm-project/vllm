@@ -8,31 +8,61 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
+from vllm.utils import cdiv, round_up
+
+
+def pplx_hidden_dim_scale_bytes(
+    hidden_dim: int,
+    in_dtype: torch.dtype,
+    quant_dtype: Optional[torch.dtype],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]],
+):
+    # For blocked per token: set to
+    #   ceil_div(hidden_dim, block_size) * sizeof(float32)
+    # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
+    if quant_dtype is not None and quant_dtype.itemsize == 1:
+        block_size = block_shape[0] if block_shape is not None else 128
+        hidden_dim_bytes = hidden_dim * quant_dtype.itemsize
+        if per_act_token_quant:
+            hidden_scale_bytes = 4 * torch.float32.itemsize #?
+        else:
+            hidden_scale_bytes = round_up((cdiv(hidden_dim, block_size) *
+                                           torch.float32.itemsize),
+                                          16)
+    else:
+        hidden_dim_bytes = hidden_dim * in_dtype.itemsize
+        hidden_scale_bytes = 0
+
+    return hidden_dim_bytes, hidden_scale_bytes
 
 
 # The max_num_tokens, world_size and dp_size must be the same
 # as the ones used to create the AllToAll.
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
-    def __init__(self,
-                 a2a: pplx.AllToAll,
-                 max_num_tokens: int,
-                 world_size: int,
-                 rank: int,
-                 dp_size: int,
-                 quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None,
-                 per_act_token: bool = False):
-        super().__init__()
+    def __init__(
+        self,
+        a2a: pplx.AllToAll,
+        max_num_tokens: int,
+        world_size: int,
+        rank: int,
+        dp_size: int,
+        quant_dtype: Optional[torch.dtype] = None,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+    ):
+        super().__init__(
+            quant_dtype,
+            per_act_token_quant,
+            block_shape,
+        )
         assert max_num_tokens > 0
         self.a2a = a2a
-        self.block_shape = block_shape
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.rank = rank
         self.dp_size = dp_size
-        self.quant_dtype = quant_dtype
-        self.per_act_token = per_act_token
 
     def max_num_tokens_per_rank(self) -> Optional[int]:
         return self.max_num_tokens

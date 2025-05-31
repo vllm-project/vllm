@@ -15,14 +15,15 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
-        quant_dtype: Optional[torch.dtype] = None,
-        per_channel_quant: bool = False,
-        block_shape: Optional[list[int]] = None,
+        quant_dtype: Optional[torch.dtype],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]],
     ):
-        super().__init__()
-        self.per_channel_quant = per_channel_quant
-        self.block_shape = block_shape
-        self.quant_dtype = quant_dtype
+        super().__init__(
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        )
 
     def max_num_tokens_per_rank(self) -> Optional[int]:
         return None
@@ -52,7 +53,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
 
         a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
                                                    self.quant_dtype,
-                                                   self.per_channel_quant,
+                                                   self.per_act_token_quant,
                                                    self.block_shape)
 
         return a1q, a1q_scale, None, None, None

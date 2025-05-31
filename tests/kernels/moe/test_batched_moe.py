@@ -275,14 +275,16 @@ def batched_moe(
                                   world_size=1,
                                   dp_size=1,
                                   rank=0,
-                                  qtype=qtype,
+                                  quant_dtype=qtype,
                                   block_shape=block_shape,
-                                  per_act_token=per_act_token),
+                                  per_act_token_quant=per_act_token),
         BatchedTritonExperts(max_num_tokens=max_num_tokens,
                              dp_size=1,
                              world_size=1,
                              use_fp8_w8a8=qtype == torch.float8_e4m3fn,
-                             block_shape=block_shape))
+                             per_act_token_quant=per_act_token,
+                             block_shape=block_shape)
+    )
 
     return fused_experts(a,
                          w1,

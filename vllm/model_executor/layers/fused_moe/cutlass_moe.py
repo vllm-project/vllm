@@ -208,14 +208,18 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         max_experts_per_worker: int,
         out_dtype: torch.dtype,
-        per_act_token: bool,
+        per_act_token_quant: bool,
         per_out_ch: bool,
         use_batched_format: bool = False,
     ):
-        super().__init__()
+        super().__init__(
+            quant_dtype=torch.float8_e4m3fn,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=None,
+        )
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
-        self.per_act_token = per_act_token
+        self.per_act_token = per_act_token_quant
         self.per_out_ch = per_out_ch
         self.use_batched_format = use_batched_format
 
@@ -339,7 +343,8 @@ def cutlass_moe_fp8(
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(
             quant_dtype=torch.float8_e4m3fn,
-            per_channel_quant=per_act_token,
+            per_act_token_quant=per_act_token,
+            block_shape=None,
         ),
         CutlassExpertsFp8(
             max_experts_per_worker=global_num_experts,
