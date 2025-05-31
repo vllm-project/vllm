@@ -106,7 +106,7 @@ class MultiConnector(KVConnectorBase_V1):
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
         for c in self._connectors:
-            sending, recving = c.get_finished(finished_req_ids)
+            sending, recving = c.get_finished(finished_req_ids, kwargs)
             if not recving and not sending:
                 continue
             # Aggregate finished recving request ids.
