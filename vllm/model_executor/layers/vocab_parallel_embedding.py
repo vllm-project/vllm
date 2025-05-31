@@ -204,7 +204,8 @@ class VocabParallelEmbedding(torch.nn.Module):
                  org_num_embeddings: Optional[int] = None,
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 use_presharded_weights: bool = False):
         super().__init__()
 
         # Keep the input dimensions.
@@ -214,6 +215,10 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
         num_added_embeddings = num_embeddings - self.org_vocab_size
+        self.use_presharded_weights = use_presharded_weights
+        if use_presharded_weights:
+            assert (num_added_embeddings == 0
+                    ), "Lora is not supported with presharded weights."
         self.org_vocab_size_padded = pad_vocab_size(self.org_vocab_size,
                                                     self.padding_size)
         self.num_embeddings_padded = pad_vocab_size(
@@ -383,10 +388,14 @@ class VocabParallelEmbedding(torch.nn.Module):
             start_idx = start_idx // packed_factor
             shard_size = shard_size // packed_factor
         else:
-            assert loaded_weight.shape[output_dim] == self.org_vocab_size
+            assert loaded_weight.shape[output_dim] == (
+                self.org_vocab_size //
+                (self.tp_size if self.use_presharded_weights else 1))
 
         # Copy the data. Select chunk corresponding to current shard.
-        loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+        if not self.use_presharded_weights:
+            loaded_weight = loaded_weight.narrow(output_dim, start_idx,
+                                                 shard_size)
 
         if current_platform.is_hpu():
             # FIXME(kzawora): Weight copy with slicing bugs out on Gaudi here,
@@ -456,10 +465,16 @@ class ParallelLMHead(VocabParallelEmbedding):
                  org_num_embeddings: Optional[int] = None,
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
-        super().__init__(num_embeddings, embedding_dim, params_dtype,
-                         org_num_embeddings, padding_size, quant_config,
-                         prefix)
+                 prefix: str = "",
+                 use_presharded_weights: bool = False):
+        super().__init__(num_embeddings,
+                         embedding_dim,
+                         params_dtype,
+                         org_num_embeddings,
+                         padding_size,
+                         quant_config,
+                         prefix,
+                         use_presharded_weights=use_presharded_weights)
         self.quant_config = quant_config
         if bias:
             self.bias = Parameter(
