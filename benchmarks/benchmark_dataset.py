@@ -707,6 +707,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
+        self.dagaset_stream = dataset_stream
         self.load_data()
 
     def load_data(self) -> None:
