@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_events import KVEventBatch, get_kv_event_publisher
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
@@ -78,9 +78,6 @@ class Scheduler(SchedulerInterface):
             self.connector = KVConnectorFactory.create_connector_v1(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
-        self.kv_event_publisher = EventPublisherFactory.create(
-            self.kv_events_config)
-
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
@@ -148,6 +145,9 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+
+        self.kv_event_publisher = get_kv_event_publisher(
+            vllm_config.parallel_config, self.kv_events_config)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
