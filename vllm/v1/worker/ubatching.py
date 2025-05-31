@@ -54,7 +54,7 @@ class UBatchContext:
     def __exit__(self, exc_type, exc_val, exc_tb):
         global _CURRENT_CONTEXT
         _CURRENT_CONTEXT[threading.get_ident()] = None
-        print("Finishing ubatch %d\n" % self.id, flush=True)
+        # print("Finishing ubatch %d\n" % self.id, flush=True)
         self.cpu_signal_event.set()
         self.cpu_wait_event.clear()
         self.current_stream = self.compute_stream
@@ -75,22 +75,22 @@ class UBatchContext:
         # assert not self.cpu_wait_event.is_set()
         pass
     def _signal_comm_done(self):
-        self.ctx_valid_state()
+        # self.ctx_valid_state()
         self.gpu_comm_done_event.record(self.comm_stream)
     
     def _signal_compute_done(self):
-        self.ctx_valid_state()
+        # self.ctx_valid_state()
         self.gpu_compute_done_event.record(self.compute_stream)
 
     def _wait_compute_done(self):
         # print(f"{self.id} Waiting on COMPUTE stream", flush=True)
-        self.ctx_valid_state()
+        # self.ctx_valid_state()
         self.comm_stream.wait_event(self.gpu_compute_done_event)
         # print("Compute stream done", flush=True)
 
     def _wait_comm_done(self):
         # print(f"{self.id} Waiting on COMM stream", flush=True)
-        self.ctx_valid_state()
+        # self.ctx_valid_state()
         self.compute_stream.wait_event(self.gpu_comm_done_event)
         # print("Comm stream done", flush=True)
 
@@ -104,22 +104,22 @@ class UBatchContext:
 
     def _cpu_yield(self):
         # print(f"UBatchContext: {self.id} yielding CPU", flush=True)
-        self.ctx_valid_state()
+        # self.ctx_valid_state()
         self.cpu_signal_event.set()
         self.cpu_wait_event.wait()
         self.cpu_wait_event.clear()
         self._restore_context()
-        self.ctx_valid_state()
+        # self.ctx_valid_state()
         # print(f"UBatchContext: {self.id} resuming CPU", flush=True)
 
     def yield_and_switch_from_compute_to_comm(self):
         assert current_stream() == self.compute_stream
         # dp_rank = get_dp_group().rank_in_group 
         # print(f"DP: {dp_rank} UB: {self.id} Yield and switch from {self.stream_string()}", flush=True)
-        self.ctx_valid_state()
+        # self.ctx_valid_state()
         self._signal_compute_done()
         self._cpu_yield()
-        self.ctx_valid_state()
+        # self.ctx_valid_state()
         assert self.current_stream == self.compute_stream
         self.update_stream(self.comm_stream)
         # print(f"DP: {dp_rank} UB: {self.id} Resuming on stream {self.stream_string()}", flush=True)
@@ -129,10 +129,10 @@ class UBatchContext:
         assert current_stream() == self.comm_stream
         # dp_rank = get_dp_group().rank_in_group 
         # print(f"DP: {dp_rank} UB: {self.id} Yield and switch from {self.stream_string()}", flush=True)
-        self.ctx_valid_state()
+        # self.ctx_valid_state()
         self._signal_comm_done()
         self._cpu_yield()
-        self.ctx_valid_state()
+        # self.ctx_valid_state()
         assert self.current_stream == self.comm_stream
         self.update_stream(self.compute_stream)
         # print(f"DP: {dp_rank} UB: {self.id} Resuming on stream {self.stream_string()}", flush=True)
