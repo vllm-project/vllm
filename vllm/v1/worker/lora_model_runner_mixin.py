@@ -80,8 +80,38 @@ class LoRAModelRunnerMixin:
                                       lora_requests)
 
     @contextmanager
-    def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
-                                  num_scheduled_tokens: np.ndarray):
+    def maybe_setup_dummy_loras(self, lora_config):
+        if lora_config is None:
+            yield
+        else:
+            # __enter__ code
+            assert self.lora_manager is not None, "LoRA is not enabled"
+
+            num_loras = lora_config.max_loras
+
+            # Make dummy lora requests
+            lora_requests: set[LoRARequest] = {
+                LoRARequest(lora_name=f"warmup_{lora_id}",
+                            lora_int_id=lora_id,
+                            lora_path="/not/a/real/path")
+                for lora_id in range(1, num_loras + 1)
+            }
+
+            with self.lora_manager.dummy_lora_cache():
+                # Add the dummy LoRAs here so _set_active_loras doesn't try to
+                # load from disk.
+                for lr in lora_requests:
+                    self.lora_manager.add_dummy_lora(
+                        lr, rank=self.LORA_WARMUP_RANK)
+
+                yield
+
+            # __exit__ code
+            self.lora_manager.remove_all_adapters()
+
+    @contextmanager
+    def maybe_select_dummy_loras(self, lora_config: LoRAConfig,
+                                 num_scheduled_tokens: np.ndarray):
         if lora_config is None:
             yield
         else:
@@ -108,21 +138,18 @@ class LoRAModelRunnerMixin:
                 for lora_id in range(1, num_loras + 1)
             }
 
-            with self.lora_manager.dummy_lora_cache():
-                # Add the dummy LoRAs here so _set_active_loras doesn't try to
-                # load from disk.
-                for lr in lora_requests:
-                    self.lora_manager.add_dummy_lora(
-                        lr, rank=self.LORA_WARMUP_RANK)
+            self._set_active_loras(tuple(prompt_lora_mapping),
+                                   tuple(token_lora_mapping), lora_requests)
 
-                self._set_active_loras(tuple(prompt_lora_mapping),
-                                       tuple(token_lora_mapping),
-                                       lora_requests)
+            yield
 
-                yield
-
-            # __exit__ code
-            self.lora_manager.remove_all_adapters()
+    @contextmanager
+    def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
+                                  num_scheduled_tokens: np.ndarray):
+        with self.maybe_setup_dummy_loras(
+                lora_config), self.maybe_select_dummy_loras(
+                    lora_config, num_scheduled_tokens):
+            yield
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if not self.lora_manager:

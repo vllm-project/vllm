@@ -146,9 +146,9 @@ python3 vllm/benchmarks/benchmark_serving.py \
 
 ``` bash
 VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
-    --ngram_prompt_lookup_min 2 \
-    --ngram-prompt-lookup-max 5 \
-    --speculative_config '{"model": "[ngram]", "num_speculative_tokens": 5}
+    --speculative-config $'{"method": "ngram",
+    "num_speculative_tokens": 5, "prompt_lookup_max": 5,
+    "prompt_lookup_min": 2}'
 ```
 
 ``` bash
@@ -273,9 +273,9 @@ python3 vllm/benchmarks/benchmark_throughput.py \
     --output-len=100 \
     --num-prompts=2048 \
     --async-engine \
-    --ngram_prompt_lookup_min=2 \
-    --ngram-prompt-lookup-max=5 \
-    --speculative_config '{"model": "[ngram]", "num_speculative_tokens": 5}
+    --speculative-config $'{"method": "ngram",
+    "num_speculative_tokens": 5, "prompt_lookup_max": 5,
+    "prompt_lookup_min": 2}'
 ```
 
 ```

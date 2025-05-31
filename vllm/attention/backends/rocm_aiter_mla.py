@@ -132,8 +132,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         super().__init__(input_builder)
-        assert self.runner.model_config.max_model_len == 32768,\
-                "AITER MLA requires max model len to be set to 32768"
         assert self.block_size == 1, "AITER MLA requires only block size 1."
 
     def prepare(self):

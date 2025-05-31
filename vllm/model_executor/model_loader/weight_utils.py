@@ -696,7 +696,7 @@ def initialize_dummy_weights(
                 # Note: We avoid using torch.rank_like as it doesn't currently
                 # support the generator argument.
                 param.copy_((high - low) *
-                            torch.rand(*param.shape,
+                            torch.rand(param.shape,
                                        generator=generator,
                                        dtype=param.dtype,
                                        layout=param.layout,

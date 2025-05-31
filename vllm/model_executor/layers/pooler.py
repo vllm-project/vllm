@@ -6,10 +6,9 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PretrainedConfig
 from typing_extensions import assert_never
 
-from vllm.config import PoolerConfig
+from vllm.config import ModelConfig, PoolerConfig
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
@@ -283,30 +282,37 @@ class Pooler(nn.Module):
         )
 
 
-class CrossEncodingPooler(nn.Module):
-    """A layer that pools specific information from hidden states.
+class ClassifierPooler(nn.Module):
+    """A pooling layer for classification tasks.
 
     This layer does the following:
-    1. Extracts specific tokens or aggregates data based on pooling method.
-    2. Normalizes output if specified.
-    3. Returns structured results as `PoolerOutput`.
-
-    Attributes:
-        pooling_type: The type of pooling to use.
-        normalize: Whether to normalize the pooled data.
+    1. Applies a classification layer to the hidden states.
+    2. Optionally applies a pooler layer.
+    3. Applies an activation function to the output. In the case of
+       classification models it is either sigmoid or softmax. In the
+       case of scoring models, the same behavior is configuration
+       dependent, as in the sentence-transformers library.
     """
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: ModelConfig,
         classifier: nn.Module,
         pooler: Optional[nn.Module] = None,
     ):
         super().__init__()
         self.classifier = classifier
         self.pooler = pooler
-        self.default_activation_function = \
-            get_cross_encoder_activation_function(config)
+
+        if config.task == "score":
+            self.default_activation_function = \
+                get_cross_encoder_activation_function(config.hf_config)
+        elif config.task == "classify":
+            self.default_activation_function = nn.Sigmoid() \
+                if config.hf_config.num_labels == 1 else nn.Softmax()
+        else:
+            raise NotImplementedError(f"task={config.task!r} is not supported"
+                                      " with the classification pooler")
 
     def forward(
         self,

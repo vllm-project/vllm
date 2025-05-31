@@ -61,7 +61,7 @@ def test_basic_lifecycle():
     # (1c): update_from_output()
     engine_core_outputs = scheduler.update_from_output(scheduler_output,
                                                        model_runner_output)
-    assert len(engine_core_outputs.outputs) == 0
+    assert not engine_core_outputs or not engine_core_outputs[0].outputs
 
     # STEP (2):
     # (2a): schedule(): nothing happens!
@@ -112,7 +112,7 @@ def test_basic_lifecycle():
                                                        model_runner_output)
     scheduler.schedule()
 
-    outputs = engine_core_outputs.outputs
+    outputs = engine_core_outputs[0].outputs
     assert len(outputs) == 1
     output = outputs[0]
     assert output.finish_reason == FinishReason.STOP
@@ -335,7 +335,7 @@ def test_full_block_prompt():
                                                        model_runner_output)
     scheduler.schedule()
 
-    outputs = engine_core_outputs.outputs
+    outputs = engine_core_outputs[0].outputs
     assert len(outputs) == 1
     output = outputs[0]
     assert output.finish_reason == FinishReason.STOP

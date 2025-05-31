@@ -988,7 +988,8 @@ class OpenAIServingChat(OpenAIServing):
                     tool_calls=[
                         tool_call_class(function=FunctionCall(
                             name=tool_call.name,
-                            arguments=json.dumps(tool_call.parameters)))
+                            arguments=json.dumps(tool_call.parameters,
+                                                 ensure_ascii=False)))
                         for tool_call in tool_calls
                     ])
 

@@ -12,12 +12,11 @@ from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
-
-_LOCAL_LOGGING_INTERVAL_SEC = 5.0
 
 StatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 
@@ -35,7 +34,7 @@ class StatLoggerBase(ABC):
         ...
 
     @abstractmethod
-    def record(self, scheduler_stats: SchedulerStats,
+    def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
         ...
 
@@ -78,20 +77,22 @@ class LoggingStatLogger(StatLoggerBase):
         # Compute summary metrics for tracked stats
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
-    def record(self, scheduler_stats: SchedulerStats,
+    def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
         """Log Stats to standard output."""
 
         if iteration_stats:
             self._track_iteration_stats(iteration_stats)
 
-        self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
+        if scheduler_stats is not None:
+            self.prefix_caching_metrics.observe(
+                scheduler_stats.prefix_cache_stats)
 
-        if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_logging.observe(
-                scheduler_stats.spec_decoding_stats)
+            if scheduler_stats.spec_decoding_stats is not None:
+                self.spec_decoding_logging.observe(
+                    scheduler_stats.spec_decoding_stats)
 
-        self.last_scheduler_stats = scheduler_stats
+            self.last_scheduler_stats = scheduler_stats
 
     def log(self):
         now = time.monotonic()
@@ -131,10 +132,11 @@ class LoggingStatLogger(StatLoggerBase):
         self.spec_decoding_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
-        logger.info(
-            "vllm cache_config_info with initialization " \
-            "after num_gpu_blocks is: %d",
-            self.vllm_config.cache_config.num_gpu_blocks)
+        if self.vllm_config.cache_config.num_gpu_blocks:
+            logger.info(
+                "Engine %03d: vllm cache_config_info with initialization "
+                "after num_gpu_blocks is: %d", self.engine_index,
+                self.vllm_config.cache_config.num_gpu_blocks)
 
 
 class PrometheusStatLogger(StatLoggerBase):
@@ -144,7 +146,8 @@ class PrometheusStatLogger(StatLoggerBase):
     _spec_decoding_cls = SpecDecodingProm
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        self._unregister_vllm_metrics()
+
+        unregister_vllm_metrics()
         self.vllm_config = vllm_config
         self.engine_index = engine_index
         # Use this flag to hide metrics that were deprecated in
@@ -169,11 +172,13 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_running = self._gauge_cls(
             name="vllm:num_requests_running",
             documentation="Number of requests in model execution batches.",
+            multiprocess_mode="mostrecent",
             labelnames=labelnames).labels(*labelvalues)
 
         self.gauge_scheduler_waiting = self._gauge_cls(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
+            multiprocess_mode="mostrecent",
             labelnames=labelnames).labels(*labelvalues)
 
         #
@@ -182,6 +187,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_gpu_cache_usage = self._gauge_cls(
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
+            multiprocess_mode="mostrecent",
             labelnames=labelnames).labels(*labelvalues)
 
         self.counter_gpu_prefix_cache_queries = self._counter_cls(
@@ -242,6 +248,9 @@ class PrometheusStatLogger(StatLoggerBase):
                 buckets=build_1_2_5_buckets(max_model_len),
                 labelnames=labelnames).labels(*labelvalues)
 
+        # TODO: This metric might be incorrect in case of using multiple
+        # api_server counts which uses prometheus mp.
+        # See: https://github.com/vllm-project/vllm/pull/18053
         self.histogram_iteration_tokens = \
             self._histogram_cls(
                 name="vllm:iteration_tokens_total",
@@ -340,6 +349,9 @@ class PrometheusStatLogger(StatLoggerBase):
         #
         # LoRA metrics
         #
+
+        # TODO: This metric might be incorrect in case of using multiple
+        # api_server counts which uses prometheus mp.
         self.gauge_lora_info: Optional[prometheus_client.Gauge] = None
         if vllm_config.lora_config is not None:
             self.labelname_max_lora = "max_lora"
@@ -350,13 +362,16 @@ class PrometheusStatLogger(StatLoggerBase):
                 self._gauge_cls(
                     name="vllm:lora_requests_info",
                     documentation="Running stats on lora requests.",
+                    multiprocess_mode="sum",
                     labelnames=[
                         self.labelname_max_lora,
                         self.labelname_waiting_lora_adapters,
                         self.labelname_running_lora_adapters,
-                    ])
+                    ],
+                )
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
+
         metrics_info = config_obj.metrics_info()
         metrics_info["engine"] = self.engine_index
 
@@ -372,25 +387,28 @@ class PrometheusStatLogger(StatLoggerBase):
         info_gauge = self._gauge_cls(
             name=name,
             documentation=documentation,
-            labelnames=metrics_info.keys()).labels(**metrics_info)
+            multiprocess_mode="mostrecent",
+            labelnames=metrics_info.keys(),
+        ).labels(**metrics_info)
         info_gauge.set(1)
 
-    def record(self, scheduler_stats: SchedulerStats,
+    def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
         """Log to prometheus."""
-        self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
-        self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
+        if scheduler_stats is not None:
+            self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
+            self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 
-        self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
+            self.gauge_gpu_cache_usage.set(scheduler_stats.gpu_cache_usage)
 
-        self.counter_gpu_prefix_cache_queries.inc(
-            scheduler_stats.prefix_cache_stats.queries)
-        self.counter_gpu_prefix_cache_hits.inc(
-            scheduler_stats.prefix_cache_stats.hits)
+            self.counter_gpu_prefix_cache_queries.inc(
+                scheduler_stats.prefix_cache_stats.queries)
+            self.counter_gpu_prefix_cache_hits.inc(
+                scheduler_stats.prefix_cache_stats.hits)
 
-        if scheduler_stats.spec_decoding_stats is not None:
-            self.spec_decoding_prom.observe(
-                scheduler_stats.spec_decoding_stats)
+            if scheduler_stats.spec_decoding_stats is not None:
+                self.spec_decoding_prom.observe(
+                    scheduler_stats.spec_decoding_stats)
 
         if iteration_stats is None:
             return
@@ -444,13 +462,6 @@ class PrometheusStatLogger(StatLoggerBase):
             }
             self.gauge_lora_info.labels(**lora_info_labels)\
                                 .set_to_current_time()
-
-    @staticmethod
-    def _unregister_vllm_metrics():
-        # Unregister any existing vLLM collectors (for CI/CD
-        for collector in list(prometheus_client.REGISTRY._collector_to_names):
-            if hasattr(collector, "_name") and "vllm" in collector._name:
-                prometheus_client.REGISTRY.unregister(collector)
 
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)

@@ -30,6 +30,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQMarlinConfig)
 from vllm.model_executor.models.aimv2 import AIMv2Model
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.utils import (AutoWeightsLoader, flatten_bn,
@@ -48,7 +51,7 @@ from vllm.transformers_utils.configs.ovis import (BaseVisualTokenizerConfig,
                                                   OvisConfig)
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import merge_multimodal_embeddings
 
 # Cannot find the following number from hf config.
@@ -106,12 +109,14 @@ class VisualTokenizer(torch.nn.Module):
         config: BaseVisualTokenizerConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-    ):
+    ) -> nn.Module:
         model_type = config.backbone_config.model_type
         if model_type == "aimv2":
+            # No post rms_norm in Ovis2's AIMv2 ViT.
             return AIMv2Model(
                 config=config.backbone_config,
                 quant_config=quant_config,
+                require_post_norm=False,
                 prefix=prefix,
             )
         elif model_type == "siglip_vision_model":
@@ -124,14 +129,14 @@ class VisualTokenizer(torch.nn.Module):
             f"Unsupported visual tokenizer model_type: {model_type}")
 
     @property
-    def dtype(self):
+    def dtype(self) -> torch.dtype:
         return next(self.head.parameters()).dtype
 
     @property
-    def device(self):
+    def device(self) -> torch.device:
         return next(self.head.parameters()).device
 
-    def tokenize(self, logits):
+    def tokenize(self, logits: torch.Tensor) -> torch.Tensor:
         if self.config.tokenize_function == 'softmax':
             tokens = softmax(logits, dim=-1)
         elif self.config.tokenize_function == 'gumbel_argmax':
@@ -144,7 +149,7 @@ class VisualTokenizer(torch.nn.Module):
                 f'or st_argmax, but got {self.config.tokenize_function}')
         return tokens
 
-    def encode(self, pixel_values):
+    def encode(self, pixel_values: torch.Tensor) -> torch.Tensor:
         features = self.backbone(pixel_values)
         if self.config.drop_cls_token:
             features = features[:, 1:, :]
@@ -395,7 +400,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(OvisMultiModalProcessor,
                                         info=OvisProcessingInfo,
                                         dummy_inputs=OvisDummyInputsBuilder)
-class Ovis(nn.Module, SupportsMultiModal):
+class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -410,7 +415,7 @@ class Ovis(nn.Module, SupportsMultiModal):
 
         self.visual_tokenizer = VisualTokenizer(
             config=config.visual_tokenizer_config,
-            quant_config=quant_config,
+            quant_config=self._maybe_ignore_quant_config(quant_config),
             prefix=f"{prefix}.visual_tokenizer",
         )
 
@@ -421,9 +426,16 @@ class Ovis(nn.Module, SupportsMultiModal):
         text_model_type = self.config.get_text_config().model_type
         self.image_pad_token_id = IMAGE_PAD_TOKEN_ID_MAP[text_model_type]
 
-        # TODO(Isotr0py): PP support
-        # self.make_empty_intermediate_tensors = (
-        #    self.language_model.make_empty_intermediate_tensors)
+        self.make_empty_intermediate_tensors = (
+            self.get_language_model().make_empty_intermediate_tensors)
+
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
+        # seems to avoid vision encoder sections for some models.
+        # See: https://huggingface.co/AIDC-AI/Ovis2-2B-GPTQ-Int4
+        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
+            return None
+        return quant_config
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[OvisImagePatchInputs]:

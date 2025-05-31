@@ -29,19 +29,66 @@ See <gh-file:LICENSE>.
 Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation.
 Check out the [building from source][build-from-source] documentation for details.
 
-### Building the docs
+### Building the docs with MkDocs
 
-Install the dependencies:
+#### Introduction to MkDocs
+
+[MkDocs](https://github.com/mkdocs/mkdocs) is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file.
+
+#### Install MkDocs and Plugins
+
+Install MkDocs along with the [plugins](https://github.com/vllm-project/vllm/blob/main/mkdocs.yaml) used in the vLLM documentation, as well as required dependencies:
 
 ```bash
 pip install -r requirements/docs.txt
 ```
 
-Start the autoreloading MkDocs server:
+> **Note:** Ensure that your Python version is compatible with the plugins (e.g., mkdocs-awesome-nav requires Python 3.10+)
+
+#### Verify Installation
+
+Confirm that MkDocs is correctly installed::
+
+```bash
+mkdocs --version
+```
+
+Example output:
+
+```console
+mkdocs, version 1.6.1 from /opt/miniconda3/envs/mkdoc/lib/python3.9/site-packages/mkdocs (Python 3.9)
+```
+
+#### Clone the `vLLM` repository
+
+```bash
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+```
+
+#### Start the Development Server
+
+MkDocs comes with a built-in dev-server that lets you preview your documentation as you work on it. Make sure you're in the same directory as the `mkdocs.yml` configuration file, and then start the server by running the `mkdocs serve` command:
 
 ```bash
 mkdocs serve
 ```
+
+Example output:
+
+```console
+INFO    -  Documentation built in 106.83 seconds
+INFO    -  [22:02:02] Watching paths for changes: 'docs', 'mkdocs.yaml'
+INFO    -  [22:02:02] Serving on http://127.0.0.1:8000/
+```
+
+#### View in Your Browser
+
+Open up [http://127.0.0.1:8000/](http://127.0.0.1:8000/) in your browser to see a live preview:.
+
+#### Learn More
+
+For additional features and advanced configurations, refer to the official [MkDocs Documentation](https://www.mkdocs.org/).
 
 ## Testing
 

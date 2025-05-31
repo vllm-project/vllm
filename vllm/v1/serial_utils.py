@@ -158,8 +158,8 @@ class MsgpackEncoder:
         self, obj: torch.Tensor
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
-        #  view the tensor as a 1D array of bytes
-        arr = obj.flatten().view(torch.uint8).numpy()
+        # view the tensor as a contiguous 1D array of bytes
+        arr = obj.flatten().contiguous().view(torch.uint8).numpy()
         if obj.nbytes < self.size_threshold:
             # Smaller tensors are encoded inline, just like ndarrays.
             data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)

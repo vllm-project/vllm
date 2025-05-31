@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -191,3 +191,27 @@ def test_streaming_tool_call_with_large_steps():
     assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
     assert reconstructor.tool_calls[1].function == PARAMETERLESS_FUNCTION_CALL
     assert reconstructor.tool_calls[2].function == EMPTY_LIST_FUNCTION_CALL
+
+
+@pytest.mark.parametrize("streaming", [False])
+def test_regex_timeout_handling(streaming: bool):
+    """test regex timeout is handled gracefully"""
+    mock_tokenizer = MagicMock()
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
+        "llama4_pythonic")(mock_tokenizer)
+
+    fake_problematic_input = "hello world[A(A=" + "\t)A(A=,\t" * 2
+
+    # create a mock regex that raises TimeoutError
+    mock_regex = MagicMock()
+    mock_regex.match.side_effect = TimeoutError("Regex timeout")
+
+    with patch.object(tool_parser, 'TOOL_CALL_REGEX', mock_regex):
+        content, tool_calls = run_tool_extraction(tool_parser,
+                                                  fake_problematic_input,
+                                                  streaming=streaming)
+
+        # should treat as regular text when regex times out
+        assert content == fake_problematic_input
+        assert len(tool_calls) == 0
+        mock_regex.match.assert_called_once()

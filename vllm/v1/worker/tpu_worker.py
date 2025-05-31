@@ -83,10 +83,6 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
-        if vllm_config.lora_config is not None:
-            raise NotImplementedError(
-                "The V1 TPU backend doesn't support LoRA serving")
-
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
@@ -166,7 +162,8 @@ class TPUWorker:
             runner_kv_caches)
 
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
-        self.model_runner.profile_run(self.model_runner.max_num_tokens)
+        with self.model_runner.maybe_setup_dummy_loras(self.lora_config):
+            self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
