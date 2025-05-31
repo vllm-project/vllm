@@ -53,6 +53,10 @@ class MinimaxM2ToolParser(ToolParser):
         self.parameter_complete_regex = re.compile(
             r"<parameter name=(.*?)</parameter>", re.DOTALL
         )
+        self.invoke_name_regex = re.compile(r"<invoke name=([^>]+)>", re.DOTALL)
+
+        # Early name emission tracking
+        self.current_tool_name_index: int = 0
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -302,41 +306,63 @@ class MinimaxM2ToolParser(ToolParser):
         Tracks progress via ``current_tool_index`` so each block is
         extracted exactly once across successive streaming calls.
         """
+        # Early name emission: scan for invoke openings that may not yet
+        # be complete, and expose them as name-only DeltaToolCalls.
+        # Completed invokes are always processed before new name-only
+        # invokes so that the stream order is never inverted.
         complete_invokes = self.invoke_complete_regex.findall(current_text)
+        name_invokes = self.invoke_name_regex.findall(current_text)
         delta_tool_calls: list[DeltaToolCall] = []
 
-        while len(complete_invokes) > self.current_tool_index:
-            invoke_str = complete_invokes[self.current_tool_index]
-            tool_call = self._parse_single_invoke(
-                invoke_str,
-                self.tools,
-            )
-            if not tool_call:
+        while (
+            len(complete_invokes) > self.current_tool_index
+            or len(name_invokes) > self.current_tool_name_index
+        ):
+            # Phase 1: catch up current_tool_index to
+            # current_tool_name_index — emit args-only for invokes whose
+            # name was already sent.
+            if self.current_tool_index < min(
+                len(complete_invokes), self.current_tool_name_index
+            ):
+                invoke_str = complete_invokes[self.current_tool_index]
+                tool_call = self._parse_single_invoke(invoke_str, self.tools)
                 self.current_tool_index += 1
+                if tool_call:
+                    args_json = tool_call.function.arguments
+                    self.prev_tool_call_arr.append(
+                        {
+                            "name": tool_call.function.name,
+                            "arguments": json.loads(args_json),
+                        }
+                    )
+                    self.streamed_args_for_tool.append(args_json)
+                    delta_tool_calls.append(
+                        DeltaToolCall(
+                            index=self.current_tool_index - 1,
+                            function=DeltaFunctionCall(arguments=args_json),
+                        )
+                    )
                 continue
 
-            args_json = tool_call.function.arguments
-            idx = self.current_tool_index
-            self.current_tool_index += 1
-
-            self.prev_tool_call_arr.append(
-                {
-                    "name": tool_call.function.name,
-                    "arguments": json.loads(args_json),
-                }
-            )
-            self.streamed_args_for_tool.append(args_json)
-            delta_tool_calls.append(
-                DeltaToolCall(
-                    index=idx,
-                    id=self._generate_tool_call_id(),
-                    function=DeltaFunctionCall(
-                        name=tool_call.function.name,
-                        arguments=args_json,
-                    ),
-                    type="function",
+            # Phase 2: advance current_tool_name_index — emit a name-only
+            # chunk for the next invoke whose opening we can see.
+            if self.current_tool_name_index < len(name_invokes):
+                name_str = name_invokes[self.current_tool_name_index]
+                function_name = self._extract_name(name_str)
+                call_id = self._generate_tool_call_id()
+                idx = self.current_tool_name_index
+                self.current_tool_name_index += 1
+                delta_tool_calls.append(
+                    DeltaToolCall(
+                        index=idx,
+                        id=call_id,
+                        type="function",
+                        function=DeltaFunctionCall(name=function_name),
+                    )
                 )
-            )
+                continue
+            # will not happen
+            break
 
         return delta_tool_calls
 
@@ -418,6 +444,7 @@ class MinimaxM2ToolParser(ToolParser):
             self.prev_tool_call_arr.clear()
             self.streamed_args_for_tool.clear()
             self.is_tool_call_started = tool_call_starting
+            self.current_tool_name_index = 0
 
         # Pass through content before any tool call.
         if not self.is_tool_call_started:

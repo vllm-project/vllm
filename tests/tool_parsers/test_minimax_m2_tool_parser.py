@@ -310,7 +310,11 @@ class TestDeltaMessageFormat:
     """Verify the shape of emitted DeltaMessage / DeltaToolCall."""
 
     def test_tool_call_fields(self, parser):
-        """Each emitted tool call has id, name, arguments, type, index."""
+        """Each emitted tool call has id, name, arguments, type, index.
+
+        With early name emission the complete invoke produces two
+        DeltaToolCall entries: a name-only opening chunk followed by
+        an arguments-only content chunk."""
         results = _feed(
             parser,
             [
@@ -320,16 +324,30 @@ class TestDeltaMessageFormat:
             ],
         )
         tc_deltas = [tc for r in results for tc in (r.tool_calls or [])]
-        assert len(tc_deltas) == 1
-        tc = tc_deltas[0]
-        assert tc.index == 0
-        assert tc.type == "function"
-        assert tc.id is not None and tc.id.startswith("call_")
-        assert tc.function.name == "fn"
-        assert json.loads(tc.function.arguments) == {"k": "v"}
+        assert len(tc_deltas) == 2
+
+        # First: name-only opening chunk
+        name_tc = tc_deltas[0]
+        assert name_tc.index == 0
+        assert name_tc.type == "function"
+        assert name_tc.id is not None and name_tc.id.startswith("call_")
+        assert name_tc.function.name == "fn"
+        assert name_tc.function.arguments is None
+
+        # Second: arguments-only content chunk
+        args_tc = tc_deltas[1]
+        assert args_tc.index == 0
+        assert args_tc.id is None
+        assert args_tc.type is None
+        assert args_tc.function.name is None
+        assert json.loads(args_tc.function.arguments) == {"k": "v"}
 
     def test_multi_invoke_indices(self, parser):
-        """Multiple invokes get sequential indices."""
+        """Multiple invokes get sequential indices.
+
+        With early name emission each invoke produces two
+        DeltaToolCalls (name + args), so indices appear as
+        [0, 0, 1, 1]."""
         results = _feed(
             parser,
             [
@@ -341,7 +359,7 @@ class TestDeltaMessageFormat:
         )
         tc_deltas = [tc for r in results for tc in (r.tool_calls or [])]
         indices = [tc.index for tc in tc_deltas]
-        assert indices == [0, 1]
+        assert indices == [0, 0, 1, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -678,3 +696,109 @@ class TestNoneStringPreservation:
         assert len(tc) == 1
         parsed = json.loads(tc[0]["arguments"])
         assert parsed["value"] == "nil"
+
+
+# ---------------------------------------------------------------------------
+# Name / parameter separation (name-first streaming)
+# ---------------------------------------------------------------------------
+
+
+class TestSeparateNameParam:
+    def test_both_tools_in_one_chunk(self, parser):
+        """Both tools' full content arrives in one chunk."""
+        results = _feed(
+            parser,
+            [
+                "<minimax:tool_call>"
+                '<invoke name="tool1"><parameter name="x">1</parameter></invoke>'
+                '<invoke name="tool2"><parameter name="y">2</parameter></invoke>'
+                "</minimax:tool_call>",
+            ],
+        )
+        tc_deltas = [tc for r in results for tc in (r.tool_calls or [])]
+        assert len(tc_deltas) == 4
+
+        self._assert_name_chunk(tc_deltas[0], 0, "tool1")
+        self._assert_args_chunk(tc_deltas[1], 0, {"x": "1"})
+        self._assert_name_chunk(tc_deltas[2], 1, "tool2")
+        self._assert_args_chunk(tc_deltas[3], 1, {"y": "2"})
+
+        tc = _collect_tool_calls(results)
+        assert tc[0]["name"] == "tool1"
+        assert tc[1]["name"] == "tool2"
+        assert json.loads(tc[0]["arguments"]) == {"x": "1"}
+        assert json.loads(tc[1]["arguments"]) == {"y": "2"}
+
+    def test_two_invokes_in_two_batches(self, parser):
+        """First invoke complete, then second invoke complete."""
+        results = _feed(
+            parser,
+            [
+                "<minimax:tool_call>"
+                '<invoke name="tool1"><parameter name="x">1</parameter></invoke>',
+                '<invoke name="tool2"><parameter name="y">2</parameter></invoke>'
+                "</minimax:tool_call>",
+            ],
+        )
+        tc_deltas = [tc for r in results for tc in (r.tool_calls or [])]
+        assert len(tc_deltas) == 4
+
+        self._assert_name_chunk(tc_deltas[0], 0, "tool1")
+        self._assert_args_chunk(tc_deltas[1], 0, {"x": "1"})
+        self._assert_name_chunk(tc_deltas[2], 1, "tool2")
+        self._assert_args_chunk(tc_deltas[3], 1, {"y": "2"})
+
+    def test_step_by_step(self, parser):
+        """name_tool1, args_tool1, name_tool2, args_tool2 arrive one by one."""
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="tool1">',
+                '<parameter name="x">1</parameter></invoke>',
+                '<invoke name="tool2">',
+                '<parameter name="y">2</parameter></invoke>',
+                "</minimax:tool_call>",
+            ],
+        )
+        tc_deltas = [tc for r in results for tc in (r.tool_calls or [])]
+        assert len(tc_deltas) == 4
+
+        self._assert_name_chunk(tc_deltas[0], 0, "tool1")
+        self._assert_args_chunk(tc_deltas[1], 0, {"x": "1"})
+        self._assert_name_chunk(tc_deltas[2], 1, "tool2")
+        self._assert_args_chunk(tc_deltas[3], 1, {"y": "2"})
+
+    def test_overlap(self, parser):
+        """name_tool1, then args_tool1+name_tool2 together, then args_tool2."""
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="tool1">',
+                '<parameter name="x">1</parameter></invoke><invoke name="tool2">',
+                '<parameter name="y">2</parameter></invoke>',
+                "</minimax:tool_call>",
+            ],
+        )
+        tc_deltas = [tc for r in results for tc in (r.tool_calls or [])]
+        assert len(tc_deltas) == 4
+
+        self._assert_name_chunk(tc_deltas[0], 0, "tool1")
+        self._assert_args_chunk(tc_deltas[1], 0, {"x": "1"})
+        self._assert_name_chunk(tc_deltas[2], 1, "tool2")
+        self._assert_args_chunk(tc_deltas[3], 1, {"y": "2"})
+
+    @staticmethod
+    def _assert_name_chunk(tc, expected_index, expected_name):
+        assert tc.index == expected_index
+        assert tc.type == "function"
+        assert tc.id is not None and tc.id.startswith("call_")
+        assert tc.function.name == expected_name
+        assert tc.function.arguments is None
+
+    @staticmethod
+    def _assert_args_chunk(tc, expected_index, expected_args):
+        assert tc.index == expected_index
+        assert tc.id is None
+        assert tc.type is None
+        assert tc.function.name is None
+        assert json.loads(tc.function.arguments) == expected_args
