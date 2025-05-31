@@ -31,6 +31,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.dp_size = dp_size
         self.quant_dtype = quant_dtype
 
+    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+        return torch.uint32
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -114,7 +117,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             bound_m=bound_m,
         )
 
-        return expert_x, expert_x_scale, expert_num_tokens
+        return expert_x, expert_x_scale, expert_num_tokens, None, None
 
     def finalize(
         self,

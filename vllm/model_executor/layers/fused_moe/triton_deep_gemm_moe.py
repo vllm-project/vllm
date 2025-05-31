@@ -28,9 +28,10 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                            per_channel_quant=per_channel_quant,
                                            block_shape=block_shape,
                                            block_m=block_m)
-        self.deep_gemm_expert = DeepGemmExperts()
         self.allow_deep_gemm = allow_deep_gemm
         self.use_fp8_w8a8 = use_fp8_w8a8
+        self.deep_gemm_expert = DeepGemmExperts(
+        ) if self.allow_deep_gemm else None
 
     def workspace_shapes(
         self,
@@ -72,7 +73,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         N = w1.size(1)
         if (self.allow_deep_gemm and self.use_fp8_w8a8 and N > 512
-                and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
+                and _valid_deep_gemm(hidden_states, w1, w2)):
             return self.deep_gemm_expert.apply(
                 hidden_states,
                 w1,

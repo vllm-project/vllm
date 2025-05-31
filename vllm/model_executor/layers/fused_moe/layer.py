@@ -29,6 +29,7 @@ from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
 
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
+has_deepep = importlib.util.find_spec("deep_ep") is not None
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import (BatchedPrepareAndFinalize,
@@ -39,6 +40,9 @@ if current_platform.is_cuda_alike():
                                  FusedMoEPrepareAndFinalize)
     if has_pplx:
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
+    if has_deepep:
+        from .deepep_ll_prepare_finalize import DeepEPLLPrepareAndFinalize
+        from .deepep_prepare_finalize import DeepEPPrepareAndFinalize
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -71,9 +75,23 @@ class FusedMoEParallelConfig:
     use_ep: bool  # whether to use EP or not
 
     @property
+    def use_all2all_kernels(self):
+        return self.dp_size > 1 and self.use_ep
+
+    @property
     def use_pplx_kernels(self):
-        return self.dp_size > 1 and self.use_ep and \
-             envs.VLLM_ALL2ALL_BACKEND == "pplx"
+        return (self.use_all2all_kernels
+                and envs.VLLM_ALL2ALL_BACKEND == "pplx")
+
+    @property
+    def use_deepep_kernels(self):
+        return (self.use_all2all_kernels
+                and envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput")
+
+    @property
+    def use_deepep_ll_kernels(self):
+        return (self.use_all2all_kernels
+                and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
 
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
@@ -230,6 +248,14 @@ class MoEConfig:
     def use_pplx_kernels(self):
         return self.moe_parallel_config.use_pplx_kernels
 
+    @property
+    def use_deepep_kernels(self):
+        return self.moe_parallel_config.use_deepep_kernels
+
+    @property
+    def use_deepep_ll_kernels(self):
+        return self.moe_parallel_config.use_deepep_ll_kernels
+
 
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
@@ -283,8 +309,62 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 dp_size=all2all_manager.tp_group.world_size,
                 quant_dtype=moe.in_dtype,
             )
+        elif moe.use_deepep_kernels:
+            all_to_all_args = dict(
+                group=all2all_manager.cpu_group,
+                num_nvl_bytes=1024 * 1024 * 1024,  # 1Gb
+                num_rdma_bytes=0,
+                low_latency_mode=False,
+                num_qps_per_rank=1)
 
+            handle = all2all_manager.get_handle(all_to_all_args)
+
+            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+            q_dtype = torch.float8_e4m3fn if isinstance(
+                quant_config, Fp8Config) else None
+            assert moe.dp_size == all2all_manager.dp_world_size
+            prepare_finalize = DeepEPPrepareAndFinalize(
+                handle,
+                world_size=all2all_manager.world_size,
+                rank=all2all_manager.rank,
+                dp_size=all2all_manager.dp_world_size,
+                rank_expert_offset=all2all_manager.rank *
+                moe.num_local_experts,
+                quant_dtype=q_dtype)
+        elif moe.use_deepep_ll_kernels:
+            import deep_ep
+            num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+                moe.max_num_tokens, moe.hidden_dim, all2all_manager.world_size,
+                moe.num_experts)
+            all_to_all_args = dict(group=all2all_manager.cpu_group,
+                                   num_rdma_bytes=num_rdma_bytes,
+                                   low_latency_mode=True,
+                                   num_qps_per_rank=moe.num_experts //
+                                   all2all_manager.world_size)
+
+            handle = all2all_manager.get_handle(all_to_all_args)
+
+            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+            q_dtype = torch.float8_e4m3fn if isinstance(
+                quant_config, Fp8Config) else None
+
+            # Note (varun): Whether to use FP8 dispatch or not needs some
+            # profiling. Turning it off for now.
+            prepare_finalize = DeepEPLLPrepareAndFinalize(
+                handle,
+                world_size=all2all_manager.world_size,
+                rank=all2all_manager.rank,
+                dp_size=all2all_manager.dp_world_size,
+                rank_expert_offset=all2all_manager.rank *
+                moe.num_local_experts,
+                max_tokens_per_rank=moe.max_num_tokens,
+                quant_dtype=q_dtype,
+                use_fp8_dispatch=False,
+            )
+
+        self.topk_indices_dtype = None
         if prepare_finalize is not None:
+            self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
             experts = self.select_gemm_impl(prepare_finalize)
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
@@ -348,12 +428,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         experts: Optional[FusedMoEPermuteExpertsUnpermute] = None
 
-        if isinstance(prepare_finalize,
-                      (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
+        use_batched_experts = (
+            isinstance(prepare_finalize, BatchedPrepareAndFinalize) or
+            (has_pplx and isinstance(prepare_finalize, PplxPrepareAndFinalize))
+            or (has_deepep
+                and isinstance(prepare_finalize, DeepEPLLPrepareAndFinalize)))
+
+        if use_batched_experts:
             logger.debug("BatchedTritonExperts %s", self.moe)
+            assert self.moe.dp_size == all2all_manager.dp_world_size
             experts = BatchedTritonExperts(
-                max_num_tokens=MOE_DP_CHUNK_SIZE,
+                max_num_tokens=self.moe.max_num_tokens,
                 world_size=all2all_manager.world_size,
+                # TODO (varun) : fix confusion with dp_size.
                 # dp_size actually means tp_size, bug in pplx kernels
                 dp_size=all2all_manager.tp_group.world_size,
                 use_fp8_w8a8=False,
@@ -372,6 +459,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 block_shape=None,
                 per_channel_quant=False,
             )
+
         return experts
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -489,6 +577,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -500,7 +589,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            indices_type=torch.uint32 if self.moe.use_pplx_kernels else None)
+            indices_type=self.topk_indices_dtype)
 
         if self.rocm_aiter_moe_enabled:
             assert expert_map is None
@@ -801,11 +890,8 @@ class FusedMoE(torch.nn.Module):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         quant_method: Optional[QuantizeMethodBase] = None
-
-        if quant_config is None:
-            quant_method = UnquantizedFusedMoEMethod(moe)
-        else:
-            quant_method = quant_config.get_quant_method(self, prefix)
+        quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
+                        else quant_config.get_quant_method(self, prefix))
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
@@ -831,7 +917,7 @@ class FusedMoE(torch.nn.Module):
         # Chunked all2all staging tensor
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
-        if self.moe_parallel_config.use_pplx_kernels:
+        if self.moe_parallel_config.use_pplx_kernels or self.moe_parallel_config.use_deepep_kernels or self.moe_parallel_config.use_deepep_ll_kernels:
             act_dtype = vllm_config.model_config.dtype
             self.batched_hidden_states = torch.zeros(
                 (MOE_DP_CHUNK_SIZE, self.hidden_size),
@@ -874,6 +960,14 @@ class FusedMoE(torch.nn.Module):
     @property
     def use_pplx_kernels(self):
         return self.moe_parallel_config.use_pplx_kernels
+
+    @property
+    def use_deepep_kernels(self):
+        return self.moe_parallel_config.use_deepep_kernels
+
+    @property
+    def use_deepep_ll_kernels(self):
+        return self.moe_parallel_config.use_deepep_ll_kernels
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
@@ -1210,14 +1304,17 @@ class FusedMoE(torch.nn.Module):
         Therefore it is required that we reduce the shared_experts output
         early.
         """
-        return self.use_pplx_kernels
+        # TODO (varun) : confirm this
+        return (self.use_pplx_kernels or self.use_deepep_kernels
+                or self.use_deepep_ll_kernels)
 
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """
         The pplx combine kernel reduces across GPU ranks by default.
         """
-        if self.use_pplx_kernels:
+        if (self.use_pplx_kernels or self.use_deepep_kernels
+                or self.use_deepep_ll_kernels):
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
@@ -1284,7 +1381,7 @@ class FusedMoE(torch.nn.Module):
 
         ctx = get_forward_context()
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
-        moe_dp_chunk_size_per_rank = MOE_DP_CHUNK_SIZE
+        moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
 
         num_tokens = full_hidden_states.size(0)
         for chunk_start_ in range(0, max_tokens_across_dp,
@@ -1305,12 +1402,17 @@ class FusedMoE(torch.nn.Module):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
-        if self.moe_parallel_config.use_pplx_kernels:
+        if (self.moe_parallel_config.use_pplx_kernels
+                or self.moe_parallel_config.use_deepep_ll_kernels):
             return self.forward_impl_chunked(hidden_states, router_logits)
 
-        if self.dp_size > 1:
+        do_naive_dispatch_combine: bool = (
+            self.dp_size > 1
+            and not self.moe_parallel_config.use_deepep_kernels)
+        if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
+
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
@@ -1330,7 +1432,7 @@ class FusedMoE(torch.nn.Module):
             apply_router_weight_on_input=self.apply_router_weight_on_input,
         )
 
-        if self.dp_size > 1:
+        if do_naive_dispatch_combine:
             final_hidden_states = get_ep_group().combine(final_hidden_states)
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):

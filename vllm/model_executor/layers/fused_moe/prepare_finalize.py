@@ -23,6 +23,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         self.block_shape = block_shape
         self.quant_dtype = quant_dtype
 
+    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+        return None
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -46,7 +49,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
                                                    self.per_channel_quant,
                                                    self.block_shape)
 
-        return a1q, a1q_scale, None
+        return a1q, a1q_scale, None, None, None
 
     def finalize(
         self,

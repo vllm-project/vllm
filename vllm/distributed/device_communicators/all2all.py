@@ -124,3 +124,38 @@ class PPLXAll2AllManager(All2AllManagerBase):
             from pplx_kernels.nvshmem import nvshmem_finalize
             logger.debug("PPLX NVSHMEM finalize")
             nvshmem_finalize()
+
+
+class DeepEPAll2AllManager(All2AllManagerBase):
+    """
+    All2All communication based on DeepEP High-Throughput kernels.
+    """
+
+    def __init__(self, cpu_group):
+        has_deepep = importlib.util.find_spec("deep_ep") is not None
+        assert has_deepep, "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install DeepEP kernels."  # noqa
+        super().__init__(cpu_group)
+        self.handle_cache = Cache()
+
+    def get_handle(self, kwargs):
+        import deep_ep
+        return self.handle_cache.get_or_create(kwargs, deep_ep.Buffer)
+
+    def dispatch(self, hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor):
+        raise NotImplementedError
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        pass
+
+
+class DeepEPLLAll2AllManager(DeepEPAll2AllManager):
+    """
+    All2All communication based on DeepEP Low-Latency kernels.
+    """
+
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
