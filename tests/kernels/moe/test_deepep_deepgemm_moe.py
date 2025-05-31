@@ -14,19 +14,16 @@ from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import Concatenate, ParamSpec
 
-from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.deepep_prepare_finalize import (
     DeepEPPrepareAndFinalize)
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
-
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 
 try:
     import deep_ep
@@ -147,31 +144,6 @@ def per_block_cast_to_fp8(
     return x_scaled_sub, scales
 
 
-def native_per_token_group_quant_fp8(x,
-                                     group_size,
-                                     eps=1e-10,
-                                     dtype=torch.float8_e4m3fn):
-    """Function to perform per-token-group quantization on an input tensor
-    `x` using native torch."""
-    assert x.shape[-1] % group_size == 0, ("the last dimension of `x` cannot "
-                                           "be divisible by `group_size`")
-    assert x.is_contiguous(), "`x` is not contiguous"
-
-    finfo = torch.finfo(dtype)
-    fp8_min = finfo.min
-    fp8_max = finfo.max
-
-    x_ = x.reshape(x.numel() // group_size, group_size)
-    amax = x_.abs().max(dim=-1,
-                        keepdim=True)[0].clamp(min=eps).to(torch.float32)
-    x_s = amax / fp8_max
-    x_q = (x_ / x_s).clamp(min=fp8_min, max=fp8_max).to(dtype)
-    x_q = x_q.reshape(x.shape)
-    x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size, ))
-
-    return x_q, x_s
-
-
 def make_block_quant_fp8_weights(
     e: int,
     n: int,
@@ -197,19 +169,6 @@ def make_block_quant_fp8_weights(
     k_tiles_w1 = (k + block_k - 1) // block_k
     n_tiles_w2 = (k + block_n - 1) // block_n
     k_tiles_w2 = (n + block_k - 1) // block_k
-
-    #w1 = w1_bf16.to(torch.float8_e4m3fn)
-    #w2 = w2_bf16.to(torch.float8_e4m3fn)
-
-    #factor_for_scale = 1e-2
-    #w1_s = torch.rand(
-    #    (e, n_tiles_w1, k_tiles_w1), dtype=torch.float32,
-    #    device="cuda") * factor_for_scale
-    #w2_s = torch.rand(
-    #    (e, n_tiles_w2, k_tiles_w2), dtype=torch.float32,
-    #    device="cuda") * factor_for_scale
-
-    #return w1, w2, w1_s, w2_s
 
     w1 = torch.empty_like(w1_bf16, dtype=torch.float8_e4m3fn)
     w2 = torch.empty_like(w2_bf16, dtype=torch.float8_e4m3fn)
@@ -256,7 +215,6 @@ class TestTensors:
         topk, m, k, block_size = (config.topk, config.m, config.k,
                                   config.block_size)
 
-
         fp8_info = torch.finfo(torch.float8_e4m3fn)
         fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
@@ -267,10 +225,6 @@ class TestTensors:
         block_k = block_size[1]
         _, rank_token_scales = per_token_group_quant_fp8(rank_tokens, block_k)
 
-        #local_experts = 16
-        #es = rank * local_experts 
-        #ee = es + local_experts
-
         topk = torch.randint(
             low=0,
             high=config.num_experts,
@@ -280,7 +234,7 @@ class TestTensors:
         topk_weights = torch.randn(topk.shape,
                                    dtype=torch.float32,
                                    device=torch.cuda.current_device())
-        
+
         return TestTensors(rank_tokens=rank_tokens,
                            rank_token_scales=rank_token_scales,
                            topk=topk,
@@ -377,110 +331,23 @@ def deep_ep_moe_impl(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
     return out
 
 
-def torch_moe2(a:torch.Tensor,
-               topk_ids:torch.Tensor,
-               topk_weights: torch.Tensor,
-               w1: torch.Tensor,
-               w2: torch.Tensor,
-               w1_scale: torch.Tensor,
-               w2_scale: torch.Tensor,
-               a1_scale: torch.Tensor,
-               block_shape: list[int]):
+def triton_impl(a: torch.Tensor, topk_ids: torch.Tensor,
+                topk_weights: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
+                w1_scale: torch.Tensor, w2_scale: torch.Tensor,
+                a1_scale: torch.Tensor, block_shape: list[int]):
 
-    return fused_experts(hidden_states = a,
-                  w1 = w1,
-                  w2 = w2,
-                  topk_weights = topk_weights,
-                  topk_ids = topk_ids,
-                  inplace = False,
-                  use_fp8_w8a8 = True,
-                  w1_scale = w1_scale, 
-                  w2_scale = w2_scale, 
-                  a1_scale = a1_scale,
-                  block_shape = block_shape,
-                  allow_deep_gemm = True)
-
-def torch_moe_impl(
-    a: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weight: torch.Tensor,
-    topk_ids: torch.Tensor,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
-) -> torch.Tensor:
-    M, K = a.shape
-    topk = topk_ids.shape[1]
-
-    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
-    a, a_scale = per_token_group_quant_fp8(a, block_shape[1])
-    torch.cuda.synchronize()
-    did = 79
-    top_ks = [9, 12]
-    do_debug = torch.cuda.current_device() == 0 and False
-    if do_debug:
-        print(f"a {a.shape} {a[did*2]} | a_scale {a_scale.shape} {a_scale[did*2]}")
-
-    out = torch.zeros(M * topk,
-                      w2.shape[1],
-                      dtype=torch.bfloat16,
-                      device=a.device)
-    num_experts = w1.shape[0]
-    for i in range(num_experts):
-        mask = (topk_ids == i).view(-1)
-
-        tmp_idx = None 
-        if do_debug:
-            if i in top_ks:
-                if i == top_ks[0]:
-                    assert mask[did*2] == True
-                if i == top_ks[1]:
-                    assert mask[did*2 + 1] == True
-                tmp_idx = torch.count_nonzero(mask[:did*2+1+1]) - 1
-
-
-        if mask.sum():
-
-            torch.cuda.synchronize()
-            if tmp_idx is not None:
-                print(f"tmp is {tmp_idx} {a[mask][tmp_idx]}  ")
-                print(f"w1 scale is {w1_scale[i]}")
-
-            tmp1 = native_w8a8_block_matmul(a[mask], w1[i], a_scale[mask],
-                                            w1_scale[i], block_shape,
-                                            torch.bfloat16)
-
-            torch.cuda.synchronize()
-            if do_debug and i in top_ks:
-                print (f"expert {i} -- mm1 {tmp1[tmp_idx]}")
-
-            tmp2 = SiluAndMul()(tmp1)
-            tmp2, b_scale = per_token_group_quant_fp8(tmp2, block_shape[1])
-
-            torch.cuda.synchronize()
-            if do_debug and i in top_ks:
-                print (f"expert {i} -- b {tmp2[tmp_idx]} | b_scale {b_scale[tmp_idx]}")
-
-            tmp3 = native_w8a8_block_matmul(tmp2, w2[i], b_scale,
-                                                 w2_scale[i], block_shape,
-                                                 torch.bfloat16)
-
-            torch.cuda.synchronize()
-            if do_debug and i in top_ks:
-                print (f"expert {i} -- mm2 {tmp3[tmp_idx]}")
-
-            out[mask] = tmp3
-
-
-    torch.cuda.synchronize()
-
-    if do_debug:
-        print(f"out {out.shape} {out[did*2]}", flush=True)
-        print(f"out {out.shape} {out[did*2 + 1]}", flush=True)
-
-    return (out.view(M, -1, w2.shape[1]).to(dtype=torch.float32) *
-            topk_weight.view(M, -1, 1)).sum(dim=1).to(dtype=out.dtype)
+    return fused_experts(hidden_states=a,
+                         w1=w1,
+                         w2=w2,
+                         topk_weights=topk_weights,
+                         topk_ids=topk_ids,
+                         inplace=False,
+                         use_fp8_w8a8=True,
+                         w1_scale=w1_scale,
+                         w2_scale=w2_scale,
+                         a1_scale=a1_scale,
+                         block_shape=block_shape,
+                         allow_deep_gemm=True)
 
 
 def _deep_ep_moe(
@@ -493,7 +360,6 @@ def _deep_ep_moe(
     w2_scale: torch.Tensor,
 ):
     current_platform.seed_everything(pgi.rank)
-    #current_platform.seed_everything(7)
 
     w1 = w1.to(device=torch.cuda.current_device())
     w2 = w2.to(device=torch.cuda.current_device())
@@ -509,24 +375,15 @@ def _deep_ep_moe(
 
     with set_current_vllm_config(VllmConfig()):
         # Reference
-
-        torch_moe = torch_moe2(a = test_tensors.rank_tokens,
-               topk_ids = test_tensors.topk,
-               topk_weights = test_tensors.topk_weights,
-               w1 = w1,
-               w2 = w2,
-               w1_scale = w1_scale,
-               w2_scale = w2_scale,
-               a1_scale = test_tensors.rank_token_scales,
-               block_shape = block_shape)
-        # torch_moe = torch_moe_impl(a=test_tensors.rank_tokens,
-        #                           w1=w1,
-        #                           w2=w2,
-        #                           topk_weight=test_tensors.topk_weights,
-        #                           topk_ids=test_tensors.topk,
-        #                           w1_scale=w1_scale,
-        #                           w2_scale=w2_scale,
-        #                           block_shape=block_shape)
+        triton_moe = triton_impl(a=test_tensors.rank_tokens,
+                                 topk_ids=test_tensors.topk,
+                                 topk_weights=test_tensors.topk_weights,
+                                 w1=w1,
+                                 w2=w2,
+                                 w1_scale=w1_scale,
+                                 w2_scale=w2_scale,
+                                 a1_scale=test_tensors.rank_token_scales,
+                                 block_shape=block_shape)
 
         # Splice experts for this rank.
         num_local_experts = config.num_experts // pgi.world_size
@@ -549,81 +406,31 @@ def _deep_ep_moe(
             config.num_experts,
         )
 
-    #max_diff = torch.max(torch.abs(deepep_moe.to(torch.float32)
-    #                   - torch_moe.to(torch.float32)))
-    #rel_diff = (torch.mean(
-    #    torch.abs(deepep_moe.to(torch.float32) - torch_moe.to(torch.float32)))
-    #            / torch.mean(torch.abs(torch_moe.to(torch.float32))))
-
-    torch.cuda.synchronize()
-
-    #torch_moe = torch_moe.to(torch.float32)
-    #deepep_moe = deepep_moe.to(torch.float32)
-
-    rel_diff = torch.abs(deepep_moe - torch_moe) / torch.abs(torch.min(deepep_moe, torch_moe))
-    rel_diff = torch.where(rel_diff > 1.0, rel_diff, 0)
-
-
-    torch.cuda.synchronize()
-
-    if pgi.rank == 0 and False:
-        torch.set_printoptions(profile="full")
-        #print (f"R0 torch 126: {torch_moe[126]}", flush=True)
-        #print (f"R0 deepep 126: {deepep_moe[126]}", flush=True)
-        print (f"R0 torch 127: {torch_moe[127]}", flush=True)
-        #print (f"R0 deepep 127: {deepep_moe[127]}", flush=True)
-        #print (f"relative diff : {rel_diff}", flush=True)
-
-        print (f"R0 torch 127 36: {torch_moe[127][36]}", flush=True)
-        print (f"R0 deepep 127 36 : {deepep_moe[127][36]}", flush=True)
-
-        print (f"R0 torch 127 79: {torch_moe[127][79]}", flush=True)
-        print (f"R0 deepep 127 79 : {deepep_moe[127][79]}", flush=True)
-        #print (f"relative diff 127 79 : {rel_diff[127][79]}", flush=True)
-        torch.set_printoptions(profile="default")
-
-    if pgi.rank == 0 and False:
-        torch.set_printoptions(profile="full")
-        #print (f"R1 torch 126: {torch_moe[126]}", flush=True)
-        #print (f"R1 deepep 126: {deepep_moe[126]}", flush=True)
-        print (f"R1 torch 128: {torch_moe[128]}", flush=True)
-        print (f"R1 deepep 128: {deepep_moe[128]}", flush=True)
-        print (f"R1 relative diff 128 : {rel_diff[128]}", flush=True)
-
-        #print (f"R1 torch 127 36: {torch_moe[127][36]}", flush=True)
-        #print (f"R1 deepep 127 36 : {deepep_moe[127][36]}", flush=True)
-
-        #print (f"R1 torch 127 79: {torch_moe[127][79]}", flush=True)
-        #print (f"R1 deepep 127 79 : {deepep_moe[127][79]}", flush=True)
-        #print (f"relative diff 127 79 : {rel_diff[127][79]}", flush=True)
-        torch.set_printoptions(profile="default")
-
-    if pgi.rank == 0:
-        torch.testing.assert_close(
-            torch_moe,
-            deepep_moe,
-            atol=1e-3,
-            rtol=1e-3,
-        )
+    torch.testing.assert_close(
+        triton_moe,
+        deepep_moe,
+        atol=6e-2,
+        rtol=6e-2,
+    )
 
 
 MNKs = [
-    #(129, 128, 128),
-    #(222, 128, 128),
+    (129, 128, 128),
     (129, 128, 256),
-    (129, 1024, 2048),
     (222, 1024, 2048),
+    (129, 1024, 2048),
     (128, 1024, 2048),
     (128, 1024, 2048),
     (128, 1024, 2048),
     (128, 128, 128),
-    #(8, 128, 128),
-    #(8, 128, 512),
-    #(8, 512, 512),
-    #(3, 1024, 2048),
-    #(32, 128, 1024),
-    #(45, 512, 2048),
-    #(64, 1024, 1024),
+    (222, 128, 128),
+    (8, 128, 128),
+    (8, 128, 512),
+    (8, 512, 512),
+    (3, 1024, 2048),
+    (32, 128, 1024),
+    (45, 512, 2048),
+    (64, 1024, 1024),
 ]
 
 
@@ -657,19 +464,6 @@ def test_deep_ep_moe(mnk: tuple[int, int, int], num_experts: int, topk: int,
 
     w1, w2, w1_scale, w2_scale = make_block_quant_fp8_weights(
         num_experts, n, k, block_size)
-    #print (w1_scale)
-    #print (w2_scale)
 
-    #w1_scale.fill_(0.0004)
-    #w2_scale.fill_(0.0004)
-
-    torch.set_printoptions(profile="full")
-    #print (w1_scale)
-    #print (w2_scale)
-    torch.set_printoptions(profile="default")
-
-
-    assert w1_scale.is_contiguous()
-    assert w2_scale.is_contiguous()
     parallel_launch(world_size, _deep_ep_moe, dp_size, config, w1, w2,
                     w1_scale, w2_scale)

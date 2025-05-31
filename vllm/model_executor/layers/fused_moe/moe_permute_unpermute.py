@@ -26,26 +26,12 @@ def _moe_permute(
 
     tokens_in_chunk = curr_hidden_states.size(0)
 
-    do_debug = torch.cuda.current_device() == 0 and False
-    if do_debug:
-        torch.set_printoptions(profile="full")
-        print (f"topk_ids : {curr_topk_ids.shape} {curr_topk_ids}", flush=True)
-        print(f"expert map {expert_map}", flush=True)
-        torch.set_printoptions(profile="default")
-
     sorted_token_ids, expert_ids, num_tokens_post_padded = (
         moe_align_block_size(curr_topk_ids,
                              block_m,
                              global_num_experts,
                              expert_map,
                              pad_sorted_ids=True))
-
-    if do_debug:
-        torch.set_printoptions(profile="full")
-        print (f"from within moe_permute :: expert_ids {expert_ids.shape} {expert_ids}", flush=True)
-        print (f"sorted token ids {sorted_token_ids.shape} {sorted_token_ids}")
-        torch.set_printoptions(profile="default")
-
 
     inv_perm: Optional[torch.Tensor] = None
 

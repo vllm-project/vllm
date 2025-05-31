@@ -1,9 +1,9 @@
-# SPDX-License-Identifier: Apache-2.0 from typing import Optional
+# SPDX-License-Identifier: Apache-2.0
+from typing import Optional
 
 import deep_ep
 import torch
 
-from typing import Optional
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
@@ -19,7 +19,7 @@ def dequant_fp8(expert_x_fp8: torch.Tensor,
     expert_x_scales = expert_x_scales.contiguous()
     num_experts = expert_x_fp8.size(0)
 
-    # DeepEP kernels quantize dispatch inputs in 128 element chunks.
+    # DeepEP kernels quantize dispatch inputs in 128 element chunks
     expert_x_fp32 = expert_x_fp8.to(torch.float32).view(num_experts, -1, 128)
     expert_x_scales = expert_x_scales.view(num_experts, -1, 1)
     return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.shape)
