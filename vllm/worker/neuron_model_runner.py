@@ -394,7 +394,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 adapter_ids=model_input.adapter_ids,
                 **MultiModalKwargs.as_kwargs(
                     model_input.multi_modal_kwargs or {},
-                    dtype=self.model_config.dtype,
                     device=self.device,
                 ),
             )
@@ -407,7 +406,6 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 input_block_ids=model_input.input_block_ids,
                 **MultiModalKwargs.as_kwargs(
                     model_input.multi_modal_kwargs or {},
-                    dtype=self.model_config.dtype,
                     device=self.device,
                 ),
             )
