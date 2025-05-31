@@ -314,3 +314,11 @@ class LLMEngine:
     def __del__(self):
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
+
+    def get_kv_cache_token_capacity(self) -> int:
+        """Get the total token capacity of the KV cache.
+
+        Returns:
+            int: The total number of tokens that can be stored in the KV cache.
+        """
+        return self.engine_core.get_kv_cache_token_capacity()

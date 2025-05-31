@@ -1520,3 +1520,6 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def get_kv_cache_token_capacity(self) -> int:
+        return self.llm_engine.get_kv_cache_token_capacity()

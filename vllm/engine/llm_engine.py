@@ -2132,6 +2132,15 @@ class LLMEngine:
         return self.model_executor.collective_rpc(method, timeout, args,
                                                   kwargs)
 
+    def get_kv_cache_token_capacity(self) -> int:
+        """Get the total token capacity of the KV cache.
+
+        Returns:
+            int: The total number of tokens that can be stored in the KV cache.
+        """
+        return self.vllm_config.cache_config.num_gpu_blocks \
+            * self.vllm_config.cache_config.block_size
+
 
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
     from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
