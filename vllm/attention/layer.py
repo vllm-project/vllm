@@ -142,8 +142,9 @@ class Attention(nn.Module):
         # torch.compile works by registering the attention as one giant
         # opaque custom op. For other platforms, we directly call them
         # and let torch.compile handle them.
-        self.use_direct_call = not current_platform.is_cuda_alike(
-        ) and not current_platform.is_cpu()
+        self.use_direct_call = attn_backend.use_direct_call or (
+            not current_platform.is_cuda_alike()
+            and not current_platform.is_cpu())
 
         self.use_output = attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
@@ -225,14 +226,23 @@ class Attention(nn.Module):
                     query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
+            if not self.use_mla:
+                query = query.view(-1, self.num_heads, self.head_size)
+                if key is not None:
+                    key = key.view(-1, self.num_kv_heads, self.head_size)
+                if value is not None:
+                    value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
                 forward_context = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                assert output_shape is not None
+                hidden_size = output_shape[-1]
                 return self.impl.forward(self, query, key, value,
-                                         self_kv_cache, attn_metadata)
+                                         self_kv_cache,
+                                         attn_metadata).view(-1, hidden_size)
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
