@@ -59,7 +59,7 @@ def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
     # We only check main components instead of whole model submodules
     for child in model.children():
         child_map = getattr(child, "packed_modules_mapping", {})
-        if any((k in parent_map and parent_map[k] == v)
+        if any((k in parent_map and parent_map[k] != v)
                for k, v in child_map.items()):
             raise ValueError(
                 f"Can't update {type(model).__name__}'s packed_modules_mapping "

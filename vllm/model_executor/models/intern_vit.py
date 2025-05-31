@@ -416,7 +416,7 @@ class InternVisionEncoder(nn.Module):
 class InternVisionModel(nn.Module):
 
     packed_modules_mapping = {
-        "wqkv": ["wqkv"],
+        "qkv": ["qkv"],
     }
 
     def __init__(
