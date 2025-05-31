@@ -810,7 +810,7 @@ def get_cutlass_moe_mm_data(
         topk_ids: torch.Tensor, expert_offsets: torch.Tensor,
         problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor,
         input_permutation: torch.Tensor, output_permutation: torch.Tensor,
-        num_experts: int, n: int, k: int):
+        num_experts: int, n: int, k: int, blockscale_offsets: Optional[torch.Tensor] = None):
     """
     Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
@@ -833,21 +833,21 @@ def get_cutlass_moe_mm_data(
                                                 problem_sizes1, problem_sizes2,
                                                 input_permutation,
                                                 output_permutation,
-                                                num_experts, n, k)
+                                                num_experts, n, k, blockscale_offsets)
 
-def get_cutlass_moe_mm_data_full(
-        topk_ids: torch.Tensor, expert_offsets: torch.Tensor,
-        blockscale_offsets: torch.Tensor,
-        problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor,
-        input_permutation: torch.Tensor, output_permutation: torch.Tensor,
-        num_experts: int, n: int, k: int):
-    return torch.ops._C.get_cutlass_moe_mm_data_full(topk_ids, expert_offsets,
-                                                     blockscale_offsets,
-                                                     problem_sizes1,
-                                                     problem_sizes2,
-                                                     input_permutation,
-                                                     output_permutation,
-                                                     num_experts, n, k)
+# def get_cutlass_fp4_moe_mm_data(
+#         topk_ids: torch.Tensor, expert_offsets: torch.Tensor,
+#         blockscale_offsets: torch.Tensor,
+#         problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor,
+#         input_permutation: torch.Tensor, output_permutation: torch.Tensor,
+#         num_experts: int, n: int, k: int):
+#     return torch.ops._C.get_cutlass_fp4_moe_mm_data(topk_ids, expert_offsets,
+#                                                      blockscale_offsets,
+#                                                      problem_sizes1,
+#                                                      problem_sizes2,
+#                                                      input_permutation,
+#                                                      output_permutation,
+#                                                      num_experts, n, k)
 
 def moe_permute(
         input_tensor: torch.Tensor, dst2src_map: torch.Tensor, output_tensor: torch.Tensor

@@ -443,19 +443,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
       "                        Tensor! input_permutation, "
       "                        Tensor! output_permutation, int num_experts, "
-      "                        int n, int k) -> ()",
+      "                        int n, int k, Tensor? blockscale_offsets) -> ()",
       {stride_tag});
   ops.impl("get_cutlass_moe_mm_data", torch::kCUDA, &get_cutlass_moe_mm_data);
 
-  ops.def(
-      "get_cutlass_moe_mm_data_full(Tensor topk_ids, Tensor! expert_offsets, "
-      "                        Tensor! blockscale_offsets, "
-      "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
-      "                        Tensor! input_permutation, "
-      "                        Tensor! output_permutation, int num_experts, "
-      "                        int n, int k) -> ()",
-      {stride_tag});
-  ops.impl("get_cutlass_moe_mm_data_full", torch::kCUDA, &get_cutlass_moe_mm_data_full);
+//   ops.def(
+//       "get_cutlass_fp4_moe_mm_data(Tensor topk_ids, Tensor! expert_offsets, "
+//       "                        Tensor! blockscale_offsets, "
+//       "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
+//       "                        Tensor! input_permutation, "
+//       "                        Tensor! output_permutation, int num_experts, "
+//       "                        int n, int k) -> ()",
+//       {stride_tag});
+//   ops.impl("get_cutlass_fp4_moe_mm_data", torch::kCUDA, &get_cutlass_fp4_moe_mm_data);
 
   // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
   ops.def(

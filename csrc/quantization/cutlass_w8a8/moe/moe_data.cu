@@ -8,7 +8,7 @@
 #include <cutlass/array.h>
 #include <cutlass/numeric_types.h>
 
-#include <ATen/Dispatch.h>
+#include "../../../moe/permute_unpermute_kernels/dispatch.h"
 
 
 constexpr uint64_t THREADS_PER_EXPERT = 512;
@@ -99,7 +99,7 @@ void get_cutlass_moe_mm_data_caller(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
-    const int64_t num_experts, const int64_t n, const int64_t k) {
+    const int64_t num_experts, const int64_t n, const int64_t k, const std::optional<torch::Tensor>& blockscale_offsets) {
   auto stream = at::cuda::getCurrentCUDAStream(topk_ids.device().index());
   auto options_int32 =
       torch::TensorOptions().dtype(torch::kInt32).device(topk_ids.device());
@@ -111,10 +111,19 @@ void get_cutlass_moe_mm_data_caller(
       static_cast<int32_t*>(problem_sizes1.data_ptr()),
       static_cast<int32_t*>(problem_sizes2.data_ptr()),
       static_cast<int32_t*>(atomic_buffer.data_ptr()), topk_ids.numel(), n, k);
+  if (blockscale_offsets.has_value()) {
+    compute_expert_blockscale_offsets<<<1, 1, 0, stream>>>(
+        static_cast<const int32_t*>(problem_sizes1.data_ptr()),
+        static_cast<int32_t*>(expert_offsets.data_ptr()),
+        static_cast<int32_t*>(blockscale_offsets.value().data_ptr()),
+        static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts);
+  }
+  else {
   compute_expert_offsets<<<1, 1, 0, stream>>>(
       static_cast<const int32_t*>(problem_sizes1.data_ptr()),
       static_cast<int32_t*>(expert_offsets.data_ptr()),
       static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts);
+  }
   compute_arg_sorts<<<num_experts, num_threads, 0, stream>>>(
       static_cast<const int32_t*>(topk_ids.data_ptr()),
       static_cast<const int32_t*>(expert_offsets.data_ptr()),
@@ -124,35 +133,6 @@ void get_cutlass_moe_mm_data_caller(
       topk_ids.size(1));
 }
 
-void get_cutlass_moe_mm_data_full_caller(
-    const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
-    torch::Tensor& blockscale_offsets,
-    torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
-    torch::Tensor& input_permutation, torch::Tensor& output_permutation,
-    const int64_t num_experts, const int64_t n, const int64_t k) {
-  auto stream = at::cuda::getCurrentCUDAStream(topk_ids.device().index());
-  auto options_int32 =
-      torch::TensorOptions().dtype(torch::kInt32).device(topk_ids.device());
-  torch::Tensor atomic_buffer = torch::zeros(num_experts, options_int32);
-  int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
-  compute_problem_sizes<<<num_experts, num_threads, 0, stream>>>(
-      static_cast<const int32_t*>(topk_ids.data_ptr()),
-      static_cast<int32_t*>(problem_sizes1.data_ptr()),
-      static_cast<int32_t*>(problem_sizes2.data_ptr()),
-      static_cast<int32_t*>(atomic_buffer.data_ptr()), topk_ids.numel(), n, k);
-  compute_expert_blockscale_offsets<<<1, 1, 0, stream>>>(
-      static_cast<const int32_t*>(problem_sizes1.data_ptr()),
-      static_cast<int32_t*>(expert_offsets.data_ptr()),
-      static_cast<int32_t*>(blockscale_offsets.data_ptr()),
-      static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts);
-  compute_arg_sorts<<<num_experts, num_threads, 0, stream>>>(
-      static_cast<const int32_t*>(topk_ids.data_ptr()),
-      static_cast<const int32_t*>(expert_offsets.data_ptr()),
-      static_cast<int32_t*>(input_permutation.data_ptr()),
-      static_cast<int32_t*>(output_permutation.data_ptr()),
-      static_cast<int32_t*>(atomic_buffer.data_ptr()), topk_ids.numel(),
-      topk_ids.size(1));
-}
 
 template <typename T>
 __global__ void expandInputRowsKernel(
@@ -197,8 +177,7 @@ void moe_permute_caller(
   int64_t const num_src_rows = input_tensor.size(0);
   int64_t const num_cols = input_tensor.size(1);
 
-  AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16,
-      input_tensor.scalar_type(), "moe_permute_kernel", ([&] {
+  MOE_DISPATCH(input_tensor.scalar_type(), [&] {
         expandInputRowsKernel<scalar_t><<<blocks, threads, 0, stream>>>(
             reinterpret_cast<scalar_t*>(input_tensor.data_ptr()),
             dst2src_map.data_ptr<int32_t>(),
@@ -206,5 +185,5 @@ void moe_permute_caller(
             num_src_rows,
             num_dest_rows,
             num_cols);
-      }));
+      });
 }
