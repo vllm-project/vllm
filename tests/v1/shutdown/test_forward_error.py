@@ -2,15 +2,18 @@
 """Test that we handle an Error in model forward and shutdown."""
 
 import asyncio
+import os
 
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
 from tests.v1.shutdown.utils import (SHUTDOWN_TEST_THRESHOLD_BYTES,
                                      SHUTDOWN_TEST_TIMEOUT_SEC)
+from tests.v1.utils import generate_dp
 from vllm import LLM, AsyncEngineArgs, SamplingParams
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.sampling_params import RequestOutputKind
 from vllm.utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -34,6 +37,7 @@ def evil_forward(self, *args, **kwargs):
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("model", MODELS)
 async def test_async_llm_model_error(monkeypatch, tensor_parallel_size: int,
@@ -84,8 +88,7 @@ async def test_async_llm_model_error(monkeypatch, tensor_parallel_size: int,
     # Confirm all the processes are cleaned up.
     wait_for_gpu_memory_to_clear(
         devices=list(range(tensor_parallel_size)),
-        threshold_bytes=2 * 2**30,
-        timeout_s=60,
+        threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
     )
 
     # NOTE: shutdown is handled by the API Server if an exception
@@ -127,3 +130,70 @@ def test_llm_model_error(monkeypatch, tensor_parallel_size: int,
             devices=list(range(tensor_parallel_size)),
             threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
+@pytest.mark.parametrize("data_parallel_size", [2])
+@pytest.mark.parametrize("model", MODELS)
+async def test_async_llm_dp_model_error(monkeypatch, data_parallel_size: int,
+                                        model: str) -> None:
+    """Test that AsyncLLM w/ data parallelism propagates a forward pass
+    error and frees memory.
+    AsyncLLM always uses an MP client.
+
+    Args:
+      data_parallel_size: degree of data parallelism
+      model: model under test
+    """
+    if cuda_device_count_stateless() < data_parallel_size:
+        pytest.skip(reason="Not enough CUDA devices")
+
+    # Monkeypatch an error in the model.
+    monkeypatch.setattr(LlamaForCausalLM, "forward", evil_forward)
+
+    engine_args = AsyncEngineArgs(
+        model=model,
+        enforce_eager=True,
+        disable_log_requests=True,
+        tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
+        data_parallel_size=int(os.getenv("DP_SIZE", data_parallel_size)),
+    )
+
+    prompt = "This is a test of data parallel"
+    engine = AsyncLLM.from_engine_args(engine_args)
+
+    # Create concurrent requests.
+    NUM_REQUESTS = 10
+    NUM_EXPECTED_TOKENS = 10
+
+    tasks = [
+        generate_dp(engine, f"request-{idx}", prompt,
+                    RequestOutputKind.FINAL_ONLY, NUM_EXPECTED_TOKENS)
+        for idx in range(NUM_REQUESTS)
+    ]
+    outputs = await asyncio.gather(*tasks)
+
+    # Every request should get an EngineDeadError.
+    for output in outputs:
+        assert isinstance(output, EngineDeadError)
+
+    # AsyncLLM should be errored.
+    assert engine.errored
+
+    # We should not be able to make another request.
+    with pytest.raises(EngineDeadError):
+        async for _ in generate_dp(engine, "abc", prompt,
+                                   RequestOutputKind.FINAL_ONLY,
+                                   NUM_EXPECTED_TOKENS):
+            raise Exception("We should not get here.")
+
+    # Confirm all the processes are cleaned up.
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(data_parallel_size)),
+        threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+    )
+
+    # NOTE: shutdown is handled by the API Server if an exception
+    # occurs, so it is expected that we would need to call this.
+    engine.shutdown()
