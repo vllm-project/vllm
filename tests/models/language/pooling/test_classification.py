@@ -13,7 +13,8 @@ from vllm.platforms import current_platform
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
     ],
 )
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype",
+                         ["half"] if current_platform.is_rocm() else ["float"])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -35,8 +36,13 @@ def test_models(
                    auto_cls=AutoModelForSequenceClassification) as hf_model:
         hf_outputs = hf_model.classify(example_prompts)
 
+    # check logits difference
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
         hf_output = torch.tensor(hf_output)
         vllm_output = torch.tensor(vllm_output)
 
-        assert torch.allclose(hf_output, vllm_output, 1e-3)
+        # the tolerance value of 1e-2 is selected based on the
+        # half datatype tests in
+        # tests/models/language/pooling/test_embedding.py
+        assert torch.allclose(hf_output, vllm_output,
+                              1e-3 if dtype == "float" else 1e-2)
