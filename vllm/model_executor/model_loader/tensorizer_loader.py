@@ -11,8 +11,8 @@ from vllm.config import LoadConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.tensorizer import (
-    TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
-    serialize_vllm_model, tensorizer_weights_iterator)
+    TensorizerConfig, deserialize_tensorizer_model, init_tensorizer_model,
+    is_vllm_tensorized, serialize_vllm_model, tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     initialize_model,
                                                     set_default_torch_dtype)
@@ -61,37 +61,33 @@ class TensorizerLoader(BaseModelLoader):
             model.load_weights(self._get_weights_iterator())
         return model.eval()
 
-    def _load_model_serialized(
-        self,
-        vllm_config: VllmConfig,
-    ) -> nn.Module:
-        """Load a serialized model with tensorizer.
-
-        Expects a vLLM-tensorized model. See the
-        examples/others/tensorize_vllm_model.py example script
-        for serializing vLLM models."""
-
-        device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
-
-        with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
-                model_class = get_model_architecture(model_config)[0]
-
-                tensorizer_config = copy.copy(self.tensorizer_config)
-                tensorizer_config.model_class = model_class
-                tensorizer_config.hf_config = model_config.hf_config
-                tensorizer_config.dtype = model_config.dtype
-
-                model = load_with_tensorizer(tensorizer_config,
-                                             vllm_config=vllm_config)
-        return model.eval()
-
     def download_model(self, model_config: ModelConfig) -> None:
         self.tensorizer_config.verify_with_model_config(model_config)
 
         with self.tensorizer_config.open_stream():
             pass
+
+    def _patch_tensorizer_config(
+            self, model_config: ModelConfig) -> TensorizerConfig:
+        model_class = get_model_architecture(model_config)[0]
+        tensorizer_config = copy.copy(self.tensorizer_config)
+        tensorizer_config.model_class = model_class
+        tensorizer_config.hf_config = model_config.hf_config
+        tensorizer_config.dtype = model_config.dtype
+        return tensorizer_config
+
+    def load_weights(self, model: nn.Module,
+                     model_config: ModelConfig) -> None:
+        """Load serialized model weights with tensorizer.
+
+        Expects a vLLM-tensorized model. See the
+        examples/others/tensorize_vllm_model.py example script
+        for serializing vLLM models."""
+        if is_vllm_tensorized(self.tensorizer_config):
+            tensorizer_config = self._patch_tensorizer_config(model_config)
+            deserialize_tensorizer_model(model, tensorizer_config)
+        else:
+            model.load_weights(self._get_weights_iterator())
 
     def load_model(self, vllm_config: VllmConfig,
                    model_config: ModelConfig) -> nn.Module:
@@ -106,7 +102,11 @@ class TensorizerLoader(BaseModelLoader):
                 get_tensor_model_parallel_rank())
 
         if is_vllm_tensorized(self.tensorizer_config):
-            return self._load_model_serialized(vllm_config=vllm_config)
+            tensorizer_config = self._patch_tensorizer_config(model_config)
+            model = init_tensorizer_model(tensorizer_config=tensorizer_config,
+                                          vllm_config=vllm_config)
+            self.load_weights(model, model_config)
+            return model
         return self._load_model_serialized_cpu(vllm_config=vllm_config)
 
     @staticmethod

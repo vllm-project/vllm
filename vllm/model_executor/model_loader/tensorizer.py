@@ -21,7 +21,8 @@ from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, ParallelConfig, set_current_vllm_config
+from vllm.config import (ModelConfig, ParallelConfig, VllmConfig,
+                         set_current_vllm_config)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -208,12 +209,6 @@ class TensorizerConfig:
                            **tensorizer_args.stream_params)
 
 
-def load_with_tensorizer(tensorizer_config: TensorizerConfig,
-                         **extra_kwargs) -> nn.Module:
-    tensorizer = TensorizerAgent(tensorizer_config, **extra_kwargs)
-    return tensorizer.deserialize()
-
-
 @dataclass
 class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO, str,
@@ -366,100 +361,72 @@ class TensorizerArgs:
         return tensorizer_args
 
 
-class TensorizerAgent:
-    """
-    A class for performing tensorizer deserializations specifically for
-    vLLM models using plaid_mode. Uses TensorizerArgs to configure the
-    behavior of the TensorDeserializer when loading tensors from a serialized
-    model. For deserializations of HuggingFace models, TensorDeserializer is
-    instead used as an iterator directly in the func hf_model_weights_iterator
-    in vllm/model_executor/model_loader/weight_utils.py
-    """
+def _check_tensors_on_meta_device(model: nn.Module) -> None:
+    for tensor in model.state_dict().values():
+        if tensor.device.type == 'meta':
+            raise ValueError(
+                "The serialized model contains tensors on the meta device,"
+                " indicating that some tensors were not loaded properly."
+                " Please check that the parameters of the model being"
+                " specified match that of the serialized model, such as"
+                " its quantization.")
 
-    def __init__(self, tensorizer_config: TensorizerConfig, vllm_config):
-        self.tensorizer_config = tensorizer_config
-        self.tensorizer_args = (
-            self.tensorizer_config._construct_tensorizer_args())
-        self.vllm_config = vllm_config
-        self.model = self._init_model()
 
-    def _init_model(self):
-        assert self.tensorizer_config.hf_config is not None
-        model_args = self.tensorizer_config.hf_config
-        model_args.torch_dtype = self.tensorizer_config.dtype
-        assert self.tensorizer_config.model_class is not None
-        # TODO: Do we need to consider old-style model class?
-        with meta_tensor_mode(), set_current_vllm_config(self.vllm_config,
-                                                         check_compile=True):
-            return self.tensorizer_config.model_class(
-                vllm_config=self.vllm_config)
+def _resize_lora_embeddings(model: nn.Module):
+    """Modify LoRA embedding layers to use bigger tensors
+    to allow for adapter added tokens."""
+    for child in model.modules():
+        if (isinstance(child, VocabParallelEmbedding) and child.weight.shape[0]
+                < child.num_embeddings_per_partition):
+            new_weight = torch.empty(child.num_embeddings_per_partition,
+                                     child.embedding_dim,
+                                     dtype=child.weight.dtype,
+                                     device=child.weight.device)
+            new_weight[:child.weight.shape[0]].copy_(child.weight.data)
+            new_weight[child.weight.shape[0]:].fill_(0)
+            child.weight.data = new_weight
 
-    def _resize_lora_embeddings(self):
-        """Modify LoRA embedding layers to use bigger tensors
-        to allow for adapter added tokens."""
-        for child in self.model.modules():
-            if (isinstance(child, VocabParallelEmbedding)
-                    and child.weight.shape[0]
-                    < child.num_embeddings_per_partition):
-                new_weight = torch.empty(child.num_embeddings_per_partition,
-                                         child.embedding_dim,
-                                         dtype=child.weight.dtype,
-                                         device=child.weight.device)
-                new_weight[:child.weight.shape[0]].copy_(child.weight.data)
-                new_weight[child.weight.shape[0]:].fill_(0)
-                child.weight.data = new_weight
 
-    def _check_tensors_on_meta_device(self):
-        for tensor in self.model.state_dict().values():
-            if tensor.device.type == 'meta':
-                raise ValueError(
-                    "The serialized model contains tensors on the meta device,"
-                    " indicating that some tensors were not loaded properly."
-                    " Please check that the parameters of the model being"
-                    " specified match that of the serialized model, such as"
-                    " its quantization.")
+def init_tensorizer_model(tensorizer_config: TensorizerConfig,
+                          vllm_config: VllmConfig) -> nn.Module:
+    assert tensorizer_config.hf_config is not None
+    model_args = tensorizer_config.hf_config
+    model_args.torch_dtype = tensorizer_config.dtype
+    assert tensorizer_config.model_class is not None
+    # TODO: Do we need to consider old-style model class?
+    with meta_tensor_mode(), set_current_vllm_config(vllm_config,
+                                                     check_compile=True):
+        return tensorizer_config.model_class(vllm_config=vllm_config)
 
-    def deserialize(self):
-        """
-        Deserialize the model using the TensorDeserializer. This method is
-        specifically for vLLM models using tensorizer's plaid_mode.
 
-        The deserializer makes use of tensorizer_args.stream_params
-        to configure the behavior of the stream when loading tensors from a
-        serialized model. The deserializer_params are used to configure the
-        behavior of the TensorDeserializer when loading tensors themselves.
-        Documentation on these params can be found in TensorizerArgs
-
-        Returns:
-            nn.Module: The deserialized model.
-        """
-        before_mem = get_mem_usage()
-        start = time.perf_counter()
-        with _read_stream(
-                self.tensorizer_config.tensorizer_uri,
-                **self.tensorizer_args.stream_params
-        ) as stream, TensorDeserializer(
+def deserialize_tensorizer_model(model: nn.Module,
+                                 tensorizer_config: TensorizerConfig) -> None:
+    tensorizer_args = tensorizer_config._construct_tensorizer_args()
+    before_mem = get_mem_usage()
+    start = time.perf_counter()
+    with _read_stream(
+            tensorizer_config.tensorizer_uri,
+            **tensorizer_args.stream_params) as stream, TensorDeserializer(
                 stream,
-                dtype=self.tensorizer_config.dtype,
+                dtype=tensorizer_config.dtype,
                 device=f'cuda:{torch.cuda.current_device()}',
-                **self.tensorizer_args.deserializer_params) as deserializer:
-            deserializer.load_into_module(self.model)
-            end = time.perf_counter()
+                **tensorizer_args.deserializer_params) as deserializer:
+        deserializer.load_into_module(model)
+        end = time.perf_counter()
 
-        total_bytes_str = convert_bytes(deserializer.total_tensor_bytes)
-        duration = end - start
-        per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
-        after_mem = get_mem_usage()
-        deserializer.close()
-        logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str,
-                    end - start, per_second)
-        logger.info("Memory usage before: %s", before_mem)
-        logger.info("Memory usage after: %s", after_mem)
+    total_bytes_str = convert_bytes(deserializer.total_tensor_bytes)
+    duration = end - start
+    per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
+    after_mem = get_mem_usage()
+    deserializer.close()
+    logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str,
+                end - start, per_second)
+    logger.info("Memory usage before: %s", before_mem)
+    logger.info("Memory usage after: %s", after_mem)
 
-        self._check_tensors_on_meta_device()
-        self._resize_lora_embeddings()
-        del self.model.vllm_tensorized_marker
-        return self.model.eval()
+    _check_tensors_on_meta_device(model)
+    _resize_lora_embeddings(model)
+    del model.vllm_tensorized_marker
 
 
 def tensorizer_weights_iterator(
