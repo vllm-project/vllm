@@ -336,18 +336,21 @@ def triton_impl(a: torch.Tensor, topk_ids: torch.Tensor,
                 w1_scale: torch.Tensor, w2_scale: torch.Tensor,
                 a1_scale: torch.Tensor, block_shape: list[int]):
 
-    return fused_experts(hidden_states=a,
-                         w1=w1,
-                         w2=w2,
-                         topk_weights=topk_weights,
-                         topk_ids=topk_ids,
-                         inplace=False,
-                         use_fp8_w8a8=True,
-                         w1_scale=w1_scale,
-                         w2_scale=w2_scale,
-                         a1_scale=a1_scale,
-                         block_shape=block_shape,
-                         allow_deep_gemm=False)
+    return fused_experts(
+        hidden_states=a,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        inplace=False,
+        use_fp8_w8a8=True,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        block_shape=block_shape,
+        # Make sure this is set to False so we
+        # dont end up comparing the same implementation.
+        allow_deep_gemm=False)
 
 
 def _deep_ep_moe(
