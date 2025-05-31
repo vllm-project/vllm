@@ -103,8 +103,13 @@ KVConnectorFactory.register_connector(
 
 KVConnectorFactory.register_connector(
     "MooncakeStoreConnector",
-    "vllm.distributed.kv_transfer.kv_connector.mooncake_store_connector",
-    "MooncakeStoreConnector")
+    "vllm.distributed.kv_transfer.kv_connector.kv_store_connector",
+    "KVStoreConnector")
+
+KVConnectorFactory.register_connector(
+    "FileStoreConnector",
+    "vllm.distributed.kv_transfer.kv_connector.kv_store_connector",
+    "KVStoreConnector")
 
 KVConnectorFactory.register_connector(
     "SharedStorageConnector",
