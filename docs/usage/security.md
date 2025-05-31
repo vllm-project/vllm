@@ -12,14 +12,14 @@ All communications between nodes in a multi-node vLLM deployment are **insecure 
 
 The following options control inter-node communications in vLLM:
 
-1. **Environment Variables:**
+#### 1. **Environment Variables:**
    - `VLLM_HOST_IP`: Sets the IP address for vLLM processes to communicate on
 
-2. **KV Cache Transfer Configuration:**
+#### 2. **KV Cache Transfer Configuration:**
    - `--kv-ip`: The IP address for KV cache transfer communications (default: 127.0.0.1)
    - `--kv-port`: The port for KV cache transfer communications (default: 14579)
 
-3. **Data Parallel Configuration:**
+#### 3. **Data Parallel Configuration:**
    - `data_parallel_master_ip`: IP of the data parallel master (default: 127.0.0.1)
    - `data_parallel_master_port`: Port of the data parallel master (default: 29500)
 
@@ -39,16 +39,16 @@ Key points from the PyTorch security guide:
 
 ### Security Recommendations
 
-1. **Network Isolation:**
+#### 1. **Network Isolation:**
    - Deploy vLLM nodes on a dedicated, isolated network
    - Use network segmentation to prevent unauthorized access
    - Implement appropriate firewall rules
 
-2. **Configuration Best Practices:**
+#### 2. **Configuration Best Practices:**
    - Always set `VLLM_HOST_IP` to a specific IP address rather than using defaults
    - Configure firewalls to only allow necessary ports between nodes
 
-3. **Access Control:**
+#### 3. **Access Control:**
    - Restrict physical and network access to the deployment environment
    - Implement proper authentication and authorization for management interfaces
    - Follow the principle of least privilege for all system components
