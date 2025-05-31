@@ -142,6 +142,24 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
         assert e > topk, "Number of experts must be greater than topk"
         topk_weights, topk_ids, _ = fused_topk(a, score, topk,
                                                renormalize=False)
+        # strides for the cutlass moe_fp4 kernel
+        ab_strides_13 = torch.full((e,),
+                                  w1_q.shape[2] * 2,
+                                  dtype=torch.int32, 
+                                  device=w1_q.device)
+        c_strides_13 = torch.full((e,),
+                                 w1_q.shape[1],
+                                 dtype=torch.int32,
+                                 device=w1_q.device)
+        ab_strides_2 = torch.full((e,),
+                                 w2_q.shape[2] * 2,
+                                 dtype=torch.int32,
+                                 device=w2_q.device)
+        c_strides_2 = torch.full((e,),
+                                 w2_q.shape[1],
+                                 dtype=torch.int32,
+                                 device=w2_q.device)
+        
         cutlass_output = cutlass_moe_fp4(
             a=a,
             a1_gscale=a1_gs,
@@ -152,6 +170,10 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
             w2_fp4=w2_q,
             w2_blockscale=w2_blockscale,
             w2_alphas=(1 / w2_gs),
+            ab_strides_13=ab_strides_13,
+            ab_strides_2=ab_strides_2,
+            c_strides_13=c_strides_13,
+            c_strides_2=c_strides_2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             m=m,
@@ -201,6 +223,7 @@ def run_with_expert_maps(num_experts: int, num_local_experts: int,
            cutlass_fp4_moe_kwargs["expert_map"] = expert_map
            # update cutlass moe arg tensors
            for k, t in full_tensors.items():
+              assert t.shape[0] == num_experts, "Tensor shape mismatch"
               cutlass_fp4_moe_kwargs[k] = t[l:u]
            cutlass_fp4_moe_kwargs["m"] = cutlass_fp4_moe_kwargs["a"].shape[0]
            cutlass_fp4_moe_kwargs["n"] = cutlass_fp4_moe_kwargs["w2_fp4"].shape[2] * 2
@@ -319,9 +342,9 @@ def test_cutlass_moe_EP(
 
 
 if __name__ == "__main__":
-    m, n, k = (64, 1024, 1024)
+    m, n, k = (2,3072,1024)
     e = 8
     topk = 1
     local_expert_size = 4
-    # test_cutlass_fp4_moe_no_graph(m=m, n=n, k=k, e=e, topk=topk, dtype=torch.half)
-    test_cutlass_moe_EP(m=m, n=n, k=k, e=e, topk=topk, local_expert_size=local_expert_size)
+    test_cutlass_fp4_moe_no_graph(m=m, n=n, k=k, e=e, topk=topk, dtype=torch.half)
+    # test_cutlass_moe_EP(m=m, n=n, k=k, e=e, topk=topk, local_expert_size=local_expert_size)

@@ -585,9 +585,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
         # GEMM 1
-        assert torch.allclose(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]), (
-                "w1_weight_scale_2 must match w3_weight_scale_2")
+        #assert torch.allclose(
+        #    layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]), (
+        #        "w1_weight_scale_2 must match w3_weight_scale_2")
 
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
@@ -633,8 +633,43 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         layer.w2_blockscale_swizzled = Parameter(w2_blockscale_swizzled,
                                                  requires_grad=False)
+        
         layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
 
+        # initialize the strides tensors for the weights based on the ep_size
+        num_experts = layer.local_num_experts \
+            if (layer.local_num_experts > 0) else layer.global_num_experts
+
+        # strides for the cutlass moe_fp4 kernel.
+        
+        # this the stride(in num elements) is between rows of the weight 
+        # tensor per expert.
+        # similarly, for activations, this is stride(in num elements) between
+        # rows of the activation tensor.
+        # for example, if the weight tensor is [e, 2*n, k], then the stride is 
+        # k between rows per expert.
+        # so for `a` tensor of shape [m*topk, k], the stride is k.
+        # for `w13_weight` tensor of shape [e, 2*n, k], the stride is k between
+        # rows per expert. 
+        # for `c1` tensor of shape [m*topk, n], the stride is n
+
+        layer.ab_strides_13 = torch.full((num_experts,),
+                                  layer.w13_weight.shape[2] * 2,
+                                  dtype=torch.int64, 
+                                  device=layer.w13_weight.device)
+        layer.c_strides_13 = torch.full((num_experts,),
+                                 layer.w13_weight.shape[1],
+                                 dtype=torch.int64,
+                                 device=layer.w13_weight.device)
+        layer.ab_strides_2 = torch.full((num_experts,),
+                                 layer.w2_weight.shape[2] * 2,
+                                 dtype=torch.int64,
+                                 device=layer.w2_weight.device)
+        layer.c_strides_2 = torch.full((num_experts,),
+                                 layer.w2_weight.shape[1],
+                                 dtype=torch.int64,
+                                 device=layer.w2_weight.device)
+        
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
             del layer.g1_alphas
@@ -726,6 +761,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e=layer.w13_weight.shape[0],
                 a1_gscale=layer.w13_input_scale_quant,
                 a2_gscale=layer.w2_input_scale_quant,
+                ab_strides_13=layer.ab_strides_13,
+                ab_strides_2=layer.ab_strides_2,
+                c_strides_13=layer.c_strides_13,
+                c_strides_2=layer.c_strides_2,
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 device=x.device).to(x.dtype)

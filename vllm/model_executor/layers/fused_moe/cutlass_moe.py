@@ -279,7 +279,12 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
                     w1_fp4: torch.Tensor, w1_blockscale: torch.Tensor,
                     w1_alphas: torch.Tensor, a2_gscale: torch.Tensor,
                     w2_fp4: torch.Tensor, w2_blockscale: torch.Tensor,
-                    w2_alphas: torch.Tensor, topk_weights: torch.Tensor,
+                    w2_alphas: torch.Tensor,
+                    ab_strides_13: torch.Tensor,
+                    ab_strides_2: torch.Tensor,
+                    c_strides_13: torch.Tensor,
+                    c_strides_2: torch.Tensor,
+                    topk_weights: torch.Tensor,
                     topk_ids: torch.Tensor, m: int, n: int, k: int, e: int,
                     device: torch.device,
                     expert_map: Optional[torch.Tensor] = None,
@@ -308,6 +313,13 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     
     m, n, k: Unquantized weight shapes, dtype: int
     e: number of experts, dtype: int
+    
+    # strides for activation and weight tensors to go from one row to the next
+    # per local_num_experts
+    ab_strides_13: [e]
+    ab_strides_2: [e]
+    c_strides_13: [e]
+    c_strides_2: [e]
 
     assumes that topk < k < n to satisfy - up/down projection expectations.
     - expert_map (Optional[torch.Tensor]): In the case of Expert parallel,
@@ -377,7 +389,6 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     # Note that problem sizes are based on logical number of elements.
     ops.get_cutlass_moe_mm_data(local_topk_ids, expert_offsets, problem_sizes1,
                                 problem_sizes2, a_map, c_map, e, n, k)
-
     tokens_per_expert = problem_sizes1[:, 0]
     rounded_tokens_per_expert = (tokens_per_expert + (128 - 1)) // 128 * 128
     blockscale_offsets = torch.zeros(e + 1, dtype=torch.int32, device=device)
@@ -390,12 +401,13 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
         blockscale_offsets,
         num_topk,
         expert_map=a_map,
-        MAX_TOKENS_PER_EXPERT=MAX_TOKENS_PER_EXPERT)
+        )
 
     c1 = ops.cutlass_fp4_moe_mm(rep_a_fp4, w1_fp4, rep_a_blockscale,
-                                w1_blockscale, w1_alphas, problem_sizes1,
-                                expert_offsets[:-1], blockscale_offsets[:-1],
-                                out_dtype, device)
+                                w1_blockscale, w1_alphas,
+                                ab_strides_13, c_strides_13,
+                                problem_sizes1, expert_offsets[:-1],
+                                blockscale_offsets[:-1], out_dtype, device)
     del rep_a_fp4, rep_a_blockscale
     # hidden size dimension is split to one halfpytho sized tensor.
     intermediate = torch.empty((m * num_topk, w1_fp4.shape[1] // 2),
@@ -410,14 +422,14 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
         expert_offsets,
         blockscale_offsets,
         num_topk,
-        MAX_TOKENS_PER_EXPERT=MAX_TOKENS_PER_EXPERT)
+        )
 
     c2 = ops.cutlass_fp4_moe_mm(int_fp4, w2_fp4, int_blockscale, w2_blockscale,
-                                w2_alphas, problem_sizes2, expert_offsets[:-1],
+                                w2_alphas, ab_strides_2, c_strides_2,
+                                problem_sizes2, expert_offsets[:-1],
                                 blockscale_offsets[:-1], out_dtype, device,
                                 zero_initializer=c2_zero_initializer)
     del int_fp4, int_blockscale
-    
     c2 = c2[c_map].view(m, num_topk, k)
     if not apply_router_weight_on_input:
         c2 = c2 * topk_weights.view(m, num_topk, 1).to(out_dtype)
