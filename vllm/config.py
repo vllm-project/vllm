@@ -3143,15 +3143,21 @@ def _resolve_auto_dtype(
 ):
     from vllm.platforms import current_platform
 
-    platform_supported_dtypes = current_platform.supported_dtypes
-    platform_dtype = next(dtype for dtype in platform_supported_dtypes
-                          if _is_valid_dtype(model_type, dtype))
+    supported_dtypes = [
+        dtype for dtype in current_platform.supported_dtypes
+        if _is_valid_dtype(model_type, dtype)
+    ]
+
+    if is_pooling_model and torch.float16 in supported_dtypes:
+        preferred_dtype = torch.float16
+    else:
+        preferred_dtype = supported_dtypes[0]
 
     # Downcast for float32 models
     if config_dtype == torch.float32:
-        config_dtype = torch.float16 if is_pooling_model else platform_dtype
+        config_dtype = preferred_dtype
 
-    if config_dtype in platform_supported_dtypes:
+    if config_dtype in supported_dtypes:
         return config_dtype
 
     # Ensure device compatibility
@@ -3169,10 +3175,10 @@ def _resolve_auto_dtype(
         "Falling back to %s for compatibility.",
         device_str,
         config_dtype,
-        platform_dtype,
+        preferred_dtype,
     )
 
-    return platform_dtype
+    return preferred_dtype
 
 
 def _get_and_verify_dtype(
