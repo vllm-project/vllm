@@ -1360,6 +1360,16 @@ class ModelConfig:
     @property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
+        """
+        For Mllama, VLLM overrides HF's is_encoder_decoder flag and sets it to 
+        True to enable cross-attention
+        Neuron needs all multimodal data to be in the decoder and does not 
+        need to explicitly enable cross-attention
+        """
+        if (current_platform.is_neuron()
+                and self.hf_config.model_type == "mllama"):
+            return False
+
         return is_encoder_decoder(self.hf_config)
 
     @property
