@@ -418,22 +418,22 @@ def _deep_ep_moe(
 
 
 MNKs = [
-    (222, 1024, 2048),
+    (8, 128, 128),
+    (8, 128, 512),
+    (8, 512, 512),
+    (3, 1024, 2048),
+    (32, 128, 1024),
+    (45, 512, 2048),
+    (64, 1024, 1024),
+    (129, 128, 256),
     (129, 1024, 2048),
-    #(8, 128, 128),
-    #(8, 128, 512),
-    #(8, 512, 512),
-    #(3, 1024, 2048),
-    #(32, 128, 1024),
-    #(45, 512, 2048),
-    #(64, 1024, 1024),
-    #(129, 128, 256),
+    (222, 1024, 2048),
 ]
 
 
 @pytest.mark.parametrize("mnk", MNKs)
 @pytest.mark.parametrize("num_experts", [32])
-@pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @requires_deep_ep
 @requires_deep_gemm
