@@ -1782,6 +1782,9 @@ class ParallelConfig:
     rank: int = 0
     """Global rank in distributed setup."""
 
+    sleep_on_idle: bool = False
+    """Reduce CPU usage when vLLM is idle."""
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
@@ -2718,6 +2721,7 @@ class SpeculativeConfig:
             ray_workers_use_nsight=target_parallel_config.
             ray_workers_use_nsight,
             placement_group=target_parallel_config.placement_group,
+            sleep_on_idle=target_parallel_config.sleep_on_idle,
         )
 
         return draft_parallel_config

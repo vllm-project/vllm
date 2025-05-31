@@ -90,7 +90,9 @@ class MultiprocExecutor(Executor):
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
-            self.workers = WorkerProc.wait_for_ready(unready_workers)
+            self.workers = WorkerProc.wait_for_ready(
+                unready_workers,
+                sleep_on_idle=self.parallel_config.sleep_on_idle)
 
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
@@ -348,7 +350,9 @@ class WorkerProc:
 
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-            input_shm_handle, self.worker.rank)
+            input_shm_handle,
+            self.worker.rank,
+            sleep_on_idle=vllm_config.parallel_config.sleep_on_idle)
 
         # Initializes a message queue for sending the model output
         self.worker_response_mq = MessageQueue(1, 1)
@@ -389,7 +393,8 @@ class WorkerProc:
 
     @staticmethod
     def wait_for_ready(
-        unready_proc_handles: list[UnreadyWorkerProcHandle]
+        unready_proc_handles: list[UnreadyWorkerProcHandle],
+        sleep_on_idle: bool = False,
     ) -> list[WorkerProcHandle]:
 
         e = Exception("WorkerProc initialization failed due to "
@@ -412,7 +417,7 @@ class WorkerProc:
 
                     # Extract the message queue handle.
                     worker_response_mq = MessageQueue.create_from_handle(
-                        response["handle"], 0)
+                        response["handle"], 0, sleep_on_idle=sleep_on_idle)
                     ready_proc_handles[unready_proc_handle.rank] = (
                         WorkerProcHandle.from_unready_handle(
                             unready_proc_handle, worker_response_mq))
