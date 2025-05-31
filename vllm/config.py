@@ -2574,7 +2574,7 @@ class SpeculativeConfig:
                         eagle_config = EAGLEConfig(
                             self.draft_model_config.hf_config,
                             method=self.method,
-                            **{"model_type": "eagle"})
+                            model_type="eagle")
                         self.draft_model_config.hf_config = eagle_config
 
                 if (self.num_speculative_tokens is not None
