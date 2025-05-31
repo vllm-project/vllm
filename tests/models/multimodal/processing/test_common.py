@@ -282,6 +282,8 @@ def _test_processing_correctness_one(
     "Skywork/Skywork-R1V-38B",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     "openai/whisper-large-v3",
+    "omni-research/Tarsier-7b",
+    "omni-research/Tarsier-34b",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])

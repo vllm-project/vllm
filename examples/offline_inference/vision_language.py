@@ -332,6 +332,27 @@ def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
         prompts=prompts,
     )
 
+# omni-research/Tarsier-7b
+def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "omni-research/Tarsier-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+    prompts = [
+        (f"USER: <image>\n{question} ASSISTANT:")
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
 
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
@@ -1091,6 +1112,7 @@ model_example_map = {
     "qwen2_5_omni": run_qwen2_5_omni,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
+    "tarsier": run_tarsier,
 }
 
 
