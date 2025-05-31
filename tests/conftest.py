@@ -327,7 +327,8 @@ class HfRunner:
         self.dtype = torch_dtype = _get_and_verify_dtype(
             self.model_name,
             self.config,
-            dtype,
+            dtype=dtype,
+            is_pooling_model=is_sentence_transformer or is_cross_encoder,
         )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}

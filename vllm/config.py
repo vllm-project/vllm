@@ -542,10 +542,22 @@ class ModelConfig:
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
+
+        supported_tasks, task = self._resolve_task(self.task)
+        self.supported_tasks = supported_tasks
+        self.task = task
+        if self.task in ("draft", "generate"):
+            self.truncation_side = "left"
+        else:
+            self.truncation_side = "right"
+
+        self.pooler_config = self._init_pooler_config()
+
         self.dtype = _get_and_verify_dtype(
             self.model,
             self.hf_config,
             self.dtype,
+            is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
         )
 
@@ -603,16 +615,6 @@ class ModelConfig:
         if (not current_platform.is_neuron() and self.override_neuron_config):
             raise ValueError(
                 "`override_neuron_config` is only supported on Neuron.")
-
-        supported_tasks, task = self._resolve_task(self.task)
-        self.supported_tasks = supported_tasks
-        self.task = task
-        if self.task in ("draft", "generate"):
-            self.truncation_side = "left"
-        else:
-            self.truncation_side = "right"
-
-        self.pooler_config = self._init_pooler_config()
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -699,7 +701,6 @@ class ModelConfig:
             self.model, self.revision)
 
     def _init_pooler_config(self) -> Optional["PoolerConfig"]:
-
         if self.runner_type == "pooling":
             if isinstance(self.override_pooler_config, dict):
                 self.override_pooler_config = PoolerConfig(
@@ -3134,20 +3135,26 @@ def _find_dtype(
     return config_dtype
 
 
-def _resolve_auto_dtype(model_type: str, config_dtype: torch.dtype):
+def _resolve_auto_dtype(
+    model_type: str,
+    config_dtype: torch.dtype,
+    *,
+    is_pooling_model: bool,
+):
     from vllm.platforms import current_platform
 
-    platform_dtype = next(dtype for dtype in current_platform.supported_dtypes
+    platform_supported_dtypes = current_platform.supported_dtypes
+    platform_dtype = next(dtype for dtype in platform_supported_dtypes
                           if _is_valid_dtype(model_type, dtype))
 
-    # Downcast to platform's default for float32 models
+    # Downcast for float32 models
     if config_dtype == torch.float32:
-        return platform_dtype
+        config_dtype = torch.float16 if is_pooling_model else platform_dtype
 
-    # Ensure device compatibility
-    if config_dtype in current_platform.supported_dtypes:
+    if config_dtype in platform_supported_dtypes:
         return config_dtype
 
+    # Ensure device compatibility
     device_name = current_platform.get_device_name()
     device_capability = current_platform.get_device_capability()
 
@@ -3173,6 +3180,7 @@ def _get_and_verify_dtype(
     config: PretrainedConfig,
     dtype: Union[str, torch.dtype],
     *,
+    is_pooling_model: bool,
     revision: Optional[str] = None,
 ) -> torch.dtype:
     config_dtype = _find_dtype(model_id, config, revision=revision)
@@ -3182,7 +3190,11 @@ def _get_and_verify_dtype(
         dtype = dtype.lower()
         if dtype == "auto":
             # Set default dtype from model config
-            torch_dtype = _resolve_auto_dtype(model_type, config_dtype)
+            torch_dtype = _resolve_auto_dtype(
+                model_type,
+                config_dtype,
+                is_pooling_model=is_pooling_model,
+            )
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype!r}")
