@@ -22,6 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Rotary Positional Embeddings."""
+import functools
 import math
 from typing import Any, Optional, Union
 
@@ -1457,6 +1458,7 @@ class MRotaryEmbedding(RotaryEmbedding):
         ]
 
     @staticmethod
+    @functools.lru_cache(maxsize=1024)
     def get_next_input_positions_tensor(
         mrope_position_delta: int,
         context_len: int,
