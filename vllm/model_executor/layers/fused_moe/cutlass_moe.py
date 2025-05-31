@@ -21,8 +21,13 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         ab_strides2: torch.Tensor,
         c_strides2: torch.Tensor,
         out_dtype: torch.dtype,
+        per_act_token_quant: bool,
     ):
-        super().__init__()
+        super().__init__(
+            quant_dtype=torch.float8_e4m3fn,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=None,
+        )
         self.ab_strides1 = ab_strides1
         self.c_strides1 = c_strides1
         self.ab_strides2 = ab_strides2
@@ -241,8 +246,9 @@ def cutlass_moe_fp8(
 
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(
-            per_channel_quant=per_act_token,
             quant_dtype=torch.float8_e4m3fn,
+            per_act_token_quant=per_act_token,
+            block_shape=None,
         ),
         CutlassExpertsFp8(
             ab_strides1,
@@ -250,6 +256,7 @@ def cutlass_moe_fp8(
             ab_strides2,
             c_strides2,
             out_dtype,
+            per_act_token,
         ),
     )
 

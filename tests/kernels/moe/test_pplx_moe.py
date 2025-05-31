@@ -357,6 +357,7 @@ def torch_moe2(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     use_fp8_w8a8: bool = False,
+    per_act_token_quant = False,
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
     M, K = a.shape
@@ -469,9 +470,7 @@ def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
         hidden_dim_bytes=hidden_dim * a.dtype.itemsize,
-        hidden_dim_scale_bytes=(0 if a.dtype.itemsize != 1 else
-                                ((hidden_dim + block_size - 1) // block_size *
-                                 torch.float32.itemsize)),
+        hidden_dim_scale_bytes=0,
     )
 
     topk_ids = topk_ids.to(dtype=torch.uint32)
@@ -482,7 +481,6 @@ def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
         world_size,
         rank,
         dp_size,
-        a.dtype,
     )
 
     a_chunk = chunk_by_rank(a, rank, world_size).to(device)
@@ -599,27 +597,27 @@ def pplx_moe(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     qtype: Optional[torch.dtype] = None,
+    per_act_token_quant = False,
     block_shape: Optional[list[int]] = None,
     use_compile: bool = True,
     use_cudagraphs: bool = True,
 ) -> torch.Tensor:
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-        PplxPrepareAndFinalize)
+        PplxPrepareAndFinalize, pplx_hidden_dim_scale_bytes)
 
     device = torch.device("cuda", rank)
     hidden_dim = a.shape[1]
     num_experts = w1.shape[0]
-    block_size = block_shape[1] if block_shape is not None else 128
     topk = topk_ids.shape[1]
     max_num_tokens = round_up(rank_chunk(a.shape[0], 0, world_size), 64)
 
-    if qtype is not None:
-        a_dtype = qtype
-        # This is probably not right
-        scale_bytes = round_up(((hidden_dim + block_size - 1) // block_size) * torch.float32.itemsize, 16)
-    else:
-        a_dtype = a.dtype
-        scale_bytes = 0
+    hidden_dim_bytes, scale_bytes = pplx_hidden_dim_scale_bytes(
+        hidden_dim,
+        a.dtype,
+        qtype,
+        per_act_token_quant=per_act_token_quant,
+        block_shape=block_shape,
+    )
 
     ata = AllToAll.internode(
         max_num_tokens=max_num_tokens,
@@ -629,7 +627,7 @@ def pplx_moe(
         world_size=world_size,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
-        hidden_dim_bytes=hidden_dim * a_dtype.itemsize,
+        hidden_dim_bytes=hidden_dim_bytes,
         hidden_dim_scale_bytes=scale_bytes,
     )
 
@@ -642,6 +640,7 @@ def pplx_moe(
         rank,
         dp_size,
         quant_dtype=qtype,
+        per_act_token_quant=per_act_token_quant,
         block_shape=block_shape,
     )
 
@@ -765,6 +764,7 @@ def _pplx_moe(
     w1_s: Optional[torch.Tensor] = None,
     w2_s: Optional[torch.Tensor] = None,
     qtype: Optional[torch.dtype] = None,
+    per_act_token_quant: bool = False,
     block_shape: Optional[list[int]] = None,
 ):
     uid = nvshmem_get_unique_id(
@@ -788,9 +788,9 @@ def _pplx_moe(
 
     with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s, w2_s, use_fp8_w8a8, block_shape)
+        torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s, w2_s, use_fp8_w8a8, per_act_token_quant, block_shape)
         pplx_output = pplx_moe(pgi.rank, pgi.world_size, dp_size, a, w1, w2,
-                               topk_weight, topk_ids, w1_s, w2_s, qtype, block_shape)
+                               topk_weight, topk_ids, w1_s, w2_s, qtype, per_act_token_quant, block_shape)
         # TODO (bnell): fix + re-enable
         #batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight,
         #                              topk_ids)
@@ -809,6 +809,8 @@ def _pplx_moe(
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
+@pytest.mark.parametrize("per_act_token_quant", [False]) #, True])
+@pytest.mark.parametrize("block_shape", [[128, 128]]) #[None, [128, 128]])
 @requires_pplx
 def test_pplx_moe(
     mnk: tuple[int, int, int],
@@ -816,6 +818,8 @@ def test_pplx_moe(
     topk: int,
     dtype: torch.dtype,
     world_dp_size: tuple[int, int],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]],
 ):
     current_platform.seed_everything(7)
     m, n, k = mnk
@@ -827,6 +831,10 @@ def test_pplx_moe(
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
+    if not use_fp8_w8a8 and per_act_token_quant and block_shape is not None:
+        pytest.skip("Skip quantization test for non-quantized type")
+
+    # TODO (bnell): scale setup for different quant strategies
     if use_fp8_w8a8:
         block_shape = [128, 128]
         quant_type = torch.float8_e4m3fn
@@ -856,4 +864,4 @@ def test_pplx_moe(
         w1_s = None
         w2_s = None
 
-    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk, w1_s, w2_s, quant_type, block_shape)
+    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk, w1_s, w2_s, quant_type, per_act_token_quant, block_shape)

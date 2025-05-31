@@ -6,28 +6,44 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape)
-from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    get_config_quant_dtype,
+    TritonExperts)
 
 
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
-    def __init__(self,
-                 use_fp8_w8a8: bool = False,
-                 use_int8_w8a8: bool = False,
-                 use_int8_w8a16: bool = False,
-                 use_int4_w4a16: bool = False,
-                 per_channel_quant: bool = False,
-                 block_shape: Optional[list[int]] = None,
-                 block_m: Optional[int] = None,
-                 allow_deep_gemm: bool = False):
-        super().__init__()
-        self.triton_expert = TritonExperts(use_fp8_w8a8=use_fp8_w8a8,
-                                           use_int8_w8a8=use_int8_w8a8,
-                                           use_int4_w4a16=use_int4_w4a16,
-                                           use_int8_w8a16=use_int8_w8a16,
-                                           per_channel_quant=per_channel_quant,
-                                           block_shape=block_shape,
-                                           block_m=block_m)
+    def __init__(
+        self,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        use_int4_w4a16: bool = False,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+        block_m: Optional[int] = None,
+        allow_deep_gemm: bool = False,
+    ):
+        quant_dtype = get_config_quant_dtype(
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16,
+        )
+        super().__init__(
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        )
+        self.triton_expert = TritonExperts(
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int4_w4a16=use_int4_w4a16,
+            use_int8_w8a16=use_int8_w8a16,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+            block_m=block_m,
+        )
         self.deep_gemm_expert = DeepGemmExperts()
         self.allow_deep_gemm = allow_deep_gemm
         self.use_fp8_w8a8 = use_fp8_w8a8
