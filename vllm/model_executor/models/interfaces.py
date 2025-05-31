@@ -138,23 +138,6 @@ class SupportsLoRA(Protocol):
     embedding_padding_modules: ClassVar[list[str]] = []
     packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
 
-    def __post_init__(self):
-        """
-        Called after the model is initialized to set up LoRA-specific
-        attributes.
-        """
-        # This method can be used to set up LoRA-specific attributes
-        # if needed, but it is not required for the interface.
-        if hasattr(self, "get_language_model"):
-            self.embedding_modules.update(
-                getattr(self.get_language_model(), "embedding_modules", {}))
-            self.embedding_padding_modules.extend(
-                getattr(self.get_language_model(), "embedding_padding_modules",
-                        []))
-            self.packed_modules_mapping.update(
-                getattr(self.get_language_model(), "packed_modules_mapping",
-                        {}))
-
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
 # so we need to treat the class as an instance and use isinstance instead

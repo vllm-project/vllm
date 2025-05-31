@@ -420,8 +420,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet. No 'packed_modules_mapping' found.")
         self.is_pool_model=is_pooling_model(model)
-        self.modules_mapping = ParamMapping(
-            copy.deepcopy(model.packed_modules_mapping))
+
+        modules_mapping = copy.deepcopy(model.packed_modules_mapping)
+        if hasattr(model, "get_language_model"):
+            backbone_mapping = getattr(model.get_language_model(),
+                                       "packed_modules_mapping", {})
+            modules_mapping.update(backbone_mapping)
+        self.modules_mapping = ParamMapping(modules_mapping)
 
         # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
