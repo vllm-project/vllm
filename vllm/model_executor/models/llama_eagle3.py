@@ -215,6 +215,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         if self.draft_id_to_target_id is None:
+            assert logits.shape[1] == self.config.vocab_size, \
+                "Expected logits to have shape " \
+                f"(*, {self.config.vocab_size}), but got {logits.shape}"
             return logits
 
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
@@ -234,24 +237,22 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-        )
-
         model_weights = {}
+        includes_draft_id_mapping = False
         for name, loaded_weight in weights:
             if "t2d" in name:
                 continue
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
+                includes_draft_id_mapping = True
             elif "lm_head" not in name:
                 name = "model." + name
             model_weights[name] = loaded_weight
 
-        loaded_weights = loader.load_weights(model_weights.items())
-
-        if 'd2t' not in loaded_weights:
-            self.draft_id_to_target_id = None
-
-        return loaded_weights
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=None,
+            skip_substrs=["draft_id_to_target_id"] \
+                if not includes_draft_id_mapping else None,
+        )
+        loader.load_weights(model_weights.items())
