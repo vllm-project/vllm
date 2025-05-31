@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import itertools
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -301,21 +300,6 @@ def init_vllm_registered_model(
                                                  architectures=architectures)
 
     return initialize_model(vllm_config=vllm_config, prefix=prefix)
-
-
-def get_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
-    parent_map = copy.deepcopy(getattr(model, "packed_modules_mapping", {}))
-    # We only check main components instead of whole model submodules
-    for child in model.children():
-        child_map = getattr(child, "packed_modules_mapping", {})
-        if any((k in parent_map and parent_map[k] == v)
-               for k, v in child_map.items()):
-            raise ValueError(
-                f"Can't update {type(model).__name__}'s packed_modules_mapping "
-                f"safely because of conflicts from {type(child).__name__}.")
-        else:
-            parent_map.update(child_map)
-    return parent_map
 
 
 @overload

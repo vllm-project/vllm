@@ -35,8 +35,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models import is_pooling_model
-from vllm.model_executor.models.utils import get_packed_modules_mapping
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import (get_packed_modules_mapping,
+                                       set_weight_attrs)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
