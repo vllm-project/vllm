@@ -33,6 +33,7 @@ from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -154,7 +155,10 @@ class OpenAIServingCompletion(OpenAIServing):
                     input_length = len(engine_prompt["prompt_token_ids"])
                 else:
                     assert_never(engine_prompt)
-                default_max_tokens = self.max_model_len - input_length
+
+                default_max_tokens = current_platform.maybe_update_max_tokens(
+                    prompt_len=input_length,
+                    default_max_tokens=self.max_model_len - input_length)
 
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
