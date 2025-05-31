@@ -730,8 +730,8 @@ def _pplx_moe(
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
-@pytest.mark.parametrize("per_act_token_quant", [False]) #, True])
-@pytest.mark.parametrize("block_shape", [[128, 128]]) #[None, [128, 128]])
+@pytest.mark.parametrize("per_act_token_quant", [False, True])
+@pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
 def test_pplx_moe(
