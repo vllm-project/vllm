@@ -18,13 +18,14 @@ from pydantic import SkipValidation, TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, DecodingConfig,
-                         DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, GuidedDecodingBackend,
-                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
+from vllm.config import (AttnDType, BlockSize, CacheConfig, CacheDType,
+                         CompilationConfig, ConfigFormat, ConfigType,
+                         DecodingConfig, DetailedTraceModules, Device,
+                         DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackend, GuidedDecodingBackendV1,
+                         HfOverrides, KVEventsConfig, KVTransferConfig,
+                         LoadConfig, LoadFormat, LoRAConfig, ModelConfig,
+                         ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
@@ -274,6 +275,7 @@ class EngineArgs:
     load_format: str = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
+    attn_dtype: AttnDType = ModelConfig.attn_dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
     max_model_len: Optional[int] = ModelConfig.max_model_len
@@ -460,6 +462,7 @@ class EngineArgs:
         model_group.add_argument("--trust-remote-code",
                                  **model_kwargs["trust_remote_code"])
         model_group.add_argument("--dtype", **model_kwargs["dtype"])
+        model_group.add_argument("--attn_dtype", **model_kwargs["attn_dtype"])
         model_group.add_argument("--seed", **model_kwargs["seed"])
         model_group.add_argument("--hf-config-path",
                                  **model_kwargs["hf_config_path"])
@@ -884,6 +887,7 @@ class EngineArgs:
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,
+            attn_dtype=self.attn_dtype,
             seed=self.seed,
             revision=self.revision,
             code_revision=self.code_revision,
@@ -1288,10 +1292,11 @@ class EngineArgs:
             return False
 
         # Only Fp16 and Bf16 dtypes since we only support FA.
-        V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
-        if model_config.dtype not in V1_SUPPORTED_DTYPES:
-            _raise_or_fallback(feature_name=f"--dtype {model_config.dtype}",
-                               recommend_to_remove=False)
+        V1_SUPPORTED_ATTN_DTYPES = [torch.bfloat16, torch.float16]
+        if model_config.attn_dtype not in V1_SUPPORTED_ATTN_DTYPES:
+            _raise_or_fallback(
+                feature_name=f"--attn_dtype {model_config.attn_dtype}",
+                recommend_to_remove=False)
             return False
 
         # No Embedding Models so far.

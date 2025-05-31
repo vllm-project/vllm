@@ -80,7 +80,7 @@ def get_global_forced_attn_backend() -> Optional[_Backend]:
 
 def get_attn_backend(
     head_size: int,
-    dtype: torch.dtype,
+    attn_dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
     is_attention_free: bool,
@@ -94,7 +94,7 @@ def get_attn_backend(
     # private function.
     return _cached_get_attn_backend(
         head_size=head_size,
-        dtype=dtype,
+        attn_dtype=attn_dtype,
         kv_cache_dtype=kv_cache_dtype,
         block_size=block_size,
         is_attention_free=is_attention_free,
@@ -107,7 +107,7 @@ def get_attn_backend(
 @cache
 def _cached_get_attn_backend(
     head_size: int,
-    dtype: torch.dtype,
+    attn_dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
     is_attention_free: bool,
@@ -146,8 +146,8 @@ def _cached_get_attn_backend(
 
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
-        selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
-        use_mla)
+        selected_backend, head_size, attn_dtype, kv_cache_dtype, block_size,
+        use_v1, use_mla)
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}")
