@@ -25,11 +25,10 @@ def pplx_hidden_dim_scale_bytes(
         block_size = block_shape[0] if block_shape is not None else 128
         hidden_dim_bytes = hidden_dim * quant_dtype.itemsize
         if per_act_token_quant:
-            hidden_scale_bytes = 4 * torch.float32.itemsize #?
+            hidden_scale_bytes = 4 * torch.float32.itemsize  #?
         else:
-            hidden_scale_bytes = round_up((cdiv(hidden_dim, block_size) *
-                                           torch.float32.itemsize),
-                                          16)
+            hidden_scale_bytes = round_up(
+                (cdiv(hidden_dim, block_size) * torch.float32.itemsize), 16)
     else:
         hidden_dim_bytes = hidden_dim * in_dtype.itemsize
         hidden_scale_bytes = 0

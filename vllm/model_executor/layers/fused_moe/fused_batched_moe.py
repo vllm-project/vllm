@@ -9,11 +9,9 @@ import triton.language as tl
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    get_config_dtype_str, try_get_optimal_moe_config,
-    get_config_quant_dtype)
+    get_config_dtype_str, get_config_quant_dtype, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
-from vllm.utils import round_up
 
 
 @triton.jit
@@ -444,7 +442,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         b_a1 = torch.zeros(
             (num_local_experts, self.max_num_tokens, hidden_dim),
-            dtype=self.quant_dtype if self.quant_dtype is not None else a1.dtype,
+            dtype=self.quant_dtype
+            if self.quant_dtype is not None else a1.dtype,
             device=a1.device)
 
         if self.quant_dtype is not None:
@@ -546,7 +545,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
         super().__init__(
             quant_dtype=quant_dtype,
-            per_act_token_quant=False, # TODO (bnell): quantization
+            per_act_token_quant=False,  # TODO (bnell): quantization
             block_shape=block_shape,
         )
         assert block_m is None
@@ -636,26 +635,22 @@ def batched_moe_kernel_quantize_input(
     per_channel_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    if (True or
-        torch.compiler.is_compiling()
-        or torch.cuda.is_current_stream_capturing()):
-        # Note: this does a bunch of extra work because expert_num_tokens is ignored
-        # but it does support torch.compile + cudagraphs.
+    if (True or torch.compiler.is_compiling()
+            or torch.cuda.is_current_stream_capturing()):
+        # Note: this does a bunch of extra work because expert_num_tokens is
+        # ignored but it does support torch.compile + cudagraphs.
         hidden_dim = A.size(-1)
         if block_shape is not None:
             block_shape = [block_shape[1], block_shape[0]]
         assert A_scale is None or A_scale.dim() == 2
-        A_q, A_q_scale = moe_kernel_quantize_input(
-            A.view(-1, hidden_dim),
-            A_scale,
-            qtype,
-            per_channel_quant,
-            block_shape)
+        A_q, A_q_scale = moe_kernel_quantize_input(A.view(-1,
+                                                          hidden_dim), A_scale,
+                                                   qtype, per_channel_quant,
+                                                   block_shape)
         A_q = A_q.view(E, -1, hidden_dim)
         if A_q_scale is not None:
             A_q_scale = A_q_scale.view(E, -1, A_q_scale.size(-1))
         return A_q, A_q_scale
-
 
     if qtype is not None:
         assert block_shape is not None

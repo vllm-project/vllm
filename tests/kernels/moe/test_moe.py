@@ -287,18 +287,21 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
             vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
 
         # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
-        hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
+        hf_inputs = torch.randn(
+            (1, 64, config.hidden_size)).to(dtype).to("cuda")
         # vLLM uses 1D query [num_tokens, hidden_dim]
         vllm_inputs = hf_inputs.flatten(0, 1)
 
         # Pad the weight if moe padding is enabled
         if padding:
             vllm_moe.experts.w13_weight = Parameter(F.pad(
-                vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[..., 0:-128],
+                vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[...,
+                                                                      0:-128],
                                                     requires_grad=False)
             torch.cuda.empty_cache()
             vllm_moe.experts.w2_weight = Parameter(F.pad(
-                vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
+                vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[...,
+                                                                     0:-128],
                                                    requires_grad=False)
             torch.cuda.empty_cache()
 

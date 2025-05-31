@@ -8,8 +8,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    get_config_quant_dtype,
-    TritonExperts)
+    TritonExperts, get_config_quant_dtype)
 
 
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):

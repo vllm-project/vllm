@@ -283,8 +283,7 @@ def batched_moe(
                              world_size=1,
                              use_fp8_w8a8=qtype == torch.float8_e4m3fn,
                              per_act_token_quant=per_act_token,
-                             block_shape=block_shape)
-    )
+                             block_shape=block_shape))
 
     return fused_experts(a,
                          w1,
@@ -345,7 +344,7 @@ def torch_moe2(
             topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
 
 
-@pytest.mark.parametrize("m", [32, 45, 64]) #[1, 33, 64, 222])
+@pytest.mark.parametrize("m", [32, 45, 64])  #[1, 33, 64, 222])
 @pytest.mark.parametrize("n", [128, 512, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 512, 1024, 2048])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
