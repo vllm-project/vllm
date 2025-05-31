@@ -896,6 +896,15 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
+        # --- BEGIN PATCH: Compensate for norm difference in draft logits ---
+        # If the draft model's logits are much larger than the target's,
+        # acceptance probabilities will be very low. To mitigate this,
+        # scale down the draft logits before computing acceptance.
+        # This is a minimal fix; ideally, norm removal should be done at the model level.
+        # If you want to experiment, you can uncomment the following line:
+        # proposal_probs = proposal_probs / 2.5
+        # --- END PATCH ---
+
         # Sampler arguments
         sampler_extra_kwargs: Dict[str, Any] = {}
         if self.generators and isinstance(self.spec_decode_sampler,
@@ -914,6 +923,13 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             **sampler_extra_kwargs,
         )
         
+        # Add the new logging statements:
+        if not self._disable_log_stats:
+            logger.info(f"[SPEC_DEBUG] Draft tokens: {proposal_token_ids.tolist()}")
+            logger.info(f"[SPEC_DEBUG] Accepted tokens: {accepted_token_ids.tolist()}")
+            accepted_mask = accepted_token_ids >= 0
+            logger.info(f"[SPEC_DEBUG] Acceptance mask: {accepted_mask.tolist()}")
+
         # Track acceptance rate for debugging
         self._track_acceptance_rate(proposal_token_ids, accepted_token_ids)
         # Append output tokens from non-speculative sequences to

@@ -32,6 +32,7 @@ from transformers import LlamaConfig
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
+from vllm.logger import init_logger
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -54,6 +55,8 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
+
+logger = init_logger(__name__)
 
 
 class LlamaMLP(nn.Module):
@@ -577,6 +580,8 @@ class LlamaForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP)
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if self.draft_mode:
+            # H1 probe: Check if forward is called multiple times
+            logger.info(f"[H1] llama forward in draft_mode, positions shape={positions.shape}")
             # Draft mode: early exit
             return self.forward_with_early_exit(input_ids, positions, self.draft_layer, intermediate_tensors)
         else:

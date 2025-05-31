@@ -21,7 +21,7 @@ class LayerSkipModelMixin:
         
         # Map layer_skip to the actual layer the LSQ head was trained on
         # layer_skip=17 means "exit after layer 16", so load h16.pt
-        actual_layer = layer - 1
+        actual_layer = layer
         head_file = os.path.join(path, f"h{actual_layer}.pt")
         
         # Validate file exists
@@ -141,7 +141,4 @@ class LayerSkipModelMixin:
             })
         
         # 4. Last rank applies norm and returns final tensor
-        if hasattr(self.model, 'norm'):
-            hidden_states, _ = self.model.norm(hidden_states, residual)
-        
         return hidden_states

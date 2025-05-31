@@ -133,15 +133,46 @@ class LayerSkipProposer(ProposerWorkerBase, DelegateWorkerBase):
     ) -> Tuple[List[SamplerOutput], bool]:
         """Simple multi-step autoregressive draft sampling."""
         
-        # For now, implement a simple version
-        # TODO: Use MultiStepWorker logic if needed
         model_outputs: List[SamplerOutput] = []
         
+        # Enable hidden states if needed for next step
+        if execute_model_req.previous_hidden_states is not None:
+            self.worker.model_runner.return_hidden_states = True
+        
         for step in range(sample_len):
-            # Execute one step in draft mode
+            logger.info(f"[LayerSkipProposer] Draft step {step}/{sample_len}")
+            
+            # Debug: Check sequence state before execution
+            for i, seq_group in enumerate(execute_model_req.seq_group_metadata_list):
+                for seq_id, seq_data in seq_group.seq_data.items():
+                    logger.info(f"  Seq {seq_id}: len={seq_data.get_len()}, "
+                              f"computed_tokens={seq_data.get_num_computed_tokens()}, "
+                              f"is_prompt={seq_group.is_prompt}")
+            
+            # CRITICAL FIX for H1: Force single-step execution to prevent logit caching
+            # The GPU multi-step path caches a [batch, k, vocab] tensor and slices it
+            # We need to ensure each step actually runs the model
+            execute_model_req.spec_step_idx = step
+            
+            # Force num_steps=1 to prevent GPU multi-step optimization
+            execute_model_req.num_steps = 1
+            
             step_outputs = self.worker.execute_model(execute_model_req)
             assert len(step_outputs) == 1, "Expected single output per step"
             step_output = step_outputs[0]
+            
+            # Debug: Check what tokens were generated
+            for i, output in enumerate(step_output.outputs):
+                for sample in output.samples:
+                    logger.info(f"  Generated token: {sample.output_token}")
+            
+            # Update hidden states if available
+            if hasattr(step_output, 'hidden_states') and step_output.hidden_states is not None:
+                from vllm.sequence import HiddenStates
+                execute_model_req.previous_hidden_states = HiddenStates(
+                    step_output.hidden_states,
+                    execute_model_req.seq_group_metadata_list
+                )
             
             # Append tokens to sequences for next step
             self._append_new_tokens(step_output, execute_model_req.seq_group_metadata_list)
@@ -152,13 +183,25 @@ class LayerSkipProposer(ProposerWorkerBase, DelegateWorkerBase):
     def _append_new_tokens(self, sampler_output: SamplerOutput, seq_group_metadata_list):
         """Append sampled tokens to sequences for next step."""
         for seq_group_metadata, sequence_output in zip(seq_group_metadata_list, sampler_output.outputs):
+            # CRITICAL: Mark as decode mode after first step
+            seq_group_metadata.is_prompt = False
+            
             for seq_output in sequence_output.samples:
                 # Get the sequence and append the token
                 seq_data = seq_group_metadata.seq_data[sequence_output.parent_seq_id]
-                seq_data.append_token_id(
-                    seq_output.output_token, 
-                    seq_output.logprobs.get(seq_output.output_token, 0.0) if seq_output.logprobs else 0.0
-                )
+                seq_id = sequence_output.parent_seq_id
+                
+                # Log state before append
+                logger.info(f"[H3] seq {seq_id} len={seq_data.get_len()} "
+                           f"computed={seq_data.get_num_computed_tokens()} "
+                           f"is_prompt={seq_group_metadata.is_prompt}")
+                
+                token_id = seq_output.output_token
+                token_logprob = seq_output.logprobs.get(token_id, 0.0) if seq_output.logprobs else 0.0
+                
+                seq_data.append_token_id(token_id, token_logprob)
+                # FIX #2: Update computed tokens so positions advance
+                seq_data.update_num_computed_tokens(1)
     
     # DelegateWorkerBase provides delegation to self.worker automatically
     # No manual delegation needed

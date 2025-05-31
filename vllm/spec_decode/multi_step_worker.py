@@ -6,6 +6,7 @@ from typing import Dict, List, Set, Tuple
 
 import torch
 
+from vllm import logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -74,6 +75,14 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
 
         For multi step worker, this indicator shall be True.
         """
+        # H1 probe: Count how many times this is called
+        global _h1_counter
+        try:
+            _h1_counter += 1
+        except NameError:
+            _h1_counter = 1
+        logger.info(f"[H1] draft_forward_calls={_h1_counter}")
+        
         self._raise_if_unsupported(execute_model_req)
         # Expand the batch for sequences with a bonus token.
         # Perform a forward pass on the expanded batch and filter the
@@ -102,9 +111,10 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             # supports_gpu_multi_step(..)
             if expanded_request.previous_hidden_states is not None:
                 self.worker.model_runner.return_hidden_states = True
-            for _ in range(sample_len):
+            for step in range(sample_len):
                 model_output: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
+                logger.info(f"[H1] step {step} forward_ran={step == 0}")
                 assert (len(model_output) == 1
                         ), "composing multistep workers not supported"
                 model_output = model_output[0]
