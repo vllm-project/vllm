@@ -625,6 +625,7 @@ class EngineArgs:
         parallel_group.add_argument('--data-parallel-backend',
                                     '-dpb',
                                     type=str,
+                                    default='mp',
                                     help='Backend for data parallel, either '
                                     '"mp" or "ray".')
         parallel_group.add_argument(
