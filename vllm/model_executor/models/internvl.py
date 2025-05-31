@@ -1019,15 +1019,6 @@ class InternVLMultiModalProcessor(
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                         SupportsLoRA):
 
-    packed_modules_mapping = {
-        "wqkv": ["wqkv"],
-        "qkv": ["qkv"],
-        "gate_up_proj": [
-            "w1",
-            "w3",
-        ],
-    }
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 

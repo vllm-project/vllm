@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import math
 import os
 from collections.abc import Sequence
@@ -34,6 +33,7 @@ from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
+from vllm.model_executor.utils import get_packed_modules_mapping
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -364,8 +364,8 @@ class LoRAModelManager(AdapterModelManager):
             # We need to replace rotary emb layer to do batch computation
             # for long lora.
             self.supported_lora_modules.append("rotary_emb")
-        self.packed_modules_mapping = copy.deepcopy(
-            self.model.packed_modules_mapping)
+
+        self.packed_modules_mapping = get_packed_modules_mapping(self.model)
         # Used to indicate whether the model is a multimodal model
         self.supports_mm: bool = (
             supports_multimodal(self.model)
