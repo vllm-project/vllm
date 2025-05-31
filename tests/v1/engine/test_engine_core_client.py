@@ -93,19 +93,9 @@ async def loop_until_done_async(client: EngineCoreClient, outputs: dict):
             break
 
 
-async def loop_until_fully_done_async(client: EngineCoreClient,
-                                      outputs: dict,
-                                      timeout: float = 20.0):
-    start_time = time.monotonic()
+async def loop_until_fully_done_async(client: EngineCoreClient, outputs: dict):
 
     while True:
-        # Check for timeout
-        elapsed_time = time.monotonic() - start_time
-        if elapsed_time > timeout:
-            raise TimeoutError(
-                f"loop_until_fully_done_async timed out after {timeout} seconds"
-            )
-
         engine_core_outputs = (await client.get_output_async()).outputs
 
         if len(engine_core_outputs) == 0:
@@ -267,7 +257,9 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
                     await client.abort_requests_async([request.request_id])
 
             outputs = {req_id: [] for req_id in request_ids}
-            await loop_until_done_async(client, outputs)
+            await asyncio.wait_for(loop_until_fully_done_async(
+                client, outputs),
+                                   timeout=20.0)
 
             for idx, req_id in enumerate(request_ids):
                 if idx % 2 == 0:
