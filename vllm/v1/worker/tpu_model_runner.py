@@ -42,7 +42,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from .utils import sanity_check_mm_encoder_outputs
+from .utils import add_shared_kv_layers, sanity_check_mm_encoder_outputs
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -225,6 +225,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int64)
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
+
+        self.shared_kv_cache_layers: dict[str, str] = {}
 
         # tensors for structured decoding
         self.grammar_bitmask_cpu = torch.zeros(
@@ -435,6 +437,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         block_size = self.vllm_config.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in layers.items():
+            if (kv_tgt_layer :=
+                    attn_module.kv_sharing_target_layer_name) is not None:
+                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+                continue
+
             if attn_module.attn_type == AttentionType.DECODER:
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
@@ -1313,8 +1320,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             0].get_cpu_tensor().dtype
 
         kv_caches: dict[str, torch.Tensor] = {}
+        layer_to_kv_cache_group_idx: dict[str, int] = {}
 
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
+        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
                 tensor_config = kv_cache_config.tensors[layer_name]
@@ -1330,9 +1338,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                                dtype=dtype,
                                                device=self.device)
 
+                    layer_to_kv_cache_group_idx[layer_name] = i
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
                     raise NotImplementedError
+
+        add_shared_kv_layers(
+            self.shared_kv_cache_layers,
+            kv_caches,
+            kv_cache_config.kv_cache_groups,
+            layer_to_kv_cache_group_idx,
+        )
 
         bind_kv_cache(
             kv_caches,

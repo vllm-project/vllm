@@ -58,8 +58,8 @@ from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
-                    scatter_mm_placeholders)
+from .utils import (add_shared_kv_layers, gather_mm_placeholders,
+                    sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -274,6 +274,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+
+        self.shared_kv_cache_layers: dict[str, str] = {}
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
         """
@@ -2019,6 +2021,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.initialize_attn_backend(kv_cache_config)
 
         kv_caches: dict[str, torch.Tensor] = {}
+        layer_to_kv_cache_group_idx: dict[str, int] = {}
 
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -2059,6 +2062,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
+                    layer_to_kv_cache_group_idx[layer_name] = i
                     kv_caches[layer_name] = torch.zeros(
                         kv_cache_shape, dtype=dtype,
                         device=self.device).permute(*inv_order)
@@ -2066,6 +2070,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
+
+        add_shared_kv_layers(
+            self.shared_kv_cache_layers,
+            kv_caches,
+            kv_cache_config.kv_cache_groups,
+            layer_to_kv_cache_group_idx,
+        )
 
         if self.speculative_config and self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
@@ -2095,6 +2106,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in layers.items():
+            if (kv_tgt_layer :=
+                    attn_module.kv_sharing_target_layer_name) is not None:
+                # If an attention module has kv_sharing_target_layer_name, it
+                # will not allocate its own KV cache and will share it with
+                # the target layer. In this case, we skip creating a
+                # KVCacheSpec and assume the layer doesn't exist for purposes
+                # of KV cache initialization. This also means we can allocate
+                # more KV blocks overall given same available memory, such that
+                # longer max_model_len can be supported when using KV sharing.
+                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+                continue
+
             # TODO: Support other attention modules, e.g., cross-attention
             if attn_module.attn_type == AttentionType.DECODER:
                 if attn_module.sliding_window is not None:
