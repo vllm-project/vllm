@@ -2,7 +2,7 @@
 
 import contextlib
 import importlib
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.library
@@ -1135,6 +1135,53 @@ def scaled_fp4_experts_quant(
     return output, output_scales
 
 
+# Using the default value (240.0) from pytorch will cause accuracy
+# issue on dynamic quantization models. Here use 224.0 for rocm.
+FP8_DTYPE = current_platform.fp8_dtype()
+FP8_MAX = 224.0 if current_platform.is_rocm() else torch.finfo(FP8_DTYPE).max
+FP8_MIN = -224.0 if current_platform.is_rocm() else torch.finfo(FP8_DTYPE).min
+
+
+@torch.compile()
+def dynamic_per_token_quant_fp8(
+    x: torch.Tensor,
+    scale_ub: Optional[torch.Tensor] = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Compute scales
+    x_token_max, _ = x.abs().max(dim=-1)
+    x_token_max = x_token_max.to(torch.float32)
+    if scale_ub is not None:
+        x_token_max = x_token_max.clamp(max=scale_ub)
+    scales = (x_token_max / FP8_MAX)[:, None]
+    min_scaling_factor = 1.0 / (FP8_MAX * 512.0)
+    scales = scales.clamp(min=min_scaling_factor)
+    # Quant
+    out = x.to(torch.float32) / scales
+    out = out.clamp(FP8_MIN, FP8_MAX).to(FP8_DTYPE)
+    return out, scales
+
+
+@torch.compile()
+def dynamic_per_tensor_quant_fp8(
+        x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    # Compute scales
+    x_max = x.abs().max().to(torch.float32)
+    scale = x_max / FP8_MAX
+    # Quant
+    out = (x.to(torch.float32) * scale.reciprocal()).clamp(
+        FP8_MIN, FP8_MAX).to(FP8_DTYPE)
+    return out, scale.view((1, ))
+
+
+@torch.compile()
+def static_per_tensor_quant_fp8(x: torch.Tensor,
+                                scale: torch.Tensor) -> torch.Tensor:
+    # Quant
+    out = (x.to(torch.float32) * scale.reciprocal()).clamp(
+        FP8_MIN, FP8_MAX).to(FP8_DTYPE)
+    return out
+
+
 # fp8
 def scaled_fp8_quant(
     input: torch.Tensor,
@@ -1168,27 +1215,24 @@ def scaled_fp8_quant(
     """
     # This code assumes batch_dim and num_tokens are flattened
     assert (input.ndim == 2)
-    shape: Union[tuple[int, int], torch.Size] = input.shape
-    # For ROCm on MI300, the output fp8 dtype is torch.float_e3m3fnuz
-    out_dtype: torch.dtype = current_platform.fp8_dtype()
-    if num_token_padding:
-        shape = (max(num_token_padding, input.shape[0]), shape[1])
-    output = torch.empty(shape, device=input.device, dtype=out_dtype)
 
     if scale is None:
         if use_per_token_if_dynamic:
-            scale = torch.empty((shape[0], 1),
-                                device=input.device,
-                                dtype=torch.float32)
-            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale, scale_ub)
+            # dynamic per token quantization
+            output, scale = dynamic_per_token_quant_fp8(input, scale_ub)
         else:
-            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+            # dynamic per tensor quantization
+            output, scale = dynamic_per_tensor_quant_fp8(input)
     else:
-        # num_token_padding not implemented for this case
-        assert (scale.numel() == 1 or num_token_padding is None)
-        torch.ops._C.static_scaled_fp8_quant(output, input, scale)
+        # static per tensor quantization
+        assert scale.numel() == 1
+        output = static_per_tensor_quant_fp8(input, scale)
+
+    if num_token_padding:
+        pad_size = max(0, num_token_padding - output.shape[0])
+        if pad_size > 0:
+            # Pad the first dimension (tokens) with zeros
+            output = torch.nn.functional.pad(output, (0, 0, 0, pad_size))
 
     return output, scale
 
