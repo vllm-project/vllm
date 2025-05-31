@@ -95,11 +95,15 @@ async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
     """
     req_data = req_data.copy()
     req_data["max_tokens"] = 1
+    req_data["stream"] = False
+    if "stream_options" in req_data:
+        del req_data["stream_options"]
     if "max_completion_tokens" in req_data:
         req_data["max_completion_tokens"] = 1
 
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
     response = await client.post(endpoint, json=req_data, headers=headers)
+    print("Got the response:", response.json())
     response.raise_for_status()
     return response
 
@@ -125,6 +129,7 @@ async def handle_completions(request: Request):
     st = time.time()
     try:
         req_data = await request.json()
+        print("Received a new request!")
 
         # Send request to prefill service, ignore the response
         response = await send_request_to_service(app.state.prefill_client,
@@ -142,6 +147,7 @@ async def handle_completions(request: Request):
 
         # Stream response from decode service
         async def generate_stream():
+            print("Streaming response from decode service")
             async for chunk in stream_service_response(app.state.decode_client,
                                                        "/completions",
                                                        req_data):

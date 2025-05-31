@@ -659,6 +659,8 @@ class NixlCPUReceiver:
                 # NOTE: an alternative is to try allocation for other requests
                 # and then come back to this one, but this may create
                 # starvation
+                logger.info("No space available for request %s, skipping",
+                            req_uuid)
                 break
 
             # Add the request to the inflight requests
@@ -1038,7 +1040,11 @@ class NixlDecodeManager:
     def get_finished(self, num_expected_layers: int) -> list[str]:
         """Get the prefill node request_ids of the requests that finishes 
         receiving (which means the KV caches of all tokens and all layers 
-        are in CPU memory)
+        are in CPU memory).
+
+        By default, if a request's id will only be returned once. However,
+        the caller can call `remove_ready_request` to force the get_finished
+        to return the request id again in the next call.
 
         Returns:
             list[str]: A list of prefill-side request ids.
@@ -1094,6 +1100,15 @@ class NixlDecodeManager:
         else:
             self.tp_group.send_object(ready_requests, dst=0)
             return ready_requests
+
+    def remove_ready_request(self, p_request_id: str) -> None:
+        """Remove the request from the 'ready' request list so that
+        it will be checked again in the next of get_finished.
+
+        Args:
+            p_request_id (str): The prefill-side request id.
+        """
+        self._already_ready_requests.discard(p_request_id)
 
     def _create_decoder_kv_spec(self, source_spec: SourceSpec,
                                 vaddr: int) -> DecoderKVSpec:
@@ -1154,6 +1169,8 @@ class NixlDecodeManager:
         else:
             logger.warning("Request %s not found in received tokens",
                            p_request_id)
+
+        self.remove_ready_request(p_request_id)
 
     def close(self):
         self._nixl_receiver.close()

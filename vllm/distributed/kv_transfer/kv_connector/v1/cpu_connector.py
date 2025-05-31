@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import threading
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -16,7 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_cpu_utils import (
     NixlDecodeManager, NixlPrefillManager, NixlSendTask)
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils import cdiv, round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -432,6 +434,14 @@ class CPUConnector(KVConnectorBase_V1):
             # Prefiller side sender
             if self.kv_role == "kv_producer":
                 self._kv_sender = NixlPrefillManager(self._kv_size)
+                self._kv_sender_lock = threading.Lock()
+                self._kv_sender_stop_event = threading.Event()
+                self._kv_sender_thread = threading.Thread(
+                    target=self._kv_sender_processor,
+                    daemon=True,
+                )
+                self._kv_sender_thread.start()
+
             elif self.kv_role == "kv_consumer":
                 self._kv_receiver = NixlDecodeManager(
                     self._kv_size,
@@ -544,7 +554,10 @@ class CPUConnector(KVConnectorBase_V1):
             "total_num_tokens is %d", request_id, num_computed_tokens,
             num_tokens)
 
-        if num_tokens < self._block_size:
+        num_extra_tokens = round_down(num_tokens,
+                                      self._block_size) - num_computed_tokens
+
+        if num_extra_tokens < self._block_size:
             # If the request is smaller than the block size, we don't need
             # to do anything special
             logger.info(
@@ -552,6 +565,8 @@ class CPUConnector(KVConnectorBase_V1):
                 "no async loading", request_id, self._block_size)
             return 0, False
 
+        # Seen this request before, which means it should be ready this time,
+        # so we don't need to do async loading again
         if request.request_id in self._should_be_ready_reqs:
             self._should_be_ready_reqs.remove(request.request_id)
             return 0, False
@@ -570,7 +585,7 @@ class CPUConnector(KVConnectorBase_V1):
         # the async flag is true (see _update_waiting_for_remote_kv in
         # scheduler.py). We need to carefully deal with it when copying
         # the KV cache at worker side
-        return num_tokens // self._block_size * self._block_size, True
+        return num_extra_tokens, True
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
@@ -629,11 +644,19 @@ class CPUConnector(KVConnectorBase_V1):
         if self.kv_role == "kv_consumer":
             return False, None
         # For prefiller, send back the prefiller request id
+        logger.info("Prefill request %s finished", request.request_id)
         return False, dict(prefill_request_id=request.request_id)
 
     #############################################################
     # Worker Side Methods
     #############################################################
+    def _kv_sender_processor(self) -> None:
+        """Process the KV sender tasks in a separate thread."""
+        while not self._kv_sender_stop_event.is_set():
+            with self._kv_sender_lock:
+                self._kv_sender.progress()
+            time.sleep(0.001)  # Sleep for a short time to avoid busy waiting
+
     def _get_layer_id(self, layer_name: str) -> int:
         assert layer_name in self._layer_name_to_id, \
                 f"Layer {layer_name} not found in layer name to id map"
@@ -755,7 +778,10 @@ class CPUConnector(KVConnectorBase_V1):
         if layer_id == len(self._gpu_kv_caches) - 1:
             # Free the memory for the whole request
             for p_req_id in self._inflight_h2d_requests:
-                logger.info("Freeing request %s", p_req_id)
+                logger.info("Freeing request %s, current watermark: [%d, %d]",
+                            p_req_id,
+                            self._kv_receiver._allocator.low_watermark,
+                            self._kv_receiver._allocator.high_watermark)
                 self._kv_receiver.free_request(p_req_id)
             self._inflight_h2d_requests.clear()
 
@@ -805,10 +831,11 @@ class CPUConnector(KVConnectorBase_V1):
             )
 
             # Create the send task
-            task = self._kv_sender.create_send_task(
-                source_spec=source_spec,
-                destination_spec=dest_spec,
-            )
+            with self._kv_sender_lock:
+                task = self._kv_sender.create_send_task(
+                    source_spec=source_spec,
+                    destination_spec=dest_spec,
+                )
             assert isinstance(task, NixlSendTask), \
                     "Send task is not of type NixlSendTask"
 
@@ -851,7 +878,7 @@ class CPUConnector(KVConnectorBase_V1):
         for task in self._inflight_copy_tasks:
             if task.cuda_event is not None:
                 task.cuda_event.synchronize()
-        self._kv_sender.progress()
+        #self._kv_sender.progress()
         self._inflight_copy_tasks.clear()
 
     def get_finished(
@@ -874,14 +901,20 @@ class CPUConnector(KVConnectorBase_V1):
                 len(self._gpu_kv_caches))
             ret = set()
             for p_req_id in p_ready_reqs:
-                ret.add(self._prefill_req_id_to_decode_req_id[p_req_id])
+                if p_req_id in self._prefill_req_id_to_decode_req_id:
+                    ret.add(self._prefill_req_id_to_decode_req_id[p_req_id])
+                else:
+                    # We haven't seen the corresponding decode request
+                    # before. Therefore, we should make the receiver
+                    # to return the request id again in the next
+                    # call to get_finished.
+                    self._kv_receiver.remove_ready_request(p_req_id)
 
             if ret:
                 logger.info("Got finished requests: %s", ret)
 
             return None, ret
         else:
-            self._kv_sender.progress()
             return None, None
 
     def close(self):
@@ -893,6 +926,11 @@ class CPUConnector(KVConnectorBase_V1):
         This prevents overwrites of paged KV buffer before saving done.
         """
         if hasattr(self, "_kv_sender") and self._kv_sender is not None:
+            self._kv_sender_stop_event.set()
+            if hasattr(self, "_kv_sender_thread") and \
+                    self._kv_sender_thread is not None:
+                self._kv_sender_thread.join()
             self._kv_sender.close()
+
         if hasattr(self, "_kv_receiver") and self._kv_receiver is not None:
             self._kv_receiver.close()

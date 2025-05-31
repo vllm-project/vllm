@@ -98,7 +98,6 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids: set[str] = set()
 
         # P/D: requests in process of sending/recving KV transfers
-        self.pending_free_req_ids: set[str] = set()
         self.finished_recving_kv_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
@@ -870,7 +869,6 @@ class Scheduler(SchedulerInterface):
 
         if not delay_free_blocks:
             self._free_blocks(request)
-            self.pending_free_req_ids.add(request.request_id)
 
         return kv_xfer_params
 
@@ -882,8 +880,7 @@ class Scheduler(SchedulerInterface):
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
-        return len(self.waiting) + len(self.running) + len(
-            self.pending_free_req_ids)
+        return len(self.waiting) + len(self.running)
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
@@ -1000,4 +997,3 @@ class Scheduler(SchedulerInterface):
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
-            self.pending_free_req_ids.remove(req_id)
