@@ -719,7 +719,7 @@ if __name__ == "__main__":
         "--hf-stream",
         action="store_true",
         default=True,
-        help="Use streaming mode for HF datasets. "
+        help="Use streaming mode for HF datasets. ",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
