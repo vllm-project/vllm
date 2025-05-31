@@ -120,6 +120,7 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
+    VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S: int = 300
 
 
 def get_default_cache_root():
@@ -833,6 +834,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
     lambda: int(os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")),
+
+    # Timeout for calling execute_model() in multiproc_executor
+    "VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S":
+    lambda: int(os.getenv("VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S", "300")),
 }
 
 # --8<-- [end:env-vars-definition]
