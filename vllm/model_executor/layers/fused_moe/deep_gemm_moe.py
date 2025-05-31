@@ -8,7 +8,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
-    _moe_permute)
+    moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
@@ -117,15 +117,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert global_num_experts != -1
         assert w2.size(1) == K
-
-        a1q, a1q_scale, _, expert_ids, inv_perm = _moe_permute(
-            a1q,
-            a1q_scale,
-            topk_ids,
-            global_num_experts,
-            expert_map,
-            self.block_shape[0],
-        )
+        fill_invalid_expert = 0
+        a1q, a1q_scale, _, inv_perm, expert_ids = moe_permute(
+            a1q, a1q_scale, topk_ids, global_num_experts, expert_map,
+            self.block_shape[0], fill_invalid_expert)
 
         # Note: M_sum is different than the pre-permuted shape of a1q.
         M_sum = a1q.size(0)
