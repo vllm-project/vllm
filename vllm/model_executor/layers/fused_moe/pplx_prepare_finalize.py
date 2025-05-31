@@ -66,6 +66,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                    per_act_token,
                                                    self.block_shape)
 
+        if a1q_scale is not None and a1q_scale.dim() == 1:
+            assert a1q_scale.numel() == 1
+            a1q_scale = a1q_scale.view(1, 1)
+
         # rem_experts need to be 0 for pplx to work properly.
         rem_experts = num_experts % self.world_size
         assert rem_experts == 0
@@ -90,7 +94,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             float32_size = torch.float32.itemsize
             block_size = (self.block_shape[0] if self.block_shape is not None
                           else 1) * float32_size
-            expert_x_scale = torch.empty(
+            expert_x_scale = torch.zeros(
                 (
                     num_experts,
                     expert_x.size(1),
