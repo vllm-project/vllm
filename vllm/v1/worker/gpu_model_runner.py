@@ -4,6 +4,7 @@ import copy
 import gc
 import time
 import weakref
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
@@ -275,7 +276,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
-    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
+    def _may_reorder_batch(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> Sequence[tuple[int, int]]:
         """
         Update the order of requests in the batch based on the attention
         backend's needs. For example, some attention backends (namely MLA) may
@@ -286,9 +290,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             scheduler_output: The scheduler output.
 
         Returns:
-            True if the batch was reordered, False otherwise.
+            Sequence of swap tuples
         """
-        batch_reordered = self.attn_metadata_builders[0].reorder_batch(
+        swaps = self.attn_metadata_builders[0].reorder_batch(
             self.input_batch, scheduler_output)
 
         # For models with multiple KV cache groups, the groups should agree on
@@ -298,7 +302,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
             assert not self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
-        return batch_reordered
+        return swaps
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -476,10 +480,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
-        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
+        batch_changed = (len(removed_req_indices) > 0
+                         or len(req_ids_to_add) > 0)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
+        removed = removed_req_indices
+        added = []
         removed_req_indices.sort(reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
@@ -489,16 +496,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 # Append to the end.
                 req_index = None
-            self.input_batch.add_request(req_state, req_index)
+            req_index = self.input_batch.add_request(req_state, req_index)
+            added.append((req_index, req_state.sampling_params,
+                          req_state.output_token_ids))
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
-            self.input_batch.condense(removed_req_indices)
+            moved = self.input_batch.condense(removed_req_indices)
+        else:
+            moved = []
 
-        batch_reordered = self._may_reorder_batch(scheduler_output)
+        # Some attention backends (namely MLA) may want to separate requests
+        # based on if the attention computation will be compute-bound or
+        # memory-bound. This gives them a hook to do that.
+        if swaps := self._may_reorder_batch(scheduler_output):
+            moved.extend(swaps)
+            batch_changed = True
 
-        if batch_changed or batch_reordered:
+        if batch_changed:
             self.input_batch.refresh_sampling_metadata()
+            self.input_batch.logit_procs_update_states(
+                removed=removed,
+                moved=moved,
+                added=added,
+            )
 
     def _get_cumsum_and_arange(
         self,
@@ -1790,7 +1811,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             all_random=False,
             top_p=dummy_tensors(0.9),
             top_k=dummy_tensors(logits.size(1) - 1),
-            min_p=None,
             generators={},
             max_num_logprobs=None,
             no_penalties=True,
@@ -1799,10 +1819,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             presence_penalties=dummy_tensors(0.1),
             repetition_penalties=dummy_tensors(0.1),
             output_token_ids=[[] for _ in range(num_reqs)],
-            min_tokens={},
-            logit_bias=[None for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
+            logits_procs=[],
+            nongreedy_logits_procs=[],
         )
         try:
             sampler_output = self.sampler(logits=logits,
