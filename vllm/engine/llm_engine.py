@@ -1285,7 +1285,7 @@ class LLMEngine:
         engine = LLMEngine.from_engine_args(engine_args)
         example_inputs = [(0, "What is LLM?",
         SamplingParams(temperature=0.0))]
-    
+
         # Start the engine with an event loop
         while True:
             if example_inputs:
@@ -1687,6 +1687,7 @@ class LLMEngine:
         max_num_generation_tokens_requests: List[int] = []
         max_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
+        failed_requests: List[str] = []
 
         # LoRA requests
         running_lora_adapters = dict(
@@ -1805,6 +1806,12 @@ class LLMEngine:
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
                     ])
+                    failed_requests.extend([
+                        SequenceStatus.get_finished_reason(seq.status)
+                        for seq in seq_group.get_finished_seqs()
+                        if seq.status in (SequenceStatus.FINISHED_ABORTED,
+                                          SequenceStatus.FINISHED_IGNORED)
+                    ])
 
             # Number of generation tokens.
             #   num_batched_tokens equals the number of prompt_tokens plus the
@@ -1863,6 +1870,7 @@ class LLMEngine:
             n_requests=n_requests,
             max_tokens_requests=max_tokens_requests,
             finished_reason_requests=finished_reason_requests,
+            failed_requests=failed_requests,
             max_lora=str(max_lora_stat),
             waiting_lora_adapters=list(waiting_lora_adapters.keys()),
             running_lora_adapters=list(running_lora_adapters.keys()))
