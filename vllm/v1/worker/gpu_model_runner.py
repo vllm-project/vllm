@@ -1105,14 +1105,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for k, v in self.intermediate_tensors.items()
         })
 
-    def get_dp_padding(self, num_tokens: int):
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
         if dp_size == 1:
             # Early exit.
-            return 0, torch.tensor([num_tokens],
-                                   device="cpu",
-                                   dtype=torch.int32)
+            return 0, None
 
         num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
             num_tokens, dp_size, dp_rank)
