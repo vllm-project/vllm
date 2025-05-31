@@ -21,7 +21,7 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchResponseData,
                                               ChatCompletionResponse,
                                               EmbeddingResponse, ErrorResponse,
-                                              ScoreResponse)
+                                              RerankResponse, ScoreResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -274,8 +274,11 @@ async def run_request(serving_engine_func: Callable,
                       tracker: BatchProgressTracker) -> BatchRequestOutput:
     response = await serving_engine_func(request.body)
 
-    if isinstance(response,
-                  (ChatCompletionResponse, EmbeddingResponse, ScoreResponse)):
+    if isinstance(
+            response,
+        (ChatCompletionResponse, EmbeddingResponse, ScoreResponse,
+         RerankResponse),
+    ):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
@@ -397,7 +400,7 @@ async def main(args):
             response_futures.append(
                 run_request(embed_handler_fn, request, tracker))
             tracker.submitted()
-        elif request.url == "/v1/score":
+        elif request.url.endswith("/score"):
             score_handler_fn = openai_serving_scores.create_score if \
                 openai_serving_scores is not None else None
             if score_handler_fn is None:
@@ -411,13 +414,29 @@ async def main(args):
             response_futures.append(
                 run_request(score_handler_fn, request, tracker))
             tracker.submitted()
+        elif request.url.endswith("/rerank"):
+            rerank_handler_fn = openai_serving_scores.do_rerank if \
+                openai_serving_scores is not None else None
+            if rerank_handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg="The model does not support Rerank API",
+                    ))
+                continue
+
+            response_futures.append(
+                run_request(rerank_handler_fn, request, tracker))
+            tracker.submitted()
         else:
             response_futures.append(
                 make_async_error_request_output(
                     request,
-                    error_msg=
-                    "Only /v1/chat/completions, /v1/embeddings, and /v1/score "
-                    "are supported in the batch endpoint.",
+                    error_msg=f"URL {request.url} was used. "
+                    "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
+                    " /score, /rerank ."
+                    "See vllm/entrypoints/openai/api_server.py for supported "
+                    "score/rerank versions.",
                 ))
 
     with tracker.pbar():
