@@ -701,7 +701,7 @@ def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
-    prompt = f"USER: {'<image>'*len(image_urls)}\n{question}\n ASSISTANT:"
+    prompt = f"USER: {'<image>' * len(image_urls)}\n{question}\n ASSISTANT:"
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
