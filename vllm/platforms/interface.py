@@ -47,6 +47,7 @@ class _Backend(enum.Enum):
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
+    CUTLASS_MLA_VLLM_V1 = enum.auto()
     FLASHMLA = enum.auto()  # Supported by V1
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
