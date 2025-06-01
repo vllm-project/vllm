@@ -135,9 +135,6 @@ class TarsierProcessor(LlavaProcessor):
             "return_tensors", None)
         text_inputs = self.tokenizer(prompt_strings,
                                      **output_kwargs["text_kwargs"])
-        self._check_special_mm_tokens(prompt_strings,
-                                      text_inputs,
-                                      modalities=["image"])
         return BatchFeature(data={
             **text_inputs,
             **image_inputs
