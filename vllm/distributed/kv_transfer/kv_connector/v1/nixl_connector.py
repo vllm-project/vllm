@@ -334,7 +334,10 @@ class NixlConnectorWorker:
         # Map of engine_id -> agent_name.
         self._remote_agents: dict[str, str] = {}
 
-        # NIXL handshake.
+        # NIXL handshake port.
+        # NOTE(rob): Within a DP group, each DP rank gets its own
+        # base port (which is sent in the KVTransferParams).
+        # Each TP rank listens/queries on the base_port + tp_rank.
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
             vllm_config.parallel_config.data_parallel_rank_local)
@@ -405,12 +408,6 @@ class NixlConnectorWorker:
 
         # Listen for new requests for metadata.
         host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-
-        # NOTE(rob): each DP group will exchange metadata with
-        # with all other remote DP groups. So each DP group will
-        # have its own base_port. Then, within a DP group, each
-        # TP rank uses its own port (which is just incrementing
-        # the base port by the TP rank.
         path = make_zmq_path("tcp", host, base_port + tp_rank)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
