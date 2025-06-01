@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
+import regex as re
 import torch
 
 from vllm.config import VllmConfig
@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
     P2pNcclEngine)
+from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -78,27 +79,24 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
 
 class P2pNcclConnector(KVConnectorBase_V1):
 
-    def __init__(self,
-                 vllm_config: "VllmConfig",
-                 role: KVConnectorRole,
-                 rank: int = 0,
-                 local_rank: int = 0):
-        super().__init__(vllm_config=vllm_config,
-                         role=role,
-                         rank=rank,
-                         local_rank=local_rank)
+    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+        super().__init__(vllm_config=vllm_config, role=role)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
         self.config = vllm_config.kv_transfer_config
-        self.rank = rank
         self.is_producer = self.config.is_kv_producer
         self.chunked_prefill: dict[str, Any] = {}
 
+        self._rank = get_world_group().rank \
+            if role == KVConnectorRole.WORKER else 0
+        self._local_rank = get_world_group().local_rank \
+            if role == KVConnectorRole.WORKER else 0
+
         self.p2p_nccl_engine = P2pNcclEngine(
-            local_rank=local_rank,
+            local_rank=self._local_rank,
             config=self.config,
             hostname="",
-            port_offset=rank,
+            port_offset=self._rank,
         ) if role == KVConnectorRole.WORKER else None
 
     # ==============================

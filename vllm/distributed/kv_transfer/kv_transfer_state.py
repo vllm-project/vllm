@@ -61,10 +61,7 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
             and _KV_CONNECTOR_AGENT is None):
         if envs.VLLM_USE_V1:
             _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector_v1(
-                config=vllm_config,
-                role=KVConnectorRole.WORKER,
-                rank=get_world_group().rank,
-                local_rank=get_world_group().local_rank)
+                config=vllm_config, role=KVConnectorRole.WORKER)
         else:
             _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector_v0(
                 rank=get_world_group().rank,
