@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
+from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -57,19 +58,15 @@ class KVConnectorMetadata:
 
 class KVConnectorBase_V1(ABC):
 
-    def __init__(self,
-                 vllm_config: "VllmConfig",
-                 role: KVConnectorRole,
-                 rank: int = 0,
-                 local_rank: int = 0):
+    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design.")
         self._connector_metadata = KVConnectorMetadata()
         self._vllm_config = vllm_config
         self._role = role
-        self._rank = rank
-        self._local_rank = local_rank
+        self._rank = get_world_group().rank
+        self._local_rank = get_world_group().local_rank
 
     @property
     def role(self) -> KVConnectorRole:
