@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import Optional
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
@@ -23,7 +23,6 @@ class KVCacheBlocks:
     """
     blocks[i][j] refers to the i-th kv_cache_group and the j-th block of tokens.
     """
-    num_kv_cache_groups: ClassVar[int]
 
     def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
         """Adds two KVCacheBlocks instances."""
@@ -44,14 +43,9 @@ class KVCacheBlocks:
             block_ids.append([blk.block_id for blk in group])
         return block_ids
 
-    @classmethod
-    def create_empty(cls) -> "KVCacheBlocks":
-        """Creates a new KVCacheBlocks instance with no blocks."""
-        return cls([[] for _ in range(cls.num_kv_cache_groups)])
-
     def get_unhashed_block_ids(self) -> list[int]:
         """Get block_ids of unhashed blocks from KVCacheBlocks instance."""
-        assert self.num_kv_cache_groups == 1, "Only one group is supported"
+        assert len(self.blocks) == 1, "Only one group is supported"
         return [
             block.block_id for block in self.blocks[0]
             if block.block_hash is None
@@ -93,8 +87,7 @@ class KVCacheManager:
             caching_hash_fn=self.caching_hash_fn,
             enable_kv_cache_events=enable_kv_cache_events,
         )
-        KVCacheBlocks.num_kv_cache_groups = len(
-            kv_cache_config.kv_cache_groups)
+        self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
 
@@ -142,7 +135,7 @@ class KVCacheManager:
         # When the request requires prompt logprobs, we skip prefix caching.
         if (not self.enable_caching
                 or request.sampling_params.prompt_logprobs is not None):
-            return KVCacheBlocks.create_empty(), 0
+            return self.create_empty_block_list(), 0
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
@@ -374,3 +367,13 @@ class KVCacheManager:
         """Get the block ids of a request."""
         return KVCacheBlocks(
             self.coordinator.get_blocks(request_id)).get_block_ids()
+
+    def cache_blocks(self, request: Request, block_hashes: list[BlockHashType],
+                     num_computed_tokens: int) -> None:
+        """Cache the blocks for the request."""
+        self.coordinator.cache_blocks(request, block_hashes,
+                                      num_computed_tokens)
+
+    def create_empty_block_list(self) -> KVCacheBlocks:
+        """Creates a new KVCacheBlocks instance with no blocks."""
+        return KVCacheBlocks([[] for _ in range(self.num_kv_cache_groups)])

@@ -13,7 +13,7 @@ from vllm.v1.request import Request
 
 class KVCacheCoordinator:
     """
-    Coordinator the KV cache of different KV cache groups.
+    Coordinate the KV cache of different KV cache groups.
     """
 
     def __init__(
@@ -31,6 +31,10 @@ class KVCacheCoordinator:
         self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
                                     enable_kv_cache_events)
         self.single_type_managers: list[SingleTypeKVCacheManager] = []
+
+        # Needs special handling for find_longest_cache_hit if eagle is enabled
+        self.use_eagle = use_eagle
+
         for i in range(len(self.kv_cache_config.kv_cache_groups)):
             kv_cache_spec = self.kv_cache_config.kv_cache_groups[
                 i].kv_cache_spec
@@ -38,7 +42,6 @@ class KVCacheCoordinator:
                 get_manager_for_kv_cache_spec(
                     kv_cache_spec=kv_cache_spec,
                     block_pool=self.block_pool,
-                    use_eagle=use_eagle,
                     kv_cache_group_id=i,
                     caching_hash_fn=caching_hash_fn,
                 ))
@@ -172,10 +175,11 @@ class KVCacheCoordinator:
         pass
 
 
-class UnifiedKVCacheCoordinator(KVCacheCoordinator):
+class SingleGroupKVCacheCoordinator(KVCacheCoordinator):
     """
-    KV cache coordinator for unified models with only one KV cache type, and
-    thus one kv cache group.
+    KV cache coordinator for models with only one KV cache group. This is the
+    case for models with only one KV cache type, e.g., all attention layers use
+    full attention or all attention layers use sliding window attention.
     """
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
@@ -184,8 +188,9 @@ class UnifiedKVCacheCoordinator(KVCacheCoordinator):
         super().__init__(kv_cache_config, max_model_len, use_eagle,
                          enable_caching, caching_hash_fn,
                          enable_kv_cache_events)
-        self.block_size = self.kv_cache_config.kv_cache_groups[
-            0].kv_cache_spec.block_size
+        self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[
+            0].kv_cache_spec
+        self.block_size = self.kv_cache_spec.block_size
         assert len(self.kv_cache_config.kv_cache_groups) == 1, (
             "UnifiedKVCacheCoordinator assumes only one kv cache group")
 
@@ -193,7 +198,13 @@ class UnifiedKVCacheCoordinator(KVCacheCoordinator):
             self, block_hashes: list[BlockHashType],
             max_cache_hit_length: int) -> tuple[list[list[KVCacheBlock]], int]:
         hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
-            block_hashes, max_cache_hit_length, [0])
+            block_hashes=block_hashes,
+            max_length=max_cache_hit_length,
+            kv_cache_group_ids=[0],
+            block_pool=self.block_pool,
+            kv_cache_spec=self.kv_cache_spec,
+            use_eagle=self.use_eagle,
+        )
         return hit_blocks, len(hit_blocks[0]) * self.block_size
 
 
@@ -239,10 +250,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.other_group_ids = groups_by_type_id[next(
             iter(groups_by_type_id.keys() - full_attention_type_ids))]
 
-        self.full_attention_block_size = self.kv_cache_config.kv_cache_groups[
-            self.full_attention_group_ids[0]].kv_cache_spec.block_size
-        self.other_block_size = self.kv_cache_config.kv_cache_groups[
-            self.other_group_ids[0]].kv_cache_spec.block_size
+        self.full_attention_spec = self.kv_cache_config.kv_cache_groups[
+            self.full_attention_group_ids[0]].kv_cache_spec
+        self.other_spec = self.kv_cache_config.kv_cache_groups[
+            self.other_group_ids[0]].kv_cache_spec
+
+        self.full_attention_block_size = self.full_attention_spec.block_size
+        self.other_block_size = self.other_spec.block_size
         if self.other_block_size % self.full_attention_block_size != 0:
             raise NotImplementedError(
                 "KVCacheCoordinator assumes the block_size of the full "
@@ -267,19 +281,28 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         """
         # First, find the longest cache hit for full attention.
         hit_blocks_full_attn = self.single_type_managers[
-            0].find_longest_cache_hit(
-                block_hashes,
+            self.full_attention_group_ids[0]].find_longest_cache_hit(
+                block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
-                kv_cache_group_ids=self.full_attention_group_ids)
+                kv_cache_group_ids=self.full_attention_group_ids,
+                block_pool=self.block_pool,
+                kv_cache_spec=self.full_attention_spec,
+                use_eagle=self.use_eagle,
+            )
         hit_length = len(
             hit_blocks_full_attn[0]) * self.full_attention_block_size
 
         # Next, find the cache hit for the other attention WITHIN
         # the cache hit of full attention.
         hit_blocks_other_attn = self.single_type_managers[
-            1].find_longest_cache_hit(block_hashes,
-                                      max_length=hit_length,
-                                      kv_cache_group_ids=self.other_group_ids)
+            self.other_group_ids[0]].find_longest_cache_hit(
+                block_hashes=block_hashes,
+                max_length=hit_length,
+                kv_cache_group_ids=self.other_group_ids,
+                block_pool=self.block_pool,
+                kv_cache_spec=self.other_spec,
+                use_eagle=self.use_eagle,
+            )
         hit_length = len(hit_blocks_other_attn[0]) * self.other_block_size
         assert hit_length % self.full_attention_block_size == 0
 
@@ -304,10 +327,10 @@ def get_kv_cache_coordinator(
         enable_caching: bool, caching_hash_fn: Callable,
         enable_kv_cache_events: bool) -> KVCacheCoordinator:
     if len(kv_cache_config.kv_cache_groups) == 1:
-        return UnifiedKVCacheCoordinator(kv_cache_config, max_model_len,
-                                         use_eagle, enable_caching,
-                                         caching_hash_fn,
-                                         enable_kv_cache_events)
+        return SingleGroupKVCacheCoordinator(kv_cache_config, max_model_len,
+                                             use_eagle, enable_caching,
+                                             caching_hash_fn,
+                                             enable_kv_cache_events)
     else:
         return HybridKVCacheCoordinator(kv_cache_config, max_model_len,
                                         use_eagle, enable_caching,

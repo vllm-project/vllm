@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -352,7 +352,8 @@ class Scheduler(SchedulerInterface):
                             request)
                 else:
                     # P/D: skip checking prefix cache if loaded from remote kvs.
-                    new_computed_blocks = KVCacheBlocks.create_empty()
+                    new_computed_blocks = (
+                        self.kv_cache_manager.create_empty_block_list())
                     num_native_computed_tokens = 0
 
                 # Get externally-cached tokens if using a KVConnector.
@@ -966,7 +967,7 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens = len(block_ids) * self.block_size
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1
-        self.kv_cache_manager.coordinator.cache_blocks(
+        self.kv_cache_manager.cache_blocks(
             request,
             self.kv_cache_manager.req_to_block_hashes[request.request_id],
             num_computed_tokens,
