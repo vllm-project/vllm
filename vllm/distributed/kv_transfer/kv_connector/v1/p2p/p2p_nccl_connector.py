@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
     P2pNcclEngine)
+from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -85,6 +86,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self.config = vllm_config.kv_transfer_config
         self.is_producer = self.config.is_kv_producer
         self.chunked_prefill: dict[str, Any] = {}
+
+        self._rank = get_world_group().rank \
+            if role == KVConnectorRole.WORKER else 0
+        self._local_rank = get_world_group().local_rank \
+            if role == KVConnectorRole.WORKER else 0
 
         self.p2p_nccl_engine = P2pNcclEngine(
             local_rank=self._local_rank,
