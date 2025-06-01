@@ -43,7 +43,8 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from .utils import add_shared_kv_layers, sanity_check_mm_encoder_outputs
+from .utils import (initialize_kv_cache_for_kv_sharing,
+                    sanity_check_mm_encoder_outputs)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -237,6 +238,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
 
+        # Records layer pairings for cross-layer KV sharing.
+        # If an Attention layer does not allocate its own KV cache and instead
+        # reuses the shared KV cache allocated by another (earlier) Attention
+        # layer, then its fully-qualified name (FQN) will be a key in the dict.
+        # Its corresponding value will be the FQN of the Attention layer that
+        # originally allocates the KV cache and writes new KV activations to it.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
         # tensors for structured decoding
@@ -1353,7 +1360,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             0].get_cpu_tensor().dtype
 
         kv_caches: dict[str, torch.Tensor] = {}
-        layer_to_kv_cache_group_idx: dict[str, int] = {}
 
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -1379,17 +1385,18 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     tpu_kv_cache = torch.zeros(kv_cache_shape,
                                                dtype=dtype).to(self.device)
 
-                    layer_to_kv_cache_group_idx[layer_name] = i
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
                     raise NotImplementedError
 
-        add_shared_kv_layers(
-            self.shared_kv_cache_layers,
-            kv_caches,
-            kv_cache_config.kv_cache_groups,
-            layer_to_kv_cache_group_idx,
-        )
+        # Setup `kv_cache_config` and `kv_caches` for models
+        # with cross-layer KV sharing
+        if self.shared_kv_cache_layers:
+            initialize_kv_cache_for_kv_sharing(
+                self.shared_kv_cache_layers,
+                kv_cache_config.kv_cache_groups,
+                kv_caches,
+            )
 
         bind_kv_cache(
             kv_caches,

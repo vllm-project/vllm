@@ -58,7 +58,7 @@ from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from .utils import (add_shared_kv_layers, gather_mm_placeholders,
+from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
@@ -275,6 +275,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
+        # Records layer pairings for cross-layer KV sharing.
+        # If an Attention layer does not allocate its own KV cache and instead
+        # reuses the shared KV cache allocated by another (earlier) Attention
+        # layer, then its fully-qualified name (FQN) will be a key in the dict.
+        # Its corresponding value will be the FQN of the Attention layer that
+        # originally allocates the KV cache and writes new KV activations to it.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
@@ -2050,8 +2056,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.initialize_attn_backend(kv_cache_config)
 
         kv_caches: dict[str, torch.Tensor] = {}
-        layer_to_kv_cache_group_idx: dict[str, int] = {}
-
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
@@ -2091,7 +2095,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    layer_to_kv_cache_group_idx[layer_name] = i
                     kv_caches[layer_name] = torch.zeros(
                         kv_cache_shape, dtype=dtype,
                         device=self.device).permute(*inv_order)
@@ -2100,12 +2103,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
 
-        add_shared_kv_layers(
-            self.shared_kv_cache_layers,
-            kv_caches,
-            kv_cache_config.kv_cache_groups,
-            layer_to_kv_cache_group_idx,
-        )
+        # Setup `kv_cache_config` and `kv_caches` for models
+        # with cross-layer KV sharing
+        if self.shared_kv_cache_layers:
+            initialize_kv_cache_for_kv_sharing(
+                self.shared_kv_cache_layers,
+                kv_cache_config.kv_cache_groups,
+                kv_caches,
+            )
 
         if self.speculative_config and self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
