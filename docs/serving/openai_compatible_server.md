@@ -247,7 +247,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
     vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
       --trust-remote-code \
       --max-model-len 4096 \
-      --chat-template examples/template_vlm2vec.jinja
+      --chat-template examples/templates/template_vlm2vec.jinja
     ```
 
     !!! warning
@@ -255,7 +255,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
         to run this model in embedding mode instead of text generation mode.
 
         The custom chat template is completely different from the original one for this model,
-        and can be found here: <gh-file:examples/template_vlm2vec.jinja>
+        and can be found here: <gh-file:examples/templates/template_vlm2vec.jinja>
 
     Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
 
@@ -291,14 +291,14 @@ and passing a list of `messages` in the request. Refer to the examples below for
     vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
       --trust-remote-code \
       --max-model-len 8192 \
-      --chat-template examples/template_dse_qwen2_vl.jinja
+      --chat-template examples/templates/template_dse_qwen2_vl.jinja
     ```
 
     !!! warning
         Like with VLM2Vec, we have to explicitly pass `--task embed`.
 
         Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
-        by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
+        by a custom chat template: <gh-file:examples/templates/template_dse_qwen2_vl.jinja>
 
     !!! warning
         `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code

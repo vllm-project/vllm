@@ -10,7 +10,7 @@ Start the server with tool calling enabled. This example uses Meta's Llama 3.1 8
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --enable-auto-tool-choice \
     --tool-call-parser llama3_json \
-    --chat-template examples/tool_chat_template_llama3.1_json.jinja
+    --chat-template examples/templates/tool_chat_template_llama3.1_json.jinja
 ```
 
 Next, make a request to the model that should result in it using the available tools:
@@ -141,12 +141,12 @@ Known issues:
 much shorter than what vLLM generates. Since an exception is thrown when this condition
 is not met, the following additional chat templates are provided:
 
-* <gh-file:examples/tool_chat_template_mistral.jinja> - this is the "official" Mistral chat template, but tweaked so that
+* <gh-file:examples/templates/tool_chat_template_mistral.jinja> - this is the "official" Mistral chat template, but tweaked so that
 it works with vLLM's tool call IDs (provided `tool_call_id` fields are truncated to the last 9 digits)
-* <gh-file:examples/tool_chat_template_mistral_parallel.jinja> - this is a "better" version that adds a tool-use system prompt
+* <gh-file:examples/templates/tool_chat_template_mistral_parallel.jinja> - this is a "better" version that adds a tool-use system prompt
 when tools are provided, that results in much better reliability when working with parallel tool calling.
 
-Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+Recommended flags: `--tool-call-parser mistral --chat-template examples/templates/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 
@@ -170,17 +170,17 @@ Known issues:
 
 VLLM provides two JSON based chat templates for Llama 3.1 and 3.2:
 
-* <gh-file:examples/tool_chat_template_llama3.1_json.jinja> - this is the "official" chat template for the Llama 3.1
+* <gh-file:examples/templates/tool_chat_template_llama3.1_json.jinja> - this is the "official" chat template for the Llama 3.1
 models, but tweaked so that it works better with vLLM.
-* <gh-file:examples/tool_chat_template_llama3.2_json.jinja> - this extends upon the Llama 3.1 chat template by adding support for
+* <gh-file:examples/templates/tool_chat_template_llama3.2_json.jinja> - this extends upon the Llama 3.1 chat template by adding support for
 images.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template {see_above}`
 
 VLLM also provides a pythonic and JSON based chat template for Llama 4, but pythonic tool calling is recommended:
-* <gh-file:examples/tool_chat_template_llama4_pythonic.jinja> - this is based on the [official chat template](https://www.llama.com/docs/model-cards-and-prompt-formats/llama4/) for the Llama 4 models.
+* <gh-file:examples/templates/tool_chat_template_llama4_pythonic.jinja> - this is based on the [official chat template](https://www.llama.com/docs/model-cards-and-prompt-formats/llama4/) for the Llama 4 models.
 
-For Llama 4 model, use `--tool-call-parser llama4_pythonic --chat-template examples/tool_chat_template_llama4_pythonic.jinja`.
+For Llama 4 model, use `--tool-call-parser llama4_pythonic --chat-template examples/templates/tool_chat_template_llama4_pythonic.jinja`.
 
 #### IBM Granite
 
@@ -190,7 +190,7 @@ Supported models:
 
 Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
 
-<gh-file:examples/tool_chat_template_granite.jinja>: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
+<gh-file:examples/templates/tool_chat_template_granite.jinja>: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
 
 * `ibm-granite/granite-3.1-8b-instruct`
 
@@ -200,9 +200,9 @@ The chat template from Huggingface can be used directly. Parallel function calls
 
 * `ibm-granite/granite-20b-functioncalling`
 
-Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
+Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/templates/tool_chat_template_granite_20b_fc.jinja`
 
-<gh-file:examples/tool_chat_template_granite_20b_fc.jinja>: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
+<gh-file:examples/templates/tool_chat_template_granite_20b_fc.jinja>: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
 ### InternLM Models (`internlm`)
 
@@ -215,7 +215,7 @@ Known issues:
 
 * Although this implementation also supports InternLM2, the tool call results are not stable when testing with the `internlm/internlm2-chat-7b` model.
 
-Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
+Recommended flags: `--tool-call-parser internlm --chat-template examples/templates/tool_chat_template_internlm2_tool.jinja`
 
 ### Jamba Models (`jamba`)
 
@@ -240,7 +240,7 @@ Flags: `--tool-call-parser hermes`
 Supported models:
 * `deepseek-ai/DeepSeek-V3-0324`
 
-Flags: `--tool-call-parser deepseek_v3 --chat-template examples/tool_chat_template_deepseekv3.jinja`
+Flags: `--tool-call-parser deepseek_v3 --chat-template examples/templates/tool_chat_template_deepseekv3.jinja`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
@@ -259,12 +259,12 @@ Limitations:
 
 Example supported models:
 
-* `meta-llama/Llama-3.2-1B-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
-* `meta-llama/Llama-3.2-3B-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
-* `Team-ACE/ToolACE-8B` (use with <gh-file:examples/tool_chat_template_toolace.jinja>)
-* `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with <gh-file:examples/tool_chat_template_toolace.jinja>)
-* `meta-llama/Llama-4-Scout-17B-16E-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
-* `meta-llama/Llama-4-Maverick-17B-128E-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
+* `meta-llama/Llama-3.2-1B-Instruct`\* (use with <gh-file:examples/templates/tool_chat_template_llama3.2_pythonic.jinja>)
+* `meta-llama/Llama-3.2-3B-Instruct`\* (use with <gh-file:examples/templates/tool_chat_template_llama3.2_pythonic.jinja>)
+* `Team-ACE/ToolACE-8B` (use with <gh-file:examples/templates/tool_chat_template_toolace.jinja>)
+* `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with <gh-file:examples/templates/tool_chat_template_toolace.jinja>)
+* `meta-llama/Llama-4-Scout-17B-16E-Instruct`\* (use with <gh-file:examples/templates/tool_chat_template_llama4_pythonic.jinja>)
+* `meta-llama/Llama-4-Maverick-17B-128E-Instruct`\* (use with <gh-file:examples/templates/tool_chat_template_llama4_pythonic.jinja>)
 
 Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 

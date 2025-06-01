@@ -15,7 +15,7 @@ from ...utils import VLLM_PATH, RemoteOpenAIServer
 MODEL_NAME = "TIGER-Lab/VLM2Vec-Full"
 MAXIMUM_IMAGES = 2
 
-vlm2vec_jinja_path = VLLM_PATH / "examples/template_vlm2vec.jinja"
+vlm2vec_jinja_path = VLLM_PATH / "examples/templates/template_vlm2vec.jinja"
 assert vlm2vec_jinja_path.exists()
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)

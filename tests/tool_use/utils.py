@@ -52,7 +52,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "arguments": [
             "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "hermes", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")
+            str(VLLM_PATH /
+                "examples/templates/tool_chat_template_hermes.jinja")
         ],
         "system_prompt":
         "You are a helpful assistant with access to tools. If a tool"
@@ -67,7 +68,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "arguments": [
             "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "llama3_json", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_llama3.1_json.jinja")
+            str(VLLM_PATH /
+                "examples/templates/tool_chat_template_llama3.1_json.jinja")
         ],
         "supports_parallel":
         False,
@@ -78,7 +80,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "arguments": [
             "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "llama3_json", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_llama3.2_json.jinja")
+            str(VLLM_PATH /
+                "examples/templates/tool_chat_template_llama3.2_json.jinja")
         ],
         "supports_parallel":
         False,
@@ -90,8 +93,8 @@ CONFIGS: dict[str, ServerConfig] = {
             "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "llama4_pythonic", "--chat-template",
             str(VLLM_PATH /
-                "examples/tool_chat_template_llama4_pythonic.jinja"), "-tp",
-            "4"
+                "examples/templates/tool_chat_template_llama4_pythonic.jinja"),
+            "-tp", "4"
         ],
         "supports_parallel":
         False,
@@ -105,7 +108,8 @@ CONFIGS: dict[str, ServerConfig] = {
             "--enforce-eager", "--no-enable-prefix-caching", "-tp", "4",
             "--distributed-executor-backend", "mp", "--tool-call-parser",
             "llama4_json", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_llama4_json.jinja")
+            str(VLLM_PATH /
+                "examples/templates/tool_chat_template_llama4_json.jinja")
         ],
         "supports_parallel":
         True,
@@ -118,7 +122,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "arguments": [
             "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "mistral", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
+            str(VLLM_PATH /
+                "examples/templates/tool_chat_template_mistral.jinja"),
             "--ignore-patterns=\"consolidated.safetensors\""
         ],
         "system_prompt":
@@ -136,7 +141,7 @@ CONFIGS: dict[str, ServerConfig] = {
     #     "arguments": [
     #         "--tool-call-parser", "granite-20b-fc", "--chat-template",
     #         str(VLLM_PATH /
-    #             "examples/tool_chat_template_granite_20b_fc.jinja"),
+    #             "examples/templates/tool_chat_template_granite_20b_fc.jinja"),
     #         "--max_num_seqs", "1", "--enforce-eager", "--cpu-offload-gb", "20"
     #     ],
     #     "supports_parallel":
@@ -150,7 +155,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "arguments": [
             "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "granite", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_granite.jinja")
+            str(VLLM_PATH /
+                "examples/templates/tool_chat_template_granite.jinja")
         ],
     },
     "granite-3.1-8b": {
@@ -172,7 +178,7 @@ CONFIGS: dict[str, ServerConfig] = {
             "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "internlm", "--chat-template",
             str(VLLM_PATH /
-                "examples/tool_chat_template_internlm2_tool.jinja"),
+                "examples/templates/tool_chat_template_internlm2_tool.jinja"),
             "--trust_remote_code"
         ],
         "supports_parallel":
@@ -184,7 +190,8 @@ CONFIGS: dict[str, ServerConfig] = {
         "arguments": [
             "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "pythonic", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_toolace.jinja")
+            str(VLLM_PATH /
+                "examples/templates/tool_chat_template_toolace.jinja")
         ],
         "supports_parallel":
         True,

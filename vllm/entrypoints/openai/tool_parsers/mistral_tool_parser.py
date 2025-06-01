@@ -47,7 +47,7 @@ class MistralToolCall(ToolCall):
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with the
-    examples/tool_chat_template_mistral.jinja template.
+    examples/templates/tool_chat_template_mistral.jinja template.
 
     Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
     """

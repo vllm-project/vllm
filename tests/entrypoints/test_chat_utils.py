@@ -20,7 +20,7 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import VLLM_PATH
 
-EXAMPLES_DIR = VLLM_PATH / "examples"
+EXAMPLES_DIR = VLLM_PATH / "examples" / "templates"
 
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 ULTRAVOX_MODEL_ID = "fixie-ai/ultravox-v0_5-llama-3_2-1b"

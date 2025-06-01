@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 class GraniteToolParser(ToolParser):
     """
     Tool call parser for the granite 3.0 models. Intended
-    for use with the examples/tool_chat_template_granite.jinja
+    for use with the examples/templates/tool_chat_template_granite.jinja
     template.
 
     Used when --enable-auto-tool-choice --tool-call-parser granite

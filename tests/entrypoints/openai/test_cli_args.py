@@ -16,7 +16,7 @@ LORA_MODULE = {
     "path": "/path/to/module2",
     "base_model_name": "llama"
 }
-CHATML_JINJA_PATH = VLLM_PATH / "examples/template_chatml.jinja"
+CHATML_JINJA_PATH = VLLM_PATH / "examples/templates/template_chatml.jinja"
 assert CHATML_JINJA_PATH.exists()
 
 

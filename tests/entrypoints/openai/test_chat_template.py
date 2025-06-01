@@ -11,7 +11,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 from ...models.registry import HF_EXAMPLE_MODELS
 from ...utils import VLLM_PATH
 
-chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
+chatml_jinja_path = VLLM_PATH / "examples/templates/template_chatml.jinja"
 assert chatml_jinja_path.exists()
 
 # Define models, templates, and their corresponding expected outputs

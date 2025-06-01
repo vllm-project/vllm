@@ -2,7 +2,7 @@
 
 from ...utils import VLLM_PATH, RemoteOpenAIServer
 
-chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
+chatml_jinja_path = VLLM_PATH / "examples/templates/template_chatml.jinja"
 assert chatml_jinja_path.exists()
 
 
