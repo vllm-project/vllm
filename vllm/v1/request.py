@@ -27,6 +27,7 @@ class Request:
         multi_modal_placeholders: Optional[list[PlaceholderRange]],
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
+        client_index: int = 0,
         arrival_time: Optional[float] = None,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
@@ -34,6 +35,7 @@ class Request:
         priority: int = 0,
     ) -> None:
         self.request_id = request_id
+        self.client_index = client_index
         self.priority = priority
         self.sampling_params = sampling_params
         # Because of LoRA, the eos token id can be different for each request.
