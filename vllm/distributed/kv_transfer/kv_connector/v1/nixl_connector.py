@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    get_tp_group, get_world_group)
+    get_tp_group)
 from vllm.logger import init_logger
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -172,6 +172,10 @@ class NixlConnectorScheduler:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
+        self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        self.side_channel_port = (
+            envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
+            vllm_config.parallel_config.data_parallel_rank_local)
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
         # Requests that need to start recv.
@@ -310,8 +314,8 @@ class NixlConnectorScheduler:
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
-            remote_host=envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
-            remote_port=envs.VLLM_NIXL_SIDE_CHANNEL_PORT,
+            remote_host=self.side_channel_host,
+            remote_port=self.side_channel_port,
         )
 
 
@@ -330,11 +334,15 @@ class NixlConnectorWorker:
         # Map of engine_id -> agent_name.
         self._remote_agents: dict[str, str] = {}
 
+        # NIXL handshake.
+        self.side_channel_port = (
+            envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
+            vllm_config.parallel_config.data_parallel_rank)
+
         # Metadata.
         self.engine_id = engine_id
         self.rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
-        self.world_rank = get_world_group().rank_in_group
         self.tp_group = get_tp_group()
 
         # KV Caches and nixl tracking data.
@@ -383,8 +391,8 @@ class NixlConnectorWorker:
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
-                                 ready_event: threading.Event,
-                                 world_rank: int):
+                                 ready_event: threading.Event, base_port: int,
+                                 tp_rank: int):
         """Background thread for getting new NIXL handshakes."""
         # NOTE(rob): this is a simple implementation. We will move
         # to a better approach like an ETCD server in the future.
@@ -405,13 +413,13 @@ class NixlConnectorWorker:
         # NOTE(rob): we need each rank to have a unique port. This
         # hack to keeps us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-        port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT + world_rank
-        path = make_zmq_path("tcp", host, port)
-        logger.debug("Starting listening on path: %s", path)
+        path = make_zmq_path("tcp", host, base_port + tp_rank)
+        logger.info("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
             while True:
                 identity, _, msg = sock.recv_multipart()
+                print(f"GOT QUERY: {identity=}")
                 if msg != GET_META_MSG:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
@@ -424,7 +432,7 @@ class NixlConnectorWorker:
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-        path = make_zmq_path("tcp", host, port + self.world_rank)
+        path = make_zmq_path("tcp", host, port + self.rank)
         logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
@@ -435,13 +443,14 @@ class NixlConnectorWorker:
             got_metadata_time = time.perf_counter()
 
             # Register Remote agent.
-            self.add_remote_agent(metadata)
+            engine_id = self.add_remote_agent(metadata)
             setup_agent_time = time.perf_counter()
 
             logger.debug("NIXL handshake: get metadata took: %s",
                          got_metadata_time - start_time)
             logger.debug("NIXL handshake: add agent took: %s",
                          setup_agent_time - got_metadata_time)
+        return engine_id
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -532,7 +541,7 @@ class NixlConnectorWorker:
         ready_event = threading.Event()
         self._nixl_handshake_listener_t = threading.Thread(
             target=self._nixl_handshake_listener,
-            args=(metadata, ready_event, self.world_rank),
+            args=(metadata, ready_event, self.side_channel_port, self.rank),
             daemon=True,
             name="nixl_handshake_listener")
         self._nixl_handshake_listener_t.start()
@@ -582,6 +591,7 @@ class NixlConnectorWorker:
         self.dst_xfer_side_handles[
             engine_id] = self.nixl_wrapper.prep_xfer_dlist(
                 self._remote_agents[engine_id], descs)
+        return engine_id
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
@@ -718,7 +728,8 @@ class NixlConnectorWorker:
     ):
         # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
         if dst_engine_id not in self._remote_agents:
-            self._nixl_handshake(remote_host, remote_port)
+            engine_id = self._nixl_handshake(remote_host, remote_port)
+            print(f"WE GOT {engine_id=}, {dst_engine_id=}")
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
