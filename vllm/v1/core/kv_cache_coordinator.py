@@ -6,7 +6,8 @@ from typing import Callable
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
-    SingleTypeKVCacheManager, get_manager_for_kv_cache_spec)
+    FullAttentionManager, SingleTypeKVCacheManager,
+    get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.request import Request
 
@@ -255,6 +256,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.other_spec = self.kv_cache_config.kv_cache_groups[
             self.other_group_ids[0]].kv_cache_spec
 
+        self.full_attention_manager_cls = FullAttentionManager
+        other_attention_clses = set(self.single_type_managers[i].__class__
+                                    for i in self.other_group_ids)
+        assert len(other_attention_clses) == 1, (
+            "KVCacheCoordinator assumes all other groups have the same "
+            "attention manager class now.")
+        self.other_attention_cls = next(iter(other_attention_clses))
+
         self.full_attention_block_size = self.full_attention_spec.block_size
         self.other_block_size = self.other_spec.block_size
         if self.other_block_size % self.full_attention_block_size != 0:
@@ -280,29 +289,29 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 - The number of tokens of the longest cache hit.
         """
         # First, find the longest cache hit for full attention.
-        hit_blocks_full_attn = self.single_type_managers[
-            self.full_attention_group_ids[0]].find_longest_cache_hit(
+        hit_blocks_full_attn = (
+            self.full_attention_manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=self.full_attention_group_ids,
                 block_pool=self.block_pool,
                 kv_cache_spec=self.full_attention_spec,
                 use_eagle=self.use_eagle,
-            )
+            ))
         hit_length = len(
             hit_blocks_full_attn[0]) * self.full_attention_block_size
 
         # Next, find the cache hit for the other attention WITHIN
         # the cache hit of full attention.
-        hit_blocks_other_attn = self.single_type_managers[
-            self.other_group_ids[0]].find_longest_cache_hit(
+        hit_blocks_other_attn = (
+            self.other_attention_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
                 max_length=hit_length,
                 kv_cache_group_ids=self.other_group_ids,
                 block_pool=self.block_pool,
                 kv_cache_spec=self.other_spec,
                 use_eagle=self.use_eagle,
-            )
+            ))
         hit_length = len(hit_blocks_other_attn[0]) * self.other_block_size
         assert hit_length % self.full_attention_block_size == 0
 
