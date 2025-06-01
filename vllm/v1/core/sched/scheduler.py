@@ -519,7 +519,7 @@ class Scheduler(SchedulerInterface):
                 # Request was already popped from self.waiting
                 # (either via heapq.heappop or self.waiting.popleft())
                 # unless it was re-added above due to new_blocks being None.
-                if load_kv_async:x§
+                if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     if self.policy == "priority":
