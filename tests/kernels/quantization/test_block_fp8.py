@@ -107,7 +107,6 @@ def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
             act_out = SiluAndMul().forward_native(inter_out)
             act_out_q, act_out_s = native_per_token_group_quant_fp8(
                 act_out, block_k)
-            act_out = act_out.to(torch.float32)
             out[mask] = native_w8a8_block_matmul(act_out_q,
                                                  w2[i],
                                                  act_out_s,

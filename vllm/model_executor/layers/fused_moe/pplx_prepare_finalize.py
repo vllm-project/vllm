@@ -97,14 +97,23 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
+
         repeat_cols = 4
-        repeat_rows = 1 if self.per_act_token else a1.shape[0]
+        repeat_rows = 1 if self.per_act_token_quant else a1.shape[0]
         a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, (None if self.per_act_token else a1_scale), self.quant_dtype,
-            self.per_act_token, self.block_shape)
+            a1, (None if self.per_act_token_quant else a1_scale), self.quant_dtype,
+            self.per_act_token_quant, self.block_shape)
 
         if a1q_scale is not None:
             a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
+
+        # per_act_token_quant = a1_scale.numel() != 1 if a1_scale is not None else (
+        #     a2_scale.numel() != 1 if a2_scale is not None else False)
+
+        # a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
+        #                                            self.quant_dtype,
+        #                                            per_act_token,
+        #                                            self.block_shape)
 
         if a1q_scale is not None and a1q_scale.dim() == 1:
             assert a1q_scale.numel() == 1
@@ -134,15 +143,22 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             float32_size = torch.float32.itemsize
             block_size = (self.block_shape[0] if self.block_shape is not None
                           else 1) * float32_size
-            expert_x_scale = torch.zeros(
-                (
-                    num_local_experts,
-                    expert_x.size(1),
-                    (expert_x.size(2) + block_size - 1) // block_size,
-                ),
-                dtype=torch.float32,
-                device=device,
+
+            expert_x_scale_shape = (
+                num_local_experts,
+                expert_x.size(1),
+                (expert_x.size(2) + block_size - 1) // block_size,
             )
+
+            print(f"XXXXXXXXXX {block_size} {expert_x_scale_shape}")
+
+            expert_x_scale = torch.zeros(
+                expert_x_scale_shape,
+                dtype=torch.float32,
+                device=expert_x.device,
+            )
+
+            print(f"YYYYYYYYYYYYYYY {expert_x.shape}")
 
         # This argument is optional, defaults to indices.size(0)
         # There's not much point setting this unless it is != indices.size(0)
@@ -157,6 +173,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=rank_topk_ids,
             bound_m=bound_m,
         )
+        if expert_x_scale is not None:
+            expert_x_scale = expert_x_scale[:, :, 0:1]
+
+        print(f"ZZZZZZZZZZZZZZ")
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, 0:1]
 
@@ -184,6 +204,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # Set weights to 1 if we did them in dispatch. This is hacky.
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
+
+        print("CCCCCCCCCCCCCCCCCCCC")
 
         self.a2a.combine(out_tokens=output,
                          indices=topk_ids,

@@ -314,8 +314,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 moe.hidden_dim,
                 moe.in_dtype,
                 moe.quant_dtype,
-                per_act_token_quant=False,
-                block_shape=[moe.block_size, moe.block_size],
+                per_act_token_quant=False, # TODO: (bnell) quantization
+                block_shape=[moe.block_size, moe.block_size], # TODO: (bnell) quantization
             )
 
             all_to_all_args = dict(

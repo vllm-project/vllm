@@ -37,6 +37,7 @@ def _fp8_quantize(
         A, A_scale = ops.scaled_fp8_quant(
             A, A_scale, use_per_token_if_dynamic=per_act_token)
     else:
+        assert not per_act_token
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
         A, A_scale = per_token_group_quant_fp8(A, block_k)
@@ -64,6 +65,7 @@ def _int8_quantize(
             "int8 quantization only supports block or channel-wise"
         A, A_scale = per_token_quant_int8(A)
     else:
+        assert not per_act_token
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
         A, A_scale = per_token_group_quant_int8(A, block_k)

@@ -44,9 +44,10 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=block_shape,
             block_m=block_m,
         )
-        self.allow_deep_gemm = allow_deep_gemm and use_fp8_w8a8
-        self.deep_gemm_expert = DeepGemmExperts(
-        ) if self.allow_deep_gemm else None
+        self.allow_deep_gemm = (allow_deep_gemm and
+                                not per_act_token_quant and
+                                use_fp8_w8a8)
+        self.deep_gemm_expert = DeepGemmExperts() if self.allow_deep_gemm else None
 
     def supports_chunking(self) -> bool:
         dge = self.deep_gemm_expert
@@ -68,8 +69,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
-        if self.allow_deep_gemm and _valid_deep_gemm_shape(M, N, K):
-            assert self.deep_gemm_expert is not None
+        if (self.allow_deep_gemm and N > 512
+            and _valid_deep_gemm_shape(M, N, K)):
             return self.deep_gemm_expert.workspace_shapes(
                 a, aq, M, N, K, topk, global_num_experts, local_num_experts)
         else:
