@@ -28,6 +28,8 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
@@ -35,10 +37,18 @@ from vllm.utils import round_up
 
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 
+from tests.kernels.moe.utils import (
+    native_w8a8_block_matmul,
+    torch_moe2,
+    naive_batched_moe,
+)
+
+
 requires_pplx = pytest.mark.skipif(
     not has_pplx,
     reason="Requires PPLX kernels",
 )
+
 
 PPLX_PREPARE_COMBOS = [(4, 128, 128), (32, 1024, 512), (64, 1024, 512),
                        (222, 2048, 1024)]
