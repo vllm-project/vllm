@@ -17,7 +17,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from json import JSONDecodeError
 from typing import Annotated, Any, Optional
 
 import prometheus_client
@@ -1329,7 +1328,7 @@ async def run_server_worker(listen_address,
     log_config = None
     if getattr(args, "log_config_file", None):
         try:
-            with open(args.log_config_file, "r") as f:
+            with open(args.log_config_file) as f:
                 log_config = json.load(f)
         except Exception as e:
             logger.warning("Failed to load log config from file %s: error %e",

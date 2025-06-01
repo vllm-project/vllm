@@ -131,7 +131,7 @@ async def run_server(args: Namespace,
     log_config = None
     if getattr(args, "log_config_file", None):
         try:
-            with open(args.log_config_file, "r") as f:
+            with open(args.log_config_file) as f:
                 log_config = json.load(f)
         except Exception as e:
             logger.warning("Failed to load log config from file %s: error %e",
