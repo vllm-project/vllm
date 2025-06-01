@@ -26,6 +26,7 @@ Dependencies:
 - torch
 - openai
 """
+
 import base64
 import io
 
@@ -44,17 +45,13 @@ def main():
 
     # Transformers
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
-    transformers_model = transformers.AutoModelForCausalLM.from_pretrained(
-        model_name)
+    transformers_model = transformers.AutoModelForCausalLM.from_pretrained(model_name)
 
     # Refer to the HuggingFace repo for the correct format to use
-    chat = [{
-        "role": "user",
-        "content": "Please tell me about the capital of France."
-    }]
-    token_ids = tokenizer.apply_chat_template(chat,
-                                              add_generation_prompt=True,
-                                              return_tensors='pt')
+    chat = [{"role": "user", "content": "Please tell me about the capital of France."}]
+    token_ids = tokenizer.apply_chat_template(
+        chat, add_generation_prompt=True, return_tensors="pt"
+    )
 
     embedding_layer = transformers_model.get_input_embeddings()
     prompt_embeds = embedding_layer(token_ids).squeeze(0)
@@ -64,7 +61,7 @@ def main():
     torch.save(prompt_embeds, buffer)
     buffer.seek(0)
     binary_data = buffer.read()
-    encoded_embeds = base64.b64encode(binary_data).decode('utf-8')
+    encoded_embeds = base64.b64encode(binary_data).decode("utf-8")
 
     completion = client.completions.create(
         model=model_name,
@@ -75,7 +72,8 @@ def main():
         temperature=0.0,
         # NOTE: The OpenAI client allows passing in extra JSON body via the
         # `extra_body` argument.
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
 
     print("-" * 30)
     print(completion.choices[0].text)

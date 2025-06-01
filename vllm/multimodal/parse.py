@@ -28,7 +28,8 @@ else:
 
 class ModalityDataItems(ABC, Generic[_T, _I]):
     """
-    Represents data items for a modality in {class}`MultiModalDataItems`.
+    Represents data items for a modality in
+    [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
     """
 
     def __init__(self, data: _T, modality: str) -> None:
@@ -251,15 +252,15 @@ _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     """
-    As {data}`~vllm.multimodal.inputs.MultiModalDataDict`, but normalized
-    such that each entry corresponds to a list.
+    As [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict], but
+    normalized such that each entry corresponds to a list.
     """
 
     def get_count(self, modality: str, *, strict: bool = True) -> int:
         """
         Get the number of data items belonging to a modality.
 
-        If `strict=False`, return `0` instead of raising {exc}`KeyError`
+        If `strict=False`, return `0` instead of raising [`KeyError`][]
         even if the modality is not found.
         """
         if modality not in self:
@@ -305,8 +306,8 @@ ModalityDataParser: TypeAlias = Callable[[ModalityData[Any]],
 
 class MultiModalDataParser:
     """
-    Parses {data}`~vllm.multimodal.inputs.MultiModalDataDict` into
-    {class}`MultiModalDataItems`.
+    Parses [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+    into [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
 
     Args:
         target_sr (float, optional): Enables automatic resampling of audio
