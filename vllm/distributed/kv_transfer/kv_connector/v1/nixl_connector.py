@@ -341,7 +341,7 @@ class NixlConnectorWorker:
 
         # Metadata.
         self.engine_id = engine_id
-        self.rank = get_tensor_model_parallel_rank()
+        self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
 
@@ -395,12 +395,7 @@ class NixlConnectorWorker:
                                  tp_rank: int):
         """Background thread for getting new NIXL handshakes."""
         # NOTE(rob): this is a simple implementation. We will move
-        # to a better approach like an ETCD server in the future.
-
-        # NOTE(rob): to support heterogeneous TP, we will have to
-        # move this into the scheduler rather than worker, since
-        # each rank needs the metadata of all other ranks (whereas
-        # in this setup, each rank only gets one other rank's meta.
+        # to a better approach via HTTP endpoint soon.
 
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(metadata)
@@ -410,9 +405,12 @@ class NixlConnectorWorker:
 
         # Listen for new requests for metadata.
         host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        # NOTE(rob): we need each rank to have a unique port. This
-        # hack to keeps us moving. We will switch when moving to etcd
-        # or where we have a single ZMQ socket in the scheduler.
+
+        # NOTE(rob): each DP group will exchange metadata with
+        # with all other remote DP groups. So each DP group will
+        # have its own base_port. Then, within a DP group, each
+        # TP rank uses its own port (which is just incrementing
+        # the base port by the TP rank.
         path = make_zmq_path("tcp", host, base_port + tp_rank)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
@@ -428,10 +426,10 @@ class NixlConnectorWorker:
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
-        # NOTE(rob): we need each rank to have a unique port. This is
-        # a hack to keep us moving. We will switch when moving to etcd
-        # or where we have a single ZMQ socket in the scheduler.
-        path = make_zmq_path("tcp", host, port + self.rank)
+        # NOTE(rob): we need each tp_rank to have a unique port.
+        # This is a hack to keep us moving. We will switch when
+        # we switch to HTTP-based NIXL metadata exchange.
+        path = make_zmq_path("tcp", host, port + self.tp_rank)
         logger.info("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
@@ -539,7 +537,7 @@ class NixlConnectorWorker:
         ready_event = threading.Event()
         self._nixl_handshake_listener_t = threading.Thread(
             target=self._nixl_handshake_listener,
-            args=(metadata, ready_event, self.side_channel_port, self.rank),
+            args=(metadata, ready_event, self.side_channel_port, self.tp_rank),
             daemon=True,
             name="nixl_handshake_listener")
         self._nixl_handshake_listener_t.start()
@@ -563,9 +561,9 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
                 blocks_data.append(
-                    (base_addr + block_offset, self.block_len, self.rank))
-        logger.debug("Created %s blocks for src engine %s and rank %s",
-                     len(blocks_data), self.engine_id, self.rank)
+                    (base_addr + block_offset, self.block_len, self.tp_rank))
+        logger.debug("Created %s blocks for src engine %s and tp_rank %s",
+                     len(blocks_data), self.engine_id, self.tp_rank)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
@@ -580,9 +578,9 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
                 blocks_data.append(
-                    (base_addr + block_offset, self.block_len, self.rank))
-        logger.debug("Created %s blocks for dst engine %s and rank %s",
-                     len(blocks_data), engine_id, self.rank)
+                    (base_addr + block_offset, self.block_len, self.tp_rank))
+        logger.debug("Created %s blocks for dst engine %s and tp_rank %s",
+                     len(blocks_data), engine_id, self.tp_rank)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
@@ -607,14 +605,14 @@ class NixlConnectorWorker:
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
-                "and %s requests done recving", self.rank, len(done_sending),
-                len(done_recving))
+                "and %s requests done recving", self.tp_rank,
+                len(done_sending), len(done_recving))
 
         if self.world_size == 1:
             return done_sending, done_recving
 
         # Rank 0: get finished from all other ranks.
-        if self.rank == 0:
+        if self.tp_rank == 0:
             for req_id in done_sending:
                 self._done_sending_count[req_id] += 1
             for req_id in done_recving:
