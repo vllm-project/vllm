@@ -337,7 +337,7 @@ class NixlConnectorWorker:
         # NIXL handshake.
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
-            vllm_config.parallel_config.data_parallel_rank)
+            vllm_config.parallel_config.data_parallel_rank_local)
 
         # Metadata.
         self.engine_id = engine_id
@@ -424,6 +424,7 @@ class NixlConnectorWorker:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
+        logger.info("Done listening on path: %s", path)
 
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote instance."""
@@ -433,7 +434,7 @@ class NixlConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
         path = make_zmq_path("tcp", host, port + self.rank)
-        logger.debug("Querying metadata on path: %s", path)
+        logger.info("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
             sock.send(GET_META_MSG)
@@ -729,7 +730,7 @@ class NixlConnectorWorker:
         # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
         if dst_engine_id not in self._remote_agents:
             engine_id = self._nixl_handshake(remote_host, remote_port)
-            print(f"WE GOT {engine_id=}, {dst_engine_id=}")
+            print(f"{remote_port=}: WE GOT {engine_id=}, {dst_engine_id=}")
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
