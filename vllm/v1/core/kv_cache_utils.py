@@ -11,9 +11,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, sha256
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheNewTensor,
-                                        KVCacheReuseTensor, KVCacheSpec,
-                                        SlidingWindowSpec)
+                                        KVCacheGroupSpec, KVCacheSpec,
+                                        KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -612,6 +611,38 @@ def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     return len(layer_keys) == 1
 
 
+def get_num_blocks(vllm_config: VllmConfig, num_layers: int,
+                   available_memory: int, page_size: int) -> int:
+    """
+    Get the number of kv cache blocks.
+
+    Args:
+        vllm_config: The global VllmConfig
+        num_layers: The number of layers
+        available_memory: Memory available for KV cache in bytes.
+        page_size: The page size of the KV cache.
+
+    """
+    num_blocks = int(available_memory // page_size // num_layers)
+    num_blocks = max(num_blocks, 0)
+    if vllm_config.cache_config.num_gpu_blocks_override is not None:
+        num_gpu_blocks_override = \
+            vllm_config.cache_config.num_gpu_blocks_override
+        logger.info(
+            "Overriding num_gpu_blocks=%d with "
+            "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
+    return num_blocks
+
+
+def get_uniform_page_size(kv_cache_spec: dict[str, KVCacheSpec]) -> int:
+    """
+    Get the page size of the KV cache.
+    """
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    assert len(page_sizes) == 1
+    return page_sizes.pop()
+
+
 def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
                                       kv_cache_spec: dict[str, KVCacheSpec],
                                       available_memory: int) -> KVCacheConfig:
@@ -628,12 +659,9 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         The generated KVCacheConfig
     """
 
-    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
-    assert len(page_sizes) == 1
-    page_size = page_sizes.pop()
-
-    num_blocks = int(available_memory // page_size // len(kv_cache_spec))
-    num_blocks = max(num_blocks, 0)
+    page_size = get_uniform_page_size(kv_cache_spec)
+    num_blocks = get_num_blocks(vllm_config, len(kv_cache_spec),
+                                available_memory, page_size)
 
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
         num_gpu_blocks_override = \
@@ -647,7 +675,6 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = num_tokens / vllm_config.model_config.max_model_len
-    # TODO: fix for hybrid allocator
     logger.info(
         "Maximum concurrency for %s tokens per request: %.2fx",
         max_model_len_str,
@@ -659,12 +686,15 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     # for all layers.
     grouped_layer_names = [list(kv_cache_spec.keys())]
 
+    # Each layer uses a separate Tensor to store its KV cache.
+    kv_cache_tensors = [
+        KVCacheTensor(size=per_layer_size, shared_by=[layer_name])
+        for layer_name in kv_cache_spec
+    ]
+
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
-        tensors={
-            layer_name: KVCacheNewTensor(size=per_layer_size)
-            for layer_name in kv_cache_spec
-        },
+        kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
     )
@@ -722,32 +752,48 @@ def _get_kv_cache_config_uniform_page_size(
             )
         for i in range(0, len(layers), group_size):
             grouped_layers.append(layers[i:i + group_size])
+    kv_cache_groups = create_kv_cache_group_specs(kv_cache_spec,
+                                                  grouped_layers)
 
-    # Divide the available memory equally among all layers in the first group.
-    # The memory layout in the example will be:
-    # full.0: Tensor with size=available_memory//2
-    # full.1: Tensor with size=available_memory//2
-    kv_cache_spec_first_group = {
-        layer_name: kv_cache_spec[layer_name]
-        for layer_name in grouped_layers[0]
-    }
-    kv_cache_config = _get_kv_cache_config_uniform_type(
-        vllm_config, kv_cache_spec_first_group, available_memory)
-
-    # Reuse the KV cache tensors of the first group for the other groups.
+    # Determine how model runners should initialize the KV cache tensors.
+    # We will have group_size memory pools, each is shared by one layer from
+    # each group. As layers of different groups have different block table,
+    # they will use different parts of the shared Tensor.
     # The memory layout in the example will be:
     # full.0, sw.0, sw.2: share a Tensor with size=available_memory//2
     # full.1, sw.1: share another Tensor with size=available_memory//2
-    # Layers of different groups have different block table, so they will
-    # use different parts of the shared Tensor.
-    for layers in grouped_layers[1:]:
-        for layer_name, layer_name_first_group in zip(
-                layers, grouped_layers[0][:len(layers)]):
-            kv_cache_config.tensors[layer_name] = KVCacheReuseTensor(
-                reused_layer_name=layer_name_first_group)
+    page_size = get_uniform_page_size(kv_cache_spec)
+    num_blocks = get_num_blocks(vllm_config, group_size, available_memory,
+                                page_size)
+    per_memory_pool_size = page_size * num_blocks
+    kv_cache_tensors = []
+    for i in range(group_size):
+        shared_by = []
+        for j in range(len(kv_cache_groups)):
+            if i < len(grouped_layers[j]):
+                shared_by.append(grouped_layers[j][i])
+        kv_cache_tensors.append(
+            KVCacheTensor(size=per_memory_pool_size, shared_by=shared_by))
 
-    kv_cache_config.kv_cache_groups = create_kv_cache_group_specs(
-        kv_cache_spec, grouped_layers)
+    # Print the KV cache size and maximum concurrency.
+    # TODO in this PR: Now just copy from the uniform type implementation.
+    # Should reimplement this for hybrid model
+    num_tokens = num_blocks * vllm_config.cache_config.block_size
+    num_tokens_str = f"{num_tokens:,}"
+    logger.info("GPU KV cache size: %s tokens", num_tokens_str)
+    max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
+    max_concurrency = num_tokens / vllm_config.model_config.max_model_len
+    logger.info(
+        "Maximum concurrency for %s tokens per request: %.2fx",
+        max_model_len_str,
+        max_concurrency,
+    )
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+    )
     return kv_cache_config
 
 

@@ -39,8 +39,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheNewTensor,
-                                        KVCacheReuseTensor, KVCacheSpec,
+                                        KVCacheConfig, KVCacheSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
@@ -1881,18 +1880,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             corresponding memory buffer for KV cache.
          """
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
-        for layer_name, tensor_config in kv_cache_config.tensors.items():
-            if isinstance(tensor_config, KVCacheNewTensor):
-                # A new tensor with `tensor_config.size` bytes
-                kv_cache_raw_tensors[layer_name] = torch.zeros(
-                    tensor_config.size, dtype=torch.int8, device=self.device)
-        for layer_name, tensor_config in kv_cache_config.tensors.items():
-            if isinstance(tensor_config, KVCacheReuseTensor):
-                # Reuse a tensor from `kv_cache_raw_tensors`
-                kv_cache_raw_tensors[layer_name] = kv_cache_raw_tensors[
-                    tensor_config.reused_layer_name]
-        assert len(kv_cache_raw_tensors) == len(
-            kv_cache_config.tensors), "Some layers are not initialized"
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            tensor = torch.zeros(kv_cache_tensor.size,
+                                 dtype=torch.int8,
+                                 device=self.device)
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_cache_raw_tensors[layer_name] = tensor
+
+        layer_names = set()
+        for group in kv_cache_config.kv_cache_groups:
+            layer_names.update(group.layer_names)
+        assert layer_names == set(kv_cache_raw_tensors.keys(
+        )), "Some layers are not correctly initialized"
         return kv_cache_raw_tensors
 
     def _setup_kv_cache_shapes(

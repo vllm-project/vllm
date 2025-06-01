@@ -154,28 +154,12 @@ class SlidingWindowSpec(AttentionSpec):
 
 
 @dataclass
-class KVCacheTensorBase:
+class KVCacheTensor:
     """
-    A dataclass for specifying how the workers should initialize the KV cache
-    for a layer.
+    A class for specifying the KV cache tensor.
     """
-    pass
-
-
-@dataclass
-class KVCacheNewTensor(KVCacheTensorBase):
-    """
-    Initialize the KV cache with a tensor of `size` bytes.
-    """
-    size: int  # The size of KV cache Tensor in bytes
-
-
-@dataclass
-class KVCacheReuseTensor(KVCacheTensorBase):
-    """
-    Reuse the KV cache tensor of `layer_name` for the current layer.
-    """
-    reused_layer_name: str
+    size: int  # size of the KV cache tensor in bytes
+    shared_by: list[str]  # layer names that share the same KV cache tensor
 
 
 @dataclass
@@ -197,8 +181,8 @@ class KVCacheConfig:
     """
     """The number of KV cache blocks"""
     num_blocks: int
-    """layer_name -> how to initialize KV cache for that layer"""
-    tensors: dict[str, KVCacheTensorBase]
+    """How should model runner initialize the KV cache tensors for each layer"""
+    kv_cache_tensors: list[KVCacheTensor]
     """
     The kv cache groups of the model.
     The layers in the models are repeated with some patterns, e.g., a model
