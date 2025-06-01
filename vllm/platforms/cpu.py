@@ -28,7 +28,7 @@ class CpuPlatform(Platform):
     dispatch_key: str = "CPU"
 
     @property
-    def supported_dtypes(self) -> list:
+    def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
         elif sys.platform.startswith(
