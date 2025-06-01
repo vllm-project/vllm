@@ -4,12 +4,12 @@ import enum
 import json
 import os
 import time
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, TypeVar, Union
 
 import huggingface_hub
-from huggingface_hub import hf_hub_download
+from huggingface_hub import get_safetensors_metadata, hf_hub_download
 from huggingface_hub import list_repo_files as hf_list_repo_files
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
@@ -93,10 +93,15 @@ class ConfigFormat(str, enum.Enum):
     MISTRAL = "mistral"
 
 
-def with_retry(func: Callable[[], Any],
-               log_msg: str,
-               max_retries: int = 2,
-               retry_delay: int = 2):
+_R = TypeVar("_R")
+
+
+def with_retry(
+    func: Callable[[], _R],
+    log_msg: str,
+    max_retries: int = 2,
+    retry_delay: int = 2,
+) -> _R:
     for attempt in range(max_retries):
         try:
             return func()
@@ -108,6 +113,8 @@ def with_retry(func: Callable[[], Any],
                          max_retries)
             time.sleep(retry_delay)
             retry_delay *= 2
+
+    raise AssertionError("Should not be reached")
 
 
 # @cache doesn't cache exceptions
@@ -823,13 +830,39 @@ def try_get_generation_config(
 
 
 def get_cross_encoder_activation_function(config: PretrainedConfig):
-    if (hasattr(config, "sbert_ce_default_activation_function")
-            and config.sbert_ce_default_activation_function is not None):
 
+    function_name: Optional[str] = None
+    if hasattr(config, "sentence_transformers") and "activation_fn" in \
+        config.sentence_transformers:
+        function_name = config.sentence_transformers["activation_fn"]
+
+    elif (hasattr(config, "sbert_ce_default_activation_function")
+          and config.sbert_ce_default_activation_function is not None):
         function_name = config.sbert_ce_default_activation_function
+
+    if function_name is not None:
         assert function_name.startswith("torch.nn.modules."), \
             "Loading of activation functions is restricted to " \
             "torch.nn.modules for security reasons"
         return resolve_obj_by_qualname(function_name)()
     else:
         return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
+
+
+def try_get_safetensors_metadata(
+    model: str,
+    *,
+    revision: Optional[str] = None,
+):
+    get_safetensors_metadata_partial = partial(
+        get_safetensors_metadata,
+        model,
+        revision=revision,
+        token=os.getenv('HF_TOKEN', None),
+    )
+
+    try:
+        return with_retry(get_safetensors_metadata_partial,
+                          "Error retrieving safetensors")
+    except Exception:
+        return None

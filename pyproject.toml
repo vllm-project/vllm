@@ -8,7 +8,6 @@ requires = [
     "setuptools-scm>=8.0",
     "torch == 2.7.0",
     "wheel",
-    "regex",
     "jinja2",
 ]
 build-backend = "setuptools.build_meta"
@@ -110,6 +109,7 @@ ignore = [
 ]
 
 [tool.mypy]
+plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
@@ -171,7 +171,8 @@ plugins.md033.enabled = false # inline-html
 plugins.md046.enabled = false # code-block-style
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
 
-[tool.ty]
+[tool.ty.src]
+root = "./vllm"
 respect-ignore-files = true
 
 [tool.ty.environment]

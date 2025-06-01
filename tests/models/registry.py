@@ -283,7 +283,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "ModernBertModel": _HfExamplesInfo("Alibaba-NLP/gte-modernbert-base",
                                 trust_remote_code=True),
-    "NomicBertModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-long",  # noqa: E501
+    "NomicBertModel": _HfExamplesInfo("nomic-ai/nomic-embed-text-v2-moe",
                                                trust_remote_code=True),
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
     "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B"),
@@ -434,6 +434,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+    "EagleMiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-1B-sft-bf16",
+                                            trust_remote_code=True,
+                                            is_available_online=False,
+                                            speculative_model="openbmb/MiniCPM-2B-sft-bf16",
+                                            tokenizer="openbmb/MiniCPM-2B-sft-bf16"),
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                     trust_remote_code=True,
                                     speculative_model="XiaomiMiMo/MiMo-7B-RL")
