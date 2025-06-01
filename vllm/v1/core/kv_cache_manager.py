@@ -189,6 +189,9 @@ class KVCacheManager:
                 hitting the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed 
                 tokens.
+            num_draft_tokens: The number of draft tokens from speculative
+                decoding. This is excluded in cache_blocks because draft
+                tokens might be rejected.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.

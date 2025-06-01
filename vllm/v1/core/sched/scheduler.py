@@ -230,7 +230,7 @@ class Scheduler(SchedulerInterface):
 
             num_draft_tokens = max(
                 num_new_tokens + request.num_computed_tokens -
-                request.num_tokens, 0)
+                request.num_tokens, 0) if request.spec_token_ids else 0
 
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
