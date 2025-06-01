@@ -43,11 +43,12 @@ Install MkDocs along with the [plugins](https://github.com/vllm-project/vllm/blo
 pip install -r requirements/docs.txt
 ```
 
-> **Note:** Ensure that your Python version is compatible with the plugins (e.g., mkdocs-awesome-nav requires Python 3.10+)
+!!! note
+    Ensure that your Python version is compatible with the plugins (e.g., `mkdocs-awesome-nav` requires Python 3.10+)
 
 #### Verify Installation
 
-Confirm that MkDocs is correctly installed::
+Confirm that MkDocs is correctly installed:
 
 ```bash
 mkdocs --version
