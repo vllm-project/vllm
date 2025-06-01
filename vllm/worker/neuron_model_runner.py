@@ -169,6 +169,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
             mm_kwargs = seq_group_metadata.multi_modal_data
             if mm_kwargs:
+                mm_kwargs = self.process_multi_modal_data_neuron(mm_kwargs)
                 multi_modal_kwargs_list.append(mm_kwargs)
 
         max_seq_len = max(seq_lens)
@@ -273,6 +274,14 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
                 sampling_params.top_k = top_k
                 sampling_params.top_p = top_p
                 sampling_params.temperature = temperature
+
+        # we need multi_modal_data for later tokens as well
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
+        for seq_group_metadata in seq_group_metadata_list:
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data:
+                multi_modal_kwargs_list.append(mm_data)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
@@ -421,6 +430,10 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+
+    def process_multi_modal_data_neuron(self, mm_data):
+        # this is a no-op for NeuronModelRunner
+        return mm_data
 
     def remove_all_loras(self):
         raise NotImplementedError(

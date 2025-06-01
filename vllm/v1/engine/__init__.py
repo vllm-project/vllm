@@ -46,10 +46,6 @@ class EngineCoreRequest(
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 
-    # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
-    # but this object is currently not playing well with msgspec
-    # due to circular imports and typing we have in data.py
-
     request_id: str
     prompt_token_ids: list[int]
     token_type_ids: Optional[list[int]]
@@ -62,6 +58,10 @@ class EngineCoreRequest(
     arrival_time: float
     lora_request: Optional[LoRARequest]
     cache_salt: Optional[str]
+
+    # Index of the client, used to ensure outputs are sent back to the same
+    # client for this request when scaling out the front-end.
+    client_index: int = 0
 
     # Used in DP case to indicate which wave of requests this is expected to
     # belong to, to cover a race condition where the request is sent before

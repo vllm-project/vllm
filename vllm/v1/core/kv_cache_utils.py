@@ -544,16 +544,17 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
                                                    available_memory)
         estimated_msg = ""
         if estimated_max_len > 0:
-            estimated_msg = " Based on the available memory,"
-            f" the estimated maximum model length is {estimated_max_len}."
+            estimated_msg = (
+                "Based on the available memory, "
+                f"the estimated maximum model length is {estimated_max_len}.")
 
         raise ValueError(
             f"To serve at least one request with the models's max seq len "
             f"({max_model_len}), ({needed_memory/GiB_bytes:.2f} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory/GiB_bytes:.2f} GiB)."
+            f"memory ({available_memory/GiB_bytes:.2f} GiB). "
             f"{estimated_msg} "
-            f" Try increasing `gpu_memory_utilization` or decreasing "
+            f"Try increasing `gpu_memory_utilization` or decreasing "
             f"`max_model_len` when initializing the engine.")
 
 

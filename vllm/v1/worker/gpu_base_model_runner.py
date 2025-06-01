@@ -454,6 +454,26 @@ class GPUBaseModelRunner(ABC, LoRAModelRunnerMixin, Generic[InputBatchT,
                                          token_indices: torch.Tensor):
         pass
 
+    def _get_cumsum_and_arange(
+        self,
+        num_tokens: np.ndarray,
+        cumsum_dtype: Optional[np.dtype] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Get the cumulative sum and batched arange of the given array.
+        # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
+        # Equivalent to but faster than:
+        # np.concatenate([np.arange(n) for n in num_tokens])
+        """
+        # Step 1. [2, 5, 3] -> [2, 7, 10]
+        cu_num_tokens = np.cumsum(num_tokens, dtype=cumsum_dtype)
+        total_num_tokens = cu_num_tokens[-1]
+        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
+        cumsums_offsets = np.repeat(cu_num_tokens - num_tokens, num_tokens)
+        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        arange = self.arange_np[:total_num_tokens] - cumsums_offsets
+
+        return cu_num_tokens, arange
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -479,17 +499,10 @@ class GPUBaseModelRunner(ABC, LoRAModelRunnerMixin, Generic[InputBatchT,
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
 
-        # Get batched arange.
-        # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # Equivalent to but faster than:
-        # np.concatenate([np.arange(n) for n in num_scheduled_tokens])
-        # Step 1. [2, 5, 3] -> [2, 7, 10]
-        cu_num_tokens = np.cumsum(num_scheduled_tokens)
-        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
-        cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
-                                    num_scheduled_tokens)
-        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
+        # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
+        # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        cu_num_tokens, arange = self._get_cumsum_and_arange(
+            num_scheduled_tokens)
 
         # Get positions.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
