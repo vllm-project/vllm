@@ -414,17 +414,15 @@ class NixlConnectorWorker:
         # hack to keeps us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
         path = make_zmq_path("tcp", host, base_port + tp_rank)
-        logger.info("Starting listening on path: %s", path)
+        logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
             while True:
                 identity, _, msg = sock.recv_multipart()
-                print(f"GOT QUERY: {identity=}")
                 if msg != GET_META_MSG:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
-        logger.info("Done listening on path: %s", path)
 
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote instance."""
@@ -444,14 +442,13 @@ class NixlConnectorWorker:
             got_metadata_time = time.perf_counter()
 
             # Register Remote agent.
-            engine_id = self.add_remote_agent(metadata)
+            self.add_remote_agent(metadata)
             setup_agent_time = time.perf_counter()
 
             logger.debug("NIXL handshake: get metadata took: %s",
                          got_metadata_time - start_time)
             logger.debug("NIXL handshake: add agent took: %s",
                          setup_agent_time - got_metadata_time)
-        return engine_id
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -592,7 +589,6 @@ class NixlConnectorWorker:
         self.dst_xfer_side_handles[
             engine_id] = self.nixl_wrapper.prep_xfer_dlist(
                 self._remote_agents[engine_id], descs)
-        return engine_id
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
@@ -729,8 +725,7 @@ class NixlConnectorWorker:
     ):
         # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
         if dst_engine_id not in self._remote_agents:
-            engine_id = self._nixl_handshake(remote_host, remote_port)
-            print(f"{remote_port=}: WE GOT {engine_id=}, {dst_engine_id=}")
+            self._nixl_handshake(remote_host, remote_port)
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
