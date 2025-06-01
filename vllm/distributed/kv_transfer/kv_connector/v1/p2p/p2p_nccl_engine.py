@@ -116,7 +116,7 @@ class P2pNcclEngine:
             self._ping_thread.start()
 
         logger.info(
-            "💯P2pNcclEngine init, rank:%d, local_rank:%d, http_address:%s"
+            "💯P2pNcclEngine init, rank:%d, local_rank:%d, http_address:%s, "
             "zmq_address:%s, proxy_address:%s, send_type:%s, buffer_size_"
             "threshold:%.2f", self.rank, self.local_rank, self.http_address,
             self.zmq_address, self.proxy_address, self.send_type,
