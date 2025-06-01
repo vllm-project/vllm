@@ -42,8 +42,8 @@ class Request:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
-        self.arrival_time = arrival_time if arrival_time is not None else time.time(
-        )
+        self.arrival_time = arrival_time if arrival_time is not None else \
+            time.time()
 
         self.status = (RequestStatus.WAITING_FOR_FSM
                        if sampling_params.guided_decoding is not None else
