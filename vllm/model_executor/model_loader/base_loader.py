@@ -23,7 +23,8 @@ class BaseModelLoader(ABC):
     @abstractmethod
     def load_weights(self, model: nn.Module,
                      model_config: ModelConfig) -> None:
-        """Load weights into a model."""
+        """Load weights into a model. This standalone API allows 
+        inplace weights loading for an already-initialized model"""
         raise NotImplementedError
 
     def load_model(self, vllm_config: VllmConfig,
@@ -35,6 +36,7 @@ class BaseModelLoader(ABC):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config,
                                          model_config=model_config)
+            # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)
         return model.eval()
