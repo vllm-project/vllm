@@ -57,7 +57,7 @@ mkdocs --version
 Example output:
 
 ```console
-mkdocs, version 1.6.1 from /opt/miniconda3/envs/mkdoc/lib/python3.9/site-packages/mkdocs (Python 3.9)
+mkdocs, version 1.6.1 from /opt/miniconda3/envs/mkdoc/lib/python3.10/site-packages/mkdocs (Python 3.10)
 ```
 
 #### Clone the `vLLM` repository
