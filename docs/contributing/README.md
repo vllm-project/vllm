@@ -44,7 +44,7 @@ pip install -r requirements/docs.txt
 ```
 
 !!! note
-    Ensure that your Python version is compatible with the plugins (e.g., mkdocs-awesome-nav requires Python 3.10+)
+    Ensure that your Python version is compatible with the plugins (e.g., `mkdocs-awesome-nav` requires Python 3.10+)
 
 #### Verify Installation
 
