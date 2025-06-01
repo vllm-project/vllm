@@ -718,7 +718,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--hf-stream",
         action="store_true",
-        default=True,
         help="Use streaming mode for HF datasets. ",
     )
 

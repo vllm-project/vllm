@@ -1169,7 +1169,6 @@ if __name__ == "__main__":
     hf_group.add_argument(
         "--hf-stream",
         action="store_true",
-        default=True,
         help="Whether to stream the HF dataset. "
         "If set, the dataset will be streamed "
         "instead of loaded into memory. "
