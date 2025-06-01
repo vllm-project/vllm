@@ -429,7 +429,7 @@ class NixlConnectorWorker:
         # This is a hack to keep us moving. We will switch when
         # we switch to HTTP-based NIXL metadata exchange.
         path = make_zmq_path("tcp", host, port + self.tp_rank)
-        logger.info("Querying metadata on path: %s", path)
+        logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
             sock.send(GET_META_MSG)
