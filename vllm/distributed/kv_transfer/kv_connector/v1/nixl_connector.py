@@ -175,7 +175,8 @@ class NixlConnectorScheduler:
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
-            vllm_config.parallel_config.data_parallel_rank_local)
+            vllm_config.parallel_config.data_parallel_rank_local *
+            vllm_config.parallel_config.tensor_parallel_size)
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
         # Requests that need to start recv.
@@ -340,7 +341,8 @@ class NixlConnectorWorker:
         # Each TP rank listens/queries on the base_port + tp_rank.
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
-            vllm_config.parallel_config.data_parallel_rank_local)
+            vllm_config.parallel_config.data_parallel_rank_local *
+            vllm_config.parallel_config.tensor_parallel_size)
 
         # Metadata.
         self.engine_id = engine_id
