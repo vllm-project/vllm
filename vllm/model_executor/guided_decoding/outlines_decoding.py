@@ -10,7 +10,6 @@ from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.config import ModelConfig
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     JSONLogitsProcessor, RegexLogitsProcessor)
 from vllm.reasoning import ReasoningParser

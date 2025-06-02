@@ -51,7 +51,7 @@ CACHE = None
 class BaseLogitsProcessor:
 
     def __init__(self, guide: Guide, eos_token_id: int,
-                 reasoner: Optional[ReasoningParser]) -> "BaseLogitsProcessor":
+                 reasoner: Optional[ReasoningParser]) -> BaseLogitsProcessor:
         self._guide: Guide = guide
         self._eos_token_id: int = eos_token_id
         self._reasoner: Optional[ReasoningParser] = reasoner
@@ -60,8 +60,7 @@ class BaseLogitsProcessor:
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
         if self._mask is None:
-            self._mask = allocate_token_bitmask(
-                scores.size(-1))
+            self._mask = allocate_token_bitmask(scores.size(-1))
 
         # Skip the structured logits processing if reasoning is not finished.
         # reasoner is not None only when `--reasoning-parser` is set.
@@ -129,8 +128,9 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
         return Guide(index)
 
-    def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase,
-                 reasoner: Optional[ReasoningParser]) -> "RegexLogitsProcessor":
+    def __init__(
+            self, regex_string: str, tokenizer: PreTrainedTokenizerBase,
+            reasoner: Optional[ReasoningParser]) -> RegexLogitsProcessor:
         super().__init__(
             guide=RegexLogitsProcessor._get_guide(regex_string, tokenizer),
             eos_token_id=tokenizer.eos_token_id,  # type: ignore
@@ -142,7 +142,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
     def __init__(self, schema: Union[str, dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
                  whitespace_pattern: Union[str, None],
-                 reasoner: Optional[ReasoningParser]) -> "JSONLogitsProcessor":
+                 reasoner: Optional[ReasoningParser]) -> JSONLogitsProcessor:
 
         if isinstance(schema, type(BaseModel)):
             schema_str = json.dumps(schema.model_json_schema())
@@ -166,7 +166,7 @@ class OutlinesVocabulary:
     which allows us to store a hash with the vocabulary
     """
 
-    def __init__(self, vocabulary: Vocabulary) -> "OutlinesVocabulary":
+    def __init__(self, vocabulary: Vocabulary) -> OutlinesVocabulary:
         # Actual vocabulary object
         self.inner = vocabulary
         # Have to do abs(hash()) because python hashes can
