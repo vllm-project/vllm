@@ -29,11 +29,11 @@ logger = init_logger(__name__)
 @ToolParserManager.register_module("llama4_json")
 class Llama3JsonToolParser(ToolParser):
     """
-    Tool call parser for Llama 3.1 models intended for use with the
+    Tool call parser for Llama 3.x and 4 models intended for use with the
     examples/tool_chat_template_llama.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser llama3_json 
-    are all set
+    Used when --enable-auto-tool-choice --tool-call-parser llama3_json or 
+    llama4_json are set.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
@@ -49,7 +49,9 @@ class Llama3JsonToolParser(ToolParser):
         self.bot_token = "<|python_tag|>"
         self.bot_token_id = tokenizer.encode(self.bot_token,
                                              add_special_tokens=False)[0]
-        self.tool_call_regex = re.compile(r"{.*?}", re.DOTALL)
+        # Updated regex to match multiple JSONs separated by semicolons
+        self.tool_call_regex = re.compile(r"{[^}]*}(?:\s*;\s*{[^}]*})*",
+                                          re.DOTALL)
 
     def extract_tool_calls(
             self, model_output: str,
@@ -57,8 +59,9 @@ class Llama3JsonToolParser(ToolParser):
         """
         Extract the tool calls from a complete model response.
         Only extracts JSON content and ignores any surrounding plain text.
+        Supports both single JSON and multiple JSONs separated by semicolons.
         """
-        # Find JSON object in the text using regex
+        # Find JSON object(s) in the text using regex
         match = self.tool_call_regex.search(model_output)
         if not match:
             return ExtractedToolCallInformation(tools_called=False,
@@ -67,19 +70,24 @@ class Llama3JsonToolParser(ToolParser):
 
         try:
             json_str = match.group(0)
-            obj = json.loads(json_str)
+            # Split by semicolon and strip whitespace
+            json_objects = [obj.strip() for obj in json_str.split(';')]
 
-            tool_calls: list[ToolCall] = [
-                ToolCall(
-                    type="function",
-                    function=FunctionCall(
-                        name=obj["name"],
-                        # function call args are JSON but as a string
-                        arguments=json.dumps(obj["arguments"] \
-                                if "arguments" in obj \
-                                else obj["parameters"],
-                                ensure_ascii=False)))
-            ]
+            tool_calls: list[ToolCall] = []
+            for json_obj in json_objects:
+                if not json_obj:  # Skip empty strings
+                    continue
+                obj = json.loads(json_obj)
+                tool_calls.append(
+                    ToolCall(
+                        type="function",
+                        function=FunctionCall(
+                            name=obj["name"],
+                            # function call args are JSON but as a string
+                            arguments=json.dumps(obj["arguments"] \
+                                    if "arguments" in obj \
+                                    else obj["parameters"])))
+                )
 
             return ExtractedToolCallInformation(tools_called=True,
                                                 tool_calls=tool_calls,
