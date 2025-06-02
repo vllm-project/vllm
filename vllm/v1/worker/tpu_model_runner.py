@@ -27,10 +27,12 @@ from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
-from vllm.v1.attention.backends.pallas import PallasMetadata
+from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
+                                               PallasMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, SlidingWindowSpec)
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
@@ -1264,29 +1266,33 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         assert self.block_table_cpu.dtype == self.input_batch.block_table[
             0].get_cpu_tensor().dtype
 
+        kv_cache_sizes = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            assert len(kv_cache_tensor.shared_by) == 1, (
+                "KV cache tensor shared by multiple layers is not supported in "
+                "TPU.")
+            kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
+
         kv_caches: dict[str, torch.Tensor] = {}
-        # TODO in this PR: update to the new kv cache config interface.
-        # comment out temporarily to pass type checker
-        # for kv_cache_group in kv_cache_config.kv_cache_groups:
-        #     kv_cache_spec = kv_cache_group.kv_cache_spec
-        #     for layer_name in kv_cache_group.layer_names:
-        #         tensor_config = kv_cache_config.tensors[layer_name]
-        #         assert isinstance(tensor_config, KVCacheNewTensor)
-        #         assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
-        #         num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes # noqa
-        #         if isinstance(kv_cache_spec, AttentionSpec):
-        #             kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape( # noqa
-        #                 num_blocks, kv_cache_spec.block_size,
-        #                 kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
-        #             dtype = kv_cache_spec.dtype
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            for layer_name in kv_cache_group.layer_names:
+                tensor_size = kv_cache_sizes[layer_name]
+                assert tensor_size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_size // kv_cache_spec.page_size_bytes  # noqa
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(  # noqa
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
 
-        #             tpu_kv_cache = torch.zeros(kv_cache_shape,
-        #                                        dtype=dtype,
-        #                                        device=self.device)
+                    tpu_kv_cache = torch.zeros(kv_cache_shape,
+                                               dtype=dtype,
+                                               device=self.device)
 
-        #             kv_caches[layer_name] = tpu_kv_cache
-        #         else:
-        #             raise NotImplementedError
+                    kv_caches[layer_name] = tpu_kv_cache
+                else:
+                    raise NotImplementedError
 
         bind_kv_cache(
             kv_caches,
