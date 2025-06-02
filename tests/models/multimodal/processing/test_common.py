@@ -40,7 +40,7 @@ def _test_processing_correctness(
         tokenizer_mode=model_info.tokenizer_mode,
         trust_remote_code=model_info.trust_remote_code,
         seed=0,
-        dtype="float16",
+        dtype="auto",
         revision=None,
         hf_overrides=model_info.hf_overrides,
     )

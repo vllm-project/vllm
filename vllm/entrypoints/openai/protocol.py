@@ -1563,6 +1563,11 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
             "If true (the default), special tokens (e.g. BOS) will be added to "
             "the prompt."),
     )
+    return_token_strs: Optional[bool] = Field(
+        default=False,
+        description=("If true, also return the token strings "
+                     "corresponding to the token ids."),
+    )
 
 
 class TokenizeChatRequest(OpenAIBaseModel):
@@ -1575,6 +1580,11 @@ class TokenizeChatRequest(OpenAIBaseModel):
         ("If true, the generation prompt will be added to the chat template. "
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
+    )
+    return_token_strs: Optional[bool] = Field(
+        default=False,
+        description=("If true, also return the token strings "
+                     "corresponding to the token ids."),
     )
     continue_final_message: bool = Field(
         default=False,
@@ -1633,6 +1643,7 @@ class TokenizeResponse(OpenAIBaseModel):
     count: int
     max_model_len: int
     tokens: list[int]
+    token_strs: Optional[list[str]] = None
 
 
 class DetokenizeRequest(OpenAIBaseModel):
