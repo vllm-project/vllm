@@ -203,8 +203,8 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
             processor: Optional[Idefics3Processor]) -> tuple[str, str, str]:
         if processor is None:
             processor = self.get_hf_processor()
-        image_token = processor.image_token.content
-        fake_image_token = processor.fake_image_token.content
+        image_token = processor.image_token
+        fake_image_token = processor.fake_image_token
         global_image_token = processor.global_image_tag
         return image_token, fake_image_token, global_image_token
 
