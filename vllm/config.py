@@ -1790,6 +1790,10 @@ class ParallelConfig:
     rank: int = 0
     """Global rank in distributed setup."""
 
+    enable_multimodal_encoder_data_parallel: bool = False
+    """ Use data parallelism instead of tensor parallelism for vision encoder. 
+    Only support LLama4 for now"""
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
@@ -2593,7 +2597,8 @@ class SpeculativeConfig:
                     else:
                         eagle_config = EAGLEConfig(
                             self.draft_model_config.hf_config,
-                            method=self.method)
+                            method=self.method,
+                            model_type="eagle")
                         self.draft_model_config.hf_config = eagle_config
 
                 if (self.num_speculative_tokens is not None
