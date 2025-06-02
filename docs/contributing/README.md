@@ -108,6 +108,9 @@ pre-commit run mypy-3.9 --hook-stage manual --all-files
 
 # Unit tests
 pytest tests/
+
+# Run tests for a single test file with detailed output
+pytest -s -v tests/test_logger.py
 ```
 
 !!! tip
