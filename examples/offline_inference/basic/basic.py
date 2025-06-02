@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
-import os
-
 from vllm import LLM, SamplingParams
 
 # Sample prompts.
