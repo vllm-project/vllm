@@ -12,7 +12,17 @@ def main():
                         help="Model name or path")
     parser.add_argument("--trust-remote-code", action="store_true", 
                         help="Whether to trust remote code")
+    parser.add_argument("--backend", type=str, 
+                        choices=["FLASH_ATTN_VLLM_V1", "FLASHINFER_VLLM_V1", "BOK_V1"],
+                        default="FLASHINFER_VLLM_V1",
+                        help="vLLM attention backend to use")
     args = parser.parse_args()
+    
+    # Set the environment variable for the backend
+    os.environ["VLLM_ATTENTION_BACKEND"] = args.backend
+    
+    # Create the output directory name based on the backend
+    output_dir = f"{args.backend}_attn_captures"
     
     # Instantiate a normal vLLM engine
     print(f"Loading model: {args.model}")
@@ -33,7 +43,7 @@ def main():
         print("layer.self_attn.attn:", layer.self_attn.attn)
         
         # Create output directory if it doesn't exist
-        os.makedirs("attn_captures", exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
         
         # Counter to keep track of forward passes
         hook_counter = [0]
@@ -51,40 +61,44 @@ def main():
             count = hook_counter[0]
             print(f"Saving tensors from forward pass {count}", flush=True)
             
+            # Create subdirectory for this forward pass
+            pass_dir = f"{output_dir}/pass_{count}"
+            os.makedirs(pass_dir, exist_ok=True)
+            
             # Save tensors to files using torch.save
             if query is not None:
-                torch.save(query.detach().cpu(), f"attn_captures/query_{count}.pt")
+                torch.save(query.detach().cpu(), f"{pass_dir}/query.pt")
             
             if key is not None:
-                torch.save(key.detach().cpu(), f"attn_captures/key_{count}.pt")
+                torch.save(key.detach().cpu(), f"{pass_dir}/key.pt")
             else:
-                torch.save(None, f"attn_captures/key_{count}.pt")
+                torch.save(None, f"{pass_dir}/key.pt")
                 
             if value is not None:
-                torch.save(value.detach().cpu(), f"attn_captures/value_{count}.pt")
+                torch.save(value.detach().cpu(), f"{pass_dir}/value.pt")
             else:
-                torch.save(None, f"attn_captures/value_{count}.pt")
+                torch.save(None, f"{pass_dir}/value.pt")
             
             # Save the KV cache
             if isinstance(kv_cache, list):
                 # If it's a list, save each tensor in the list
-                torch.save(len(kv_cache), f"attn_captures/kv_cache_list_len_{count}.pt")
+                torch.save(len(kv_cache), f"{pass_dir}/kv_cache_list_len.pt")
                 kv_cache_cpu = []
                 for tensor in kv_cache:
                     if hasattr(tensor, 'detach'):
                         kv_cache_cpu.append(tensor.detach().cpu())
                     else:
                         kv_cache_cpu.append(tensor)
-                torch.save(kv_cache_cpu, f"attn_captures/kv_cache_{count}.pt")
+                torch.save(kv_cache_cpu, f"{pass_dir}/kv_cache.pt")
             else:
                 # If it's a tensor or something else
                 if hasattr(kv_cache, 'detach'):
-                    torch.save(kv_cache.detach().cpu(), f"attn_captures/kv_cache_{count}.pt")
+                    torch.save(kv_cache.detach().cpu(), f"{pass_dir}/kv_cache.pt")
                 else:
-                    torch.save(kv_cache, f"attn_captures/kv_cache_{count}.pt")
+                    torch.save(kv_cache, f"{pass_dir}/kv_cache.pt")
             
             # Also save the forward context's virtual engine
-            torch.save(forward_context.virtual_engine, f"attn_captures/virtual_engine_{count}.pt")
+            torch.save(forward_context.virtual_engine, f"{pass_dir}/virtual_engine.pt")
             
             return args
         

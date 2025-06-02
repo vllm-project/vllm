@@ -209,3 +209,6 @@ gitlab_token
 
 # HF Cache
 tmp/hf_cache/*
+
+
+z_hacky_layer_test/*_attn_captures/*
