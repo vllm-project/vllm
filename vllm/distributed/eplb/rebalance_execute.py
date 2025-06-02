@@ -167,7 +167,7 @@ def shuffle_layer(
         for dst in recv_ranks:
             dst_global = get_global_rank(ep_group, dst)
             p2p_ops += [
-                P2POp(torch.distributed.isend, weight[dst], dst_global)
+                P2POp(torch.distributed.isend, weight[src], dst_global)
                 for weight in expert_weights
             ]
 

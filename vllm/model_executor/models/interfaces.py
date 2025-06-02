@@ -477,6 +477,10 @@ class MixtureOfExperts(Protocol):
         the EPLB algorithm are automatically reflected in the model's behavior
         without requiring additional method calls to set new states.
 
+        You should also collect model's `expert_weights` here instead of in
+        the weight loader, since after initial weight loading, further
+        processing like quantization may be applied to the weights.
+
         Args:
             expert_load_view: A view of the expert load metrics tensor.
             logical_to_physical_map: Mapping from logical to physical experts.
