@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.triton_utils import triton
 from vllm.v1.attention.backends.flash_attn import (CommonAttentionMetadata,
                                                    FlashAttentionMetadata)
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -238,8 +239,8 @@ class EagleProposer:
                                   hidden_states: torch.Tensor,
                                   attn_metadata: FlashAttentionMetadata,
                                   batch_size: int):
-        grid = lambda meta: (
-            (batch_size + meta['BLOCK_SIZE']) // meta['BLOCK_SIZE'], )
+        # Calculate number of thread blocks
+        grid = lambda meta: (triton.cdiv(batch_size, meta['BLOCK_SIZE']), )
         attn_metadata.slot_mapping = torch.empty_like(positions)
         advance_state_kernel[grid](
             # === Input tensors ===
