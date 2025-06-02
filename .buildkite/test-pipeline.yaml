@@ -516,9 +516,9 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/multimodal/processing
-    - pytest -v -s --ignore models/multimodal/generation/test_whisper.py models/multimodal -m core_model
     - cd .. && pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+    - pytest -v -s --ignore models/multimodal/generation/test_whisper.py models/multimodal -m core_model
+    - pytest -v -s models/multimodal/processing
 
 - label: Multi-Modal Models Test (Extended) 1
   mirror_hardwares: [amdexperimental]
@@ -721,7 +721,7 @@ steps:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
 
 - label: Weight Loading Multiple GPU Test - Large Models # optional
-  mirror_hardwares: [amdexperimental] 
+  mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   gpu: a100
