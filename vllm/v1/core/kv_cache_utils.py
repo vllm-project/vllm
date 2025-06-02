@@ -125,10 +125,7 @@ class KVCacheBlock:
     next_free_block: Optional["KVCacheBlock"] = None
 
     # Whether the block is a null block that should never be cached.
-    # Use `is_not_null` instead of `is_null` because most checks in the
-    # codebase are for checking the block is not a null block,
-    # `block.is_not_null` is a little faster than `not block.is_null`
-    is_not_null: bool = True
+    is_null: bool = False
 
     def incr_ref(self):
         self.ref_cnt += 1
