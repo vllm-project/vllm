@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: SIM117
-import copy
 import fnmatch
 import glob
 import itertools
@@ -36,7 +35,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models import is_pooling_model
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import (get_packed_modules_mapping,
+                                       set_weight_attrs)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -420,8 +420,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet. No 'packed_modules_mapping' found.")
         self.is_pool_model=is_pooling_model(model)
-        self.modules_mapping = ParamMapping(
-            copy.deepcopy(model.packed_modules_mapping))
+
+        self.modules_mapping = ParamMapping(get_packed_modules_mapping(model))
 
         # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
