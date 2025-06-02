@@ -44,9 +44,9 @@ from vllm.spec_decode.target_model_runner import TargetModelRunner
 from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    create_sequence_group_output,
                                    get_all_num_logprobs,
-                                   get_sampled_token_logprobs, nvtx_range,
+                                   get_sampled_token_logprobs,
                                    split_batch_by_proposal_len)
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils import nvtx_range, resolve_obj_by_qualname
 from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)

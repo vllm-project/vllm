@@ -2842,3 +2842,26 @@ def is_torch_equal_or_newer(target: str) -> bool:
     except Exception:
         # Fallback to PKG-INFO to load the package info, needed by the doc gen.
         return Version(importlib.metadata.version('torch')) >= Version(target)
+
+
+@contextlib.contextmanager
+def nvtx_range(msg, *args, **kwargs):
+    """ 
+    Context manager / decorator that pushes an NVTX range at the beginning
+    of its scope, and pops it at the end. If extra arguments are given,
+    they are passed as arguments to msg.format().
+
+    If running with cuda graphs, you must enable nsys cuda graph profiling.
+
+    Arguments:
+        msg (string): message to associate with the range
+    """
+    from vllm.platforms import current_platform
+    if current_platform.is_cuda_alike():
+        torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
+        try:
+            yield
+        finally:
+            torch.cuda.nvtx.range_pop()
+    else:
+        yield

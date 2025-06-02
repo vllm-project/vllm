@@ -13,7 +13,8 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID, VLLM_TOKEN_ID_ARRAY_TYPE,
                            SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
-from vllm.spec_decode.util import nvtx_range, split_batch_by_proposal_len
+from vllm.spec_decode.util import split_batch_by_proposal_len
+from vllm.utils import nvtx_range
 
 SeqId = int
 TargetSeqId = int

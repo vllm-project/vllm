@@ -35,7 +35,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
-                        check_use_alibi, is_pin_memory_available)
+                        check_use_alibi, is_pin_memory_available, nvtx_range)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
@@ -1124,8 +1124,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices, spec_decode_metadata = (
-            self._prepare_inputs(scheduler_output))
+        with nvtx_range("gpu_model_runner._prepare_inputs"):
+            attn_metadata, logits_indices, spec_decode_metadata = (
+                self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1149,7 +1150,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # modal outputs after that to ensure the correct order
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
-            self._execute_mm_encoder(scheduler_output)
+            with nvtx_range("gpu_model_runner._execute_mm_encoder"):
+                self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
@@ -1188,9 +1190,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens):
+        with nvtx_range("gpu_model_runner.forward"), set_forward_context(
+                attn_metadata, self.vllm_config, num_tokens=num_input_tokens):
             self.maybe_setup_kv_connector(scheduler_output)
 
             model_output = self.model(
@@ -1224,8 +1225,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                             all_gather_group=get_tp_group())
             logits = None
         else:
-            sample_hidden_states = hidden_states[logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states, None)
+            with nvtx_range("gpu_model_runner.compute_logits"):
+                sample_hidden_states = hidden_states[logits_indices]
+                logits = self.model.compute_logits(sample_hidden_states, None)
         if broadcast_pp_output:
             model_output_broadcast_data = {
                 "logits": logits.contiguous(),
@@ -1241,36 +1243,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
-        if spec_decode_metadata is None:
-            sampler_output = self.sampler(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-            )
-        else:
-            # When indexing with a tensor (bonus_logits_indices), PyTorch
-            # creates a new tensor with separate storage from the original
-            # logits tensor. This means any in-place operations on bonus_logits
-            # won't affect the original logits tensor.
-            assert logits is not None
-            bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
-            sampler_output = self.sampler(
-                logits=bonus_logits,
-                sampling_metadata=sampling_metadata,
-            )
-            bonus_token_ids = sampler_output.sampled_token_ids
+        with nvtx_range("gpu_model_runner.sampling"):
+            if spec_decode_metadata is None:
+                sampler_output = self.sampler(
+                    logits=logits,
+                    sampling_metadata=sampling_metadata,
+                )
+            else:
+                # When indexing with a tensor (bonus_logits_indices), PyTorch
+                # creates a new tensor with separate storage from the original
+                # logits tensor. This means any in-place operations on
+                # bonus_logits won't affect the original logits tensor.
+                assert logits is not None
+                bonus_logits = logits[
+                    spec_decode_metadata.bonus_logits_indices]
+                sampler_output = self.sampler(
+                    logits=bonus_logits,
+                    sampling_metadata=sampling_metadata,
+                )
+                bonus_token_ids = sampler_output.sampled_token_ids
 
-            # Just like `bonus_logits`, `target_logits` is a new tensor with
-            # separate storage from the original `logits` tensor. Therefore,
-            # it is safe to update `target_logits` in place.
-            target_logits = logits[spec_decode_metadata.target_logits_indices]
-            output_token_ids = self.rejection_sampler(
-                spec_decode_metadata,
-                None,  # draft_probs
-                target_logits,
-                bonus_token_ids,
-                sampling_metadata,
-            )
-            sampler_output.sampled_token_ids = output_token_ids
+                # Just like `bonus_logits`, `target_logits` is a new tensor with
+                # separate storage from the original `logits` tensor. Therefore,
+                # it is safe to update `target_logits` in place.
+                target_logits = logits[
+                    spec_decode_metadata.target_logits_indices]
+                output_token_ids = self.rejection_sampler(
+                    spec_decode_metadata,
+                    None,  # draft_probs
+                    target_logits,
+                    bonus_token_ids,
+                    sampling_metadata,
+                )
+                sampler_output.sampled_token_ids = output_token_ids
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.

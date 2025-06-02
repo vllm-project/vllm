@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from contextlib import contextmanager
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.platforms import current_platform
 from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SequenceGroupMetadata,
                            SequenceOutput)
@@ -238,28 +236,6 @@ def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
                                                      size=(batch_size, ),
                                                      dtype=torch.long,
                                                      device=device)
-
-
-@contextmanager
-def nvtx_range(msg, *args, **kwargs):
-    """ 
-    Context manager / decorator that pushes an NVTX range at the beginning
-    of its scope, and pops it at the end. If extra arguments are given,
-    they are passed as arguments to msg.format().
-
-    If running with cuda graphs, you must enable nsys cuda graph profiling.
-
-    Arguments:
-        msg (string): message to associate with the range
-    """
-    if current_platform.is_cuda_alike():
-        torch.cuda.nvtx.range_push(msg.format(*args, **kwargs))
-        try:
-            yield
-        finally:
-            torch.cuda.nvtx.range_pop()
-    else:
-        yield
 
 
 class Timer:
