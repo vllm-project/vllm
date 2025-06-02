@@ -369,12 +369,7 @@ def modular_triton_moe_kernels_forward(
     w1: torch.Tensor, 
     w2: torch.Tensor,
     #TODO: this is a hack to aviod torch.compile bug in pytorch #154009
-    gate_scal: torch.Tensor,
-    expt_hist: torch.Tensor,
-    n_expts_tot: int,
-    n_expts_act: int,   
-    topk_indx: torch.Tensor,
-    gate_indx: torch.Tensor,
+    routing_data: ExpTritonExpertsRoutingData,
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
@@ -382,11 +377,7 @@ def modular_triton_moe_kernels_forward(
     per_channel_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
-    routing_data = RoutingData(gate_scal, expt_hist, n_expts_tot, n_expts_act)
-    gather_indx = GatherIndx(src_indx=topk_indx, dst_indx=gate_indx)
-    scatter_indx = ScatterIndx(src_indx=gate_indx, dst_indx=topk_indx)
-    exp_routing_data = ExpTritonExpertsRoutingData(routing_data, gather_indx, scatter_indx)
-
+    
     qtype = get_config_qtype(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
@@ -412,33 +403,6 @@ def modular_triton_moe_kernels_forward(
             w1,
             w2,
             # custom routing
-            exp_routing_data,
+            routing_data,
             apply_router_weight_on_input=False)
-
-def modular_triton_moe_kernels_forward_fake(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor, 
-    w2: torch.Tensor, 
-    gate_scal: torch.Tensor,
-    expt_hist: torch.Tensor,
-    n_expts_tot: int,
-    n_expts_act: int,   
-    topk_indx: torch.Tensor,
-    gate_indx: torch.Tensor,
-    use_fp8_w8a8: bool,
-    use_int8_w8a8: bool,
-    use_int8_w8a16: bool,
-    use_int4_w4a16: bool,
-    per_channel_quant: bool,
-    block_shape: Optional[list[int]] = None,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-direct_register_custom_op(
-    op_name="modular_triton_moe_kernels_forward",
-    op_func=modular_triton_moe_kernels_forward,
-    mutates_args=[],
-    fake_impl=modular_triton_moe_kernels_forward_fake,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
-)
  

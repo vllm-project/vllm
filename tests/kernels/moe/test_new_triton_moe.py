@@ -6,14 +6,11 @@ import torch
 import triton
 import triton.language as tl
 
-from triton_kernels.matmul_ogs import matmul_ogs
-from triton_kernels.routing import (routing, RoutingData, GatherIndx, ScatterIndx)
 from triton_kernels.testing import assert_close
 
-from vllm.model_executor.layers.fused_moe.fused_moe import ( fused_moe, fused_experts )
+from vllm.model_executor.layers.fused_moe.fused_moe import ( fused_moe, )
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.triton_kernels_moe import modular_triton_moe_kernels_forward, forward_cuda_triton
-from vllm import _custom_ops as ops
 
 def forward_modular_triton(
     x, w1, w2,
@@ -33,17 +30,12 @@ def forward_modular_triton(
 ):
     routing_data = FusedMoE.select_experts(None, router_logits, top_k, False, renormalize)
 
-    return torch.ops.vllm.modular_triton_moe_kernels_forward(
+    return modular_triton_moe_kernels_forward(
         x,
-        w1,
-        w2,
+        w1=w1,
+        w2=w2,
         # custom routing
-        gate_scal=routing_data.routing_data.gate_scal,
-        expt_hist=routing_data.routing_data.expt_hist,
-        n_expts_tot=routing_data.routing_data.n_expts_tot,
-        n_expts_act=routing_data.routing_data.n_expts_act, 
-        topk_indx=routing_data.gather_indx.src_indx,
-        gate_indx=routing_data.gather_indx.dst_indx,
+        routing_data=routing_data,
         use_fp8_w8a8=False,
         use_int8_w8a8=False,
         use_int8_w8a16=False,

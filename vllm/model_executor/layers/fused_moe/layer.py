@@ -597,17 +597,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if envs.VLLM_USE_EXP_TRITON_KERNEL:
             assert isinstance(routing_data, ExpTritonExpertsRoutingData)
 
-            return torch.ops.vllm.modular_triton_moe_kernels_forward(
+            return modular_triton_moe_kernels_forward(
                     x,
                     w1=layer.w13_weight,
                     w2=layer.w2_weight,
                     # custom routing
-                    gate_scal=routing_data.routing_data.gate_scal,
-                    expt_hist=routing_data.routing_data.expt_hist,
-                    n_expts_tot=routing_data.routing_data.n_expts_tot,
-                    n_expts_act=routing_data.routing_data.n_expts_act, 
-                    topk_indx=routing_data.gather_indx.src_indx,
-                    gate_indx=routing_data.gather_indx.dst_indx,
+                    routing_data=routing_data,
                     use_fp8_w8a8=False,
                     use_int8_w8a8=False,
                     use_int8_w8a16=False,
@@ -854,7 +849,7 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts
 
         # For smuggling this layer into the fused moe custom op
-        self.use_direct_call = self.dp_size == 1
+        self.use_direct_call = self.dp_size == 1 and not envs.VLLM_USE_EXP_TRITON_KERNEL
         if not self.use_direct_call:
             compilation_config = vllm_config.compilation_config
             if prefix in compilation_config.static_forward_context:
