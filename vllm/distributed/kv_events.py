@@ -75,7 +75,7 @@ class EventPublisher(ABC):
     operates independently of DP topology and shouldn't need DP awareness.
     """
 
-    def __init__(self, data_parallel_rank: int) -> None:
+    def __init__(self, data_parallel_rank: int = 0) -> None:
         self._data_parallel_rank = data_parallel_rank
 
     @abstractmethod
@@ -302,7 +302,8 @@ class EventPublisherFactory:
         cls._registry[name] = ctor
 
     @classmethod
-    def create(cls, config: Optional[KVEventsConfig],
+    def create(cls,
+               config: Optional[KVEventsConfig],
                data_parallel_rank: int = 0) -> EventPublisher:
         """Create publisher from a config mapping."""
         if not config:
