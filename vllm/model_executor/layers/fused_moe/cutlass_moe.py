@@ -204,12 +204,14 @@ def run_cutlass_moe_fp8(
 # TODO (bnell): split class batched vs. non-batched?
 class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
+class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
+
     def __init__(
         self,
         max_experts_per_worker: int,
-        out_dtype: torch.dtype,
+        out_dtype: Optional[torch.dtype],
         per_act_token_quant: bool,
-        per_out_ch: bool,
+        per_out_ch_quant: bool,
         use_batched_format: bool = False,
     ):
         super().__init__(
@@ -219,8 +221,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         )
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
-        self.per_act_token = per_act_token_quant
-        self.per_out_ch = per_out_ch
+        self.per_out_ch_quant = per_out_ch_quant
         self.use_batched_format = use_batched_format
 
     def supports_chunking(self) -> bool:
@@ -339,6 +340,9 @@ def cutlass_moe_fp8(
     per_out_ch = w1_scale.numel() != w1_q.shape[0]
 
     out_dtype = a.dtype
+
+    if out_dtype is None:
+        out_dtype = a.dtype
 
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(

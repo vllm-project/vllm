@@ -319,5 +319,5 @@ def test_fused_moe_batched_experts(
 
     torch.testing.assert_close(baseline_output,
                                batched_output,
-                               atol=3e-2,
+                               atol=2e-2,
                                rtol=0)
