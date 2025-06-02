@@ -474,13 +474,27 @@ class InputBatch:
 
         self.block_table.swap_row(i1, i2)
 
-    def condense(self, empty_req_indices: list[int]) -> list[tuple[int, int]]:
+    def condense(
+        self, empty_req_indices: list[int]
+    ) -> tuple[list[tuple[int, int]], list[int]]:
+        """Slide non-empty requests down into empty indices.
+
+        Any consecutive empty indices at the very end of the list are not
+        filled.
+
+        Args:
+          empty_req_indices: empty indices which may be filled.
+
+        Returns:
+          swaps: list of (from,to) swap tuples for moved requests
+          empty_req_indices: indices not filled by condensation
+        """
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
             self._req_ids.clear()
             self.req_output_token_ids.clear()
-            return []
+            return [], []
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
         # is sorted in descending order.
@@ -492,11 +506,12 @@ class InputBatch:
                 last_req_index -= 1
 
             # Find the smallest empty index.
-            empty_index = empty_req_indices.pop()
+            empty_index = empty_req_indices[-1]
             if empty_index >= last_req_index:
                 break
 
             # Swap the states.
+            empty_req_indices.pop()
             swaps.append((last_req_index, empty_index))
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
@@ -555,7 +570,7 @@ class InputBatch:
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
-        return swaps
+        return swaps, empty_req_indices
 
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self._make_sampling_metadata()

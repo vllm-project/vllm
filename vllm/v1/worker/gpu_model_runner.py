@@ -502,7 +502,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
-            moved = self.input_batch.condense(removed_req_indices)
+            moved, removed = self.input_batch.condense(removed_req_indices)
         else:
             moved = []
 

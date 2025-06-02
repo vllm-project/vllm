@@ -8,6 +8,9 @@ import torch
 from torch._prims_common import DeviceLikeType
 
 from vllm import SamplingParams
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclasses.dataclass
@@ -144,8 +147,8 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         self.pin_memory = pin_memory
 
         self.bias_tensor: torch.Tensor = torch.tensor(())
-        self.logits_slice: tuple[torch.Tensor, torch.Tensor] = (torch.tensor(
-            ()), torch.tensor(()))
+        self.logits_slice = (self._device_tensor([], torch.int32),
+                             self._device_tensor([], torch.int32))
 
     @classmethod
     def requires_nongreedy(cls) -> bool:
@@ -206,8 +209,12 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         self.device = device
         self.pin_memory = pin_memory
 
-        self.logits_slice: tuple[torch.Tensor, torch.Tensor] = (torch.tensor(
-            ()), torch.tensor(()))
+        # (req_idx_tensor,eos_tok_id_tensor)
+        self.logits_slice: tuple[torch.Tensor,
+                                 torch.Tensor] = (self._device_tensor(
+                                     [], torch.int32),
+                                                  self._device_tensor(
+                                                      [], torch.int32))
 
     @classmethod
     def requires_nongreedy(cls) -> bool:
@@ -216,6 +223,14 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     def update_states(self, batch_update: Optional[BatchUpdate] = None):
         needs_update = False
         if batch_update:
+            # Process added requests.
+            for index, sampling_params, output_tok_ids in batch_update.added:
+                if ((min_tokens := sampling_params.min_tokens)
+                        and len(output_tok_ids) < min_tokens):
+                    self.min_toks[index] = (min_tokens, output_tok_ids,
+                                            sampling_params.all_stop_token_ids)
+                    needs_update = True
+
             if self.min_toks:
                 # Process removed and moved requests.
                 for index in batch_update.removed:
@@ -226,14 +241,6 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                     if entry := self.min_toks.pop(from_index, None):
                         self.min_toks[to_index] = entry
                         needs_update = True
-
-            # Process added requests.
-            for index, sampling_params, output_tok_ids in batch_update.added:
-                if ((min_tokens := sampling_params.min_tokens)
-                        and len(output_tok_ids) < min_tokens):
-                    self.min_toks[index] = (min_tokens, output_tok_ids,
-                                            sampling_params.all_stop_token_ids)
-                    needs_update = True
 
         if self.min_toks:
             # Check for any requests that have attained their min tokens.
@@ -265,5 +272,6 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.min_toks:
+            # Inhibit EOS token for requests which have not reached min length
             logits[self.logits_slice] = -float("inf")
         return logits
