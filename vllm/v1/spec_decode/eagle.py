@@ -331,11 +331,9 @@ class EagleProposer:
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1 \
             and self.model.model.embed_tokens.weight.shape \
-                == target_model.model.embed_tokens.weight.shape \
-            and torch.allclose(self.model.model.embed_tokens.weight,
-                               target_model.model.embed_tokens.weight):
+                == target_model.model.embed_tokens.weight.shape:
             logger.info(
-                "The EAGLE head shares the same vocab embedding" \
+                "Assuming the EAGLE head shares the same vocab embedding" \
                 " with the target model."
             )
             del self.model.model.embed_tokens
