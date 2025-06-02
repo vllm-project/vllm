@@ -190,9 +190,9 @@ class CPUWorker(LocalOrDistributedWorkerBase):
                         "Please try to bind threads manually.", world_size,
                         len(node_to_cpus))
                 else:
-                    rank_to_cpus = str(node_to_cpus[self.rank][0]) + '-' + str(
-                        node_to_cpus[self.rank][cpu_count_per_numa - 1 -
-                                                num_of_reserved_cpu])
+                    end = cpu_count_per_numa - num_of_reserved_cpu
+                    rank_to_cpus_list = node_to_cpus[self.rank][:end]
+                    rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
                     self.local_omp_cpuid = rank_to_cpus
                     logger.info("auto thread-binding list: %s",
                                 self.local_omp_cpuid)
