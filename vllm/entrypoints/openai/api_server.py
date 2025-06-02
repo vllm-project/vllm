@@ -868,6 +868,11 @@ if envs.VLLM_SERVER_DEV_MODE:
         server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
         return JSONResponse(content=server_info)
 
+    @router.get("/get_kv_connector_metadata")
+    async def get_kv_connector_metadata(raw_request: Request):
+        kv_connector_metadata = raw_request.app.state.vllm_config.cache_config.transfer_handshake_metadata
+        return JSONResponse(content=kv_connector_metadata)
+
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
         """

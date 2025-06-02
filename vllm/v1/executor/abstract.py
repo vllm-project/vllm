@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from concurrent.futures import Future
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -78,6 +78,10 @@ class Executor(ExecutorBase):
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         output = self.collective_rpc("get_kv_cache_spec")
+        return output
+
+    def get_kv_connector_handshake_metadata(self) -> list[Optional[dict[int, dict[int, dict]]]]:
+        output = self.collective_rpc("get_kv_connector_handshake_metadata")
         return output
 
     def execute_model(

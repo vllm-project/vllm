@@ -32,9 +32,11 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
+import msgspec
+from pydantic_core import core_schema
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -62,18 +64,58 @@ class KVConnectorMetadata:
     Abstract Metadata used to communicate between the
     Scheduler KVConnector and Worker KVConnector.
     """
-    pass
+    
+    def __init__(self):
+        pass
 
+
+class KVConnectorHandshakeMetadata(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):
+    """
+    Metadata optionally used for out of band connector handshake between P/D workers.
+    """
+    connector_type: str = "base"
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, 
+        _source_type: Any, 
+        _handler: Callable[[Any], core_schema.CoreSchema]
+    ) -> core_schema.CoreSchema:
+        """bridge msgspec.Struct with pydantic for schema generation"""
+        return core_schema.no_info_after_validator_function(
+            cls,
+            core_schema.dict_schema()
+        )
+
+class KVConnectorTransferMetadata(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        dict=True):
+    """
+    Wrapper for transfer handshake metadata sent between engine and utils.
+    """
+    tensor_parallel_rank: int
+    data_parallel_rank: int
+    content: Optional[dict]
+    
 
 class KVConnectorBase_V1(ABC):
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+    def __init__(self,
+                 vllm_config: "VllmConfig",
+                 role: KVConnectorRole):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design.")
         self._connector_metadata = KVConnectorMetadata()
         self._vllm_config = vllm_config
         self._role = role
+        self._handshake_metadata: Optional[KVConnectorHandshakeMetadata] = None
+
 
     @property
     def role(self) -> KVConnectorRole:
@@ -104,7 +146,7 @@ class KVConnectorBase_V1(ABC):
         """
         self._connector_metadata = KVConnectorMetadata()
 
-    def _get_connector_metadata(self) -> KVConnectorMetadata:
+    def get_connector_metadata(self) -> KVConnectorMetadata:
         """Get the connector metadata.
 
         This function should only be called inside the connector.
@@ -200,6 +242,31 @@ class KVConnectorBase_V1(ABC):
             call to this method (this call or a prior one).
         """
         return None, None
+
+    def set_handshake_metadata(
+        self, handshake_metadata: KVConnectorHandshakeMetadata) -> None:
+        """
+        Set the handshake metadata for the connector.
+
+        This metadata is used for out-of-band connector handshake
+        between P/D workers.
+        
+        Args:
+            handshake_metadata (KVConnectorHandshakeMetadata): the handshake
+                metadata.
+        """
+        self._handshake_metadata = handshake_metadata
+
+
+    def get_handshake_metadata(
+        self) -> Optional[KVConnectorHandshakeMetadata]:
+        """
+        Get the handshake metadata for the connector.
+
+        Returns:
+            KVConnectorHandshakeMetadata: the handshake metadata.
+        """
+        return self._handshake_metadata
 
     # ==============================
     # Scheduler-side methods

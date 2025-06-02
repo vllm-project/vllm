@@ -33,21 +33,48 @@ import types
 import uuid
 import warnings
 import weakref
-from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError, RawDescriptionHelpFormatter,
-                      _ArgumentGroup)
+from argparse import (
+    Action,
+    ArgumentDefaultsHelpFormatter,
+    ArgumentParser,
+    ArgumentTypeError,
+    RawDescriptionHelpFormatter,
+    _ArgumentGroup,
+)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
-from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
-                             Hashable, Iterable, Iterator, KeysView, Mapping)
+from collections.abc import (
+    AsyncGenerator,
+    Awaitable,
+    Collection,
+    Generator,
+    Hashable,
+    Iterable,
+    Iterator,
+    KeysView,
+    Mapping,
+)
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
-from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Sequence, Tuple, Type, TypeVar, Union, cast,
-                    overload)
-from urllib.parse import urlparse
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    Literal,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    cast,
+    overload,
+)
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 import cachetools
@@ -67,6 +94,7 @@ from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
+
 # NOTE: import triton_utils to make TritonPlaceholderModule work
 #       if triton is unavailable
 import vllm.triton_utils  # noqa: F401
@@ -2917,3 +2945,43 @@ def is_torch_equal_or_newer(target: str) -> bool:
     except Exception:
         # Fallback to PKG-INFO to load the package info, needed by the doc gen.
         return Version(importlib.metadata.version('torch')) >= Version(target)
+
+
+def build_uri(
+    scheme: str, 
+    host: str, 
+    port: Optional[int] = None, 
+    path: str = "", 
+    params: str = "", 
+    query: str = "", 
+    fragment: str = ""
+) -> str:
+    """
+    Robustly build a URI that properly handles IPv6 addresses.
+    
+    Args:
+        scheme: URI scheme (e.g., 'http', 'https')
+        host: hostname or IP address
+        port: port number (optional)
+        path: path component
+        params: parameters component
+        query: query string
+        fragment: fragment identifier
+    
+    Returns:
+        Complete URI string
+    """
+    # Handle IPv6 addresses
+    if host:
+        try:
+            # Check if it's an IPv6 address
+            ip = ipaddress.ip_address(host)
+            # Ensure IPv6 addresses are bracketed
+            if (isinstance(ip, ipaddress.IPv6Address) and 
+                not (host.startswith('[') and host.endswith(']'))):
+                host = f'[{host}]'
+        except ValueError:
+            pass
+    
+    netloc = f"{host}:{port}" if port else host
+    return urlunparse((scheme, netloc, path, params, query, fragment))
