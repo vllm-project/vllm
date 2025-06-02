@@ -273,7 +273,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             # Intranode pplx a2a takes a group name while internode does not.
             if not all2all_manager.internode:
-                all_to_all_args["group_name"] = all2all_manager.cpu_group.group_name
+                all_to_all_args[
+                    "group_name"] = all2all_manager.cpu_group.group_name
 
             handle = all2all_manager.get_handle(all_to_all_args)
 
