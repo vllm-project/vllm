@@ -15,48 +15,48 @@ the failure?
 
 ## Filing a CI Test Failure Issue
 
-1. **File a bug report:**  
-   👉 [New CI Failure Report](https://github.com/vllm-project/vllm/issues/new?template=450-ci-failure.yml)
+- **File a bug report:**  
+    👉 [New CI Failure Report](https://github.com/vllm-project/vllm/issues/new?template=450-ci-failure.yml)
 
-1. **Use this title format:**
-
-```text
-   [CI Failure]: failing-test-job - regex/matching/failing:test
-   ```
-
-1. **For the environment field:**
-
-   ```text
-Still failing on main as of commit abcdef123
-
-   ```
-
-1. **In the description, include failing tests:**
-   ```text
-   FAILED failing/test.py:failing_test1 - Failure description  
-FAILED failing/test.py:failing_test2 - Failure description  
-   https://github.com/orgs/vllm-project/projects/20  
-   https://github.com/vllm-project/vllm/issues/new?template=400-bug-report.yml  
-   FAILED failing/test.py:failing_test3 - Failure description  
-   ```
-
-1. **Attach logs** (collapsible section example):
-   <details>
-   <summary>Logs:</summary>
-
-   ```text
-   ERROR 05-20 03:26:38 [dump_input.py:68] Dumping input data  
-   --- Logging error ---  
-   Traceback (most recent call last):  
-     File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 203, in execute_model  
-       return self.model_executor.execute_model(scheduler_output)  
-   ...
-   FAILED failing/test.py:failing_test1 - Failure description  
-   FAILED failing/test.py:failing_test2 - Failure description  
-   FAILED failing/test.py:failing_test3 - Failure description  
-   ```
+- **Use this title format:**
   
-</details>
+    ```
+    [CI Failure]: failing-test-job - regex/matching/failing:test
+    ```
+
+- **For the environment field:**
+  
+    ```
+ Still failing on main as of commit abcdef123
+    ```
+
+- **In the description, include failing tests:**
+  
+    ```
+    FAILED failing/test.py:failing_test1 - Failure description  
+ FAILED failing/test.py:failing_test2 - Failure description  
+    https://github.com/orgs/vllm-project/projects/20  
+    https://github.com/vllm-project/vllm/issues/new?template=400-bug-report.yml  
+    FAILED failing/test.py:failing_test3 - Failure description  
+    ```
+
+- **Attach logs** (collapsible section example):
+    <details>
+    <summary>Logs:</summary>
+
+    ```text
+    ERROR 05-20 03:26:38 [dump_input.py:68] Dumping input data  
+    --- Logging error ---  
+    Traceback (most recent call last):  
+      File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core.py", line 203, in execute_model  
+        return self.model_executor.execute_model(scheduler_output)  
+    ...
+    FAILED failing/test.py:failing_test1 - Failure description  
+    FAILED failing/test.py:failing_test2 - Failure description  
+    FAILED failing/test.py:failing_test3 - Failure description  
+    ```
+  
+    </details>
 
 ## Logs Wrangling
 
