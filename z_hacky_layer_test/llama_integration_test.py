@@ -1,5 +1,7 @@
+from typing import Optional
 from vllm import LLM
 import argparse
+import torch
 
 def main():
     parser = argparse.ArgumentParser(description="Extract first LlamaAttention layer")
@@ -14,19 +16,24 @@ def main():
     llm = LLM(
         model=args.model,
         trust_remote_code=args.trust_remote_code,
+        enforce_eager=True,
     )
     
     prompts = ["Hello, how are you?"]
-    # Get the first LlamaAttention layer
-    first_attention_layer = llm.llm_engine.model.model.layers[0].self_attn
     
-    # Print some info about it
-    print(f"Successfully retrieved first LlamaAttention layer")
-    print(f"Number of heads: {first_attention_layer.num_heads}")
-    print(f"Number of KV heads: {first_attention_layer.num_kv_heads}")
-    print(f"Head dimension: {first_attention_layer.head_dim}")
-    
-    return first_attention_layer
+    def check_model(self):
+            print("self.model_runner.model.model.__class__", self.model_runner.model.model.__class__)
+            print("self.model_runner.model.model.layers", self.model_runner.model.model.layers)
+            layer = self.model_runner.model.model.layers[0]
+            print("layer:", layer)
+            print("layer.self_attn:", layer.self_attn)
+            print("layer.self_attn.attn:", layer.self_attn.attn)
+            return layer.self_attn.attn
+
+    ret = llm.collective_rpc(check_model)
+
+    print("ret:", ret)
+
 
 if __name__ == "__main__":
     main()
