@@ -526,7 +526,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
             if model_type in ("aya_vision", "chameleon", "deepseek_vl_v2",
                               "internvl_chat", "ovis", "skywork_chat",
-                              "NVLM_D", "h2ovl_chat", "idefics3", "smolvlm"):
+                              "NVLM_D", "h2ovl_chat", "idefics3", "smolvlm",
+                              "tarsier"):
                 return "<image>"
             if model_type in ("mllama", "llama4"):
                 return "<|image|>"

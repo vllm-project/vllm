@@ -25,7 +25,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+from vllm.multimodal.inputs import (MultiModalFieldConfig,
                                     MultiModalKwargs)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
@@ -34,6 +34,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.models.llava import LlavaDummyInputsBuilder
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -259,28 +260,9 @@ class TarsierProcessingInfo(BaseProcessingInfo):
 _I_Tarsier = TypeVar("_I_Tarsier", bound=TarsierProcessingInfo)
 
 
-class TarsierDummyInputsBuilder(BaseDummyInputsBuilder[_I_Tarsier]):
+class TarsierDummyInputsBuilder(LlavaDummyInputsBuilder[_I_Tarsier]):
 
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_images = mm_counts.get("image", 0)
-        processor = self.info.get_hf_processor()
-        image_token = processor.image_token
-        return image_token * num_images
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
-        return {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images)
-        }
+    pass
 
 
 class TarsierMultiModalProcessor(BaseMultiModalProcessor[_I_Tarsier]):

@@ -407,7 +407,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
                                      trust_remote_code=True),
     "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b",  # noqa: E501
-                                                        trust_remote_code=True,  # noqa: E501
                                                         hf_overrides={"architectures": ["TarsierForConditionalGeneration"]}),  # noqa: E501
     # [Encoder-decoder]
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
