@@ -12,7 +12,14 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 ARG TARGETPLATFORM
+ARG UBUNTU_MIRROR
 ENV DEBIAN_FRONTEND=noninteractive
+
+# Replace Ubuntu sources if mirror is specified
+RUN if [ -n "$UBUNTU_MIRROR" ]; then \
+    sed -i "s|http://.*archive.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list && \
+    sed -i "s|http://.*security.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list; \
+fi
 
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
@@ -185,9 +192,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
+ARG UBUNTU_MIRROR
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
+
+# Replace Ubuntu sources if mirror is specified
+RUN if [ -n "$UBUNTU_MIRROR" ]; then \
+    sed -i "s|http://.*archive.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list && \
+    sed -i "s|http://.*security.ubuntu.com|$UBUNTU_MIRROR|g" /etc/apt/sources.list; \
+fi
 
 SHELL ["/bin/bash", "-c"]
 
