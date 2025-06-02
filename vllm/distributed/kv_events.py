@@ -303,7 +303,7 @@ class EventPublisherFactory:
 
     @classmethod
     def create(cls, config: Optional[KVEventsConfig],
-               data_parallel_rank: int) -> EventPublisher:
+               data_parallel_rank: int = 0) -> EventPublisher:
         """Create publisher from a config mapping."""
         if not config:
             return NullEventPublisher()
