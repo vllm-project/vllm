@@ -611,7 +611,7 @@ def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
         True if all layers have the same type, False otherwise.
     """
 
-    layer_keys = set(layer.type_id for layer in kv_cache_spec.values())
+    layer_keys = {layer.type_id for layer in kv_cache_spec.values()}
     return len(layer_keys) == 1
 
 
@@ -881,8 +881,11 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     if not is_hybrid(kv_cache_spec):
         return
 
-    logger.warning("Hybrid KV cache manager is disabled for this hybrid model,"
-                   "There can be some waste of KV cache memory.")
+    logger.warning(
+        "Hybrid KV cache manager is disabled for this hybrid model, "
+        "This means we do not enable any optimizations for saving KV cache "
+        "memory (e.g., dropping the KV cache outside the sliding window). "
+        "The compute of layers like sliding window is still saved.")
 
     has_full_attention = any(
         isinstance(spec, FullAttentionSpec) for spec in kv_cache_spec.values())

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
 from vllm.v1.core.block_pool import BlockPool
@@ -11,7 +11,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.request import Request
 
 
-class KVCacheCoordinator:
+class KVCacheCoordinator(ABC):
     """
     Coordinate the KV cache of different KV cache groups.
     """
