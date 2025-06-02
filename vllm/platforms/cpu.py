@@ -28,7 +28,7 @@ class CpuPlatform(Platform):
     dispatch_key: str = "CPU"
 
     @property
-    def supported_dtypes(self) -> list:
+    def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
         elif sys.platform.startswith(
@@ -75,7 +75,7 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
             model_config.enforce_eager = True

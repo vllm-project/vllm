@@ -3,11 +3,13 @@ import enum
 import os
 import platform
 import random
+from datetime import timedelta
 from platform import uname
 from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
 
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
@@ -84,7 +86,7 @@ class DeviceCapability(NamedTuple):
 
     def to_int(self) -> int:
         """
-        Express device capability as an integer ``<major><minor>``.
+        Express device capability as an integer `<major><minor>`.
 
         It is assumed that the minor version is always a single digit.
         """
@@ -206,10 +208,11 @@ class Platform:
         """
         Test whether this platform is compatible with a device capability.
 
-        The ``capability`` argument can either be:
+        The `capability` argument can either be:
 
-        - A tuple ``(major, minor)``.
-        - An integer ``<major><minor>``. (See {meth}`DeviceCapability.to_int`)
+        - A tuple `(major, minor)`.
+        - An integer `<major><minor>`. (See
+        [`DeviceCapability.to_int`][vllm.platforms.interface.DeviceCapability.to_int])
         """
         current_capability = cls.get_device_capability(device_id=device_id)
         if current_capability is None:
@@ -484,6 +487,20 @@ class Platform:
         Get piecewise backend class for piecewise graph.
         """
         return "vllm.compilation.base_piecewise_backend.AbstractPiecewiseBackend"  # noqa
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        """
+        Init platform-specific torch distributed process group.
+        """
+        raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
 
 class UnspecifiedPlatform(Platform):
