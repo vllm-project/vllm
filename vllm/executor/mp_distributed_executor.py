@@ -109,7 +109,6 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
         all_kwargs = []
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
-
         for i in range(world_size):
             local_rank = i
             rank = i
