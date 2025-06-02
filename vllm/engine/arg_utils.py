@@ -622,9 +622,8 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
-        parallel_group.add_argument(
-            "--enable-microbatching",
-            **parallel_kwargs["enable_microbatching"])
+        parallel_group.add_argument("--enable-microbatching",
+                                    **parallel_kwargs["enable_microbatching"])
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"])
