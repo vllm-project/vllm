@@ -720,35 +720,61 @@ def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
         available_memory: int) -> KVCacheConfig:
     """
-    Generates the KV cache configuration for models with a uniform page size.
+    Generates the KV cache configuration for hybrid models with multiple 
+    attention types but still with a uniform page size (physical memory per 
+    block per layer) for all layers.
 
-    NOTE(Chen): To simplify the kv cache management logic for hybrid models, we 
-    make the following assumptions:
+    Detailed explanation about kv cache management of hybrid models:
+    The layers in the models are repeated with some patterns, e.g., a model
+    with 10 full attention layers and 20 sliding window attention layers can be
+    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. 
+    The KVCacheManager allocates different block tables for each of the 3 layers
+    in the pattern, and repeats each of them 10 times to generate the 
+    block_table for the 30 layers in the model.
+    Therefore, we can group the layers in the model into 3 kv_cache_groups, each
+    of which contains 10 layers in the model.
+    The KVCacheManager allocates the block_table for each group based on its
+    kv_cache spec, and the model runner applies the block table to each layer 
+    in the group.
+    For example:
+    1. A model only uses full attention. The pattern is 
+    (num_hidden_layers * full), so there is only one group and the block table 
+    is shared by all layers. It is already handled by 
+    `_get_kv_cache_config_uniform_type`.
+    2. A model with 10 full attention layers and 20 sliding window 
+    attention layers. There are 3 layers in the pattern (1 * full, 2 * sw), so 
+    there are 3 kv_cache_groups, each of which represents 10 layers.
+
+    To simplify the implementation, we make the following assumptions:
     1. Physical memory per block: Must be the same across all KV cache groups. 
     Breaking this assumption is non-trivial due to memory fragmentation concerns
     when allocating blocks of different sizes.
-    2. Tokens per block (block_size): currently, we directly use 
+    2. Tokens per block (block_size): Currently, we directly use 
     `CacheConfig.block_size` for all layers. It can be extended to vary by KV 
     cache group, but within each KV cache group, all layers must share the same 
     block size.
     3. Physical memory per token per layer: This property is decided by model 
     config. Currently we only support models that have the same physical memory 
     per token per layer for all layers. Can be relaxed with a simple extension, 
-    but still need to keep physical memory per block per group the same.
+    but still need to keep physical memory per block the same for all groups.
     4. Number of layers per group: Currently assumed the same for all layers. 
-    Can be relaxed with a simple extension, but still need to keep byte per 
-    block per group the same.
+    Can be relaxed with a simple extension, but still need to keep physical 
+    memory per block the same for all groups.
     5. Attention type within groups: All layers in a group must share the same
     attention type. One exception is that, when 
     `--disable-hybrid-kv-cache-manager` is true, the single group for full 
     attention layers may also include attention layers using sliding window or 
-    LLaMA 4 local attention.
+    LLaMA 4 local attention. See `unify_hybrid_kv_cache_specs` for more details.
     6. Support for multiple attention types: The design for most components is 
     general to an arbitrary number of attention types. But 
     `find_longest_cache_hit` only supports one attention type or two 
     types of full-attention plus exactly one another type. The general
     implementation of this function is feasible but we don't know how to 
     implement it cleanly yet.
+
+    As we assume tokens per block, physical memory per token per layer, and 
+    number of layers per group are the same now, we can ensure that physical 
+    memory per block is the same for all groups.
 
     Args:
         vllm_config: The global VllmConfig
@@ -903,9 +929,10 @@ def get_kv_cache_config(
         return _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
                                                  available_memory)
     elif is_kv_cache_page_size_uniform(kv_cache_spec):
-        # KV cache of all layers have the same page size. Split the layers into
-        # groups with the same number of layers, and thus same total page size.
-        # See KVCacheConfig.kv_cache_groups for more details.
+        # Model contains multiple attention types, but KV cache of all layers
+        # have the same physical memory per block per layer. Split the layers
+        # into groups with the same number of layers, and thus same total page
+        # size.
         return _get_kv_cache_config_uniform_page_size(vllm_config,
                                                       kv_cache_spec,
                                                       available_memory)

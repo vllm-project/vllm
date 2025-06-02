@@ -185,23 +185,9 @@ class KVCacheConfig:
     kv_cache_tensors: list[KVCacheTensor]
     """
     The kv cache groups of the model.
-    The layers in the models are repeated with some patterns, e.g., a model
-    with 10 full attention layers and 20 sliding window attention layers can be
-    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. 
-    The KVCacheManager allocates different block tables for each of the 3 layers
-    in the pattern, and repeats each of them 10 times to generate the 
-    block_table for the 30 layers in the model.
-    Therefore, we can group the layers in the model into 3 groups, each of which
-    contains 10 layers in the model.
-    The KVCacheManager allocates the block_table for each group based on its
-    kv_cache spec, and the model runner applies the block table to each layer 
-    in the group.
-    For example:
-    1. A model only uses full attention. The pattern is 
-    (num_hidden_layers * full), so there is only one group and the block table 
-    is shared by all layers.
-    2. A model with 10 full attention layers and 20 sliding window 
-    attention layers. There are 3 layers in the pattern (1 * full, 2 * sw), so 
-    there are 3 groups, each of which represents 10 layers in the model.
+    For models with only one type of attention, there is only one group that
+    contains all layers.
+    For models with multiple types of attention, there will be multiple groups,
+    see `_get_kv_cache_config_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
