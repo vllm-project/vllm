@@ -206,6 +206,8 @@ def run_cutlass_moe_fp8(
 # maybe remove need for passing aq to workspace_shapes
 class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
+class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
+
     def __init__(
         self,
         max_experts_per_worker: int,
@@ -359,6 +361,9 @@ def cutlass_moe_fp8(
 
     num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(
         0)
+
+    if out_dtype is None:
+        out_dtype = a.dtype
 
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),

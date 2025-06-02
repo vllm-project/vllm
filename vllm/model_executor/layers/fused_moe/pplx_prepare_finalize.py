@@ -172,7 +172,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 (expert_x.size(2) + block_size - 1) // block_size,
             )
 
-            print(f"XXXXXXXXXX {block_size} {expert_x_scale_shape}")
+            #print(f"XXXXXXXXXX {block_size} {expert_x_scale_shape}")
 
             expert_x_scale = torch.zeros(
                 expert_x_scale_shape,
@@ -180,7 +180,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 device=expert_x.device,
             )
 
-            print(f"YYYYYYYYYYYYYYY {expert_x.shape}")
+            #print(f"YYYYYYYYYYYYYYY {expert_x.shape}")
 
         # This argument is optional, defaults to indices.size(0)
         # There's not much point setting this unless it is != indices.size(0)
@@ -198,7 +198,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
 
-        print(f"ZZZZZZZZZZZZZZ")
+        #print(f"ZZZZZZZZZZZZZZ")
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, 0:1]
 
@@ -227,7 +227,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        print("CCCCCCCCCCCCCCCCCCCC")
+        #print("CCCCCCCCCCCCCCCCCCCC")
 
         self.a2a.combine(out_tokens=output,
                          indices=topk_ids,

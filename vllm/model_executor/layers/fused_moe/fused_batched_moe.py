@@ -62,13 +62,15 @@ def moe_mmk(
     if use_w8a8:
         # block-wise
         if group_k > 0 and group_n > 0:
-            a_scale_ptrs = a_scale_ptr +  expert_id * stride_ase + offs_m * stride_asm
+            # XXXXXXX
+            a_scale_ptrs = a_scale_ptr + (expert_id * stride_ase) + (offs_m * stride_asm)
             offs_bsn = offs_n // group_n
             b_scale_ptrs = (b_scale_ptr + expert_id * stride_bse +
                             offs_bsn * stride_bsn)
 
         # channel-wise
         elif per_channel_quant:
+            # TODO: probably not correct
             b_scale_ptrs = b_scale_ptr + expert_id * stride_bse + offs_bsn[None, :] * stride_bsn
             b_scale = tl.load(b_scale_ptrs)
             # Load per-token scale for activations
@@ -77,7 +79,7 @@ def moe_mmk(
 
         # tensor-wise
         else:
-            a_scale = tl.load(a_scale_ptr)
+            a_scale = tl.load(a_scale_ptr) # + expert_id) #?
             b_scale = tl.load(b_scale_ptr + expert_id)
 
     # -----------------------------------------------------------
@@ -703,14 +705,15 @@ def batched_moe_kernel_quantize_input(
         # Note: this does a bunch of extra work because expert_num_tokens is
         # ignored but it does support torch.compile + cudagraphs.
         hidden_dim = A.size(-1)
-        assert A_scale is None or A_scale.dim() == 2
+        assert A_scale is None or A_scale.ndim <= 2
         A_q, A_q_scale = moe_kernel_quantize_input(A.view(-1,
                                                           hidden_dim), A_scale,
                                                    qtype, per_channel_quant,
                                                    block_shape)
         A_q = A_q.view(E, -1, hidden_dim)
         if A_q_scale is not None:
-            if A_q_scale.ndim == 1:
+            if A_q_scale.numel() == 1:
+                A_q_scale = A_q_scale.view(1)
                 A_q_scale = torch.repeat_interleave(A_q_scale, E, dim=0).view(E, 1, 1)
             else:
                 A_q_scale = A_q_scale.view(E, -1, A_q_scale.size(-1))
