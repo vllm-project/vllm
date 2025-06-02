@@ -246,24 +246,6 @@ void get_cutlass_moe_mm_data(
       version_num, ". Required capability: 90");
 }
 
-void moe_permute(
-    const torch::Tensor& input_tensor, const torch::Tensor& dst2src_map,
-    torch::Tensor& output_tensor) {
-  // This function currently gets compiled only if we have a valid cutlass moe
-  // mm to run it for.
-  int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
-    (defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM90)
-  moe_permute_caller(input_tensor, dst2src_map, output_tensor);
-  return;
-#endif
-  TORCH_CHECK_NOT_IMPLEMENTED(
-      false,
-      "No compiled moe_permute: no cutlass_scaled_mm kernel for "
-      "CUDA device capability: ",
-      version_num, ". Required capability: 90");
-}
-
 void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
                            torch::Tensor const& b,
                            torch::Tensor const& a_scales,

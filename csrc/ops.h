@@ -245,11 +245,6 @@ void get_cutlass_moe_mm_data(
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k, const std::optional<torch::Tensor>& blockscale_offsets);
 
-void moe_permute(
-    const torch::Tensor& input_tensor,
-    const torch::Tensor& dst2src_map,
-    torch::Tensor& output_tensor);
-
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
                            torch::Tensor const& a_scales,
