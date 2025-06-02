@@ -440,11 +440,29 @@ class VllmBackend:
             )
             self.compilation_config.cache_dir = cache_dir
 
-        if compilation_counter.num_graphs_seen > 0:
-            cache_dir = self.compilation_config.cache_dir + \
-                f'-{compilation_counter.num_graphs_seen}'
-        else:
-            cache_dir = self.compilation_config.cache_dir
+        # NOTE: Eagle compilation
+        # The eagle head is a separate model that gets run, so it needs
+        # its own cache dir (each cache dir is 1:1 with a model.forward).
+        #
+        # We currently assume that the eagle head does not need its own
+        # hash: in the vLLM repo, the hash of the original model currently
+        # entirely determines the config of the eagle head.
+        # It's very possible that this assumption will change in the
+        # future and we'll need to update this code.
+        #
+        # If you are here because you are using multiple torch.compile
+        # calls in a single model, please open an issue and let's discuss.
+        speculative_config = self.vllm_config.speculative_config
+        if (speculative_config is not None and speculative_config.use_eagle()):
+            if compilation_counter.num_graphs_seen == 1:
+                cdir = self.compilation_config.cache_dir
+                method = speculative_config.method
+                cache_dir = f"{cdir}-{method}"
+            elif compilation_counter.num_graphs_seen > 1:
+                raise AssertionError(
+                    "vLLM assumes there's only one eagle head for a given model"
+                )
+
         os.makedirs(cache_dir, exist_ok=True)
         self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
