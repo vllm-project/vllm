@@ -100,7 +100,9 @@ class BaseLogitsProcessor:
         return scores
 
     def clone(self) -> BaseLogitsProcessor:
-        return BaseLogitsProcessor(guide=copy.deepcopy(self._guide).reset(),
+        guide = copy.deepcopy(self._guide)
+        guide.reset()
+        return BaseLogitsProcessor(guide=guide,
                                    vocab_size=self._vocab_size,
                                    eos_token_id=self._eos_token_id,
                                    reasoner=self._reasoner)
