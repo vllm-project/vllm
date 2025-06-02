@@ -177,6 +177,9 @@ void moe_permute_caller(
   int64_t const num_src_rows = input_tensor.size(0);
   int64_t const num_cols = input_tensor.size(1);
 
+  TORCH_CHECK(!(num_cols % (128 / sizeof(input_tensor.scalar_type()) / 8)),
+              "num_cols must be divisible by 128 / sizeof(input_tensor.scalar_type()) / 8");
+
   MOE_DISPATCH(input_tensor.scalar_type(), [&] {
         expandInputRowsKernel<scalar_t><<<blocks, threads, 0, stream>>>(
             reinterpret_cast<scalar_t*>(input_tensor.data_ptr()),
