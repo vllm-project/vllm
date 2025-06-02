@@ -91,6 +91,14 @@ class MinPLogitsProcessor(LogitsProcessor):
             return
 
         needs_update = False
+        # Process added requests.
+        for index, sampling_params, _ in batch_update.added:
+            min_p = sampling_params.min_p
+            self.min_p_cpu[index] = min_p
+            if min_p:
+                self.min_p_count += 1
+                needs_update = True
+
         if self.min_p_count:
             # Process removed and moved requests.
             for index in batch_update.removed:
@@ -103,14 +111,6 @@ class MinPLogitsProcessor(LogitsProcessor):
                 self.min_p_cpu[to_index] = min_p
                 if min_p:
                     needs_update = True
-
-        # Process added requests.
-        for index, sampling_params, _ in batch_update.added:
-            min_p = sampling_params.min_p
-            self.min_p_cpu[index] = min_p
-            if min_p:
-                self.min_p_count += 1
-                needs_update = True
 
         # Update tensors if needed.
         size = batch_update.batch_size
@@ -159,6 +159,12 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
             return
 
         needs_update = False
+        # Process added requests.
+        for index, sampling_params, _ in batch_update.added:
+            if lb := sampling_params.logit_bias:
+                self.biases[index] = lb
+                needs_update = True
+
         if self.biases:
             # Process removed and moved requests.
             for index in batch_update.removed:
@@ -169,12 +175,6 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
                 if entry := self.biases.pop(from_index, None):
                     self.biases[to_index] = entry
                     needs_update = True
-
-        # Process added requests.
-        for index, sampling_params, _ in batch_update.added:
-            if lb := sampling_params.logit_bias:
-                self.biases[index] = lb
-                needs_update = True
 
         # Update tensors if needed.
         if self.biases and needs_update:
