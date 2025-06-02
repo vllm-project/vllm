@@ -720,7 +720,36 @@ def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
         available_memory: int) -> KVCacheConfig:
     """
-    Generates the KV cache configuration for a model with one page size.
+    Generates the KV cache configuration for models with a uniform page size.
+
+    NOTE(Chen): To simplify the kv cache management logic for hybrid models, we 
+    make the following assumptions:
+    1. Physical memory per block: Must be the same across all KV cache groups. 
+    Breaking this assumption is non-trivial due to memory fragmentation concerns
+    when allocating blocks of different sizes.
+    2. Tokens per block (block_size): currently, we directly use 
+    `CacheConfig.block_size` for all layers. It can be extended to vary by KV 
+    cache group, but within each KV cache group, all layers must share the same 
+    block size.
+    3. Physical memory per token per layer: This property is decided by model 
+    config. Currently we only support models that have the same physical memory 
+    per token per layer for all layers. Can be relaxed with a simple extension, 
+    but still need to keep physical memory per block per group the same.
+    4. Number of layers per group: Currently assumed the same for all layers. 
+    Can be relaxed with a simple extension, but still need to keep byte per 
+    block per group the same.
+    5. Attention type within groups: All layers in a group must share the same
+    attention type. One exception is that, when 
+    `--disable-hybrid-kv-cache-manager` is true, the single group for full 
+    attention layers may also include attention layers using sliding window or 
+    LLaMA 4 local attention.
+    6. Support for multiple attention types: The design for most components is 
+    general to an arbitrary number of attention types. But 
+    `find_longest_cache_hit` only supports one attention type or two 
+    types of full-attention plus exactly one another type. The general
+    implementation of this function is feasible but we don't know how to 
+    implement it cleanly yet.
+
     Args:
         vllm_config: The global VllmConfig
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
