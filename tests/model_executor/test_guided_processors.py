@@ -134,7 +134,7 @@ async def test_guided_logits_processor_with_reasoning(
     assert regex_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    regex_lp(token_ids, tensor)
+    tensor = regex_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
     assert torch.allclose(tensor, original_tensor)
 
@@ -150,7 +150,7 @@ async def test_guided_logits_processor_with_reasoning(
     assert json_lp is not None
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
-    json_lp(token_ids, tensor)
+    tensor = json_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
     assert torch.allclose(tensor, original_tensor)
 

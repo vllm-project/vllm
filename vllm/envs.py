@@ -770,7 +770,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_V0_USE_OUTLINES_CACHE":
     lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
 
-    # Whether to turn on the outlines cache for V0
+    # Whether to turn on the outlines cache for V1
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.
     "VLLM_V1_USE_OUTLINES_CACHE":
