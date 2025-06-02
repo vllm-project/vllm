@@ -1741,9 +1741,6 @@ class ParallelConfig:
     rank: int = 0
     """Global rank in distributed setup."""
 
-    enable_microbatching: bool = False
-    """Enable microbatching for the model executor."""
-
     always_microbatch_if_enabled: bool = True
     """Always microbatch if microbatching is enabled. Easier to sync between
        dp workers."""
@@ -4324,16 +4321,6 @@ class VllmConfig:
                 "full_cuda_graph is not supported with "
                 "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
-
-        if self.parallel_config.enable_microbatching and \
-            self.compilation_config.level >= CompilationLevel.PIECEWISE:
-            # Microbatching is not supported with piecewise compilation yet.
-            #  More specifically piecewise cuda-graphs
-            logger.warning_once(
-                "Piecewise compilation is not supported with "
-                "microbatching. Disabling piecewiseching compilation.")
-            self.compilation_config.level = CompilationLevel.NO_COMPILATION
-
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
