@@ -9,9 +9,11 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.attention.backends.flash_attn import (CommonAttentionMetadata,
                                                    FlashAttentionMetadata)
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import prepare_eagle_input_kernel
 
@@ -150,6 +152,11 @@ class EagleProposer:
         else:
             raise ValueError(f"Unsupported method: {self.method}")
 
+        # At this moment, we assume all eagle layers belong to the same KV
+        # cache group, thus using the same attention metadata.
+        per_layer_attn_metadata = {}
+        for layer_name in self.attn_layer_names:
+            per_layer_attn_metadata[layer_name] = attn_metadata
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -159,7 +166,7 @@ class EagleProposer:
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
 
-        with set_forward_context(attn_metadata,
+        with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
             ret_hidden_states = self.model(
@@ -245,7 +252,7 @@ class EagleProposer:
             self.hidden_states[:batch_size] = hidden_states
 
             # Run the model.
-            with set_forward_context(attn_metadata,
+            with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
                 last_hidden_states, hidden_states = self.model(
@@ -271,6 +278,7 @@ class EagleProposer:
         cu_target_query_lens: torch.Tensor,
         # [batch_size]
         num_rejected_tokens: torch.Tensor,
+        num_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # cu_target_query_lens: [0, a, a + b, a + b + c]
         # num_rejected_tokens: [n1, n2, n3]
@@ -288,18 +296,13 @@ class EagleProposer:
 
         # [a - n1, b - n2, c - n3] ->
         # [0, a - n1, a + b - n1 - n2, a + b + c - n1 - n2 - n3]
-        cu_num_tokens = torch.empty_like(cu_target_query_lens)
+        cu_num_tokens = torch.zeros_like(cu_target_query_lens)
         torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
-        cu_num_tokens[0] = 0
-
-        # FIXME(woosuk): Avoid synchronization.
-        num_tokens = cu_num_tokens[-1].item()
         token_indices = torch.empty(
             num_tokens,
             dtype=torch.int32,
-            device=cu_num_tokens.device,
+            device=cu_target_query_lens.device,
         )
-
         batch_size = num_rejected_tokens.shape[0]
         BLOCK_SIZE = 1024
         prepare_eagle_input_kernel[(batch_size, )](
@@ -322,8 +325,8 @@ class EagleProposer:
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
-        assert len(draft_attn_layer_names) == 1
-        self.attn_layer_name = next(iter(draft_attn_layer_names))
+
+        self.attn_layer_names = list(draft_attn_layer_names)
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
@@ -344,7 +347,10 @@ class EagleProposer:
         if self.vllm_config.speculative_config.method != "eagle3" and \
                 hasattr(target_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
-            self.model.lm_head = target_model.lm_head
+            if supports_multimodal(target_model):
+                self.model.lm_head = target_model.get_language_model().lm_head
+            else:
+                self.model.lm_head = target_model.lm_head
 
     @torch.inference_mode()
     def dummy_run(
@@ -358,6 +364,25 @@ class EagleProposer:
                 self.positions[:num_tokens],
                 self.hidden_states[:num_tokens],
             )
+
+    def validate_same_kv_cache_group(self,
+                                     kv_cache_config: KVCacheConfig) -> None:
+        """
+        Validate that all eagle layers belong to the same KVCacheGroup.
+        Need this assumption to ensure all eagle layers can use the
+        same AttentionMetadata.
+        May extend to multiple AttentionMetadata in the future.
+        """
+        kv_cache_groups: dict[str, int] = {}
+        for id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            for layer_name in kv_cache_group.layer_names:
+                kv_cache_groups[layer_name] = id
+        assert len(
+            set([
+                kv_cache_groups[layer_name]
+                for layer_name in self.attn_layer_names
+            ])
+        ) == 1, "All eagle layers should belong to the same kv cache group"
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax

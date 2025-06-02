@@ -57,11 +57,11 @@ In v0, the following metrics are exposed via a Prometheus-compatible `/metrics` 
 - `vllm:spec_decode_num_draft_tokens_total` (Counter)
 - `vllm:spec_decode_num_emitted_tokens_total` (Counter)
 
-These are documented under [Inferencing and Serving -> Production Metrics](../../serving/metrics.md).
+These are documented under [Inferencing and Serving -> Production Metrics](../../usage/metrics.md).
 
 ### Grafana Dashboard
 
-vLLM also provides [a reference example](https://docs.vllm.ai/en/latest/getting_started/examples/prometheus_grafana.html) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
+vLLM also provides [a reference example](https://docs.vllm.ai/en/latest/examples/prometheus_grafana.html) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
 
 The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
 
@@ -673,7 +673,7 @@ v0 has support for OpenTelemetry tracing:
 - [OpenTelemetry blog
   post](https://opentelemetry.io/blog/2024/llm-observability/)
 - [User-facing
-  docs](https://docs.vllm.ai/en/latest/getting_started/examples/opentelemetry.html)
+  docs](https://docs.vllm.ai/en/latest/examples/opentelemetry.html)
 - [Blog
   post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
 - [IBM product

@@ -10,12 +10,13 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch.fx as fx
+from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
 from .compiler_interface import (CompilerInterface, EagerAdaptor,
                                  InductorAdaptor, InductorStandaloneAdaptor)
@@ -28,7 +29,8 @@ logger = init_logger(__name__)
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     if compilation_config.use_inductor:
-        if envs.VLLM_TEST_STANDALONE_COMPILE:
+        if envs.VLLM_USE_STANDALONE_COMPILE and is_torch_equal_or_newer(
+                "2.8.0"):
             logger.info("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor()
         else:
@@ -269,7 +271,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
             for t in args
         ]
-        with self.fake_mode:
+        with self.fake_mode, enable_python_dispatcher():
             return super().run(*fake_args)
 
     def call_module(self, target: torch.fx.node.Target,

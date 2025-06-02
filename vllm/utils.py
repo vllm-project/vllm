@@ -19,7 +19,6 @@ import json
 import multiprocessing
 import os
 import pickle
-import re
 import signal
 import socket
 import subprocess
@@ -34,11 +33,12 @@ import uuid
 import warnings
 import weakref
 from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError, _ArgumentGroup)
+                      ArgumentTypeError, RawDescriptionHelpFormatter,
+                      _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
-from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
-                             Iterable, Iterator, KeysView, Mapping)
+from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
+                             Hashable, Iterable, Iterator, KeysView, Mapping)
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
@@ -54,6 +54,7 @@ import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
+import regex as re
 import torch
 import torch.types
 import yaml
@@ -85,7 +86,7 @@ MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/features/compatibility_matrix.md
+# Reminder: Please update docs/features/compatibility_matrix.md
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
@@ -106,7 +107,7 @@ STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "currently not supported for encoder/decoder "
     "models.")
 
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is currently not currently "
+STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
                              "supported with encoder/decoder "
                              "models.")
 
@@ -758,16 +759,15 @@ def get_kv_cache_torch_dtype(
         model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
-            if isinstance(model_dtype, str):
+            if isinstance(model_dtype,
+                          str) and model_dtype in STR_DTYPE_TO_TORCH_DTYPE:
                 torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
             elif isinstance(model_dtype, torch.dtype):
                 torch_dtype = model_dtype
             else:
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
-        elif cache_dtype in ["half", "bfloat16", "float"]:
+        elif cache_dtype in STR_DTYPE_TO_TORCH_DTYPE:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype == "fp8":
-            torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     elif isinstance(cache_dtype, torch.dtype):
@@ -979,6 +979,53 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
+# bool = 0, int = 1, float = 2, complex = 3
+def _get_precision_level(dtype: torch.dtype) -> int:
+    # NOTE: Complex dtypes return `is_floating_point=False`
+    return ((dtype != torch.bool) + dtype.is_floating_point +
+            dtype.is_complex * 2)
+
+
+def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
+    """
+    Test whether it is lossless to cast a tensor from
+    `src_dtype` to `tgt_dtype`.
+    """
+    if src_dtype == tgt_dtype:
+        return True
+
+    src_level = _get_precision_level(src_dtype)
+    tgt_level = _get_precision_level(tgt_dtype)
+
+    if src_level < tgt_level:
+        return True
+    if src_level > tgt_level:
+        return False
+
+    # Compare integral types
+    if not src_dtype.is_floating_point and not src_dtype.is_complex:
+        src_info = torch.iinfo(src_dtype)
+        tgt_info = torch.iinfo(tgt_dtype)
+        return src_info.min >= tgt_info.min and src_info.max <= tgt_info.max
+
+    # Compare floating-point types
+    src_info = torch.finfo(src_dtype)
+    tgt_info = torch.finfo(tgt_dtype)
+    return (src_info.min >= tgt_info.min and src_info.max <= tgt_info.max
+            and src_info.resolution >= tgt_info.resolution)
+
+
+def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
+    """
+    Get the common `dtype` where all of the other `dtypes` can be
+    cast to it without losing any information.
+    """
+    return max(
+        dtypes,
+        key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
+    )
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1004,7 +1051,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
     """
-    Unlike {class}`itertools.groupby`, groups are not broken by
+    Unlike [`itertools.groupby`][], groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)
@@ -1323,7 +1370,8 @@ class StoreBoolean(Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter,
+                          RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
@@ -1877,14 +1925,6 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
-def is_in_doc_build() -> bool:
-    try:
-        from sphinx.ext.autodoc.mock import _MockModule
-        return isinstance(zmq, _MockModule)
-    except ModuleNotFoundError:
-        return False
-
-
 def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     """
     Import a Python file according to its file path.
@@ -1924,7 +1964,8 @@ class _PlaceholderBase:
     Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
-    {meth}`__getattr__` is not called when they are accessed.
+    [`__getattr__`][vllm.utils._PlaceholderBase.__getattr__]
+    is not called when they are accessed.
 
     Info:
         [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
@@ -2426,6 +2467,7 @@ def make_zmq_socket(
     socket_type: Any,
     bind: Optional[bool] = None,
     identity: Optional[bytes] = None,
+    linger: Optional[int] = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2445,7 +2487,7 @@ def make_zmq_socket(
         buf_size = -1  # Use system default buffer size
 
     if bind is None:
-        bind = socket_type != zmq.PUSH
+        bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
 
     if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.RCVHWM, 0)
@@ -2457,6 +2499,9 @@ def make_zmq_socket(
 
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
+
+    if linger is not None:
+        socket.setsockopt(zmq.LINGER, linger)
 
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
@@ -2529,7 +2574,7 @@ def _maybe_force_spawn():
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-            "See https://docs.vllm.ai/en/latest/getting_started/"
+            "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
             "for more information. Reason: %s", reason)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -2794,14 +2839,17 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
 
 # Only relevant for models using ALiBi (e.g, MPT)
 def check_use_alibi(model_config: ModelConfig) -> bool:
-    return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
+    cfg = model_config.hf_text_config
+    return (getattr(cfg, "alibi", False)  # Falcon
             or ("BloomForCausalLM" in getattr(model_config.hf_config,
                                               "architectures", []))  # Bloom
-            or getattr(model_config.hf_text_config, "position_encoding_type",
-                       "") == "alibi"  # codellm_1b_alibi
-            or
-            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
-             and model_config.hf_text_config.attn_config.get("alibi", False)))
+            or getattr(cfg, "position_encoding_type", "") ==
+            "alibi"  # codellm_1b_alibi
+            or (hasattr(cfg, "attn_config")  # MPT
+                and ((isinstance(cfg.attn_config, dict)
+                      and cfg.attn_config.get("alibi", False)) or
+                     (not isinstance(cfg.attn_config, dict)
+                      and getattr(cfg.attn_config, "alibi", False)))))
 
 
 def sha256(input) -> int:
