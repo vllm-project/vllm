@@ -6,6 +6,8 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import _fp8_perm, _resize_cache
 from vllm.scalar_type import scalar_types
 
@@ -313,50 +315,35 @@ def cutlass_moe_fp8(
 
     out_dtype = a.dtype
 
-    ws1 = a.size(0) * topk_ids.size(1) * max(w1_q.size(1), w2_q.size(1))
-    ws2 = a.size(0) * topk_ids.size(1) * w2_q.size(2)
-    workspace13 = torch.zeros(ws1, device=a.device, dtype=out_dtype)
-    workspace2 = torch.zeros(ws2, device=a.device, dtype=out_dtype)
+    fn = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(
+            quant_dtype=torch.float8_e4m3fn,
+            per_channel_quant=per_act_token,
+        ),
+        CutlassExpertsFp8(
+            max_experts_per_worker=global_num_experts,
+            out_dtype=out_dtype,
+            per_act_token=per_act_token,
+            per_out_ch=per_out_ch,
+        ),
+    )
 
-    if apply_router_weight_on_input:
-        assert topk_ids.shape[
-            1] == 1, "topk_ids must be 1 for apply_router_weight_on_input"
-        a = a * topk_weights.to(a.dtype)
-
-    from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
-    a1q, a1q_scale = _fp8_quantize(a, a1_scale, per_act_token)
-
-    if activation == "silu":
-        activation_callable = torch.ops._C.silu_and_mul
-    elif activation == "gelu":
-        activation_callable = torch.ops._C.gelu_and_mul
-    else:
-        raise ValueError(f"Unsupported FusedMoe activation: {activation}")
-
-    out = run_cutlass_moe_fp8(
-        a1q,
+    return fn(
+        a,
         w1_q,
         w2_q,
+        topk_weights,
         topk_ids,
-        activation_callable,
+        False,
+        activation,
         global_num_experts if global_num_experts != -1 else w1_q.size(0),
         expert_map,
         w1_scale,
         w2_scale,
-        a1q_scale,
-        a2_scale,
-        workspace13,
-        workspace2,
-        None,
-        out_dtype,
-        per_act_token,
-        per_out_ch,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        apply_router_weight_on_input=apply_router_weight_on_input,
     )
-
-    if not apply_router_weight_on_input:
-        out = out * topk_weights.unsqueeze(-1).to(out_dtype)
-
-    return out.sum(dim=1)
 
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
