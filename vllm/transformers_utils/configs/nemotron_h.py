@@ -16,46 +16,51 @@
 # limitations under the License.
 """NemotronH model configuration"""
 
-import re
-
+import regex as re
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
-
 
 logger = logging.get_logger(__name__)
 
 
 class NemotronHConfig(PretrainedConfig):
     r"""
-    This is the configuration class to store the configuration of a [`NemotronHModel`]. It is used to instantiate a
-    NemotronH model according to the specified arguments, defining the model architecture. Instantiating a configuration
-    with the defaults will yield a similar configuration to that of the NemotronH-v0.1 model.
-    [todo](todo)
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    This is the configuration class to store the configuration of a
+    [`NemotronHModel`]. It is used to instantiate a NemotronH model according
+    to the specified arguments, defining the model architecture. Instantiating
+    a configuration with the defaults will yield a similar configuration to
+    that of the NemotronH-v0.1 model.
     Args:
         vocab_size (`int`, *optional*, defaults to 131072):
-            Vocabulary size of the NemotronH model. Defines the number of different tokens that can be represented by the
-            `inputs_ids` passed when calling [`NemotronHModel`]
+            Vocabulary size of the NemotronH model. Defines the number of
+            different tokens that can be represented by the `inputs_ids`
+            passed when calling [`NemotronHModel`]
         tie_word_embeddings (`bool`, *optional*, defaults to `False`):
-            Whether the model's input and output word embeddings should be tied. Note that this is only relevant if the
-            model has a output word embedding layer.
+            Whether the model's input and output word embeddings should be
+            tied. Note that this is only relevant if the model has a output
+            word embedding layer.
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.
         intermediate_size (`int`, *optional*, defaults to 21504):
             Dimension of the MLP representations.
         num_hidden_layers (`int`, *optional*, defaults to 52):
             Number of hidden layers in the Transformer encoder.
-        hybrid_override_pattern (`str`, *optional*, defaults to `"M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-"`):
-            The pattern of the hybrid model. The pattern is a string of characters where each character represents M: Mamba2, *: Attention, -: MLP
+        hybrid_override_pattern (`str`, *optional*, defaults to
+            `"M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-"`):
+            The pattern of the hybrid model. The pattern is a string of
+            characters where each character represents
+            M: Mamba2, *: Attention, -: MLP
         num_attention_heads (`int`, *optional*, defaults to 32):
-            Number of attention heads for each attention layer in the Transformer encoder.
+            Number of attention heads for each attention layer in the
+            Transformer encoder.
         attention_head_dim (`int`, *optional*, defaults to 128):
             Dimension of each attention head.
         num_key_value_heads (`int`, *optional*, defaults to 8):
-            This is the number of key_value heads that should be used to implement Grouped Query Attention. If
-            `num_key_value_heads=num_attention_heads`, the model will use Multi Head Attention (MHA), if
-            `num_key_value_heads=1` the model will use Multi Query Attention (MQA) otherwise GQA is used.
+            This is the number of key_value heads that should be used to
+            implement Grouped Query Attention. If
+            `num_key_value_heads=num_attention_heads`, the model will use
+            Multi Head Attention (MHA), if `num_key_value_heads=1` the model
+            will use Multi Query Attention (MQA) otherwise GQA is used.
         mlp_hidden_act (`str`, *optional*, defaults to "relu2"):
             The non-linear activation function in the MLP layers.
         attention_bias (`bool`, *optional*, defaults to `False`):
@@ -65,17 +70,21 @@ class NemotronHConfig(PretrainedConfig):
         use_bias (`bool`, *optional*, defaults to `False`):
             Whether to use bias in the model.
         initializer_range (`float`, *optional*, defaults to 0.02):
-            The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
+            The standard deviation of the truncated_normal_initializer for
+            initializing all weight matrices.
         layer_norm_epsilon (`float`, *optional*, defaults to 1e-5):
             The epsilon used by the layer normalization layers.
         residual_in_fp32 (`bool`, *optional*, defaults to `False`):
-            Whether or not residuals should be in `float32`. If set to `False` residuals will keep the same `dtype` as the rest of the model.
+            Whether or not residuals should be in `float32`. If set to `False`
+            residuals will keep the same `dtype` as the rest of the model.
         use_cache (`bool`, *optional*, defaults to `True`):
-            Whether or not the model should return the last key/values attentions (not used by all models). Only
-            relevant if `config.is_decoder=True`.
+            Whether or not the model should return the last key/values
+            attentions (not used by all models). Only relevant if
+            `config.is_decoder=True`.
         num_logits_to_keep (`int` or `None`, *optional*, defaults to 1):
-            Number of prompt logits to calculate during generation. If `None`, all logits will be calculated. If an
-            integer value, only last `num_logits_to_keep` logits will be calculated.
+            Number of prompt logits to calculate during generation. If `None`,
+            all logits will be calculated. If an integer value, only last
+            `num_logits_to_keep` logits will be calculated.
         pad_token_id (`int`, *optional*, defaults to 0):
             The id of the padding token.
         bos_token_id (`int`, *optional*, defaults to 1):
@@ -85,14 +94,16 @@ class NemotronHConfig(PretrainedConfig):
         sliding_window (`int`, *optional*, defaults to None):
             Sliding window attention window size.
         max_position_embeddings (`int`, *optional*, defaults to 4096):
-            The maximum sequence length that this model might ever be used with.
+            The maximum sequence length that this model might ever be used
+            with.
         attention_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for the attention probabilities.
         hidden_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for the hidden states.
         use_mamba_kernels (`bool`, *optional*, defaults to `True`):
-            Flag indicating whether or not to use the fast mamba kernels. These are available only if `mamba-ssm` and
-            `causal-conv1d` are installed, and the mamba modules are running on a CUDA device.
+            Flag indicating whether or not to use the fast mamba kernels.
+            These are available only if `mamba-ssm` and `causal-conv1d`
+            are installed, and the mamba modules are running on a CUDA device.
         ssm_state_size (`int`, *optional*, defaults to 128):
             The dimension of the mamba state space latents.
         mamba_num_heads (`int`, *optional*, defaults to 128):
@@ -116,9 +127,11 @@ class NemotronHConfig(PretrainedConfig):
         mamba_dt_init_floor (`float`, *optional*, defaults to 1e-4):
             Floor value for time step initialization in Mamba.
         mamba_conv_bias (`bool`, *optional*, defaults to `True`):
-            Whether to use bias in the convolution layer of the mamba mixer block.
+            Whether to use bias in the convolution layer of the mamba mixer
+            block.
         mamba_proj_bias (`bool`, *optional*, defaults to `False`):
-            Whether to use bias in the input and output projections of the mamba mixer block.
+            Whether to use bias in the input and output projections of the
+            mamba mixer block.
         mamba_chunk_size (`int`, *optional*, defaults to 256):
             Size of chunks for Mamba processing.
         rescale_prenorm_residual (`bool`, *optional*, defaults to `True`):
@@ -143,8 +156,8 @@ class NemotronHConfig(PretrainedConfig):
         attention_bias=False,
         mlp_bias=False,
         use_bias=False,
-        initializer_range=0.02, # nemo: init_method_std
-        layer_norm_epsilon=1e-5, # nemo: layernorm_epsilon
+        initializer_range=0.02,  # nemo: init_method_std
+        layer_norm_epsilon=1e-5,  # nemo: layernorm_epsilon
         residual_in_fp32=False,  #  Megatron Core default value
         use_cache=True,
         num_logits_to_keep=1,
@@ -154,9 +167,9 @@ class NemotronHConfig(PretrainedConfig):
         sliding_window=None,
         max_position_embeddings=4096,
         attention_dropout=0.0,
-        hidden_dropout=0.0, # * ADDED
+        hidden_dropout=0.0,  # * ADDED
         use_mamba_kernels=True,
-        ssm_state_size=128, # mamba_state_size
+        ssm_state_size=128,  # mamba_state_size
         mamba_num_heads=128,
         mamba_n_groups=8,  # nemo: mamba_ssm_ngroups = num_heads
         mamba_head_dim=64,
@@ -188,8 +201,12 @@ class NemotronHConfig(PretrainedConfig):
 
         # Validate hybrid_override_pattern
         # M: Mamba2, *: Attention, -: MLP
-        assert len(self.hybrid_override_pattern) == self.num_hidden_layers, "hybrid_override_pattern must have the same length as num_hidden_layers"
-        assert re.match(r"^[*-M]+$", self.hybrid_override_pattern), "hybrid_override_pattern must only contain characters 'M', '*', or '-'"
+        assert len(self.hybrid_override_pattern) == self.num_hidden_layers, (
+            "hybrid_override_pattern must have same length as "
+            "num_hidden_layers")
+        assert re.match(r"^[*-M]+$", self.hybrid_override_pattern), (
+            "hybrid_override_pattern must only contain characters "
+            "'M', '*', or '-'")
 
         # for backward compatibility
         if num_key_value_heads is None:
@@ -237,4 +254,5 @@ class NemotronHConfig(PretrainedConfig):
         return [
             "mamba" if self.hybrid_override_pattern[i] == "M" else
             "attention" if self.hybrid_override_pattern[i] == "*" else "mlp"
-            for i in range(self.num_hidden_layers)]
+            for i in range(self.num_hidden_layers)
+        ]

@@ -16,7 +16,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only NemotronH model."""
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -37,22 +38,22 @@ from vllm.model_executor.layers.mamba.mamba2_metadata import (
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
     MambaMixer2, extra_groups_for_head_shards)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
+                                                   SupportsLoRA, SupportsPP,
+                                                   SupportsQuant,
+                                                   SupportsV0Only)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader, make_empty_intermediate_tensors_factory, make_layers,
+    maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronHConfig
 from vllm.utils import LayerBlockType
-
-from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
-                         SupportsQuant, SupportsV0Only)
-from vllm.model_executor.models.utils import (AutoWeightsLoader, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
 
 
 class NemotronHMLP(nn.Module):
@@ -98,9 +99,9 @@ class NemotronHMLPDecoderLayer(nn.Module):
         super().__init__()
         self.config = config
 
-        self.mixer = NemotronHMLP(
-            config, quant_config=quant_config, bias=config.mlp_bias
-        )
+        self.mixer = NemotronHMLP(config,
+                                  quant_config=quant_config,
+                                  bias=config.mlp_bias)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -163,7 +164,8 @@ class NemotronHMambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states, mamba_cache_params, mamba2_metadata)
+        hidden_states = self.mixer(hidden_states, mamba_cache_params,
+                                   mamba2_metadata)
         return hidden_states, residual
 
 
@@ -291,11 +293,8 @@ class NemotronHModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
+        lora_vocab = ((lora_config.lora_extra_vocab_size *
+                       (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
@@ -308,8 +307,7 @@ class NemotronHModel(nn.Module):
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
             layer_class = ALL_DECODER_LAYER_TYPES[
-                config.hybrid_override_pattern[layer_idx]
-            ]
+                config.hybrid_override_pattern[layer_idx]]
             return layer_class(
                 config,
                 layer_idx,
@@ -319,11 +317,11 @@ class NemotronHModel(nn.Module):
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            len(config.hybrid_override_pattern), get_layer, prefix=f"{prefix}.layers"
-        )
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
+            len(config.hybrid_override_pattern),
+            get_layer,
+            prefix=f"{prefix}.layers")
+        self.make_empty_intmd_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size)
 
         self.norm_f = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -364,8 +362,7 @@ class NemotronHModel(nn.Module):
             layer_mamba_cache_params = None
             if isinstance(layer, NemotronHMambaDecoderLayer):
                 layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
-                    i - num_non_mamba_layers
-                )
+                    i - num_non_mamba_layers)
             else:
                 num_non_mamba_layers += 1
 
@@ -385,8 +382,8 @@ class NemotronHModel(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         attb_params_mapping = {
             "q_proj": "q",
             "k_proj": "k",
@@ -394,7 +391,7 @@ class NemotronHModel(nn.Module):
         }
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "embeddings" in name:
                 name = name.replace("embeddings", "embed_tokens")
@@ -411,17 +408,19 @@ class NemotronHModel(nn.Module):
 
             # load attn params
             if any(proj in name for proj in ["q_proj", "k_proj", "v_proj"]):
-                weight_name = next(
-                    proj for proj in ["q_proj", "k_proj", "v_proj"] if proj in name
-                )
+                weight_name = next(proj
+                                   for proj in ["q_proj", "k_proj", "v_proj"]
+                                   if proj in name)
                 name = name.replace(weight_name, "qkv_proj")
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, attb_params_mapping[weight_name])
+                weight_loader(param, loaded_weight,
+                              attb_params_mapping[weight_name])
             # load other params
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
 
             loaded_params.add(name)
@@ -429,7 +428,7 @@ class NemotronHModel(nn.Module):
 
 
 class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                       IsHybrid, SupportsV0Only, SupportsQuant):
+                           IsHybrid, SupportsV0Only, SupportsQuant):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -462,7 +461,7 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         self.config = config
         self.scheduler_config = scheduler_config
         self.model = NemotronHModel(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
+                                    prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -481,8 +480,7 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
 
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+        self.make_empty_intmd_tensors = (self.model.make_empty_intmd_tensors)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -515,7 +513,7 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def _get_mamba_cache_shape(
-            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+            self) -> tuple[tuple[int, int], tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = self.config.hidden_size
 
@@ -525,8 +523,9 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
-        n_groups = (self.config.n_groups + extra_groups_for_head_shards(
-            self.config.n_groups, world_size))
+        n_groups = (
+            self.config.n_groups +
+            extra_groups_for_head_shards(self.config.n_groups, world_size))
 
         # - heads and n_groups are TP-ed
         conv_dim = (intermediate_size +
@@ -555,8 +554,8 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         # update name in weights before passing to loader
         updated_weights = []
         for name, loaded_weight in weights:
