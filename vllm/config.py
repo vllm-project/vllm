@@ -1741,15 +1741,6 @@ class ParallelConfig:
     rank: int = 0
     """Global rank in distributed setup."""
 
-    always_microbatch_if_enabled: bool = True
-    """Always microbatch if microbatching is enabled. Easier to sync between
-       dp workers."""
-
-    microbatching_token_threshold: int = 4
-    """The threshold for microbatching. If the number of tokens in the
-    request is greater than this threshold, microbatching will be used.
-    Otherwise, the request will be processed in a single batch."""
-
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
