@@ -225,3 +225,29 @@ async def test_sampling_params(mary_had_lamb):
             extra_body=dict(seed=42))
 
         assert greedy_transcription.text != transcription.text
+
+@pytest.mark.asyncio
+async def test_audio_prompt(mary_had_lamb):
+    model_name = "openai/whisper-large-v3-turbo"
+    server_args = ["--enforce-eager"]
+    prompt = "This is a speech, recorded in a phonograph."
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        #Prompts should not omit the part of original prompt while transcribing.
+        client = remote_server.get_async_client()
+        transcription = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            language="en",
+            response_format="text",
+            temperature=0.0)
+        out = json.loads(transcription)['text']
+        assert "The first words I spoke in the original phonograph" in out
+        transcription_wprompt = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            language="en",
+            response_format="text",
+            prompt=prompt,
+            temperature=0.0)
+        out_prompt = json.loads(transcription_wprompt)['text']
+        assert "The first words I spoke in the original phonograph" in out_prompt
