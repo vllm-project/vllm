@@ -740,6 +740,13 @@ def _get_kv_cache_config_uniform_page_size(
     # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
     # split to 3 groups with 2 layers each:
     # (full.0, full.1), (sw.0, sw.1), (sw.2, padding).
+    # FIXME(Chen): At the moment of writing this code (2025-06-02), all
+    # open-source hybrid model follows a n:1 pattern between different attention
+    # types (e.g., Gemma3 5:1 between sw and full, LLaMA4 3:1 between local and
+    # full), so we can use the "1" in the n:1 pattern as the group size, which
+    # is the minimum number of layers among all attention types. Need a better
+    # strategy if we want to support more complex patterns (e.g., 20 full + 30
+    # sw, where the group size should be 10).
     group_size = min([len(layers) for layers in same_type_layers.values()])
     grouped_layers = []
     for layers in same_type_layers.values():
