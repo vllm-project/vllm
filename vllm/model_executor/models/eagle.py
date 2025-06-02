@@ -249,8 +249,7 @@ class EAGLE(nn.Module):
             lm_head_weight = torch.zeros(
                 self.lm_head.org_vocab_size,
                 self.lm_head.embedding_dim,
-                dtype=getattr(torch, self.config.torch_dtype) if isinstance(
-                    self.config.torch_dtype, str) else self.config.torch_dtype,
+                dtype=self.config.torch_dtype,
             )
 
         weight_loader = getattr(self.lm_head.weight, "weight_loader",
