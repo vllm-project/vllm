@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import abstractmethod
-from collections import defaultdict
-from typing import Callable
+from typing import Callable, Optional
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
@@ -232,44 +231,49 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         one of them is full attention. Then, split the kv cache groups into full
         attention groups and other groups.
         """
-        groups_by_type_id: dict[str, list[int]] = defaultdict(list)
-        full_attention_type_ids: set[str] = set()
+        full_attention_type_id: Optional[str] = None
+        other_type_id: Optional[str] = None
+        self.full_attention_group_ids: list[int] = []
+        self.other_group_ids: list[int] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
-            groups_by_type_id[g.kv_cache_spec.type_id].append(i)
             if isinstance(g.kv_cache_spec, FullAttentionSpec):
-                full_attention_type_ids.add(g.kv_cache_spec.type_id)
+                if full_attention_type_id is None:
+                    full_attention_type_id = g.kv_cache_spec.type_id
+                else:
+                    assert full_attention_type_id == g.kv_cache_spec.type_id, (
+                        "HybridKVCacheCoordinator assumes exactly one type of "
+                        "full attention groups now.")
+                self.full_attention_group_ids.append(i)
+            else:
+                if other_type_id is None:
+                    other_type_id = g.kv_cache_spec.type_id
+                else:
+                    assert other_type_id == g.kv_cache_spec.type_id, (
+                        "HybridKVCacheCoordinator assumes "
+                        "exactly one other type of groups now.")
+                self.other_group_ids.append(i)
 
-        assert len(full_attention_type_ids) == 1, (
-            "find_longest_cache_hit assumes hybrid models have exactly "
-            "one type of full attention groups now")
-        assert len(groups_by_type_id) == 2, (
-            "find_longest_cache_hit assumes hybrid models have exactly "
-            "one other type of groups except full attention now")
+        assert full_attention_type_id is not None, (
+            "HybridKVCacheCoordinator assumes exactly one type of full "
+            "attention groups now.")
+        assert other_type_id is not None, (
+            "HybridKVCacheCoordinator assumes exactly one type of other "
+            "groups now.")
 
-        self.full_attention_group_ids = groups_by_type_id[next(
-            iter(full_attention_type_ids))]
-        self.other_group_ids = groups_by_type_id[next(
-            iter(groups_by_type_id.keys() - full_attention_type_ids))]
+        self.full_attention_manager_cls = FullAttentionManager
+        self.other_attention_cls = self.single_type_managers[
+            self.other_group_ids[0]].__class__
 
         self.full_attention_spec = self.kv_cache_config.kv_cache_groups[
             self.full_attention_group_ids[0]].kv_cache_spec
         self.other_spec = self.kv_cache_config.kv_cache_groups[
             self.other_group_ids[0]].kv_cache_spec
 
-        self.full_attention_manager_cls = FullAttentionManager
-        other_attention_clses = set(self.single_type_managers[i].__class__
-                                    for i in self.other_group_ids)
-        assert len(other_attention_clses) == 1, (
-            "KVCacheCoordinator assumes all other groups have the same "
-            "attention manager class now.")
-        self.other_attention_cls = next(iter(other_attention_clses))
-
         self.full_attention_block_size = self.full_attention_spec.block_size
         self.other_block_size = self.other_spec.block_size
-        if self.other_block_size % self.full_attention_block_size != 0:
-            raise NotImplementedError(
-                "KVCacheCoordinator assumes the block_size of the full "
-                "attention layer is divisible by other layers now.")
+        assert self.other_block_size % self.full_attention_block_size == 0, (
+            "KVCacheCoordinator assumes the block_size of the full "
+            "attention layer is divisible by other layers now.")
 
     def find_longest_cache_hit(
         self,
