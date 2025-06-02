@@ -118,6 +118,7 @@ def on_gfx9() -> bool:
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 
 
+@cache
 def get_gcn_arch():
     # Try to avoid torch cuda calls to avoid initializing CUDA
     output = subprocess.check_output(['rocminfo']).decode()
