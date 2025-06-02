@@ -30,13 +30,11 @@ from ...utils import check_embeddings_close
         pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
 )
-@pytest.mark.parametrize("dtype", ["half"])
 def test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
     model,
-    dtype: str,
     monkeypatch,
 ) -> None:
 
@@ -58,13 +56,11 @@ def test_models(
     # So we need to strip the input texts to avoid test failing.
     example_prompts = [str(s).strip() for s in example_prompts]
 
-    with hf_runner(model, dtype=dtype,
-                   is_sentence_transformer=True) as hf_model:
+    with hf_runner(model, is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(model,
                      task="embed",
-                     dtype=dtype,
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
