@@ -11,7 +11,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
-from vllm.utils import is_navi
 
 logger = init_logger(__name__)
 
@@ -64,9 +63,7 @@ def paged_attention_v1(
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
         k_scale, v_scale, tp_rank, blocksparse_local_blocks,
         blocksparse_vert_stride, blocksparse_block_size,
-        blocksparse_head_sliding_step,
-        num_threads = 1024 if current_platform.is_rocm() \
-            and not is_navi() else 128)
+        blocksparse_head_sliding_step)
 
 
 def paged_attention_v2(
@@ -98,9 +95,7 @@ def paged_attention_v2(
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
         alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
-        blocksparse_block_size, blocksparse_head_sliding_step,
-        num_threads = 1024 if current_platform.is_rocm() \
-            and not is_navi() else 128)
+        blocksparse_block_size, blocksparse_head_sliding_step)
 
 
 def paged_attention_rocm(

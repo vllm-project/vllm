@@ -24,10 +24,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import (DPMetadata, get_forward_context,
+                                  set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.model_loader import TensorizerLoader, get_model
+from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -146,31 +147,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
-        # Set up speculative decoding.
-        self.use_spec_decode = False
         self.use_aux_hidden_state_outputs = False
-        if self.speculative_config:
-            self.use_spec_decode = True
-
-            # NOTE(Jiayi): currently we put the entire draft model on
-            # the last PP rank. This is not ideal if there are many
-            # layers in the draft model.
-            if get_pp_group().is_last_rank:
-                if self.speculative_config.method == "ngram":
-                    self.drafter = NgramProposer(self.vllm_config)
-                elif self.speculative_config.use_eagle():
-                    self.drafter = EagleProposer(self.vllm_config, self.device,
-                                                 self)  # type: ignore
-                    if self.speculative_config.method == "eagle3":
-                        self.use_aux_hidden_state_outputs = True
-                elif self.speculative_config.method == "medusa":
-                    self.drafter = MedusaProposer(
-                        vllm_config=self.vllm_config,
-                        device=self.device)  # type: ignore
-                else:
-                    raise ValueError("Unknown speculative decoding method: "
-                                     f"{self.speculative_config.method}")
-                self.rejection_sampler = RejectionSampler()
+        # Set up speculative decoding.
+        # NOTE(Jiayi): currently we put the entire draft model on
+        # the last PP rank. This is not ideal if there are many
+        # layers in the draft model.
+        if self.speculative_config and get_pp_group().is_last_rank:
+            if self.speculative_config.method == "ngram":
+                self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.use_eagle():
+                self.drafter = EagleProposer(self.vllm_config, self.device,
+                                             self)  # type: ignore
+                if self.speculative_config.method == "eagle3":
+                    self.use_aux_hidden_state_outputs = True
+            elif self.speculative_config.method == "medusa":
+                self.drafter = MedusaProposer(
+                    vllm_config=self.vllm_config,
+                    device=self.device)  # type: ignore
+            else:
+                raise ValueError("Unknown speculative decoding method: "
+                                 f"{self.speculative_config.method}")
+            self.rejection_sampler = RejectionSampler()
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -503,6 +500,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed or batch_reordered:
             self.input_batch.refresh_sampling_metadata()
 
+    def _get_cumsum_and_arange(
+        self,
+        num_tokens: np.ndarray,
+        cumsum_dtype: Optional[np.dtype] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Get the cumulative sum and batched arange of the given array.
+        # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
+        # Equivalent to but faster than:
+        # np.concatenate([np.arange(n) for n in num_tokens])
+        """
+        # Step 1. [2, 5, 3] -> [2, 7, 10]
+        cu_num_tokens = np.cumsum(num_tokens, dtype=cumsum_dtype)
+        total_num_tokens = cu_num_tokens[-1]
+        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
+        cumsums_offsets = np.repeat(cu_num_tokens - num_tokens, num_tokens)
+        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        arange = self.arange_np[:total_num_tokens] - cumsums_offsets
+
+        return cu_num_tokens, arange
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -528,17 +545,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
 
-        # Get batched arange.
-        # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # Equivalent to but faster than:
-        # np.concatenate([np.arange(n) for n in num_scheduled_tokens])
-        # Step 1. [2, 5, 3] -> [2, 7, 10]
-        cu_num_tokens = np.cumsum(num_scheduled_tokens)
-        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
-        cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
-                                    num_scheduled_tokens)
-        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
+        # cu_num_tokens: [2, 5, 3] -> [2, 7, 10]
+        # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        cu_num_tokens, arange = self._get_cumsum_and_arange(
+            num_scheduled_tokens)
 
         # Get positions.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
@@ -844,32 +854,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Compute the logits indices.
         # [4, 1, 3, 1, 2]
         num_sampled_tokens = num_draft_tokens + 1
-        # Step 1. [4, 5, 8, 9, 11]
-        cu_num_sampled_tokens = np.cumsum(num_sampled_tokens, dtype=np.int32)
-        total_num_sampled_tokens = cu_num_sampled_tokens[-1]
-        # Step 2. [0, 0, 0, 0, 4, 5, 5, 5, 8, 9, 9]
-        cumsums_offsets = np.repeat(cu_num_sampled_tokens - num_sampled_tokens,
-                                    num_sampled_tokens)
-        # Step 3. [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
-        arange = self.arange_np[:total_num_sampled_tokens] - cumsums_offsets
-        # Step 4. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
+
+        # Step 1. cu_num_sampled_tokens: [4, 5, 8, 9, 11]
+        # arange: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
+        cu_num_sampled_tokens, arange = self._get_cumsum_and_arange(
+            num_sampled_tokens, cumsum_dtype=np.int32)
+        # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
         logits_indices = np.repeat(
             cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
-        # Step 5. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
+        # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
         logits_indices += arange
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
 
         # Compute the draft logits indices.
-        # [3, 3, 5, 5, 6]
-        cu_num_draft_tokens = np.cumsum(num_draft_tokens, dtype=np.int32)
-        total_num_draft_tokens = cu_num_draft_tokens[-1]
-        # [0, 0, 0, 3, 3, 5]
-        cumsums_offsets = np.repeat(cu_num_draft_tokens - num_draft_tokens,
-                                    num_draft_tokens)
-        # [0, 1, 2, 0, 1, 0]
-        arange = self.arange_np[:total_num_draft_tokens] - cumsums_offsets
+        # cu_num_draft_tokens: [3, 3, 5, 5, 6]
+        # arange: [0, 1, 2, 0, 1, 0]
+        cu_num_draft_tokens, arange = self._get_cumsum_and_arange(
+            num_draft_tokens, cumsum_dtype=np.int32)
         # [0, 0, 0, 5, 5, 9]
         target_logits_indices = np.repeat(
             cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
@@ -1108,6 +1111,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for k, v in self.intermediate_tensors.items()
         })
 
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+
+        # For DP: Don't pad when setting enforce_eager.
+        # This lets us set enforce_eager on the prefiller in a P/D setup and
+        # still use CUDA graphs (enabled by this padding) on the decoder.
+        #
+        # TODO(tms) : There are many cases where padding is enabled for
+        # prefills, causing unnecessary and excessive padding of activations.
+
+        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
+            # Early exit.
+            return 0, None
+
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+                                                dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+        return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1144,6 +1172,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_input_tokens = round_up(num_scheduled_tokens, tp_size)
             else:
                 num_input_tokens = num_scheduled_tokens
+
+        # Padding for DP
+        num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
+        num_input_tokens += num_pad
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -1190,7 +1222,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
-                                 num_tokens=num_input_tokens):
+                                 num_tokens=num_input_tokens,
+                                 num_tokens_across_dp=num_tokens_across_dp):
             self.maybe_setup_kv_connector(scheduler_output)
 
             model_output = self.model(
@@ -1318,7 +1351,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
 
-        if not self.use_spec_decode:
+        if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
@@ -1531,7 +1564,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             time_before_load = time.perf_counter()
-            self.model = get_model(vllm_config=self.vllm_config)
+            model_loader = get_model_loader(self.load_config)
+            if not hasattr(self, "model"):
+                logger.info("Loading model from scratch...")
+                self.model = model_loader.load_model(
+                    vllm_config=self.vllm_config,
+                    model_config=self.model_config)
+            else:
+                logger.info(
+                    "Model was already initialized. Loading weights inplace..."
+                )
+                model_loader.load_weights(self.model,
+                                          model_config=self.model_config)
             if self.lora_config:
                 self.model = self.load_lora_model(self.model,
                                                   self.model_config,
@@ -1662,6 +1706,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_attn: bool = True,
     ) -> torch.Tensor:
 
+        # Padding for DP
+        num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
+        num_tokens += num_pad
+
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
@@ -1726,9 +1774,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens, None, False)
 
-            with set_forward_context(attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=num_tokens):
+            with set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp):
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,
@@ -1740,7 +1790,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 hidden_states = outputs
 
-            if self.use_spec_decode and self.speculative_config.use_eagle():
+            if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
                 self.drafter.dummy_run(num_tokens)
 
@@ -1795,7 +1845,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     "initializing the engine.") from e
             else:
                 raise e
-        if self.use_spec_decode:
+        if self.speculative_config:
             draft_token_ids = [[0] for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
                 draft_token_ids, self.device)
@@ -2018,9 +2068,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
-                    kv_caches[layer_name] = torch.zeros(kv_cache_shape,
-                                                        dtype=dtype,
-                                                        device=self.device)
+                    try:
+                        kv_cache_stride_order = self.attn_backends[
+                            i].get_kv_cache_stride_order()
+                        assert len(kv_cache_stride_order) == len(
+                            kv_cache_shape)
+                    except (AttributeError, NotImplementedError):
+                        kv_cache_stride_order = tuple(
+                            range(len(kv_cache_shape)))
+                    # The allocation respects the backend-defined stride order
+                    # to ensure the semantic remains consistent for each
+                    # backend. We first obtain the generic kv cache shape and
+                    # then permute it according to the stride order which could
+                    # result in a non-contiguous tensor.
+                    kv_cache_shape = tuple(kv_cache_shape[i]
+                                           for i in kv_cache_stride_order)
+                    # Maintain original KV shape view.
+                    inv_order = [
+                        kv_cache_stride_order.index(i)
+                        for i in range(len(kv_cache_stride_order))
+                    ]
+                    kv_caches[layer_name] = torch.zeros(
+                        kv_cache_shape, dtype=dtype,
+                        device=self.device).permute(*inv_order)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.

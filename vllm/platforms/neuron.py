@@ -28,7 +28,7 @@ class NeuronPlatform(Platform):
     device_name: str = "neuron"
     device_type: str = "neuron"
     ray_device_key: str = "neuron_cores"
-    supported_quantization: list[str] = ["neuron_quant"]
+    supported_quantization: list[str] = ["neuron_quant", "fbgemm_fp8"]
     device_control_env_var: str = "NEURON_RT_VISIBLE_CORES"
 
     @classmethod
@@ -48,9 +48,6 @@ class NeuronPlatform(Platform):
 
         if parallel_config.world_size > 1:
             parallel_config.distributed_executor_backend = "uni"
-
-        assert (vllm_config.lora_config
-                is None), "LoRA is not supported for Neuron backend."
 
         if vllm_config.cache_config and vllm_config.model_config:
             # neuron needs block_size = max_model_len

@@ -175,10 +175,14 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
+# extra="forbid" is a workaround to have kwargs as a field,
+# see https://github.com/pydantic/pydantic/issues/3125
 class LogitsProcessorConstructor(BaseModel):
     qualname: str
     args: Optional[list[Any]] = None
     kwargs: Optional[dict[str, Any]] = None
+
+    model_config = ConfigDict(extra="forbid")
 
 
 LogitsProcessors = list[Union[str, LogitsProcessorConstructor]]
@@ -234,7 +238,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[AnyResponseFormat] = None
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
-    stop: Optional[Union[str, list[str]]] = Field(default_factory=list)
+    stop: Optional[Union[str, list[str]]] = []
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = None
@@ -258,7 +262,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: Optional[float] = None
     repetition_penalty: Optional[float] = None
     length_penalty: float = 1.0
-    stop_token_ids: Optional[list[int]] = Field(default_factory=list)
+    stop_token_ids: Optional[list[int]] = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
@@ -756,7 +760,7 @@ class CompletionRequest(OpenAIBaseModel):
     n: int = 1
     presence_penalty: Optional[float] = 0.0
     seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
-    stop: Optional[Union[str, list[str]]] = Field(default_factory=list)
+    stop: Optional[Union[str, list[str]]] = []
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     suffix: Optional[str] = None
@@ -770,7 +774,7 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: Optional[float] = None
     repetition_penalty: Optional[float] = None
     length_penalty: float = 1.0
-    stop_token_ids: Optional[list[int]] = Field(default_factory=list)
+    stop_token_ids: Optional[list[int]] = []
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
     min_tokens: int = 0
@@ -1477,6 +1481,10 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
+BatchRequestInputBody = Union[ChatCompletionRequest, EmbeddingRequest,
+                              ScoreRequest, RerankRequest]
+
+
 class BatchRequestInput(OpenAIBaseModel):
     """
     The per-line object of the batch input file.
@@ -1497,21 +1505,22 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameters of the request.
-    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest]
+    body: BatchRequestInputBody
 
     @field_validator('body', mode='plain')
     @classmethod
     def check_type_for_url(cls, value: Any, info: ValidationInfo):
         # Use url to disambiguate models
-        url = info.data['url']
+        url: str = info.data["url"]
         if url == "/v1/chat/completions":
             return ChatCompletionRequest.model_validate(value)
         if url == "/v1/embeddings":
             return TypeAdapter(EmbeddingRequest).validate_python(value)
-        if url == "/v1/score":
+        if url.endswith("/score"):
             return ScoreRequest.model_validate(value)
-        return TypeAdapter(Union[ChatCompletionRequest, EmbeddingRequest,
-                                 ScoreRequest]).validate_python(value)
+        if url.endswith("/rerank"):
+            return RerankRequest.model_validate(value)
+        return TypeAdapter(BatchRequestInputBody).validate_python(value)
 
 
 class BatchResponseData(OpenAIBaseModel):
@@ -1523,7 +1532,7 @@ class BatchResponseData(OpenAIBaseModel):
 
     # The body of the response.
     body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
-                         ScoreResponse]] = None
+                         ScoreResponse, RerankResponse]] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -1554,6 +1563,11 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
             "If true (the default), special tokens (e.g. BOS) will be added to "
             "the prompt."),
     )
+    return_token_strs: Optional[bool] = Field(
+        default=False,
+        description=("If true, also return the token strings "
+                     "corresponding to the token ids."),
+    )
 
 
 class TokenizeChatRequest(OpenAIBaseModel):
@@ -1566,6 +1580,11 @@ class TokenizeChatRequest(OpenAIBaseModel):
         ("If true, the generation prompt will be added to the chat template. "
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
+    )
+    return_token_strs: Optional[bool] = Field(
+        default=False,
+        description=("If true, also return the token strings "
+                     "corresponding to the token ids."),
     )
     continue_final_message: bool = Field(
         default=False,
@@ -1624,6 +1643,7 @@ class TokenizeResponse(OpenAIBaseModel):
     count: int
     max_model_len: int
     tokens: list[int]
+    token_strs: Optional[list[str]] = None
 
 
 class DetokenizeRequest(OpenAIBaseModel):

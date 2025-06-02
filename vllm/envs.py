@@ -122,6 +122,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
+    VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
 
 
 def get_default_cache_root():
@@ -146,10 +147,10 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
 
 def get_vllm_port() -> Optional[int]:
     """Get the port from VLLM_PORT environment variable.
-    
+
     Returns:
         The port number as an integer if VLLM_PORT is set, None otherwise.
-        
+
     Raises:
         ValueError: If VLLM_PORT is a URI, suggest k8s service discovery issue.
     """
@@ -162,17 +163,13 @@ def get_vllm_port() -> Optional[int]:
         return int(port)
     except ValueError as err:
         from urllib.parse import urlparse
-        try:
-            parsed = urlparse(port)
-            if parsed.scheme:
-                raise ValueError(
-                    f"VLLM_PORT '{port}' appears to be a URI. "
-                    "This may be caused by a Kubernetes service discovery issue"
-                    "check the warning in: https://docs.vllm.ai/en/stable/usage/env_vars.html"
-                )
-        except Exception:
-            pass
-
+        parsed = urlparse(port)
+        if parsed.scheme:
+            raise ValueError(
+                f"VLLM_PORT '{port}' appears to be a URI. "
+                "This may be caused by a Kubernetes service discovery issue,"
+                "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+            ) from None
         raise ValueError(
             f"VLLM_PORT '{port}' must be a valid integer") from err
 
@@ -299,6 +296,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
 
+    # Use separate prefill and decode kernels for V1 attention instead of
+    # the unified triton kernel.
+    "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+     ("true", "1")),
+
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
     # when using the flash-attention backend.
     "VLLM_FLASH_ATTN_VERSION":
@@ -320,16 +324,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
              ("true", "1")),
 
-    # Use separate prefill and decode kernels for V1 attention instead of
-    # the unified triton kernel.
-    "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
-    lambda:
-    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
-     ("true", "1")),
-
-    # Internal flag to enable/disable Inductor standalone compile
-    "VLLM_TEST_STANDALONE_COMPILE":
-    lambda: os.environ.get("VLLM_TEST_STANDALONE_COMPILE", "0") != "0",
+    # Feature flag to enable/disable Inductor standalone compile.
+    # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
+    # enabled by default.
+    "VLLM_USE_STANDALONE_COMPILE":
+    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -849,6 +848,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is used to prevent the kernel from running out of memory.
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
+
+    # Regex timeout for use by the vLLM tool parsing plugins.
+    "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
+    lambda: int(os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -911,7 +914,7 @@ def compute_hash() -> str:
         "VLLM_USE_TRITON_AWQ",
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",
-        "VLLM_TEST_STANDALONE_COMPILE",
+        "VLLM_USE_STANDALONE_COMPILE",
     ]
     for key in environment_variables_to_hash:
         if key in environment_variables:
