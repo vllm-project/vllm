@@ -233,6 +233,7 @@ async def test_audio_prompt(mary_had_lamb):
     prompt = "This is a speech, recorded in a phonograph."
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         #Prompts should not omit the part of original prompt while transcribing.
+        prefix = "The first words I spoke in the original phonograph"
         client = remote_server.get_async_client()
         transcription = await client.audio.transcriptions.create(
             model=model_name,
@@ -241,7 +242,7 @@ async def test_audio_prompt(mary_had_lamb):
             response_format="text",
             temperature=0.0)
         out = json.loads(transcription)['text']
-        assert "The first words I spoke in the original phonograph" in out
+        assert prefix in out
         transcription_wprompt = await client.audio.transcriptions.create(
             model=model_name,
             file=mary_had_lamb,
@@ -250,4 +251,4 @@ async def test_audio_prompt(mary_had_lamb):
             prompt=prompt,
             temperature=0.0)
         out_prompt = json.loads(transcription_wprompt)['text']
-        assert "The first words I spoke in the original phonograph" in out_prompt
+        assert prefix in out_prompt
