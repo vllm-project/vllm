@@ -100,6 +100,7 @@ def run_test(
 
     with vllm_runner(
             model,
+            dtype="half",
             max_model_len=448,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend=distributed_executor_backend,
