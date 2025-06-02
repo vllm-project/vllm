@@ -2,6 +2,12 @@
 
 # set -x
 
+export PATH=$PATH:/usr/local/lib/python3.10/dist-packages/mooncake/
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/python3.10/dist-packages/mooncake
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/libfabric/lib:/usr/lib/habanalabs/:/usr/local/lib/
+
+export PT_HPU_LAZY_MODE=1
+
 ray stop --force
 
 # DO NOT change unless you fully undersand its purpose
@@ -25,7 +31,15 @@ block_size=128
 unset VLLM_HPU_LOG_STEP_GRAPH_COMPILATION PT_HPU_METRICS_GC_DETAILS GRAPH_VISUALIZATION
 export VLLM_HPU_LOG_STEP_GRAPH_COMPILATION=true
 export PT_HPU_METRICS_GC_DETAILS=1
-#export GRAPH_VISUALIZATION=1
+export GRAPH_VISUALIZATION=1
+
+hl-prof-config --use-template profile_api_with_nics --fuser on --trace-analyzer on --gaudi2 --merged "hltv,csv"
+
+export HABANA_PROFILE=1
+export VLLM_PROFILER_ENABLED=full
+export VLLM_TORCH_PROFILER_DIR=/workspace/
+export HABANA_PROFILE_WRITE_HLTV=1
+
 #unset VLLM_HPU_LOG_STEP_GRAPH_COMPILATION PT_HPU_METRICS_GC_DETAILS GRAPH_VISUALIZATION
 
 unset VLLM_PROMPT_BS_BUCKET_MIN VLLM_PROMPT_BS_BUCKET_STEP VLLM_PROMPT_BS_BUCKET_MAX

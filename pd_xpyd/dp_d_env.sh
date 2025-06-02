@@ -1,7 +1,7 @@
 #set -x
 BASH_DIR=$(dirname "${BASH_SOURCE[0]}")
 source "$BASH_DIR"/pd_bucket.sh
-source ./pd_xpyd/pd_env.sh
+source "$BASH_DIR"/pd_env.sh
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 

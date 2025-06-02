@@ -1,11 +1,15 @@
 #set -x
+BASH_DIR=$(dirname "${BASH_SOURCE[0]}")
 
-source ./pd_xpyd/start_etc_mooncake_master.sh
+if [ -z "$1" ] || [ "$1" == "g10" ]; then
+    source "$BASH_DIR"/start_etc_mooncake_master.sh
+    echo "source "$BASH_DIR"/start_etc_mooncake_master.sh"
+fi
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-export MOONCAKE_CONFIG_PATH=./pd_xpyd/2p2d_mooncake_p0.json 
+export MOONCAKE_CONFIG_PATH="$BASH_DIR"/mooncake_${1:-g10}.json
 
-source ./pd_xpyd/dp_p_env.sh
+source "$BASH_DIR"/dp_p_env.sh
 
 ray start --head --port=6886
 
