@@ -648,24 +648,15 @@ def test_causal_conv1d_varlen_vllm(batch, with_padding, dim, seqlen, width,
     out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=2))
     out_ref_tensor = torch.cat(out_ref, dim=0)
 
-    try:
-        assert torch.allclose(final_states[state_indices],
-                              final_states_ref[state_indices],
-                              rtol=rtol,
-                              atol=atol)
-        print("Passed conv_state")
-    except Exception as e:
-        print("FAILED conv_state")
-        raise e
+    assert torch.allclose(final_states[state_indices],
+                          final_states_ref[state_indices],
+                          rtol=rtol,
+                          atol=atol)
     unpadded_out = out[:, :out_ref_tensor.shape[-1]]
-    try:
-        assert torch.allclose(unpadded_out,
-                              out_ref_tensor,
-                              rtol=rtol,
-                              atol=atol)
-    except Exception as e:
-        input(
-            "Passed conv_state, but failed output: Press Enter to continue...")
+    assert torch.allclose(unpadded_out,
+                          out_ref_tensor,
+                          rtol=rtol,
+                          atol=atol)
 
         nz = out_ref_tensor.squeeze(0) - unpadded_out
         non_zero_indices = torch.nonzero(nz)
