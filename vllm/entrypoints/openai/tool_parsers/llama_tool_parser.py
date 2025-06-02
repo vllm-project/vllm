@@ -2,7 +2,6 @@
 
 import json
 from collections.abc import Sequence
-from json import JSONDecoder
 from typing import Union
 
 import partial_json_parser
@@ -50,54 +49,41 @@ class Llama3JsonToolParser(ToolParser):
         self.bot_token = "<|python_tag|>"
         self.bot_token_id = tokenizer.encode(self.bot_token,
                                              add_special_tokens=False)[0]
-        self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
+        self.tool_call_regex = re.compile(r"{.*?}", re.DOTALL)
 
     def extract_tool_calls(
             self, model_output: str,
             request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
+        Only extracts JSON content and ignores any surrounding plain text.
         """
-        # case -- if a tool call token is not present, return a text response
-        if not (model_output.startswith(self.bot_token)
-                or model_output.startswith('{')):
+        # Find JSON object in the text using regex
+        match = self.tool_call_regex.search(model_output)
+        if not match:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
 
         try:
-            # load the JSON, and then use it to build the Function and
-            # Tool Call
-            dec = JSONDecoder()
-            function_call_arr = []
-
-            # depending on the prompt format the Llama model may or may not
-            # prefix the output with the <|python_tag|> token
-            start_idx = len(self.bot_token) if model_output.startswith(
-                self.bot_token) else 0
-            while start_idx < len(model_output):
-                (obj, end_idx) = dec.raw_decode(model_output[start_idx:])
-                start_idx += end_idx + len('; ')
-                function_call_arr.append(obj)
+            json_str = match.group(0)
+            obj = json.loads(json_str)
 
             tool_calls: list[ToolCall] = [
                 ToolCall(
                     type="function",
                     function=FunctionCall(
-                        name=raw_function_call["name"],
+                        name=obj["name"],
                         # function call args are JSON but as a string
-                        arguments=json.dumps(raw_function_call["arguments"] \
-                                if "arguments" in raw_function_call \
-                                else raw_function_call["parameters"],
+                        arguments=json.dumps(obj["arguments"] \
+                                if "arguments" in obj \
+                                else obj["parameters"],
                                 ensure_ascii=False)))
-                for raw_function_call in function_call_arr
             ]
 
-            # get any content before  the tool call
-            ret = ExtractedToolCallInformation(tools_called=True,
-                                               tool_calls=tool_calls,
-                                               content=None)
-            return ret
+            return ExtractedToolCallInformation(tools_called=True,
+                                                tool_calls=tool_calls,
+                                                content=None)
 
         except Exception:
             logger.exception("Error in extracting tool call from response.")
