@@ -50,16 +50,18 @@ CACHE = None
 
 class BaseLogitsProcessor:
 
-    def __init__(self, guide: Guide, vocab_size: int, eos_token_id: int,
-                 reasoner: Optional[ReasoningParser]):
+    def __init__(self, guide: Guide, eos_token_id: int,
+                 reasoner: Optional[ReasoningParser]) -> "BaseLogitsProcessor":
         self._guide: Guide = guide
         self._eos_token_id: int = eos_token_id
-        self._vocab_size: int = vocab_size
         self._reasoner: Optional[ReasoningParser] = reasoner
-        self._mask: torch.Tensor = allocate_token_bitmask(vocab_size)
+        self._mask: Optional[torch.Tensor] = None
 
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
+        if self._mask is None:
+            self._mask = allocate_token_bitmask(
+                scores.size(-1))
 
         # Skip the structured logits processing if reasoning is not finished.
         # reasoner is not None only when `--reasoning-parser` is set.
@@ -103,7 +105,6 @@ class BaseLogitsProcessor:
         guide = copy.deepcopy(self._guide)
         guide.reset()
         return BaseLogitsProcessor(guide=guide,
-                                   vocab_size=self._vocab_size,
                                    eos_token_id=self._eos_token_id,
                                    reasoner=self._reasoner)
 
@@ -129,10 +130,9 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
         return Guide(index)
 
     def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase,
-                 reasoner: Optional[ReasoningParser], vocab_size: int) -> None:
+                 reasoner: Optional[ReasoningParser]) -> "RegexLogitsProcessor":
         super().__init__(
             guide=RegexLogitsProcessor._get_guide(regex_string, tokenizer),
-            vocab_size=vocab_size,
             eos_token_id=tokenizer.eos_token_id,  # type: ignore
             reasoner=reasoner)
 
@@ -142,7 +142,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
     def __init__(self, schema: Union[str, dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
                  whitespace_pattern: Union[str, None],
-                 reasoner: Optional[ReasoningParser], vocab_size: int) -> None:
+                 reasoner: Optional[ReasoningParser]) -> "JSONLogitsProcessor":
 
         if isinstance(schema, type(BaseModel)):
             schema_str = json.dumps(schema.model_json_schema())
@@ -157,7 +157,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
                 f"the JSON Schema specification")
 
         regex_string = build_regex_from_schema(schema_str, whitespace_pattern)
-        super().__init__(regex_string, tokenizer, reasoner, vocab_size)
+        super().__init__(regex_string, tokenizer, reasoner)
 
 
 class OutlinesVocabulary:
@@ -166,7 +166,7 @@ class OutlinesVocabulary:
     which allows us to store a hash with the vocabulary
     """
 
-    def __init__(self, vocabulary: Vocabulary):
+    def __init__(self, vocabulary: Vocabulary) -> "OutlinesVocabulary":
         # Actual vocabulary object
         self.inner = vocabulary
         # Have to do abs(hash()) because python hashes can

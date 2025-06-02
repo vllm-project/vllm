@@ -128,7 +128,7 @@ async def get_guided_decoding_logits_processor(
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
             get_outlines_guided_decoding_logits_processor)
         return await get_outlines_guided_decoding_logits_processor(
-            guided_params, tokenizer, reasoner, model_config)
+            guided_params, tokenizer, reasoner)
     if guided_params.backend == 'lm-format-enforcer':
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
@@ -168,7 +168,7 @@ def get_local_guided_decoding_logits_processor(
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
             get_local_outlines_guided_decoding_logits_processor)
         return get_local_outlines_guided_decoding_logits_processor(
-            guided_params, tokenizer, reasoner, model_config)
+            guided_params, tokenizer, reasoner)
     if guided_params.backend == 'lm-format-enforcer':
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_local_lm_format_enforcer_guided_decoding_logits_processor)

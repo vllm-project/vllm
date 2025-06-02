@@ -33,7 +33,7 @@ _MAX_THREADPOOL_WORKERS = 16
 
 async def get_outlines_guided_decoding_logits_processor(
     guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizerBase,
-    reasoner: Optional[ReasoningParser], model_config: ModelConfig
+    reasoner: Optional[ReasoningParser]
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, None]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
@@ -51,16 +51,15 @@ async def get_outlines_guided_decoding_logits_processor(
         global_thread_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers)
     loop = asyncio.get_running_loop()
-    vocab_size = model_config.get_vocab_size()
     return await loop.run_in_executor(global_thread_pool,
                                       _get_logits_processor, guide, tokenizer,
                                       mode, guided_params.whitespace_pattern,
-                                      reasoner, vocab_size)
+                                      reasoner)
 
 
 def get_local_outlines_guided_decoding_logits_processor(
     guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizerBase,
-    reasoner: Optional[ReasoningParser], model_config: ModelConfig
+    reasoner: Optional[ReasoningParser]
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, None]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
@@ -71,8 +70,7 @@ def get_local_outlines_guided_decoding_logits_processor(
         return None
 
     return _get_logits_processor(guide, tokenizer, mode,
-                                 guided_params.whitespace_pattern, reasoner,
-                                 model_config.get_vocab_size())
+                                 guided_params.whitespace_pattern, reasoner)
 
 
 def _get_guide_and_mode(
@@ -109,12 +107,11 @@ def _get_logits_processor(
     mode: GuidedDecodingMode,
     whitespace_pattern: Union[str, None],
     reasoner: Optional[ReasoningParser],
-    vocab_size: int,
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern,
-                                   reasoner, vocab_size)
+                                   reasoner)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
-        return RegexLogitsProcessor(guide, tokenizer, reasoner, vocab_size)
+        return RegexLogitsProcessor(guide, tokenizer, reasoner)
     else:
         raise ValueError(f"Unknown guided decoding mode {mode}")

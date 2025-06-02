@@ -39,13 +39,11 @@ def test_guided_logits_processors(zephyr_7B_tokenzer, sample_regex,
     """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""
     regex_LP = RegexLogitsProcessor(sample_regex,
                                     zephyr_7B_tokenzer,
-                                    reasoner=None,
-                                    vocab_size=32000)
+                                    reasoner=None)
     json_LP = JSONLogitsProcessor(sample_json_schema,
                                   zephyr_7B_tokenzer,
                                   whitespace_pattern=None,
-                                  reasoner=None,
-                                  vocab_size=32000)
+                                  reasoner=None)
 
     tensor = torch.rand(32000)
     original_tensor = torch.clone(tensor)
@@ -132,7 +130,7 @@ async def test_guided_logits_processor_with_reasoning(
                     regex_request, deepseek_r1_qwen_tokenizer, config,
                     reasoning_backend)
     assert regex_lp is not None
-    tensor = torch.rand(32000)
+    tensor = torch.rand(151664)
     original_tensor = torch.clone(tensor)
     tensor = regex_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
@@ -148,7 +146,7 @@ async def test_guided_logits_processor_with_reasoning(
         await get_guided_decoding_logits_processor(
             json_request, deepseek_r1_qwen_tokenizer, config, reasoning_backend)
     assert json_lp is not None
-    tensor = torch.rand(32000)
+    tensor = torch.rand(151664)
     original_tensor = torch.clone(tensor)
     tensor = json_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
@@ -165,7 +163,7 @@ async def test_guided_logits_processor_with_reasoning(
         await get_guided_decoding_logits_processor(
             json_request, deepseek_r1_qwen_tokenizer, config, reasoning_backend)
     assert json_lp is not None
-    tensor = torch.rand(32000)
+    tensor = torch.rand(151664)
     original_tensor = torch.clone(tensor)
     tensor = json_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
