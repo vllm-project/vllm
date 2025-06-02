@@ -226,6 +226,7 @@ async def test_sampling_params(mary_had_lamb):
 
         assert greedy_transcription.text != transcription.text
 
+
 @pytest.mark.asyncio
 async def test_audio_prompt(mary_had_lamb):
     model_name = "openai/whisper-large-v3-turbo"
