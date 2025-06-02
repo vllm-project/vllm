@@ -3,6 +3,7 @@
 from typing import Any, Optional, Union
 
 import pytest
+from transformers import AutoModelForImageTextToText
 
 from vllm.platforms import current_platform
 
@@ -10,7 +11,6 @@ from ..conftest import HfRunner, VllmRunner
 from ..core.block.e2e.test_correctness_sliding_window import prep_prompts
 from ..utils import multi_gpu_test
 from .utils import check_logprobs_close
-from transformers import AutoModelForImageTextToText
 
 
 def check_implementation(
@@ -75,10 +75,14 @@ def test_models(
 @pytest.mark.parametrize(
     "model,model_impl",
     [
-        ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", "transformers"), # dynamic image length and number of patches
-        ("HuggingFaceTB/SmolVLM-256M-Instruct", "transformers"), # has col/row special token between patches
-        ("Qwen/Qwen2.5-VL-3B-Instruct", "transformers"), # pixel values from processor are not 4D or 5D arraya
-    ]) # no custom code support because custom models don't follow the standard yet!
+        ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+         "transformers"),  # dynamic image length and number of patches
+        ("HuggingFaceTB/SmolVLM-256M-Instruct",
+         "transformers"),  # has col/row special token between patches
+        ("Qwen/Qwen2.5-VL-3B-Instruct", "transformers"
+         ),  # pixel values from processor are not 4D or 5D arraya
+    ]
+)  # no custom code support because custom models don't follow the standard yet!
 def test_models_multimodal(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
@@ -86,12 +90,15 @@ def test_models_multimodal(
     model: str,
     model_impl: str,
 ) -> None:
-    check_implementation(hf_runner,
-                         vllm_runner,
-                         example_prompts,
-                         model,
-                         model_impl=model_impl,
-                         kwargs_ref={"auto_cls": AutoModelForImageTextToText},)
+    check_implementation(
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        model,
+        model_impl=model_impl,
+        kwargs_ref={"auto_cls": AutoModelForImageTextToText},
+    )
+
 
 def test_hybrid_attention(vllm_runner: type[VllmRunner]) -> None:
     prompts, _, _ = prep_prompts(4, (800, 801))

@@ -231,7 +231,7 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _TRANSFORMERS_MODELS = {
-    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
@@ -457,8 +457,8 @@ class _ModelRegistry:
 
         # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):
-            # The order matters. If causal comes first, checks on MM model fails because it is not registered in MultimodalRegistry
-            # TODO: needs help from vLLM team
+            # The order matters. If the CausalLM comes first, then checks for
+            # registered model in MultimodalRegistry fail
             normalized_arch.extend(
                 ["TransformersForMultimodalLM", "TransformersForCausalLM"])
         return normalized_arch

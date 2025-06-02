@@ -41,12 +41,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalInputs,
-                                    PlaceholderRange, MultiModalDataDict)
+from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+                                    MultiModalInputs, PlaceholderRange)
 from vllm.multimodal.parse import ImageProcessorItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_get_processor
 
@@ -124,8 +124,9 @@ def replace_linear_class(
 @contextmanager
 def init_on_device_without_buffers(device: torch.device):
     """
-    A context manager under which models are initialized with all parameters on the specified device.
-    However buffers are not initialized on specified device.
+    A context manager under which models are initialized with all
+    parameters on the specified device. However buffers are not
+    initialized on specified device.
 
     Args:
         device (`torch.device`):
@@ -162,8 +163,7 @@ def init_on_device_without_buffers(device: torch.device):
         yield
     finally:
         nn.Module.register_parameter = old_register_parameter
-        for torch_function_name, old_torch_function in tensor_constructors_to_patch.items(
-        ):
+        for torch_function_name, old_torch_function in tensor_constructors_to_patch.items():
             setattr(torch, torch_function_name, old_torch_function)
 
 
@@ -216,7 +216,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
 
         target_width, target_height = self.info.get_max_image_size()
 
-        return  {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
@@ -253,13 +253,11 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs,
         num_image_patches: torch.Tensor = None,
     ):
-        hf_inputs.pop(
-            "attention_mask",
-            None)  # processors always return a mask but vLLM doesn't need it
+        # HF Processors always return a mask but vLLM doesn't need it
+        hf_inputs.pop("attention_mask", None)
         mm_fields = {
-            key: MultiModalFieldConfig.flat_from_sizes("image",
-                                                       num_image_patches)
-            for key in hf_inputs.keys()
+            key: MultiModalFieldConfig.flat_from_sizes("image", num_image_patches)
+            for key in hf_inputs
         }
         mm_fields["image_embeds"] = MultiModalFieldConfig.flat_from_sizes(
             "image", num_image_patches)
@@ -311,13 +309,17 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         """
         if return_mm_hashes:
             raise ValueError(
-                "TransformersMultimodalLM doesn't support mm hashing yet! Probably you did not set "
-                "`disable_mm_preprocessor_cache=True`.")
+                "TransformersMultimodalLM doesn't support mm hashing yet! "
+                "Probably you did not set `disable_mm_preprocessor_cache=True`")
 
         mm_items = self._to_mm_items(mm_data)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        prompt_ids, processed_data, mm_token_type_ids = self._apply_hf_processor_text_mm(
+        (
+            prompt_ids,
+            processed_data,
+            mm_token_type_ids
+        ) = self._apply_hf_processor_text_mm(
             prompt_text=prompt,
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
@@ -435,7 +437,7 @@ class TransformersModel(nn.Module):
             config_override = ConfigOverride(
                 config, sliding_window=config.interleaved_sliding_window)
 
-        # Set correct attn impl and init on "meta" to delay allocating GPU tensors
+        # Set correct attn and init on "meta" to delay allocating GPU tensors
         self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"):
             # FIXME(Isotr0py): We need to refactor this part in the future to
@@ -870,9 +872,9 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
                 if vision_embeddings.ndim == 2:
                     vision_embeddings = vision_embeddings.unsqueeze(0)
 
-                # Embeddings have to be 2D tensors of length `num_images` but transformers
-                # returns concat tensors if each patch is of different size. We split it back
-                # to make vLLM assertions happy
+                # Embeddings have to be 2D tensors of length `num_images`
+                # but transformers returns concat tensors if each patch
+                # is of different size. We split it back to make vLLM happy
                 vision_embeddings = torch.split(vision_embeddings,
                                                 num_image_patches.tolist())
                 vision_embeddings = [
