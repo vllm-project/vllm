@@ -163,7 +163,8 @@ def init_on_device_without_buffers(device: torch.device):
         yield
     finally:
         nn.Module.register_parameter = old_register_parameter
-        for torch_function_name, old_torch_function in tensor_constructors_to_patch.items():
+        for torch_function_name, old_torch_function in tensor_constructors_to_patch.items(
+        ):
             setattr(torch, torch_function_name, old_torch_function)
 
 
@@ -256,7 +257,8 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         # HF Processors always return a mask but vLLM doesn't need it
         hf_inputs.pop("attention_mask", None)
         mm_fields = {
-            key: MultiModalFieldConfig.flat_from_sizes("image", num_image_patches)
+            key: MultiModalFieldConfig.flat_from_sizes("image",
+                                                       num_image_patches)
             for key in hf_inputs
         }
         mm_fields["image_embeds"] = MultiModalFieldConfig.flat_from_sizes(
@@ -310,16 +312,13 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         if return_mm_hashes:
             raise ValueError(
                 "TransformersMultimodalLM doesn't support mm hashing yet! "
-                "Probably you did not set `disable_mm_preprocessor_cache=True`")
+                "Probably you didn't set `disable_mm_preprocessor_cache=True`")
 
         mm_items = self._to_mm_items(mm_data)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        (
-            prompt_ids,
-            processed_data,
-            mm_token_type_ids
-        ) = self._apply_hf_processor_text_mm(
+        (prompt_ids, processed_data,
+        mm_token_type_ids) = self._apply_hf_processor_text_mm(
             prompt_text=prompt,
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
