@@ -1337,7 +1337,7 @@ async def run_server_worker(listen_address,
     server_index = client_config.get("client_index", 0) if client_config else 0
 
     # Load logging config for uvicorn if specified
-    log_config = load_log_config(getattr(args, "log_config_file", None))
+    log_config = load_log_config(args.log_config_file)
     if log_config is not None:
         uvicorn_kwargs['log_config'] = log_config
 
