@@ -1366,6 +1366,7 @@ async def run_server_worker(listen_address,
             ssl_cert_reqs=args.ssl_cert_reqs,
             **uvicorn_kwargs,
         )
+
     # NB: Await server shutdown only after the backend context is exited
     try:
         await shutdown_task
