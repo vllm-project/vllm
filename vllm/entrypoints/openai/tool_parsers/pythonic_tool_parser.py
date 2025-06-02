@@ -8,6 +8,7 @@ from typing import Any, Union
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -61,8 +62,18 @@ class PythonicToolParser(ToolParser):
         """
         Extract the tool calls from a complete model response.
         """
+        is_tool_call_pattern = False
+        try:
+            is_tool_call_pattern = self.TOOL_CALL_REGEX.match(
+                model_output,
+                timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS) is not None
+        except TimeoutError:
+            logger.warning(
+                "Regex timeout occurred when matching tool call pattern.")
+            logger.debug("Regex timeout occurred when matching user input: %s",
+                         model_output)
 
-        if not (self.TOOL_CALL_REGEX.match(model_output)):
+        if not is_tool_call_pattern:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)

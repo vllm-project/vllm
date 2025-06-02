@@ -43,7 +43,7 @@ def test_basic_lifecycle():
     # Ensure the request is finished after 1 tokens.
     assert request.is_finished()
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
-    output = engine_core_outputs.outputs[0]
+    output = engine_core_outputs[0].outputs[0]
     assert output.finish_reason == FinishReason.LENGTH
     assert output.kv_transfer_params is not None
 
@@ -165,7 +165,7 @@ def test_prefix_cache_lifecycle():
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_remote])
     eco = scheduler.update_from_output(scheduler_output, model_runner_output)
-    kv_transfer_params = eco.outputs[0].kv_transfer_params
+    kv_transfer_params = eco[0].outputs[0].kv_transfer_params
 
     # Ensure we send all block ids, even if there is a cache hit.
     assert (len(
