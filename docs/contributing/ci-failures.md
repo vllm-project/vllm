@@ -1,6 +1,6 @@
 # CI Failures
 
-What should I do when a CI job fails on my PR, but I don’t think my PR caused
+What should I do when a CI job fails on my PR, but I don't think my PR caused
 the failure?
 
 - Check the dashboard of current CI test failures:  
@@ -18,30 +18,29 @@ the failure?
 1. **File a bug report:**  
    👉 [New CI Failure Report](https://github.com/vllm-project/vllm/issues/new?template=450-ci-failure.yml)
 
-2. **Use this title format:**
+1. **Use this title format:**
 
-   ```
+```text
    [CI Failure]: failing-test-job - regex/matching/failing:test
    ```
 
-3. **For the environment field:**
-
-   ```
-   Still failing on main as of commit abcdef123
-   ```
-
-4. **In the description, include failing tests:**
+1. **For the environment field:**
 
    ```text
+Still failing on main as of commit abcdef123
+
+   ```
+
+1. **In the description, include failing tests:**
+   ```text
    FAILED failing/test.py:failing_test1 - Failure description  
-   FAILED failing/test.py:failing_test2 - Failure description  
+FAILED failing/test.py:failing_test2 - Failure description  
    https://github.com/orgs/vllm-project/projects/20  
    https://github.com/vllm-project/vllm/issues/new?template=400-bug-report.yml  
    FAILED failing/test.py:failing_test3 - Failure description  
    ```
 
-5. **Attach logs** (collapsible section example):
-
+1. **Attach logs** (collapsible section example):
    <details>
    <summary>Logs:</summary>
 
