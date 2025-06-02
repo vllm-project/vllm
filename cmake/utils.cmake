@@ -456,11 +456,7 @@ function (define_gpu_extension_target GPU_MOD_NAME)
     hipify_sources_target(GPU_SOURCES ${GPU_MOD_NAME} "${GPU_SOURCES}")
   endif()
 
-  if (GPU_WITH_SOABI)
-    set(GPU_WITH_SOABI WITH_SOABI)
-  else()
-    set(GPU_WITH_SOABI)
-  endif()
+  set(GPU_WITH_SOABI WITH_SOABI)
 
   if (GPU_USE_SABI)
     Python_add_library(${GPU_MOD_NAME} MODULE USE_SABI ${GPU_USE_SABI} ${GPU_WITH_SOABI} "${GPU_SOURCES}")
