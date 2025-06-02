@@ -83,7 +83,7 @@ class SingleTypeKVCacheManager(ABC):
         # to a computed block when the request is allocated, so we also count
         # it as needed to be allocated.
         num_evictable_computed_blocks = sum(
-            (blk.ref_cnt == 0 and not blk.is_null)
+            (blk.ref_cnt == 0 and blk.is_not_null)
             for blk in new_computed_blocks)
         return ((num_new_blocks + num_evictable_computed_blocks) *
                 self.num_kv_cache_groups)
