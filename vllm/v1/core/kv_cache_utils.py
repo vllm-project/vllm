@@ -19,7 +19,7 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
-class BlockHashType(NamedTuple):
+class BlockHash(NamedTuple):
     """Hash value of a block (int), the token IDs in the block, and extra keys.
     We keep a tuple of token IDs and extra keys to reduce the likelihood of
     hash collisions when the hash value is the same. By using SHA256 however,
@@ -34,8 +34,8 @@ class BlockHashType(NamedTuple):
     extra_keys: Optional[Any] = None
 
 
-class BlockHashTypeWithGroupId(NamedTuple):
-    block_hash: BlockHashType
+class BlockHashWithGroupId(NamedTuple):
+    block_hash: BlockHash
     group_id: int
 
     def get_hash_value(self) -> int:
@@ -127,7 +127,7 @@ class KVCacheBlock:
     ref_cnt: int = 0
     # The hash of the block composed of (block hash, tuple of token IDs).
     # It is only available when the block is full.
-    _block_hash: Optional[BlockHashTypeWithGroupId] = None
+    _block_hash: Optional[BlockHashWithGroupId] = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
@@ -141,11 +141,11 @@ class KVCacheBlock:
         self.ref_cnt -= 1
 
     @property
-    def block_hash(self) -> Optional[BlockHashTypeWithGroupId]:
+    def block_hash(self) -> Optional[BlockHashWithGroupId]:
         return self._block_hash
 
     @block_hash.setter
-    def block_hash(self, block_hash: BlockHashTypeWithGroupId):
+    def block_hash(self, block_hash: BlockHashWithGroupId):
         assert self.block_hash is None, (
             "The block already has a hash. This should not happen.")
         self._block_hash = block_hash
@@ -408,7 +408,7 @@ def hash_block_tokens(
         hash_function: Callable,
         parent_block_hash: Optional[int],
         curr_block_token_ids: Sequence[int],
-        extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHashType:
+        extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHash:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
@@ -429,14 +429,14 @@ def hash_block_tokens(
         parent_block_hash = NONE_HASH
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
-    return BlockHashType(
+    return BlockHash(
         hash_function(
             (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
         curr_block_token_ids_tuple, extra_keys)
 
 
 def hash_request_tokens(hash_function: Any, block_size: int,
-                        request: Request) -> list[BlockHashType]:
+                        request: Request) -> list[BlockHash]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 

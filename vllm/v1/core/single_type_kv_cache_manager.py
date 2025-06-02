@@ -5,7 +5,7 @@ from typing import Callable
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         SlidingWindowSpec)
 from vllm.v1.request import Request
@@ -125,7 +125,7 @@ class SingleTypeKVCacheManager(ABC):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request, block_hashes: list[BlockHashType],
+    def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
                      num_tokens: int) -> None:
         """
         Cache the blocks for the request.
@@ -189,7 +189,7 @@ class SingleTypeKVCacheManager(ABC):
     @abstractmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHashType],
+        block_hashes: list[BlockHash],
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
@@ -247,7 +247,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHashType],
+        block_hashes: list[BlockHash],
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
@@ -304,7 +304,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     @classmethod
     def find_longest_cache_hit(
         cls,
-        block_hashes: list[BlockHashType],
+        block_hashes: list[BlockHash],
         max_length: int,
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,

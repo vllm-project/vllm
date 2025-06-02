@@ -8,7 +8,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils import sha256
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
-from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          hash_request_tokens)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
@@ -104,7 +104,7 @@ class KVCacheManager:
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
         self.req_to_block_hashes: defaultdict[
-            str, list[BlockHashType]] = defaultdict(list)
+            str, list[BlockHash]] = defaultdict(list)
 
     @property
     def usage(self) -> float:
@@ -377,7 +377,7 @@ class KVCacheManager:
         return KVCacheBlocks(
             self.coordinator.get_blocks(request_id)).get_block_ids()
 
-    def cache_blocks(self, request: Request, block_hashes: list[BlockHashType],
+    def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
                      num_computed_tokens: int) -> None:
         """Cache the blocks for the request."""
         self.coordinator.cache_blocks(request, block_hashes,

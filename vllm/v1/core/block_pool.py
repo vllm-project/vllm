@@ -6,8 +6,7 @@ from typing import Callable, Optional
 from vllm.distributed.kv_events import (AllBlocksCleared, BlockRemoved,
                                         BlockStored, KVCacheEvent)
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import (BlockHashType,
-                                         BlockHashTypeWithGroupId,
+from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
@@ -57,7 +56,7 @@ class BlockPool:
         # if there is already an identical block in the cache. This is because
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
-        self.cached_block_hash_to_block: dict[BlockHashTypeWithGroupId, dict[
+        self.cached_block_hash_to_block: dict[BlockHashWithGroupId, dict[
             int, KVCacheBlock]] = defaultdict(dict)
 
         # To represent a placeholder block with block_id=0.
@@ -69,7 +68,7 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
     def get_cached_block(
-            self, block_hash: BlockHashType,
+            self, block_hash: BlockHash,
             kv_cache_group_ids: list[int]) -> Optional[list[KVCacheBlock]]:
         """Get the cached block by the block hash for each group in 
         `kv_cache_group_ids`, or None if cache miss for any group.
@@ -85,7 +84,7 @@ class BlockPool:
         cached_blocks = []
         for group_id in kv_cache_group_ids:
             cached_blocks_one_group = self.cached_block_hash_to_block[
-                BlockHashTypeWithGroupId(block_hash, group_id)]
+                BlockHashWithGroupId(block_hash, group_id)]
             if not cached_blocks_one_group:
                 return None
             first_block_id = next(iter(cached_blocks_one_group))
@@ -96,7 +95,7 @@ class BlockPool:
         self,
         request: Request,
         blocks: list[KVCacheBlock],
-        block_hashes: list[BlockHashType],
+        block_hashes: list[BlockHash],
         num_cached_blocks: int,
         num_full_blocks: int,
         block_size: int,
@@ -176,7 +175,7 @@ class BlockPool:
                 block_hashes.append(block_hash)
 
             # Update and added the full block to the cache.
-            block_hash_with_group_id = BlockHashTypeWithGroupId(
+            block_hash_with_group_id = BlockHashWithGroupId(
                 block_hash, kv_cache_group_id)
             blk.block_hash = block_hash_with_group_id
             self.cached_block_hash_to_block[block_hash_with_group_id][

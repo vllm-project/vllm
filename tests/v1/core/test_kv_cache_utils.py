@@ -10,7 +10,7 @@ from vllm.utils import GiB_bytes, sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
-from vllm.v1.core.kv_cache_utils import (NONE_HASH, BlockHashType,
+from vllm.v1.core.kv_cache_utils import (NONE_HASH, BlockHash,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
                                          PrefixCachingMetrics,
                                          estimate_max_model_len,
@@ -78,7 +78,7 @@ def test_kv_cache_block():
     assert block.block_hash is None
 
     # Test block hash setting and resetting
-    block_hash = BlockHashType(hash_value=123, token_ids=(1, 2, 3))
+    block_hash = BlockHash(hash_value=123, token_ids=(1, 2, 3))
     block.block_hash = block_hash
     assert block.block_hash == block_hash
 
@@ -258,7 +258,7 @@ def test_hash_block_tokens(hash_fn):
 
     block_hash = hash_block_tokens(hash_fn, parent_block_hash,
                                    curr_block_token_ids, extra_keys)
-    assert isinstance(block_hash, BlockHashType)
+    assert isinstance(block_hash, BlockHash)
     assert block_hash.hash_value == hash_fn(
         (parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
@@ -281,8 +281,8 @@ def test_hash_request_tokens(hash_fn):
     block_hashes = hash_request_tokens(hash_fn, block_size, request)
 
     assert len(block_hashes) == 2
-    assert isinstance(block_hashes[0], BlockHashType)
-    assert isinstance(block_hashes[1], BlockHashType)
+    assert isinstance(block_hashes[0], BlockHash)
+    assert isinstance(block_hashes[1], BlockHash)
 
     # Check the first block
     assert block_hashes[0].token_ids == (0, 1, 2)
