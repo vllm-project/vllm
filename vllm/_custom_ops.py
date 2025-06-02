@@ -828,6 +828,11 @@ def get_cutlass_moe_mm_data(
                          before executing the MMs.
     - output_permutation: Permutation that must be used to shuffle the output
                           after executing the MMs.
+    - blockscale_offsets: Optional arugument passed for fp4 moe. Indices that
+                          mark at which block scale index each expert begins
+                          its computation. The number of block scale rows
+                          computed with expert E is blockscale_offsets[E + 1] -
+                          blockscale_offsets[E]
     """
     return torch.ops._C.get_cutlass_moe_mm_data(topk_ids, expert_offsets,
                                                 problem_sizes1, problem_sizes2,
@@ -835,19 +840,6 @@ def get_cutlass_moe_mm_data(
                                                 output_permutation,
                                                 num_experts, n, k, blockscale_offsets)
 
-# def get_cutlass_fp4_moe_mm_data(
-#         topk_ids: torch.Tensor, expert_offsets: torch.Tensor,
-#         blockscale_offsets: torch.Tensor,
-#         problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor,
-#         input_permutation: torch.Tensor, output_permutation: torch.Tensor,
-#         num_experts: int, n: int, k: int):
-#     return torch.ops._C.get_cutlass_fp4_moe_mm_data(topk_ids, expert_offsets,
-#                                                      blockscale_offsets,
-#                                                      problem_sizes1,
-#                                                      problem_sizes2,
-#                                                      input_permutation,
-#                                                      output_permutation,
-#                                                      num_experts, n, k)
 
 def moe_permute(
         input_tensor: torch.Tensor, dst2src_map: torch.Tensor, output_tensor: torch.Tensor

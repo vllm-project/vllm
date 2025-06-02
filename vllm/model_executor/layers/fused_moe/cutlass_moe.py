@@ -347,11 +347,6 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
                                 problem_sizes2, a_map, c_map, e, n, k, blockscale_offsets)
 
-    # tokens_per_expert = problem_sizes1[:, 0]
-    # rounded_tokens_per_expert = (tokens_per_expert + (128 - 1)) // 128 * 128
-    # blockscale_offsets = torch.zeros(e + 1, dtype=torch.int32, device=device)
-    # blockscale_offsets[1:] = torch.cumsum(rounded_tokens_per_expert, dim=0)
-
     rep_a_fp4, rep_a_blockscale = ops.scaled_fp4_experts_quant(
         a,
         a1_gscale,
