@@ -175,7 +175,7 @@ class KVCacheCoordinator:
         pass
 
 
-class SingleGroupKVCacheCoordinator(KVCacheCoordinator):
+class UnitaryKVCacheCoordinator(KVCacheCoordinator):
     """
     KV cache coordinator for models with only one KV cache group. This is the
     case for models with only one KV cache type, e.g., all attention layers use
@@ -192,7 +192,7 @@ class SingleGroupKVCacheCoordinator(KVCacheCoordinator):
             0].kv_cache_spec
         self.block_size = self.kv_cache_spec.block_size
         assert len(self.kv_cache_config.kv_cache_groups) == 1, (
-            "UnifiedKVCacheCoordinator assumes only one kv cache group")
+            "UnitaryKVCacheCoordinator assumes only one kv cache group")
 
     def find_longest_cache_hit(
             self, block_hashes: list[BlockHash],
@@ -317,6 +317,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 use_eagle=self.use_eagle,
             ))
         hit_length = len(hit_blocks_other_attn[0]) * self.other_block_size
+
+        # NOTE: the prefix cache hit length must be a multiply of block_size as
+        # we don't support partial block cache hit yet. The cache hit length
+        # of other attention is ensured to be a multiple of the block size of
+        # full attention layers in current implementation, because hit_length is
+        # a multiple of other attention's block size, and other attention's
+        # block size is a multiple of full attention's block size (verified in
+        # `verify_and_split_kv_cache_groups`).
         assert hit_length % self.full_attention_block_size == 0
 
         # Truncate the full attention cache hit to the length of the
@@ -328,7 +336,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Merge the hit blocks of full attention and other attention.
         hit_blocks = hit_blocks_other_attn
         for group_id, blocks in enumerate(hit_blocks_full_attn):
-            del blocks[hit_length // self.full_attention_block_size:]
             # NOTE: there is only one full attention group in most cases. So
             # the time complexity of insert is fine.
             hit_blocks.insert(group_id, blocks)
@@ -340,10 +347,10 @@ def get_kv_cache_coordinator(
         enable_caching: bool, caching_hash_fn: Callable,
         enable_kv_cache_events: bool) -> KVCacheCoordinator:
     if len(kv_cache_config.kv_cache_groups) == 1:
-        return SingleGroupKVCacheCoordinator(kv_cache_config, max_model_len,
-                                             use_eagle, enable_caching,
-                                             caching_hash_fn,
-                                             enable_kv_cache_events)
+        return UnitaryKVCacheCoordinator(kv_cache_config, max_model_len,
+                                         use_eagle, enable_caching,
+                                         caching_hash_fn,
+                                         enable_kv_cache_events)
     else:
         return HybridKVCacheCoordinator(kv_cache_config, max_model_len,
                                         use_eagle, enable_caching,
