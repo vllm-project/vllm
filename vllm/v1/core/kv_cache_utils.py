@@ -842,12 +842,13 @@ def _get_kv_cache_config_uniform_page_size(
             KVCacheTensor(size=per_memory_pool_size, shared_by=shared_by))
 
     # Print the KV cache size and maximum concurrency.
-    # TODO in this PR: Now just copy from the uniform type implementation.
-    # Should reimplement this for hybrid model
-    num_tokens = num_blocks * vllm_config.cache_config.block_size
+    num_tokens = num_blocks // len(
+        grouped_layers) * vllm_config.cache_config.block_size
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
+    # TODO in this PR: Now just copy from the uniform type implementation.
+    # Update after https://github.com/vllm-project/vllm/pull/19029
     max_concurrency = num_tokens / vllm_config.model_config.max_model_len
     logger.info(
         "Maximum concurrency for %s tokens per request: %.2fx",
