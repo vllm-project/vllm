@@ -244,13 +244,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         " into OpenAI API format, the name register in this plugin can be used "
         "in ``--tool-call-parser``.")
 
-    parser.add_argument(
-        "--log-config-file",
-        type=str,
-        default=os.environ.get("VLLM_LOGGING_CONFIG_PATH", None),
-        help="Path to logging config JSON file for both vllm and uvicorn",
-    )
+import vllm.envs as envs
 
+        default=envs.VLLM_LOGGING_CONFIG_PATH,
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     parser.add_argument('--max-log-len',

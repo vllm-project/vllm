@@ -1003,7 +1003,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         return Response(status_code=200, content=response)
 
 
-def load_log_config(log_config_file: str) -> Optional[dict]:
+def load_log_config(log_config_file: Optional[str]) -> Optional[dict]:
     if not log_config_file:
         return None
     try:
