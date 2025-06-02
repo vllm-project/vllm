@@ -358,16 +358,26 @@ run_serving_tests() {
     # run the server
     echo "Running test case $test_name"
     echo "Server command: $server_command"
-    bash -c "$server_command" &
-    server_pid=$!
-
-    # wait until the server is alive
-    if wait_for_server; then
-      echo ""
-      echo "vllm server is up and running."
+    # support remote vllm server
+    client_remote_args=""
+    if [[ -z "${REMOTE_HOST}" ]]; then
+      bash -c "$server_command" &
+      server_pid=$!
+      # wait until the server is alive
+      if wait_for_server; then
+        echo ""
+        echo "vllm server is up and running."
+      else
+        echo ""
+        echo "vllm failed to start within the timeout period."
+      fi
     else
-      echo ""
-      echo "vllm failed to start within the timeout period."
+      server_command="Using Remote Server $REMOTE_HOST $REMOTE_PORT"
+      if [[ ${REMOTE_PORT} ]]; then
+        client_remote_args=" --host=$REMOTE_HOST --port=$REMOTE_PORT "
+      else
+        client_remote_args=" --host=$REMOTE_HOST "
+      fi
     fi
 
     # iterate over different QPS
@@ -389,7 +399,7 @@ run_serving_tests() {
         --result-filename ${new_test_name}.json \
         --request-rate $qps \
         --metadata "tensor_parallel_size=$tp" \
-        $client_args"
+        $client_args $client_remote_args "
 
       echo "Running test case $test_name with qps $qps"
       echo "Client command: $client_command"
