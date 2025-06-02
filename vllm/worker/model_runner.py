@@ -1417,9 +1417,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             if model_input.attn_metadata is not None:
                 model_input.attn_metadata.enable_kv_scales_calculation = False
 
-            import nvtx
-            with nvtx.annotate("execute_model"):
-                self.execute_model(model_input, kv_caches, intermediate_tensors)
+            self.execute_model(model_input, kv_caches, intermediate_tensors)
             torch.cuda.synchronize()
             if self.lora_config:
                 self._remove_dummy_loras()
@@ -2125,8 +2123,6 @@ class CUDAGraphRunner(nn.Module):
     ) -> torch.Tensor:
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         
-        print("=== CUDAGraphRunner forward ===")
-
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         if positions is not None:

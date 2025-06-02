@@ -49,7 +49,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.v1.worker.ubatching import get_current_ubatch_context
 
 from .interfaces import SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
@@ -564,8 +563,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        # if (ubatch_ctx := get_current_ubatch_context()) is not None:
-        #     print("in decoder, ubatch:", ubatch_ctx.id)
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -659,9 +656,6 @@ class DeepseekV2Model(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # if (ubatch_ctx := get_current_ubatch_context()) is not None:
-        #     print("in forward, ubatch:", ubatch_ctx.id)
-        
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
