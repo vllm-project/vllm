@@ -50,8 +50,10 @@ class Llama3JsonToolParser(ToolParser):
         self.bot_token_id = tokenizer.encode(self.bot_token,
                                              add_special_tokens=False)[0]
         # Updated regex to match multiple JSONs separated by semicolons
-        self.tool_call_regex = re.compile(r"{[^}]*}(?:\s*;\s*{[^}]*})*",
-                                          re.DOTALL)
+        # This pattern is more robust and can handle nested JSON objects
+        self.tool_call_regex = re.compile(
+            r'{[^{}]*(?:{[^{}]*}[^{}]*)*}(?:\s*;\s*{[^{}]*(?:{[^{}]*}[^{}]*)*})*',
+            re.DOTALL)
 
     def extract_tool_calls(
             self, model_output: str,
