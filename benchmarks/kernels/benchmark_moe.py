@@ -6,8 +6,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
-from types import SimpleNamespace
-from typing import Any, TypedDict
+from typing import Any, TypedDict, List
 
 import ray
 import torch
@@ -562,7 +561,6 @@ def main(args: argparse.Namespace):
     config = get_config(model=args.model, trust_remote_code=args.trust_remote_code)
     if args.model_prefix:
         config = getattr(config, args.model_prefix)
-    config = SimpleNamespace(**config)
 
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
@@ -597,7 +595,7 @@ def main(args: argparse.Namespace):
     dtype = (
         torch.float16
         if current_platform.is_rocm()
-        else getattr(torch, config.torch_dtype)
+        else getattr(config, 'torch_dtype')
     )
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
