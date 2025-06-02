@@ -686,8 +686,7 @@ class ModelConfig:
 
         if not is_pooling_model:
             if self.attn_dtype != "auto" or self.dtype == "hybrid":
-                raise ValueError("Generate and draft tasks do not "
-                                 "support hybrid dtype.")
+                raise ValueError("Only pooling models support hybrid dtype.")
 
             self.dtype = _get_and_verify_dtype(
                 self.model,
@@ -727,12 +726,12 @@ class ModelConfig:
             self.attn_dtype = self.dtype
         else:
             self.attn_dtype = _get_and_verify_dtype(
-            self.model,
-            self.hf_config,
-            self.attn_dtype,
-            is_pooling_model=is_pooling_model,
-            revision=self.revision,
-        )
+                self.model,
+                self.hf_config,
+                self.attn_dtype,
+                is_pooling_model=is_pooling_model,
+                revision=self.revision,
+            )
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
@@ -4629,6 +4628,7 @@ class VllmConfig:
             f" tokenizer_revision={self.model_config.tokenizer_revision}, "
             f"trust_remote_code={self.model_config.trust_remote_code}, "
             f"dtype={self.model_config.dtype}, "
+            f"attn_dtype={self.model_config.attn_dtype}, "
             f"max_seq_len={self.model_config.max_model_len},"
             f" download_dir={self.load_config.download_dir!r}, "
             f"load_format={self.load_config.load_format}, "

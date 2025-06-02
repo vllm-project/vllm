@@ -1997,7 +1997,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if attn_backend_i is None:
                 error_msg = (
                     f"Error with get_attn_backend: {kv_cache_spec.head_size=}, "
-                    f"{self.dtype=}, {kv_cache_spec.dtype=}, "
+                    f"{self.dtype=}, {self.attn_dtype=}, "
+                    f"{kv_cache_spec.dtype=}, "
                     f"{kv_cache_spec.block_size=}, "
                     f"{self.model_config.is_attention_free=}, "
                     f"{kv_cache_spec.use_mla=}")
