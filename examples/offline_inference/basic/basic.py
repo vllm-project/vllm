@@ -12,34 +12,13 @@ prompts = [
     "The capital of France is",
     "The future of AI is",
 ]
-# Configure logging level for vllm (optional, uses VLLM_LOGGING_LEVEL env var).
-logging_level = os.getenv("VLLM_LOGGING_LEVEL", "").upper()
-if logging_level:
-    logging.basicConfig(level=getattr(logging, logging_level, logging.INFO))
-
-# Create a sampling params object, optionally limiting output tokens via MAX_TOKENS env var.
-param_kwargs = {"temperature": 0.8, "top_p": 0.95}
-max_tokens_env = os.getenv("MAX_TOKENS")
-if max_tokens_env is not None:
-    try:
-        param_kwargs["max_tokens"] = int(max_tokens_env)
-    except ValueError:
-        raise ValueError(f"Invalid MAX_TOKENS value: {max_tokens_env}")
-sampling_params = SamplingParams(**param_kwargs)
+# Create a sampling params object.
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 
 def main():
     # Create an LLM.
-    llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite", 
-              enforce_eager=False,
-              compilation_config=2,
-              enable_microbatching=True,
-              enable_expert_parallel=True,
-              trust_remote_code=True,
-              tensor_parallel_size=2,
-              max_model_len=1024,
-              #load_format="dummy",
-    )
+    llm = LLM(model="facebook/opt-125m")
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
