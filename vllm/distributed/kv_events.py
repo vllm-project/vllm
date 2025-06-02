@@ -61,7 +61,22 @@ class KVEventBatch(EventBatch):
 
 
 class EventPublisher(ABC):
-    """Lightweight publisher for EventBatch batches."""
+    """Lightweight publisher for EventBatch batches with data parallelism
+    support.
+    
+    In data parallel setups, each DP rank runs its own EventPublisher instance
+    to avoid duplicate events and ensure proper event attribution:
+    
+    - Each DP rank creates a separate publisher
+    - Publishers automatically annotate events with their data_parallel_rank
+    - This allows consumers to distinguish events from different DP ranks
+    
+    The publisher is responsible for adding DP metadata since the scheduler
+    operates independently of DP topology and shouldn't need DP awareness.
+    """
+
+    def __init__(self, data_parallel_rank: int) -> None:
+        self._data_parallel_rank = data_parallel_rank
 
     @abstractmethod
     def publish(self, events: EventBatch) -> None:
@@ -114,8 +129,8 @@ class ZmqEventPublisher(EventPublisher):
 
     def __init__(
         self,
+        data_parallel_rank: int,
         endpoint: str = "tcp://*:5557",
-        data_parallel_rank: Optional[int] = None,
         replay_endpoint: Optional[str] = None,
         buffer_steps: int = 10_000,
         hwm: int = 100_000,
@@ -123,6 +138,7 @@ class ZmqEventPublisher(EventPublisher):
         topic: str = "",
     ) -> None:
         # Storage
+        super().__init__(data_parallel_rank)
         self._event_queue = Queue[Optional[EventBatch]](maxsize=max_queue_size)
         self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
 
@@ -153,7 +169,7 @@ class ZmqEventPublisher(EventPublisher):
         if not self._running:
             raise RuntimeError("Publisher is closed")
         if events.data_parallel_rank is None:
-            events.data_parallel_rank = self._dp_rank
+            events.data_parallel_rank = self._data_parallel_rank
         self._event_queue.put(events)
 
     def shutdown(self) -> None:
@@ -286,7 +302,8 @@ class EventPublisherFactory:
         cls._registry[name] = ctor
 
     @classmethod
-    def create(cls, config: Optional[KVEventsConfig]) -> EventPublisher:
+    def create(cls, config: Optional[KVEventsConfig],
+               data_parallel_rank: int) -> EventPublisher:
         """Create publisher from a config mapping."""
         if not config:
             return NullEventPublisher()
@@ -299,7 +316,8 @@ class EventPublisherFactory:
             constructor = cls._registry[kind]
         except KeyError as exc:
             raise ValueError(f"Unknown event publisher '{kind}'") from exc
-        return constructor(**config_dict)
+        return constructor(data_parallel_rank=data_parallel_rank,
+                           **config_dict)
 
 
 def _offset_endpoint_port(endpoint: str, data_parallel_rank: int) -> str:
@@ -347,17 +365,18 @@ def get_kv_event_publisher(
         EventPublisher instance 
             (either configured publisher or NullEventPublisher)
     """
-    # Check if KV events are enabled
-    if not kv_events_config or not kv_events_config.enable_kv_cache_events:
-        return NullEventPublisher()
-
     # Create a KV event publisher only one for each dp group
     data_parallel_rank = parallel_config.data_parallel_rank
     data_parallel_size = parallel_config.data_parallel_size
 
+    # Check if KV events are enabled
+    if not kv_events_config or not kv_events_config.enable_kv_cache_events:
+        return NullEventPublisher(data_parallel_rank)
+
     # If data_parallel_rank <= 1, no need to offset ports
     if data_parallel_size <= 1:
-        return EventPublisherFactory.create(kv_events_config)
+        return EventPublisherFactory.create(kv_events_config,
+                                            data_parallel_rank)
 
     # Create a modified config with port offsetting
     modified_config = copy.deepcopy(kv_events_config)
@@ -374,4 +393,4 @@ def get_kv_event_publisher(
         modified_config.replay_endpoint = _offset_endpoint_port(
             original_replay_endpoint, data_parallel_rank)
 
-    return EventPublisherFactory.create(modified_config)
+    return EventPublisherFactory.create(modified_config, data_parallel_rank)

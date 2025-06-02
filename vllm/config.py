@@ -3743,10 +3743,6 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
-    data_parallel_rank: int = 0
-    """The DP rank where the event is emitted from
-    """
-
 
 class CompilationLevel:
     # constants for the levels of the compilation process

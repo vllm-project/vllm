@@ -12,6 +12,8 @@ from vllm.distributed.kv_events import EventPublisherFactory
 
 from .test_events import SampleBatch
 
+DP_RANK = 0
+
 
 @pytest.fixture
 def random_port():
@@ -45,7 +47,7 @@ def publisher_config(random_port, request):
 @pytest.fixture
 def publisher(publisher_config):
     """Create and return a publisher instance"""
-    pub = EventPublisherFactory.create(publisher_config)
+    pub = EventPublisherFactory.create(publisher_config, DP_RANK)
     yield pub
     pub.shutdown()
 
