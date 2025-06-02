@@ -48,7 +48,7 @@ def native_w8a8_block_matmul(A: torch.Tensor,
     As = As.reshape(M, As.shape[-1])
     n_tiles = (N + block_n - 1) // block_n
     k_tiles = (K + block_k - 1) // block_k
-    assert n_tiles * block_n == Bs.shape[0], f"{n_tiles * block_n} == {Bs.shape[0]}"
+    assert n_tiles == Bs.shape[0], f"{n_tiles * block_n} == {Bs.shape[0]}"
     assert k_tiles == Bs.shape[1], f"{k_tiles} == {Bs.shape[1]}"
 
     C_shape = (M, N)
