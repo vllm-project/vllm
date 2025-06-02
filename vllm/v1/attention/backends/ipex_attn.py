@@ -156,7 +156,7 @@ class IPEXAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: IPEXAttentionBackend,
+        attn_metadata: IPEXAttentionMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with IPEXAttention.
