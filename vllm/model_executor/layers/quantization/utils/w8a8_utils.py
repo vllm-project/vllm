@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
 from typing import Callable, Optional, Union
 
 import torch
@@ -12,18 +13,22 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
+from vllm.utils import is_torch_equal_or_newer
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = None
 
+
 # The condition to determine if it is on a platform that supports
 # torch._scaled_mm rowwise feature.
-# The condition is determined once as the operations
-# are time consuming.
-# Delay the condition check until the first time it is needed,
-# as initially CUDA_VISIBLE_DEVICES may not be set properly.
-USE_ROWWISE_TORCH_SCALED_MM = None
+# Cache the result to avoid determining it multiple times, as
+# this is time-consuming.
+@cache
+def use_rowwise_torch_scaled_mm() -> bool:
+    return current_platform.is_rocm() and (
+        is_torch_equal_or_newer("2.7")
+        and current_platform.has_device_capability(94))
 
 
 def sparse_cutlass_supported() -> bool:
@@ -203,7 +208,7 @@ def torch_per_token_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
                                    output_shape: list) -> torch.Tensor:
-    # Note: Callers of this function should check USE_ROWWISE_TORCH_SCALED_MM
+    # Note: Callers of this function should check use_rowwise_torch_scaled_mm
     #  when using it.
     #  For now it has only been validated on ROCm platform.
     #  fp8 rowwise scaling in torch._scaled_mm is introduced in
@@ -283,15 +288,10 @@ def dispatch_w8a8_scaled_mm(
         if current_platform.is_rocm():
             return rocm_per_tensor_w8a8_scaled_mm
         return torch_per_tensor_w8a8_scaled_mm
-    global USE_ROWWISE_TORCH_SCALED_MM
-    if USE_ROWWISE_TORCH_SCALED_MM is None:
-        USE_ROWWISE_TORCH_SCALED_MM = (
-            current_platform.is_rocm()
-            and torch.__version__[0:3] >= "2.7"
-            and current_platform.has_device_capability(94))
-    # If torch.scaled_mm supports per-channel (weights) per-token (inputs)
+    # torch.scaled_mm supports per tensor weights + activations only
+    # so fallback to naive if per channel or per token
     if not per_tensor_weights and not per_tensor_activations \
-            and USE_ROWWISE_TORCH_SCALED_MM:
+            and use_rowwise_torch_scaled_mm():
         return torch_per_token_w8a8_scaled_mm
     # Normally, torch.scaled_mm supports per tensor weights + activations only
     # so fallback to naive if per channel or per token
