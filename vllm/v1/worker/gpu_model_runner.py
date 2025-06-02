@@ -1867,7 +1867,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
 
-    def _initialize_kv_cache_buffer(
+    def _allocate_kv_cache_tensors(
             self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
@@ -1894,13 +1894,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )), "Some layers are not correctly initialized"
         return kv_cache_raw_tensors
 
-    def _setup_kv_cache_shapes(
+    def _reshape_kv_cache_tensors(
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_raw_tensors: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         """
-        Reshape the KV cache tensors to the desired shape.
+        Reshape the KV cache tensors to the desired shape and dtype.
 
         Args:
             kv_cache_config: The KV cache config 
@@ -1942,11 +1942,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
         # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._initialize_kv_cache_buffer(
-            kv_cache_config)
+        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
-        kv_caches = self._setup_kv_cache_shapes(kv_cache_config,
-                                                kv_cache_raw_tensors)
+        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
+                                                   kv_cache_raw_tensors)
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context, [])

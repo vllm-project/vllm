@@ -249,6 +249,10 @@ class BlockPool:
                 del self.cached_block_hash_to_block[block_hash]
 
             if self.enable_kv_cache_events:
+                # FIXME (Chen): Not sure whether we should return `hash_value`
+                # or `(hash_value, group_id)` here. But it's fine now because
+                # we disable hybrid kv cache manager when kv cache event is
+                # enabled, so there is only one group.
                 self.kv_event_queue.append(
                     BlockRemoved(block_hashes=[block_hash.get_hash_value()]))
             return True
@@ -262,8 +266,8 @@ class BlockPool:
         Args:
             blocks: A list of blocks to touch.
         """
-        for blocks_one_manager in blocks:
-            for block in blocks_one_manager:
+        for blocks_per_group in blocks:
+            for block in blocks_per_group:
                 # ref_cnt=0 means this block is in the free list (i.e. eviction
                 # candidate), so remove it.
                 if block.ref_cnt == 0 and block != self.null_block:

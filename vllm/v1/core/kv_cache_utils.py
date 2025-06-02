@@ -35,7 +35,11 @@ class BlockHash(NamedTuple):
 
 
 class BlockHashWithGroupId(NamedTuple):
+    # The hash value for the contents (e.g., token_ids) of a block without group
+    # ID. The value is the same for blocks representing the same tokens but for
+    # different groups.
     block_hash: BlockHash
+    # The KV cache group ID.
     group_id: int
 
     def get_hash_value(self) -> int:
@@ -638,7 +642,7 @@ def get_uniform_page_size(kv_cache_spec: dict[str, KVCacheSpec]) -> int:
     """
     Get the page size of the KV cache.
     """
-    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    page_sizes = set(layer.page_size_bytes for layer in kv_cache_spec.values())
     assert len(page_sizes) == 1
     return page_sizes.pop()
 
