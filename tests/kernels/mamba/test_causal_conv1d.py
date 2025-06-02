@@ -443,7 +443,7 @@ def test_causal_conv1d_varlen(with_padding, dim, seqlen, width, has_bias,
                          [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])
-@pytest.mark.parametrize("seqlen", [1])
+@pytest.mark.parametrize("seqlen", [1, 3, 5])
 @pytest.mark.parametrize("width", [2, 3, 4])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # tests correctness in case subset of the sequences are padded
@@ -544,7 +544,7 @@ def test_causal_conv1d_update_with_batch_gather_vllm(batch_size, with_padding,
 @pytest.mark.parametrize('seqlen', [8, 16, 784, 1024, 2048, 2049, 4096])
 @pytest.mark.parametrize('dim', [64, 4096])
 @pytest.mark.parametrize('with_padding', [True, False])
-@pytest.mark.parametrize('batch', [4])
+@pytest.mark.parametrize('batch', [4, 8, 10])
 def test_causal_conv1d_varlen_vllm(batch, with_padding, dim, seqlen, width,
                                    has_bias, silu_activation, itype):
     device = "cuda"
@@ -653,12 +653,4 @@ def test_causal_conv1d_varlen_vllm(batch, with_padding, dim, seqlen, width,
                           rtol=rtol,
                           atol=atol)
     unpadded_out = out[:, :out_ref_tensor.shape[-1]]
-    assert torch.allclose(unpadded_out,
-                          out_ref_tensor,
-                          rtol=rtol,
-                          atol=atol)
-
-        nz = out_ref_tensor.squeeze(0) - unpadded_out
-        non_zero_indices = torch.nonzero(nz)
-        print('nonzero indices :', non_zero_indices)
-        raise e
+    assert torch.allclose(unpadded_out, out_ref_tensor, rtol=rtol, atol=atol)
