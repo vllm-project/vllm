@@ -62,8 +62,8 @@ def moe_mmk(
     if use_w8a8:
         # block-wise
         if group_k > 0 and group_n > 0:
-            # XXXXXXX
-            a_scale_ptrs = a_scale_ptr + (expert_id * stride_ase) + (offs_m * stride_asm)
+            # + (expert_id * stride_ase) ??
+            a_scale_ptrs = a_scale_ptr + (offs_m * stride_asm)
             offs_bsn = offs_n // group_n
             b_scale_ptrs = (b_scale_ptr + expert_id * stride_bse +
                             offs_bsn * stride_bsn)
@@ -74,12 +74,13 @@ def moe_mmk(
             b_scale_ptrs = b_scale_ptr + expert_id * stride_bse + offs_bsn[None, :] * stride_bsn
             b_scale = tl.load(b_scale_ptrs)
             # Load per-token scale for activations
+            # + (expert_id * stride_ase)??
             a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
             a_scale = tl.load(a_scale_ptrs, mask=mask_m, other=0.0)[:,None]
 
         # tensor-wise
         else:
-            a_scale = tl.load(a_scale_ptr) # + expert_id) #?
+            a_scale = tl.load(a_scale_ptr) #+ expert_id * stride_ase ?
             b_scale = tl.load(b_scale_ptr + expert_id)
 
     # -----------------------------------------------------------
@@ -296,6 +297,14 @@ def batched_triton_kernel(
     c_ptr = (c_ptr + expert_id * stride_ce + cta_m_start * stride_cm +
              cta_n_start * stride_cn)
 
+    if use_fp8_w8a8:
+        # block-wise
+        if group_k > 0 and group_n > 0:
+            a_scale_ptr = a_scale_ptr + expert_id * stride_ase + cta_m_start * stride_asm
+        # channel-wise
+        elif per_channel_quant:
+            a_scale_ptr = a_scale_ptr + (expert_id * stride_ase)
+
     expert_triton_kernel(
         a_ptr,
         b_ptr,
@@ -388,12 +397,15 @@ def invoke_moe_batched_triton_kernel(
         C.stride(0),
         C.stride(1),
         C.stride(2),
-        A_scale.stride(0) if A_scale is not None and A_scale.ndim >= 2 else 0,
-        A_scale.stride(2) if A_scale is not None and A_scale.ndim == 3 else 0,
-        A_scale.stride(1) if A_scale is not None and A_scale.ndim >= 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
-        B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+
+        A_scale.stride(0) if A_scale is not None and A_scale.ndim >= 2 else 0,  #E
+        A_scale.stride(2) if A_scale is not None and A_scale.ndim == 3 else 0,  #K
+        A_scale.stride(1) if A_scale is not None and A_scale.ndim >= 2 else 0,  #M
+
+        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,  #E
+        B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,  #K
+        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,  #N
+
         # Blockwise quantization data
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
@@ -491,7 +503,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 num = self.max_num_tokens if self.per_act_token_quant else 1
                 scale_shape = (num_local_experts, num, 1)
 
-            print(f"SCALE_SHAPE {b_a1.shape} {scale_shape}")
+            #print(f"SCALE_SHAPE {self.block_shape} {b_a1.shape} {scale_shape}")
 
             b_a1_scale = torch.zeros(
                 scale_shape,
@@ -528,6 +540,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 if self.block_shape is None and not self.per_act_token_quant:
                     b_a1_scale[idx] = b_s
                 else:
+                    #print(f"XXXXX rhs={rhs.shape} b_s={b_s.shape}")
+                    assert rows == b_s.shape[0] and b_a1_scale.shape[-1] == b_s.shape[-1]
                     b_a1_scale[idx, :rows] = b_s
             else:
                 b_a1[idx, :rows, :] = rhs
@@ -717,6 +731,11 @@ def batched_moe_kernel_quantize_input(
                 A_q_scale = torch.repeat_interleave(A_q_scale, E, dim=0).view(E, 1, 1)
             else:
                 A_q_scale = A_q_scale.view(E, -1, A_q_scale.size(-1))
+
+        #print(f"A2Q_SCALE {A_q_scale.shape}")
+        #A_q_scale.fill_(0.0001)
+        #print(f"A_q_scale.stride = {A_q_scale.stride()}")
+
         return A_q, A_q_scale
 
     if qtype is not None:

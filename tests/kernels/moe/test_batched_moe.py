@@ -298,6 +298,11 @@ def test_fused_moe_batched_experts(
             block_shape=block_shape,
         )
 
+    # torch.testing.assert_close(triton_output,
+    #                            baseline_output,
+    #                            atol=2e-2,
+    #                            rtol=6e-2)
+
     torch.testing.assert_close(triton_output,
                                baseline_output,
                                atol=2e-2,
