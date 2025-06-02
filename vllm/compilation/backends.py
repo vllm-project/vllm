@@ -740,7 +740,7 @@ class PiecewiseBackend:
             # manage the memory during cuda graph capture
             return output
 
-        if self.is_debugging_mode or envs.VLLM_CUDAGRAPH_SANITIZER:
+        if self.is_debugging_mode:
             # check if the input addresses are the same
             new_input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)

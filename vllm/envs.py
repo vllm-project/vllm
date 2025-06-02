@@ -117,7 +117,6 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
-    VLLM_CUDAGRAPH_SANITIZER: bool = False
 
 
 def get_default_cache_root():
