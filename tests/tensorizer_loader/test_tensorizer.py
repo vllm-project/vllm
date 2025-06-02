@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm import SamplingParams
+from vllm import SamplingParams, LLMEngine
 from vllm.engine.arg_utils import EngineArgs
 # yapf conflicts with isort for this docstring
 # yapf: disable
@@ -280,3 +280,28 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
         # noqa: E501
 
         assert outputs == deserialized_outputs
+
+
+def test_serialize_and_deserialize_model_artifacts(tmp_path, vllm_runner):
+    model_ref = "facebook/opt-125m"
+    model_dir = tmp_path / model_ref
+    model_path = f"{model_dir}/model.tensors"
+    config = TensorizerConfig(tensorizer_uri=str(model_path))
+    args = EngineArgs(model=model_ref, device="cuda")
+
+    tensorize_vllm_model(args, config)
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    config = TensorizerConfig(tensorizer_uri=str(model_path))
+
+    eng_args = EngineArgs(
+        str(model_dir),
+        load_format="tensorizer",
+        model_loader_extra_config=config.to_dict()
+    )
+
+    LLMEngine.from_engine_args(eng_args)
+
+

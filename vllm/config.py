@@ -6,6 +6,7 @@ import enum
 import hashlib
 import inspect
 import json
+import os
 import textwrap
 import uuid
 import warnings
@@ -404,6 +405,9 @@ class ModelConfig:
     available.\n
     - "vllm" will use the vLLM model implementation.\n
     - "transformers" will use the Transformers model implementation."""
+    using_tensorizer: bool = False
+    """Indicates that model loading is done using CoreWeave's Tensorizer, 
+    which will be used to load the hf_config."""
 
     def compute_hash(self) -> str:
         """
@@ -514,7 +518,15 @@ class ModelConfig:
 
         hf_config = get_config(self.hf_config_path or self.model,
                                self.trust_remote_code, self.revision,
-                               self.code_revision, self.config_format)
+                               self.code_revision, self.config_format,
+                               using_tensorizer=self.using_tensorizer)
+
+        if self.using_tensorizer:
+            # If loading with tensorizer, hf_config.name_or_path becomes a
+            # temporary directory containing all model artifacts, so
+            # we change self.tokenizer to reflect the correct location
+            # when it's used to load the tokenizer artifacts
+            self.tokenizer = os.path.dirname(hf_config.name_or_path)
 
         if hf_overrides_kw:
             logger.info("Overriding HF config with %s", hf_overrides_kw)

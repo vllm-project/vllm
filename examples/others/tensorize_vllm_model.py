@@ -185,8 +185,16 @@ def parse_args():
     deserialize_parser.add_argument(
         "--path-to-tensors",
         type=str,
-        required=True,
+        required=False,
         help="The local path or S3 URI to the model tensors to deserialize. ")
+
+    deserialize_parser.add_argument(
+        "--tensorized-dir",
+        type=str,
+        required=False,
+        help="Directory with model artifacts for loading. Assumes a "
+             "model.tensors file exists therein. Can supersede "
+             "--path-to-tensors.")
 
     deserialize_parser.add_argument(
         "--keyfile",
@@ -302,7 +310,13 @@ if __name__ == '__main__':
         tensorize_vllm_model(engine_args, tensorizer_config)
 
     elif args.command == "deserialize":
+        if not args.path_to_tensors and not args.tensorized_dir:
+            raise ValueError("Must provide either path_to_tensors "
+                             "or tensorized_dir")
         if not tensorizer_args:
+            if args.tensorized_dir:
+                tensorized_dir = args.tensorized_dir
+
             tensorizer_config = TensorizerConfig(
                 tensorizer_uri=args.path_to_tensors,
                 encryption_keyfile = keyfile,

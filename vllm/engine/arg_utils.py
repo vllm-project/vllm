@@ -911,12 +911,20 @@ class EngineArgs:
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
+            using_tensorizer=self.load_format == LoadFormat.TENSORIZER,
         )
 
     def create_load_config(self) -> LoadConfig:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
+
+        if self.load_format == "tensorizer" and not self.model_loader_extra_config:
+            # In this instance, infer TensorizerConfig.tensorizer_dir from the
+            # model tag.
+            self.model_loader_extra_config = {
+                "tensorizer_dir": self.model
+            }
 
         return LoadConfig(
             load_format=self.load_format,

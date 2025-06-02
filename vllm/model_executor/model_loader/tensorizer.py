@@ -1,18 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import atexit
 import contextlib
 import contextvars
 import dataclasses
 import io
 import json
 import os
+import shutil
+import tempfile
 import threading
 import time
+import zipfile
 from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Any, BinaryIO, Optional, Union
+import weakref
+from transformers import (
+    PreTrainedTokenizer, PreTrainedTokenizerFast,
+    AutoTokenizer,
+)
 
 import regex as re
 import torch
@@ -26,6 +36,8 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.transformers_utils.tokenizer_base import TokenizerBase
 from vllm.utils import FlexibleArgumentParser, PlaceholderModule
 
 try:
@@ -61,6 +73,56 @@ __all__ = [
 
 logger = init_logger(__name__)
 
+def is_valid_path_string(path_str: str) -> bool:
+    try:
+        Path(path_str)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+# Potentially too flimsy...
+def is_valid_path_or_s3_uri(uri: str) -> bool:
+    if uri.startswith("s3://") and uri.endswith("/"):
+        return True
+    if uri.startswith("http://") and uri.endswith("/"):
+        return True
+    if uri.startswith("https://") and uri.endswith("/"):
+        return True
+    if is_valid_path_string(uri):
+        return True
+    return False
+
+
+def deserialize_hf_model_artifacts_to_path(model_dir: str) \
+    -> tempfile.TemporaryDirectory:
+    """
+    Loads HF model artifacts from `model_dir` using Tensorizer.
+    Since Tensorizer generalizes HTTP and local paths, and HuggingFace
+    PreTrainedConfig objects require local paths to `config.json` (and the
+    same logic applies for the tokenizer artifacts), the file is written
+    to a temporary directory which is cleaned up at exit.
+    """
+
+
+    temp_dir = tempfile.TemporaryDirectory()
+
+    def cleanup():
+        shutil.rmtree(temp_dir.name, ignore_errors=True)
+
+    atexit.register(cleanup)
+
+    temp_config_path = os.path.join(temp_dir.name)
+    with open(f"{temp_config_path}/config.json", "wb") as temp_config:
+        with _read_stream(
+            f"{model_dir}/config.json",
+        ) as hf_config_file:
+            temp_config.write(hf_config_file.read())
+
+    with _read_stream(f"{model_dir}/tokenizer.zip") as stream, zipfile.ZipFile(
+    stream, mode="r") as zip:
+        zip.extractall(temp_config_path)
+
+    return temp_dir
 
 class MetaTensorMode(TorchDispatchMode):
 
@@ -131,10 +193,20 @@ class _NoInitOrTensorImpl:
 
         return wrapper
 
+@dataclass
+class ExtraSerializationMetadata:
+    """
+    Extra parameters needed to serialize all model artifacts
+    needed for loading a HuggingFace-style model. This allows
+    TensorDeserializer to handle the loading of a model entirely,
+    not merely the tensors.
+    """
+    model_config: Optional[ModelConfig] = None
 
 @dataclass
 class TensorizerConfig:
     tensorizer_uri: Union[str, None] = None
+    tensorizer_dir: Optional[str] = None
     vllm_tensorized: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
@@ -146,20 +218,77 @@ class TensorizerConfig:
     hf_config: Optional[PretrainedConfig] = None
     dtype: Optional[Union[str, torch.dtype]] = None
     lora_dir: Optional[str] = None
+    extra_serialization_attrs: Optional[dict[str, Any]] = None
     _is_sharded: bool = False
+    """
+    TODO: Update this, this is incorrect now that it's for TensorizerConfig
+    
+    Args for the TensorizerAgent class. These are used to configure the behavior 
+    of the TensorDeserializer when loading tensors from a serialized model.
+    
+    Args:
+      tensorizer_uri: Path to serialized model tensors. Can be a local file 
+          path or a S3 URI. This is a required field unless lora_dir is 
+          provided and the config is meant to be used for the
+          `tensorize_lora_adapter` function.
+      vllm_tensorized: If True, indicates that the serialized model is a 
+          vLLM model. This is used to determine the behavior of the 
+          TensorDeserializer when loading tensors from a serialized model.
+          It is far faster to deserialize a vLLM model as it utilizes
+          tensorizer's optimized GPU loading. Note that this is now
+          deprecated, as serialized vLLM models are now automatically
+          inferred as vLLM models.
+      verify_hash: If True, the hashes of each tensor will be verified against 
+          the hashes stored in the metadata. A `HashMismatchError` will be 
+          raised if any of the hashes do not match.
+      num_readers: Controls how many threads are allowed to read concurrently
+          from the source file. Default is `None`, which will dynamically set
+          the number of readers based on the number of available 
+          resources and model size. This greatly increases performance.
+      encryption_keyfile: File path to a binary file containing a  
+          binary key to use for decryption. `None` (the default) means 
+          no decryption. See the example script in 
+          examples/others/tensorize_vllm_model.py. 
+      s3_access_key_id: The access key for the S3 bucket. Can also be set via
+          the S3_ACCESS_KEY_ID environment variable.
+      s3_secret_access_key: The secret access key for the S3 bucket. Can also
+          be set via the S3_SECRET_ACCESS_KEY environment variable.
+      s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
+          S3_ENDPOINT_URL environment variable.
+  """
 
     def __post_init__(self):
         # check if the configuration is for a sharded vLLM model
         self._is_sharded = isinstance(self.tensorizer_uri, str) \
             and re.search(r'%0\dd', self.tensorizer_uri) is not None
-        if not self.tensorizer_uri and not self.lora_dir:
-            raise ValueError("tensorizer_uri must be provided.")
-        if not self.tensorizer_uri and self.lora_dir:
-            self.tensorizer_uri = f"{self.lora_dir}/adapter_model.tensors"
-        assert self.tensorizer_uri is not None, ("tensorizer_uri must be "
-                                                 "provided.")
+        if not self.tensorizer_uri:
+            if self.lora_dir:
+                self.tensorizer_uri = f"{self.lora_dir}/adapter_model.tensors"
+            elif self.tensorizer_dir:
+                if is_valid_path_or_s3_uri(self.tensorizer_dir):
+                    self.tensorizer_uri = f"{self.tensorizer_dir}/model.tensors"
+                else:
+                    raise ValueError(
+                        f"tensorizer_dir must be a valid directory or s3 URI. "
+                    )
+            else:
+                raise ValueError("Unable to resolve tensorizer_uri. "
+                                 "A valid tensorizer_uri or tensorizer_dir "
+                                 "must be provided for deserialization, and a "
+                                 "valid tensorizer_uri, tensorizer_uri, or "
+                                 "lora_dir for serialization.")
+
         self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
+
+        assert is_valid_path_or_s3_uri(self.tensorizer_uri), ("tensorizer_uri must be a "
+                                                              "valid S3 URI or local path")
         self.lora_dir = self.tensorizer_dir
+
+        self._extra_serialization_metadata: Union[ExtraSerializationMetadata, None] = None
+        if self.extra_serialization_attrs:
+            self._extra_serialization_metadata = ExtraSerializationMetadata(
+                **self.extra_serialization_attrs
+            )
 
     @classmethod
     def as_dict(cls, *args, **kwargs) -> dict[str, Any]:
@@ -170,17 +299,7 @@ class TensorizerConfig:
         return dataclasses.asdict(self)
 
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
-        tensorizer_args = {
-            "tensorizer_uri": self.tensorizer_uri,
-            "vllm_tensorized": self.vllm_tensorized,
-            "verify_hash": self.verify_hash,
-            "num_readers": self.num_readers,
-            "encryption_keyfile": self.encryption_keyfile,
-            "s3_access_key_id": self.s3_access_key_id,
-            "s3_secret_access_key": self.s3_secret_access_key,
-            "s3_endpoint": self.s3_endpoint,
-        }
-        return TensorizerArgs(**tensorizer_args)  # type: ignore
+        return TensorizerArgs(self)  # type: ignore
 
     def verify_with_parallel_config(
         self,
@@ -214,53 +333,11 @@ def load_with_tensorizer(tensorizer_config: TensorizerConfig,
     return tensorizer.deserialize()
 
 
-@dataclass
-class TensorizerArgs:
-    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO, str,
-                          bytes, os.PathLike, int]
-    vllm_tensorized: Optional[bool] = False
-    verify_hash: Optional[bool] = False
-    num_readers: Optional[int] = None
-    encryption_keyfile: Optional[str] = None
-    s3_access_key_id: Optional[str] = None
-    s3_secret_access_key: Optional[str] = None
-    s3_endpoint: Optional[str] = None
-    """
-  Args for the TensorizerAgent class. These are used to configure the behavior 
-  of the TensorDeserializer when loading tensors from a serialized model.
-  
-  Args:
-      tensorizer_uri: Path to serialized model tensors. Can be a local file 
-          path or a S3 URI. This is a required field unless lora_dir is 
-          provided and the config is meant to be used for the
-          `tensorize_lora_adapter` function.
-      vllm_tensorized: If True, indicates that the serialized model is a 
-          vLLM model. This is used to determine the behavior of the 
-          TensorDeserializer when loading tensors from a serialized model.
-          It is far faster to deserialize a vLLM model as it utilizes
-          tensorizer's optimized GPU loading. Note that this is now
-          deprecated, as serialized vLLM models are now automatically
-          inferred as vLLM models.
-      verify_hash: If True, the hashes of each tensor will be verified against 
-          the hashes stored in the metadata. A `HashMismatchError` will be 
-          raised if any of the hashes do not match.
-      num_readers: Controls how many threads are allowed to read concurrently
-          from the source file. Default is `None`, which will dynamically set
-          the number of readers based on the number of available 
-          resources and model size. This greatly increases performance.
-      encryption_keyfile: File path to a binary file containing a  
-          binary key to use for decryption. `None` (the default) means 
-          no decryption. See the example script in 
-          examples/others/tensorize_vllm_model.py. 
-      s3_access_key_id: The access key for the S3 bucket. Can also be set via
-          the S3_ACCESS_KEY_ID environment variable.
-      s3_secret_access_key: The secret access key for the S3 bucket. Can also
-          be set via the S3_SECRET_ACCESS_KEY environment variable.
-      s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
-          S3_ENDPOINT_URL environment variable.
-  """
 
-    def __post_init__(self):
+class TensorizerArgs(TensorizerConfig):
+    def __init__(self, tensorizer_config: TensorizerConfig):
+        super().__init__(**tensorizer_config.to_dict())
+
         self.file_obj = self.tensorizer_uri
         self.s3_access_key_id = self.s3_access_key_id or envs.S3_ACCESS_KEY_ID
         self.s3_secret_access_key = (self.s3_secret_access_key
@@ -507,9 +584,38 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
     return ".vllm_tensorized_marker" in deserializer
 
 
+def serialize_extra_artifacts(tensorizer_args: TensorizerArgs,
+                              model_config: ModelConfig) -> None:
+    with _write_stream(f"{tensorizer_args.tensorizer_dir}/config.json",
+                       **tensorizer_args.stream_params) as stream:
+        stream.write(model_config.hf_config
+                     .to_json_string()
+                     .encode("utf-8")
+                     )
+        logger.info("Serialized HuggingFace model config")
+
+    # get_tokenizer returns a CachedTokenizer, which despite being a
+    # PreTrainedTokenizer is unable to implement
+    # PreTrainedTokenizer.from_pretrained as it doesn't have a resolveable
+    # tokenizer class for HuggingFace, so we must load this uncached.
+    tokenizer = AutoTokenizer.from_pretrained(model_config.tokenizer)
+
+    save_path: str = f"{tensorizer_args.tensorizer_dir}/tokenizer.zip"
+    with _write_stream(save_path) as stream, zipfile.ZipFile(
+        stream, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=5
+    ) as file, tempfile.TemporaryDirectory() as directory:
+        tokenizer.save_pretrained(directory)
+        for path in Path(directory).iterdir():
+            logger.info("Writing %s", path)
+            file.write(filename=path, arcname=path.name)
+
+    logger.info("Serialized tokenizer artifacts")
+
+
 def serialize_vllm_model(
     model: nn.Module,
     tensorizer_config: TensorizerConfig,
+    model_config: "ModelConfig",
 ) -> nn.Module:
     model.register_parameter(
         "vllm_tensorized_marker",
@@ -531,6 +637,10 @@ def serialize_vllm_model(
         serializer = TensorSerializer(stream, encryption=encryption_params)
         serializer.write_module(model)
         serializer.close()
+
+    serialize_extra_artifacts(tensorizer_args, model_config)
+
+
     logger.info("Successfully serialized model to %s", str(output_file))
     return model
 

@@ -113,10 +113,12 @@ class TensorizerLoader(BaseModelLoader):
     def save_model(
         model: torch.nn.Module,
         tensorizer_config: Union[TensorizerConfig, dict],
+        model_config: ModelConfig,
     ) -> None:
         if isinstance(tensorizer_config, dict):
             tensorizer_config = TensorizerConfig(**tensorizer_config)
         serialize_vllm_model(
             model=model,
             tensorizer_config=tensorizer_config,
+            model_config=model_config,
         )
