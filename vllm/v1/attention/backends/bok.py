@@ -17,7 +17,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-import bok_torch_api
+import py_bok
 
 
 if TYPE_CHECKING:
@@ -32,18 +32,18 @@ class BokAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_head_sizes() -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+        return [64, 128, 256]
 
     @staticmethod
     def get_name() -> str:
-        return "BOK_ATTN_VLLM_V1"
+        return "BOK_VLLM_V1"
 
     @staticmethod
     def get_impl_cls() -> type["BokAttentionImpl"]:
         return BokAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["BokAttentionMetadata"]:
         return BokAttentionMetadata
 
     @staticmethod
@@ -59,7 +59,7 @@ class BokAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
 
 @dataclass
@@ -424,7 +424,7 @@ class BokAttentionImpl(AttentionImpl):
 
         # Continue with the original operation
 
-        bok_torch_api.fwd_kvcache_xqa(
+        py_bok.fwd_kvcache_xqa(
             q=query,
             kcache=kv_cache,
             vcache=kv_cache,
