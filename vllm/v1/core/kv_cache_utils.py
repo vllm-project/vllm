@@ -607,19 +607,19 @@ def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
 
 
 def get_max_concurrency_for_kv_cache_config(
-        vllm_config: VllmConfig, kv_cache_config: KVCacheConfig,
-        memory_per_block_bytes: int) -> float:
+        vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> float:
     """
     Get the maximum concurrency for the given KV cache configuration.
     """
     num_layer_per_group = max(
         len(group.layer_names) for group in kv_cache_config.kv_cache_groups)
-
     max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
         vllm_config,
         (group.kv_cache_spec for group in kv_cache_config.kv_cache_groups))
+    memory_per_block = kv_cache_config.kv_cache_groups[
+        0].kv_cache_spec.page_size_bytes * num_layer_per_group
     num_block_per_request = cdiv(max_memory_usage_per_request,
-                                 memory_per_block_bytes)
+                                 memory_per_block)
     max_concurrency = kv_cache_config.num_blocks / num_block_per_request
     return max_concurrency
 
@@ -675,7 +675,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = get_max_concurrency_for_kv_cache_config(
-        vllm_config, kv_cache_config, page_size * len(kv_cache_spec))
+        vllm_config, kv_cache_config)
     logger.info("Maximum concurrency for %s tokens per request: %.2fx",
                 max_model_len_str, max_concurrency)
     return kv_cache_config

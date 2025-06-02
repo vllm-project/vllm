@@ -635,8 +635,6 @@ def test_get_max_concurrency_for_kv_cache_config():
         sliding_window=1024,
     )
 
-    # block_size * num_kv_heads * head_size * 2 (fp16) * 2 (k, v) * num_layers
-    memory_per_block_bytes = 16 * 32 * 128 * 2 * 2 * 32
     kv_cache_config_full_attention = KVCacheConfig(
         num_blocks=int(1024 * 1.5),
         tensors={},
@@ -646,10 +644,7 @@ def test_get_max_concurrency_for_kv_cache_config():
         ],
     )
     max_concurrency_full_attention = get_max_concurrency_for_kv_cache_config(
-        vllm_config,
-        kv_cache_config_full_attention,
-        memory_per_block_bytes,
-    )
+        vllm_config, kv_cache_config_full_attention)
     assert max_concurrency_full_attention == 1.5
 
     kv_cache_config_sliding_window = KVCacheConfig(
@@ -661,7 +656,7 @@ def test_get_max_concurrency_for_kv_cache_config():
         ],
     )
     max_concurrency_sliding_window = get_max_concurrency_for_kv_cache_config(
-        vllm_config, kv_cache_config_sliding_window, memory_per_block_bytes)
+        vllm_config, kv_cache_config_sliding_window)
     assert max_concurrency_sliding_window == 3
 
     kv_cache_config_hybrid_model = KVCacheConfig(
@@ -675,7 +670,7 @@ def test_get_max_concurrency_for_kv_cache_config():
         ],
     )
     max_concurrency_hybrid_model = get_max_concurrency_for_kv_cache_config(
-        vllm_config, kv_cache_config_hybrid_model, memory_per_block_bytes)
+        vllm_config, kv_cache_config_hybrid_model)
     assert max_concurrency_hybrid_model == 3
 
 
