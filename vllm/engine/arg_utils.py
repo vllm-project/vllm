@@ -29,7 +29,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerMode, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field)
+                         VllmConfig, get_attr_docs, get_field, AttnDType)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -274,6 +274,7 @@ class EngineArgs:
     load_format: str = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
+    attn_dtype: AttnDType = ModelConfig.attn_dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
     max_model_len: Optional[int] = ModelConfig.max_model_len
@@ -460,6 +461,7 @@ class EngineArgs:
         model_group.add_argument("--trust-remote-code",
                                  **model_kwargs["trust_remote_code"])
         model_group.add_argument("--dtype", **model_kwargs["dtype"])
+        model_group.add_argument("--attn_dtype", **model_kwargs["attn_dtype"])
         model_group.add_argument("--seed", **model_kwargs["seed"])
         model_group.add_argument("--hf-config-path",
                                  **model_kwargs["hf_config_path"])
@@ -884,6 +886,7 @@ class EngineArgs:
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,
+            attn_dtype=self.attn_dtype,
             seed=self.seed,
             revision=self.revision,
             code_revision=self.code_revision,
@@ -1287,11 +1290,12 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Only Fp16 and Bf16 dtypes since we only support FA.
-        V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
-        if model_config.dtype not in V1_SUPPORTED_DTYPES:
-            _raise_or_fallback(feature_name=f"--dtype {model_config.dtype}",
-                               recommend_to_remove=False)
+        # Only Fp16 and Bf16 attn_dtype since we only support FA.
+        V1_SUPPORTED_ATTN_DTYPES = [torch.bfloat16, torch.float16]
+        if model_config.attn_dtype not in V1_SUPPORTED_ATTN_DTYPES:
+            _raise_or_fallback(
+                feature_name=f"--attn_dtype {model_config.attn_dtype}",
+                recommend_to_remove=False)
             return False
 
         # No Embedding Models so far.

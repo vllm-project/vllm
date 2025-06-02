@@ -48,7 +48,12 @@ def correctness_test_embed_models(hf_runner,
     example_prompts = [str(s).strip() for s in example_prompts]
 
     vllm_extra_kwargs = vllm_extra_kwargs or {}
-    vllm_extra_kwargs["dtype"] = model_info.dtype
+
+    if isinstance(model_info.dtype, str):
+        vllm_extra_kwargs["dtype"] = model_info.dtype
+    else:
+        vllm_extra_kwargs["dtype"] = model_info.dtype.dtype
+        vllm_extra_kwargs["attn_dtype"] = model_info.dtype.attn_dtype
 
     with vllm_runner(model_info.name,
                      task="embed",

@@ -101,6 +101,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
+        self.attn_dtype = self.model_config.attn_dtype
         if cache_config.cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
         else:
@@ -1987,7 +1988,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     "Only AttentionSpec is supported for now.")
             attn_backend_i = get_attn_backend(
                 kv_cache_spec.head_size,
-                self.dtype,
+                self.attn_dtype,
                 kv_cache_spec.dtype,
                 kv_cache_spec.block_size,
                 self.model_config.is_attention_free,

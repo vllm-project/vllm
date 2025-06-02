@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: SIM117
 from collections.abc import Sequence
 
 import mteb
@@ -88,7 +89,13 @@ def mteb_test_embed_models(hf_runner,
         pytest.skip("Skipping test.")
 
     vllm_extra_kwargs = vllm_extra_kwargs or {}
-    vllm_extra_kwargs["dtype"] = model_info.dtype
+
+    if isinstance(model_info.dtype, str):
+        vllm_extra_kwargs["dtype"] = model_info.dtype
+
+    else:
+        vllm_extra_kwargs["dtype"] = model_info.dtype.dtype
+        vllm_extra_kwargs["attn_dtype"] = model_info.dtype.attn_dtype
 
     with vllm_runner(model_info.name,
                      task="embed",
@@ -102,18 +109,23 @@ def mteb_test_embed_models(hf_runner,
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
         vllm_dtype = vllm_model.model.llm_engine.model_config.dtype
+        model_dtype = getattr(
+            vllm_model.model.llm_engine.model_config.hf_config, "torch_dtype",
+            vllm_dtype)
 
-    with set_default_torch_dtype(vllm_dtype) and hf_runner(
-            model_info.name, is_sentence_transformer=True,
-            dtype=vllm_dtype) as hf_model:
+    with set_default_torch_dtype(model_dtype):
+        with hf_runner(model_info.name,
+                       is_sentence_transformer=True,
+                       dtype=model_dtype) as hf_model:
 
-        if hf_model_callback is not None:
-            hf_model_callback(hf_model)
+            if hf_model_callback is not None:
+                hf_model_callback(hf_model)
 
-        st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
+            st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
+            st_dtype = next(hf_model.model.parameters()).dtype
 
-    print("VLLM:", vllm_main_score)
-    print("SentenceTransformers:", st_main_score)
+    print("VLLM:", vllm_dtype, vllm_main_score)
+    print("SentenceTransformers:", model_dtype, st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
     assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_EMBED_TOL)

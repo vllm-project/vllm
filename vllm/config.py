@@ -230,7 +230,9 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
-ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
+ModelDType = Literal["auto", "hybrid", "half", "float16", "bfloat16", "float",
+                     "float32"]
+AttnDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
 @config
@@ -263,11 +265,20 @@ class ModelConfig:
     """Data type for model weights and activations:\n
     - "auto" will use FP16 precision for FP32 and FP16 models, and BF16
     precision for BF16 models.\n
+    - "hybrid" will use FP32 for weights and activation 
+    and float16 for attention.\n
     - "half" for FP16. Recommended for AWQ quantization.\n
     - "float16" is the same as "half".\n
     - "bfloat16" for a balance between precision and range.\n
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
+    attn_dtype: Union[AttnDType, torch.dtype] = "auto"
+    """
+    Data type for attention:
+    - "auto" attn_dtype is the same as model dtype. \n
+    - Manually set attn_dtype, supporting 
+    "half", "float16", "bfloat16", "float", "float32". \n
+    """
     seed: Optional[int] = None
     """Random seed for reproducibility. Initialized to None in V0, but
     initialized to 0 in V1."""
@@ -431,6 +442,7 @@ class ModelConfig:
         factors: list[Any] = []
         factors.append(self.model)
         factors.append(self.dtype)
+        factors.append(self.attn_dtype)
         factors.append(self.quantization)
         factors.append(self.revision)
         factors.append(self.code_revision)
@@ -552,14 +564,7 @@ class ModelConfig:
             self.truncation_side = "right"
 
         self.pooler_config = self._init_pooler_config()
-
-        self.dtype = _get_and_verify_dtype(
-            self.model,
-            self.hf_config,
-            self.dtype,
-            is_pooling_model=self.runner_type == "pooling",
-            revision=self.revision,
-        )
+        self._init_dtype()
 
         # Workaround for Gemma 2 which uses interleaved sliding window
         # attention, but it's not specified in its config. TODO: remove this
@@ -675,6 +680,59 @@ class ModelConfig:
             s3_tokenizer.pull_files(
                 model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
             self.tokenizer = s3_tokenizer.dir
+
+    def _init_dtype(self):
+        is_pooling_model = self.runner_type == "pooling"
+
+        if not is_pooling_model:
+            if self.attn_dtype != "auto" or self.dtype == "hybrid":
+                raise ValueError("Generate and draft tasks do not "
+                                 "support hybrid dtype.")
+
+            self.dtype = _get_and_verify_dtype(
+                self.model,
+                self.hf_config,
+                self.dtype,
+                is_pooling_model=is_pooling_model,
+                revision=self.revision,
+            )
+            self.attn_dtype = self.dtype
+            return
+
+        # For pooling models
+        config_dtype = _find_dtype(self.model,
+                                   self.hf_config,
+                                   revision=self.revision)
+
+        # If config_dtype is float32, use hybrid dtype by default.
+        if config_dtype == torch.float32 and self.dtype == "auto":
+            self.dtype = "hybrid"
+
+        if self.dtype == "hybrid":
+            self.dtype = torch.float32
+            if config_dtype == torch.bfloat16:
+                self.attn_dtype = torch.bfloat16
+            else:
+                self.attn_dtype = torch.float16
+            return
+
+        self.dtype = _get_and_verify_dtype(
+            self.model,
+            self.hf_config,
+            self.dtype,
+            is_pooling_model=is_pooling_model,
+            revision=self.revision,
+        )
+        if self.attn_dtype == "auto":
+            self.attn_dtype = self.dtype
+        else:
+            self.attn_dtype = _get_and_verify_dtype(
+            self.model,
+            self.hf_config,
+            self.attn_dtype,
+            is_pooling_model=is_pooling_model,
+            revision=self.revision,
+        )
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
