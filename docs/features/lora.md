@@ -165,6 +165,7 @@ it will first look in the local directory for a directory `foobar`, and attempt 
 that adapter will then be available for normal use on the server.
 
 Alternatively, follow these example steps to implement your own plugin:
+
 1. Implement the LoRAResolver interface.
 
     Example of a simple S3 LoRAResolver implementation:
@@ -198,9 +199,9 @@ Alternatively, follow these example steps to implement your own plugin:
             return lora_request
     ```
 
-2. Register LoRAResolver plugin.
+2. Register `LoRAResolver` plugin.
 
-     ```python
+    ```python
     from vllm.lora.resolver import LoRAResolverRegistry
 
     s3_resolver = S3LoRAResolver()
