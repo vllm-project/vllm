@@ -13,7 +13,7 @@ import huggingface_hub
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
-from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
@@ -168,7 +168,7 @@ def get_tokenizer(
 ) -> AnyTokenizer:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
     """
-    if VLLM_USE_MODELSCOPE:
+    if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
         # pylint: disable=C.
