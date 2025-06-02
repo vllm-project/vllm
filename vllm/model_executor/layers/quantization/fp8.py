@@ -782,25 +782,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
-        if isinstance(prepare_finalize,
-                      (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
-            logger.debug("BatchedTritonExperts(fp8)")
-            self.use_pplx_kernels = True
-            return BatchedTritonExperts(
-                max_num_tokens=MOE_DP_CHUNK_SIZE,
-                world_size=all2all_manager.world_size,
-                dp_size=all2all_manager.tp_group.world_size,
-                use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
-                per_act_token_quant=False,  # TODO (bnell): quantization
-            )
-        else:
-            logger.debug("TritonOrDeepGemmExperts(fp8)")
-            return TritonOrDeepGemmExperts(
-                use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
-                allow_deep_gemm=self.allow_deep_gemm,
-            )
+        assert isinstance(prepare_finalize,
+                          (BatchedPrepareAndFinalize, PplxPrepareAndFinalize))
+        logger.debug("BatchedTritonExperts(fp8)")
+        self.use_pplx_kernels = True
+        return BatchedTritonExperts(
+            max_num_tokens=MOE_DP_CHUNK_SIZE,
+            world_size=all2all_manager.world_size,
+            dp_size=all2all_manager.tp_group.world_size,
+            use_fp8_w8a8=True,
+            block_shape=self.quant_config.weight_block_size,
+            per_act_token_quant=False,  # TODO (bnell): quantization
+        )
 
     def apply(
         self,

@@ -305,7 +305,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 dp_size=all2all_manager.tp_group.world_size,
                 quant_dtype=moe.quant_dtype,
                 per_act_token_quant=False,  # TODO (bnell): quantization
-                block_shape=None,  # TODO (bnell): quantization
+                block_shape=None,           # TODO (bnell): quantization
             )
 
         if prepare_finalize is not None:
@@ -321,8 +321,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         # based on the all2all implementation, select the appropriate
         # gemm implementation
         raise NotImplementedError(
-            "Subclass must select appropriate gemm implementation"
-            " based on the prepare_finalize")
+            f"{self.__class__.__name__} must select appropriate gemm "
+            "implementation based on the prepare_finalize")
 
     @abstractmethod
     def apply(
@@ -797,7 +797,8 @@ class FusedMoE(torch.nn.Module):
         if vllm_config.model_config is not None:
             model_dtype = vllm_config.model_config.dtype
         else:
-            # TODO (bnell): This is hacky to get test_mixtral_moey to work
+            # TODO (bnell): This is a hack to get test_mixtral_moe to work
+            # since model_config is not set in the pytest test.
             model_dtype = params_dtype
 
         logger.debug("MODEL DTYPE %s", model_dtype)

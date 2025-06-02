@@ -2,6 +2,9 @@
 
 import enum
 from enum import Enum
+
+import functools
+
 from typing import Callable, Optional
 
 import torch
@@ -12,8 +15,10 @@ from compressed_tensors.quantization import (ActivationOrdering,
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
+from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
+from vllm.model_executor.layers.fused_moe import (MOE_DP_CHUNK_SIZE, FusedMoE,
+                                                  FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
@@ -129,6 +134,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             is_rocm_aiter_moe_enabled)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+
+        self.use_pplx_kernels = False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -295,15 +302,43 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                                                  requires_grad=False)
 
             self.rocm_aiter_fused_experts_func = rocm_aiter_fused_experts
-        else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
-            self.fused_experts_func = fused_experts
-
-        if self.use_marlin:
+        elif self.use_marlin:
             prepare_moe_fp8_layer_for_marlin(layer, False)
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
+            self.fused_experts_func = None
+        else:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+            self.fused_experts_func = fused_experts
+
+    def select_gemm_impl(self, prepare_finalize):
+        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+            BatchedPrepareAndFinalize, BatchedTritonExperts)
+        from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+            PplxPrepareAndFinalize)
+
+        assert not self.rocm_aiter_moe_enabled and not self.use_marlin
+
+        assert isinstance(prepare_finalize,
+                          (BatchedPrepareAndFinalize, PplxPrepareAndFinalize))
+
+        logger.debug("BatchedTritonExperts(%s)", self.__classname__.__name__)
+
+        all2all_manager = get_ep_group().device_communicator.all2all_manager
+        assert all2all_manager is not None
+
+        self.use_pplx_kernels = True
+        return BatchedTritonExperts(
+            max_num_tokens=MOE_DP_CHUNK_SIZE,
+            world_size=all2all_manager.world_size,
+            dp_size=all2all_manager.tp_group.world_size,
+            use_fp8_w8a8=True,
+            block_shape=self.quant_config.weight_block_size,
+            per_act_token_quant=(
+                self.input_quant.strategy == QuantizationStrategy.TOKEN
+            ),
+        )
 
     def apply(
         self,
@@ -334,7 +369,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=torch.uint32 if self.use_pplx_kernels else None)
 
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts_func(
@@ -419,6 +455,9 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             raise ValueError(
                 "For FP8 Fused MoE layer, we require either per tensor or "
                 "channelwise, dynamic per token quantization.")
+
+        self.fused_experts = None
+        self.use_pplx_kernels = False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -517,6 +556,15 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                                      device=device,
                                      dtype=torch.int64)
 
+        from vllm.model_executor.layers.fused_moe import cutlass_moe_fp8
+        self.fused_experts = functools.partial(
+            cutlass_moe_fp8,
+            ab_strides1=self.ab_strides1,
+            c_strides1=self.c_strides1,
+            ab_strides2=self.ab_strides2,
+            c_strides2=self.c_strides2
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Fp8 moe kernels require a single activation scale.
         # We take the max of all the scales in case they differ.
@@ -557,6 +605,29 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
+    def select_gemm_impl(self, prepare_finalize):
+        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+            BatchedPrepareAndFinalize, BatchedTritonExperts)
+        from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+            PplxPrepareAndFinalize)
+        from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
+
+        assert isinstance(prepare_finalize,
+                          (BatchedPrepareAndFinalize, PplxPrepareAndFinalize))
+        logger.debug("CutlassExpertsFp8(%s)", self.__classname__.__name__)
+
+        self.use_pplx_kernels = True
+        return CutlassExpertsFp8(
+            self.ab_strides1,
+            self.c_strides1,
+            self.ab_strides2,
+            self.c_strides2,
+            None,
+            per_act_token_quant=(
+                self.input_quant.strategy == QuantizationStrategy.TOKEN
+            ),
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -589,11 +660,10 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=torch.uint32 if self.use_pplx_kernels else None)
 
-        from vllm.model_executor.layers.fused_moe import cutlass_moe_fp8
-
-        return cutlass_moe_fp8(
+        return self.fused_experts(
             x,
             layer.w13_weight.transpose(1, 2),
             layer.w2_weight.transpose(1, 2),
@@ -601,13 +671,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale,
             topk_weights,
             topk_ids,
-            self.ab_strides1,
-            self.c_strides1,
-            self.ab_strides2,
-            self.c_strides2,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            out_dtype=x.dtype,
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )

@@ -20,7 +20,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         c_strides1: torch.Tensor,
         ab_strides2: torch.Tensor,
         c_strides2: torch.Tensor,
-        out_dtype: torch.dtype,
+        out_dtype: Optional[torch.dtype],
         per_act_token_quant: bool,
     ):
         super().__init__(
@@ -47,7 +47,9 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         N, K = K, N
         workspace1 = M * topk * max(2 * N, K)
         workspace2 = M * topk * N
-        return (workspace1, workspace2, self.out_dtype)
+        return (workspace1,
+                workspace2,
+                self.out_dtype if self.out_dtype is not None else a.dtype)
 
     def apply(
         self,
@@ -98,8 +100,9 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
             0], "AB Strides 2 expert number  mismatch"
         assert self.c_strides2.shape[0] == w2.shape[
             0], "C Strides 2 expert number mismatch"
-        assert self.out_dtype in [torch.half,
-                                  torch.bfloat16], "Invalid output dtype"
+        assert self.out_dtype is None or (
+            self.out_dtype in [torch.half, torch.bfloat16],
+            "Invalid output dtype")
 
         M = a1q.shape[0]
         _, N, K = w2.shape  # because w1 + w2 are transposed
@@ -194,7 +197,7 @@ def cutlass_moe_fp8(
     c_strides2: torch.Tensor,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    out_dtype: torch.dtype = torch.half,
+    out_dtype: Optional[torch.dtype] = None,
     expert_map: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
@@ -243,6 +246,9 @@ def cutlass_moe_fp8(
     """
     per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
         a2_scale.numel() != 1 if a2_scale is not None else False)
+
+    if out_dtype is None:
+        out_dtype = a.dtype
 
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(
