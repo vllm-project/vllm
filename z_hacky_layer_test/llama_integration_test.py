@@ -21,7 +21,7 @@ def main():
     
     prompts = ["Hello, how are you?"]
     
-    def check_model(self):
+    def attach_hook(self):
             print("self.model_runner.model.model.__class__", self.model_runner.model.model.__class__)
             print("self.model_runner.model.model.layers", self.model_runner.model.model.layers)
             layer = self.model_runner.model.model.layers[0]
@@ -30,7 +30,7 @@ def main():
             print("layer.self_attn.attn:", layer.self_attn.attn)
             return layer.self_attn.attn
 
-    ret = llm.collective_rpc(check_model)
+    ret = llm.collective_rpc(attach_hook)
 
     print("ret:", ret)
 
