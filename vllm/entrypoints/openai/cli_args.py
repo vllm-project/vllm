@@ -7,11 +7,11 @@ purposes.
 
 import argparse
 import json
-import os
 import ssl
 from collections.abc import Sequence
 from typing import Optional, Union, get_args
 
+import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
@@ -244,9 +244,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         " into OpenAI API format, the name register in this plugin can be used "
         "in ``--tool-call-parser``.")
 
-import vllm.envs as envs
-
+    parser.add_argument(
+        "--log-config-file",
+        type=str,
         default=envs.VLLM_LOGGING_CONFIG_PATH,
+        help="Path to logging config JSON file for both vllm and uvicorn",
+    )
+
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     parser.add_argument('--max-log-len',
