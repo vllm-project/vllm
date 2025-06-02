@@ -29,7 +29,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
-from vllm.v1.worker.ubatching import get_current_ubatch_context
 
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 
@@ -305,6 +304,7 @@ class AllToAllCache:
                 instance = pplx.AllToAll.internode(**kwargs)
                 self._cache[key] = instance
             return instance
+
 
 # Global singleton
 _all_to_all_cache = AllToAllCache()

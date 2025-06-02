@@ -811,10 +811,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # all2all backend for vllm's expert parallel communication
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
-
-    # check that the cudagraphs input addresses are correct before replaying
-    "VLLM_CUDAGRAPH_SANITIZER":
-    lambda: os.getenv("VLLM_CUDAGRAPH_SANITIZER", "0") == "1",
 }
 
 # end-env-vars-definition
