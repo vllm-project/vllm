@@ -1003,6 +1003,18 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         return Response(status_code=200, content=response)
 
 
+def load_log_config(log_config_file: str) -> Optional[dict]:
+    if not log_config_file:
+        return None
+    try:
+        with open(log_config_file) as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning("Failed to load log config from file %s: error %s",
+                       log_config_file, e)
+        return None
+
+
 def build_app(args: Namespace) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(openapi_url=None,
@@ -1325,14 +1337,7 @@ async def run_server_worker(listen_address,
     server_index = client_config.get("client_index", 0) if client_config else 0
 
     # Load logging config for uvicorn if specified
-    log_config = None
-    if getattr(args, "log_config_file", None):
-        try:
-            with open(args.log_config_file) as f:
-                log_config = json.load(f)
-        except Exception as e:
-            logger.warning("Failed to load log config from file %s: error %e",
-                           args.log_config_file, e)
+    log_config = load_log_config(getattr(args, "log_config_file", None))
 
     async with build_async_engine_client(args, client_config) as engine_client:
         app = build_app(args)
