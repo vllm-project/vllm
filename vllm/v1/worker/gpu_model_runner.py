@@ -28,7 +28,7 @@ from vllm.forward_context import (DPMetadata, get_forward_context,
                                   set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.model_loader import TensorizerLoader, get_model
+from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -1564,7 +1564,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             time_before_load = time.perf_counter()
-            self.model = get_model(vllm_config=self.vllm_config)
+            model_loader = get_model_loader(self.load_config)
+            if not hasattr(self, "model"):
+                logger.info("Loading model from scratch...")
+                self.model = model_loader.load_model(
+                    vllm_config=self.vllm_config,
+                    model_config=self.model_config)
+            else:
+                logger.info(
+                    "Model was already initialized. Loading weights inplace..."
+                )
+                model_loader.load_weights(self.model,
+                                          model_config=self.model_config)
             if self.lora_config:
                 self.model = self.load_lora_model(self.model,
                                                   self.model_config,

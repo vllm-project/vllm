@@ -9,10 +9,8 @@ import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import LoadConfig, ModelConfig, VllmConfig
+from vllm.config import LoadConfig, ModelConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import (
-    initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     runai_safetensors_weights_iterator)
@@ -100,21 +98,11 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Download model if necessary"""
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_model(self, vllm_config: VllmConfig,
-                   model_config: ModelConfig) -> nn.Module:
-        """Perform streaming of the model to destination"""
-        device_config = vllm_config.device_config
-        target_device = torch.device(device_config.device)
-        with set_default_torch_dtype(model_config.dtype):
-            with target_device:
-                model = initialize_model(vllm_config=vllm_config)
-
-            model_weights = model_config.model
-            if hasattr(model_config, "model_weights"):
-                model_weights = model_config.model_weights
-            model.load_weights(
-                self._get_weights_iterator(model_weights,
-                                           model_config.revision))
-
-            process_weights_after_loading(model, model_config, target_device)
-        return model.eval()
+    def load_weights(self, model: nn.Module,
+                     model_config: ModelConfig) -> None:
+        """Load weights into a model."""
+        model_weights = model_config.model
+        if hasattr(model_config, "model_weights"):
+            model_weights = model_config.model_weights
+        model.load_weights(
+            self._get_weights_iterator(model_weights, model_config.revision))
