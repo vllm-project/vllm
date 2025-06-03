@@ -151,6 +151,7 @@ def is_not_builtin(type_hint: TypeHint) -> bool:
 
 
 def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
+    """Extract type hints from Annotated or Union type hints."""
     type_hints: set[TypeHint] = set()
     origin = get_origin(type_hint)
     args = get_args(type_hint)
