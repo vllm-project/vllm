@@ -621,6 +621,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.kv_b_proj = kv_b_proj
         self.vllm_flash_attn_version = get_flash_attn_version()
 
+        self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         self.triton_fa_func = triton_attention
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
@@ -653,7 +654,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 v, [0, q.shape[-1] - v.shape[-1]], value=0)
 
         if current_platform.is_rocm() \
-            and envs.VLLM_USE_TRITON_FLASH_ATTN \
+            and self.use_triton_flash_attn \
             and not return_softmax_lse:
             attn_out = self.triton_fa_func(
                 q,
