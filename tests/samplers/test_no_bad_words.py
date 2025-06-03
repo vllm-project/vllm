@@ -103,7 +103,7 @@ class TestTwoTokenBadWord:
                                                 add_special_tokens=False)[0]
 
     def test_two_token_bad_word(self, vllm_runner):
-        with vllm_runner(self.MODEL) as llm:
+        with vllm_runner(self.MODEL, dtype="half") as llm:
             output_token_ids = self._generate(llm)
             assert output_token_ids[:2] == [
                 self.target_token_id1, self.target_token_id2
