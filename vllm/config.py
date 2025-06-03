@@ -1856,6 +1856,8 @@ class ParallelConfig:
         factors.append(self.pipeline_parallel_size)
         factors.append(self.tensor_parallel_size)
         factors.append(self.enable_expert_parallel)
+        factors.append(self.data_parallel_size)
+        factors.append(envs.VLLM_ALL2ALL_BACKEND)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
