@@ -11,6 +11,7 @@ from vllm.distributed.communication_op import (  # noqa
     tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
                                              get_tp_group, graph_capture)
+from vllm.platforms import current_platform
 
 from ..utils import init_test_distributed_environment, multi_process_parallel
 
@@ -111,6 +112,8 @@ def eager_quick_allreduce(
             torch.testing.assert_close(out, inp * (tp_size**num_communication))
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="Quick reduce is only supported on RocM.")
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
 @pytest.mark.parametrize("test_target",
