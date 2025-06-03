@@ -5,7 +5,8 @@ import pytest
 
 from vllm import PoolingParams
 
-from .embed_utils import (EmbedModelInfo, check_embeddings_close,
+from ...utils import EmbedModelInfo, HybridDType
+from .embed_utils import (check_embeddings_close,
                           correctness_test_embed_models, matryoshka_fy)
 from .mteb_utils import mteb_test_embed_models
 
@@ -31,7 +32,7 @@ TEXTS_2 = [
 EMBEDDING_MODELS = [
     EmbedModelInfo("jinaai/jina-embeddings-v3",
                    architecture="XLMRobertaModel",
-                   dtype="hybrid",
+                   dtype=HybridDType,
                    is_matryoshka=True)
 ]
 

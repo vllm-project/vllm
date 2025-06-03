@@ -3,22 +3,23 @@ from typing import Any
 
 import pytest
 
-from .embed_utils import EmbedModelInfo, correctness_test_embed_models
+from ...utils import EmbedModelInfo, HybridDType
+from .embed_utils import correctness_test_embed_models
 from .mteb_utils import mteb_test_embed_models
 
 MODELS = [
     ########## BertModel
     EmbedModelInfo("thenlper/gte-large",
                    architecture="BertModel",
-                   dtype="hybrid",
+                   dtype=HybridDType,
                    enable_test=True),
     EmbedModelInfo("thenlper/gte-base",
                    architecture="BertModel",
-                   dtype="hybrid",
+                   dtype=HybridDType,
                    enable_test=False),
     EmbedModelInfo("thenlper/gte-small",
                    architecture="BertModel",
-                   dtype="hybrid",
+                   dtype=HybridDType,
                    enable_test=False),
     EmbedModelInfo("thenlper/gte-large-zh",
                    architecture="BertModel",

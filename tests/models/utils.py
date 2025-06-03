@@ -333,6 +333,9 @@ class DTypeInfo(NamedTuple):
     attn_dtype: DType = "auto"
 
 
+HybridDType = DTypeInfo(dtype="float32", attn_dtype="float16")
+
+
 class EmbedModelInfo(NamedTuple):
     name: str
     is_matryoshka: bool = False

@@ -270,8 +270,9 @@ class ModelConfig:
     - "float32" for FP32 precision."""
     attn_dtype: Union[DType, torch.dtype] = "auto"
     """
-    Data type for attention:
-    - "auto" attn_dtype is the same as model dtype. \n
+    Data type for attention: \n
+    - "auto" will use FP16 precision for FP32 and FP16 models, and BF16
+    precision for BF16 models. \n
     - Manually set attn_dtype, supporting 
     "half", "float16", "bfloat16", "float", "float32". \n
     """

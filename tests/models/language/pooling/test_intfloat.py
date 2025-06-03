@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 
-from .embed_utils import EmbedModelInfo, correctness_test_embed_models
+from ...utils import EmbedModelInfo, HybridDType
+from .embed_utils import correctness_test_embed_models
 from .mteb_utils import mteb_test_embed_models
 
 MODELS = [
@@ -27,7 +28,7 @@ MODELS = [
                    enable_test=False),
     EmbedModelInfo("intfloat/multilingual-e5-large-instruct",
                    architecture="XLMRobertaModel",
-                   dtype="hybrid",
+                   dtype=HybridDType,
                    enable_test=False),
 ]
 
