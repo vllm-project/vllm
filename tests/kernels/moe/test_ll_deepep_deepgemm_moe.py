@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Test DeepEP + DeepGEMM integration 
+Test Low-Latency DeepEP + DeepGEMM integration 
 """
 
 import dataclasses
@@ -10,7 +10,6 @@ from typing import Optional
 import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
-from typing_extensions import ParamSpec
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
@@ -31,14 +30,14 @@ except ImportError:
     has_deep_gemm = False
 
 if has_deep_ep:
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
-        DeepEPHTPrepareAndFinalize)
+    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
+        DeepEPLLPrepareAndFinalize)
 
-    from .deepep_utils import DeepEPHTArgs, make_deepep_a2a
+    from .deepep_utils import DeepEPLLArgs, make_deepep_a2a
 
 if has_deep_gemm:
-    from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-        DeepGemmExperts)
+    from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+        BatchedDeepGemmExperts)
 
 requires_deep_ep = pytest.mark.skipif(
     not has_deep_ep,
@@ -50,7 +49,14 @@ requires_deep_gemm = pytest.mark.skipif(
     reason="Requires deep_gemm kernels",
 )
 
-P = ParamSpec("P")
+DEEPEP_BLOCK_SIZE = [128, 128]
+
+
+def next_power_of_2(x):
+    import math
+    if x == 0:
+        return 1
+    return 2**math.ceil(math.log2(x))
 
 
 def per_block_cast_to_fp8(
@@ -125,6 +131,7 @@ class TestConfig:
     k: int
     n: int
     num_experts: int
+    use_fp8_dispatch: bool
     block_size: list[int]
 
 
@@ -170,20 +177,28 @@ class TestTensors:
                            config=config)
 
 
-def make_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
-                        num_local_experts: int, q_dtype: Optional[torch.dtype],
+def make_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
+                        max_tokens_per_rank: int, dp_size: int,
+                        hidden_size: int, global_num_experts: int,
+                        use_fp8_dispatch: int, q_dtype: Optional[torch.dtype],
                         block_shape: list[int]) -> FusedMoEModularKernel:
 
-    a2a: DeepEPHTPrepareAndFinalize = make_deepep_a2a(
+    a2a: DeepEPLLPrepareAndFinalize = make_deepep_a2a(
         pg=pg,
         pgi=pgi,
         dp_size=dp_size,
-        deepep_ht_args=DeepEPHTArgs(num_local_experts=num_local_experts),
-        deepep_ll_args=None,
+        deepep_ht_args=None,
+        deepep_ll_args=DeepEPLLArgs(max_tokens_per_rank=max_tokens_per_rank,
+                                    hidden_size=hidden_size,
+                                    num_experts=global_num_experts,
+                                    use_fp8_dispatch=use_fp8_dispatch),
         q_dtype=q_dtype,
         block_shape=block_shape)
 
-    fused_experts = DeepGemmExperts()
+    fused_experts = BatchedDeepGemmExperts(max_num_tokens=max_tokens_per_rank,
+                                           world_size=pgi.world_size,
+                                           dp_size=dp_size,
+                                           block_shape=block_shape)
     mk = FusedMoEModularKernel(prepare_finalize=a2a,
                                fused_experts=fused_experts)
     return mk
@@ -192,13 +207,15 @@ def make_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
 def deep_ep_moe_impl(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
                      test_tensors: TestTensors, w1: torch.Tensor,
                      w2: torch.Tensor, w1_scale: Optional[torch.Tensor],
-                     w2_scale: Optional[torch.Tensor],
-                     num_experts: int) -> torch.Tensor:
+                     w2_scale: Optional[torch.Tensor]) -> torch.Tensor:
 
+    max_tokens_per_rank = max(
+        64, next_power_of_2(test_tensors.rank_tokens.size(0)))
+    num_experts = test_tensors.config.num_experts
+    use_fp8_dispatch = test_tensors.config.use_fp8_dispatch
     num_local_experts = w1.size(0)
 
     def build_expert_map():
-        num_local_experts = w1.size(0)
         expert_map = torch.full((num_experts, ),
                                 fill_value=-1,
                                 dtype=torch.int32)
@@ -212,10 +229,15 @@ def deep_ep_moe_impl(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
 
     # Make modular kernel
     mk: FusedMoEModularKernel = make_modular_kernel(
-        pg, pgi, dp_size, num_local_experts, q_dtype,
-        test_tensors.config.block_size)
-
-    a1_scale = test_tensors.rank_token_scales
+        pg,
+        pgi,
+        max_tokens_per_rank,
+        dp_size,
+        hidden_size=test_tensors.rank_tokens.size(-1),
+        global_num_experts=num_experts,
+        use_fp8_dispatch=use_fp8_dispatch,
+        q_dtype=q_dtype,
+        block_shape=test_tensors.config.block_size)
 
     out = mk.forward(hidden_states=test_tensors.rank_tokens,
                      w1=w1,
@@ -230,7 +252,7 @@ def deep_ep_moe_impl(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
                      w2_scale=w2_scale,
                      w1_zp=None,
                      w2_zp=None,
-                     a1_scale=a1_scale,
+                     a1_scale=None,
                      a2_scale=None,
                      apply_router_weight_on_input=False)
     return out
@@ -239,7 +261,17 @@ def deep_ep_moe_impl(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
 def triton_impl(a: torch.Tensor, topk_ids: torch.Tensor,
                 topk_weights: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
                 w1_scale: torch.Tensor, w2_scale: torch.Tensor,
-                a1_scale: torch.Tensor, block_shape: list[int]):
+                a1_scale: torch.Tensor, block_shape: list[int],
+                using_fp8_dispatch: bool):
+
+    if using_fp8_dispatch:
+        # The DeepEP implementation is requested to dispatch using FP8.
+        # For numerical stability for testing, emulate the fp8 dispatch by
+        # blockwise quant and de-quant.
+        block_k = DEEPEP_BLOCK_SIZE[1]
+        aq, aq_scale = per_token_group_quant_fp8(a, block_k)
+        a = (aq.view(-1, block_k).to(torch.float32) *
+             aq_scale.view(-1, 1)).view(a.shape).to(a.dtype)
 
     return fused_experts(
         hidden_states=a,
@@ -283,15 +315,17 @@ def _deep_ep_moe(
 
     with set_current_vllm_config(VllmConfig()):
         # Reference
-        triton_moe = triton_impl(a=test_tensors.rank_tokens,
-                                 topk_ids=test_tensors.topk,
-                                 topk_weights=test_tensors.topk_weights,
-                                 w1=w1,
-                                 w2=w2,
-                                 w1_scale=w1_scale,
-                                 w2_scale=w2_scale,
-                                 a1_scale=test_tensors.rank_token_scales,
-                                 block_shape=block_shape)
+        triton_moe = triton_impl(
+            a=test_tensors.rank_tokens,
+            topk_ids=test_tensors.topk,
+            topk_weights=test_tensors.topk_weights,
+            w1=w1,
+            w2=w2,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=test_tensors.rank_token_scales,
+            block_shape=block_shape,
+            using_fp8_dispatch=test_tensors.config.use_fp8_dispatch)
 
         # Slice experts for this rank.
         num_local_experts = config.num_experts // pgi.world_size
@@ -311,7 +345,6 @@ def _deep_ep_moe(
             w2_ep,
             w1_scale_ep,
             w2_scale_ep,
-            config.num_experts,
         )
 
     torch.testing.assert_close(
@@ -323,26 +356,29 @@ def _deep_ep_moe(
 
 
 MNKs = [
-    (8, 128, 128),
-    (8, 128, 512),
-    (8, 512, 512),
-    (3, 1024, 2048),
-    (32, 128, 1024),
-    (45, 512, 2048),
-    (64, 1024, 1024),
-    (129, 128, 256),
-    (129, 1024, 2048),
-    (222, 1024, 2048),
+    (1, 128, 2560),
+    (2, 128, 2560),
+    (3, 1024, 2560),
+    (32, 128, 2560),
+    (45, 512, 2560),
+    (64, 1024, 2560),
+    (222, 1024, 2560),
 ]
+TOPKS = [2, 6]
+# Fix tests for USE_FP8_DISPATCH=True
+USE_FP8_DISPATCH = [False]
 
 
 @pytest.mark.parametrize("mnk", MNKs)
 @pytest.mark.parametrize("num_experts", [32])
-@pytest.mark.parametrize("topk", [2, 6])
+@pytest.mark.parametrize("topk", TOPKS)
+@pytest.mark.parametrize("use_fp8_dispatch", USE_FP8_DISPATCH)
+@pytest.mark.parametrize("block_size", [DEEPEP_BLOCK_SIZE])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @requires_deep_ep
 @requires_deep_gemm
 def test_deep_ep_moe(mnk: tuple[int, int, int], num_experts: int, topk: int,
+                     use_fp8_dispatch: bool, block_size: list[int],
                      world_dp_size: tuple[int, int]):
 
     m, n, k = mnk
@@ -351,9 +387,6 @@ def test_deep_ep_moe(mnk: tuple[int, int, int], num_experts: int, topk: int,
     if topk > num_experts:
         pytest.skip(f"Skipping test: topk={topk} > E={num_experts}")
 
-    block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
-    block_size = [block_m, block_m]
-
     world_size, dp_size = world_dp_size
     config = TestConfig(
         topk=topk,
@@ -361,6 +394,7 @@ def test_deep_ep_moe(mnk: tuple[int, int, int], num_experts: int, topk: int,
         k=k,
         n=n,
         num_experts=num_experts,
+        use_fp8_dispatch=use_fp8_dispatch,
         block_size=block_size,
     )
 
