@@ -75,12 +75,14 @@ def test_models(
 @pytest.mark.parametrize(
     "model,model_impl",
     [
-        ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-         "transformers"),  # dynamic image length and number of patches
-        ("HuggingFaceTB/SmolVLM-256M-Instruct",
-         "transformers"),  # has col/row special token between patches
-        ("Qwen/Qwen2.5-VL-3B-Instruct", "transformers"
-         ),  # pixel values from processor are not 4D or 5D arraya
+        # Dynamic image length and number of patches
+        ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", "transformers"),
+        # Has col/row special token between patches
+        ("HuggingFaceTB/SmolVLM-256M-Instruct", "transformers"),
+        # Pixel values from processor are not 4D or 5D arrays
+        ("Qwen/Qwen2.5-VL-3B-Instruct", "transformers"),
+        # Check "auto" with fallback to transformers
+        ("BAAI/Emu3-Chat-hf", "auto"),
     ]
 )  # no custom code support because custom models don't follow the standard yet!
 def test_models_multimodal(

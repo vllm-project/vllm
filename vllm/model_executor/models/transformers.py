@@ -318,11 +318,11 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         (prompt_ids, processed_data,
-        mm_token_type_ids) = self._apply_hf_processor_text_mm(
-            prompt_text=prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-        )
+         mm_token_type_ids) = self._apply_hf_processor_text_mm(
+             prompt_text=prompt,
+             mm_items=mm_items,
+             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+         )
 
         # HF processor will return `mm_token_type_ids` from which
         # we can infer mm_placeholders. Until then hardcode to make code run
