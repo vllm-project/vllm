@@ -478,6 +478,7 @@ class NixlConnectorWorker:
         # TODO(tms): self.block_len needs to be per-layer for sliding window,
         # hybrid attn, etc
         self.block_len = kv_elem_size * math.prod(block_shape)
+        self.cache_device_index = first_kv_cache.device.index
 
         logger.debug("Registering KV_Caches. use_mla: %s, shape %s", use_mla,
                      first_kv_cache.shape)
@@ -502,7 +503,7 @@ class NixlConnectorWorker:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
                 caches_data.append(
-                    (base_addr, region_len, cache.device.index, ""))
+                    (base_addr, region_len, self.cache_device_index, ""))
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
@@ -543,7 +544,8 @@ class NixlConnectorWorker:
             num_blocks=self.num_blocks,
         )
 
-        # Only rank 0 starts the handshake listener
+        # Only rank 0 starts the handshake listener and send it to remote models
+        # Other ranks send their metadata to rank 0
         if self.tp_rank == 0:
             # After KV Caches registered, listen for new connections.
             logger.info("Rank %s: Starting handshake listener", self.tp_rank)
@@ -593,8 +595,8 @@ class NixlConnectorWorker:
             for block_id in range(self.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
-                blocks_data.append(
-                    (base_addr + block_offset, self.block_len, self.tp_rank))
+                blocks_data.append((base_addr + block_offset, self.block_len,
+                                    self.cache_device_index))
         logger.info("Created %s blocks for src engine %s and tp_rank %s",
                     len(blocks_data), self.engine_id, self.tp_rank)
 
@@ -610,8 +612,8 @@ class NixlConnectorWorker:
             for block_id in range(nixl_agent_meta.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
-                blocks_data.append(
-                    (base_addr + block_offset, self.block_len, self.tp_rank))
+                blocks_data.append((base_addr + block_offset, self.block_len,
+                                    self.cache_device_index))
         logger.info("Created %s blocks for dst engine %s and tp_rank %s",
                     len(blocks_data), engine_id, self.tp_rank)
 
