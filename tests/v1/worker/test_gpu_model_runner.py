@@ -54,7 +54,9 @@ def initialize_kv_cache(runner: GPUModelRunner):
         device=runner.device,
         pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
-        block_size=kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size,
+        block_sizes=[
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+        ],
     )
     runner.initialize_attn_backend(kv_cache_config)
 
