@@ -23,7 +23,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from functools import cached_property
-from typing import List, Union
+from typing import Union
 
 import PIL
 import torch
@@ -32,6 +32,8 @@ from transformers.image_utils import ImageInput
 from transformers.processing_utils import (ProcessingKwargs, ProcessorMixin,
                                            Unpack)
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
+
+from vllm.multimodal.image import convert_image_mode
 
 __all__ = ['OvisProcessor']
 IGNORE_ID = -100
@@ -102,7 +104,7 @@ class OvisProcessor(ProcessorMixin):
     def __call__(
         self,
         images: ImageInput = None,
-        text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
+        text: Union[TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]] = None,
         **kwargs: Unpack[OvisProcessorKwargs],
     ) -> BatchFeature:
         """
@@ -111,14 +113,14 @@ class OvisProcessor(ProcessorMixin):
         the text. To prepare the vision inputs, this method forwards the `vision_infos` and `kwrags` arguments to
         Qwen2VLImageProcessor's [`~Qwen2VLImageProcessor.__call__`] if `vision_infos` is not `None`.
             Args:
-                images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `List[PIL.Image.Image]`, `List[np.ndarray]`, `List[torch.Tensor]`):
+                images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `list[PIL.Image.Image]`, `list[np.ndarray]`, `list[torch.Tensor]`):
                     The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch
                     tensor. Both channels-first and channels-last formats are supported.
-                text (`str`, `List[str]`, `List[List[str]]`):
+                text (`str`, `list[str]`, `list[list[str]]`):
                     The sequence or batch of sequences to be encoded. Each sequence can be a string or a list of strings
                     (pretokenized string). If the sequences are provided as list of strings (pretokenized), you must set
                     `is_split_into_words=True` (to lift the ambiguity with a batch of sequences).
-                videos (`np.ndarray`, `torch.Tensor`, `List[np.ndarray]`, `List[torch.Tensor]`):
+                videos (`np.ndarray`, `torch.Tensor`, `list[np.ndarray]`, `list[torch.Tensor]`):
                     The image or batch of videos to be prepared. Each video can be a 4D NumPy array or PyTorch
                     tensor, or a nested list of 3D frames. Both channels-first and channels-last formats are supported.
                 return_tensors (`str` or [`~utils.TensorType`], *optional*):
@@ -361,8 +363,8 @@ class OvisProcessor(ProcessorMixin):
                 # pick the partition with maximum covering_ratio and break the tie using #sub_images
                 return sorted(all_grids, key=lambda x: (-x[1], x[0][0] * x[0][1]))[0][0]
 
-        if convert_to_rgb and image.mode != 'RGB':
-            image = image.convert('RGB')
+        if convert_to_rgb:
+            image = convert_image_mode(image, 'RGB')
 
 
         sides = self.get_image_size()
@@ -400,7 +402,7 @@ class OvisProcessor(ProcessorMixin):
                 The output of the model `generate` function. The output is expected to be a tensor of shape `(batch_size, sequence_length)`
                 or `(sequence_length,)`.
         Returns:
-            `List[str]`: The decoded text.
+            `list[str]`: The decoded text.
         """
         return self.tokenizer.batch_decode(
             generated_outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False

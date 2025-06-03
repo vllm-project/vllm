@@ -3,11 +3,13 @@
 for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
 """
-import re
 import types
 from pathlib import PosixPath
 from typing import Optional, Union
 
+import numpy as np
+import numpy.typing as npt
+import regex as re
 import torch
 from PIL.Image import Image
 from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
@@ -234,6 +236,18 @@ def minimax_vl_01_hf_output(hf_output: RunnerOutput,
     output_ids, output_str, out_logprobs = hf_output
     if output_str.endswith("<end_of_sentence>"):
         output_str = output_str.split("<end_of_sentence>")[0]
+    return output_ids, output_str, out_logprobs
+
+
+def ultravox_trunc_hf_output(hf_output: RunnerOutput,
+                             model: str) -> RunnerOutput:
+    output_ids, output_str, out_logprobs = hf_output
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    eos_token_id = tokenizer.eos_token_id
+    eos_token = tokenizer.decode(eos_token_id)
+    if output_str.endswith(eos_token):
+        output_str = output_str.split(eos_token)[0]
     return output_ids, output_str, out_logprobs
 
 
@@ -483,30 +497,74 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.max_num = self.config.max_dynamic_patch
             self.image_size = self.vision_config.image_size
 
-        def __call__(self, text: str, images: Union[Image, list[Image]],
-                     **kwargs):
+        def __call__(
+            self,
+            text: str,
+            images: Union[Image, list[Image]] = None,
+            videos: Union[npt.NDArray, list[npt.NDArray]] = None,
+            **kwargs,
+        ):
             from vllm.model_executor.models.internvl import (
                 IMG_CONTEXT, IMG_END, IMG_START,
-                image_to_pixel_values_internvl)
+                image_to_pixel_values_internvl, video_to_pixel_values_internvl)
             images = [images] if isinstance(images, Image) else images
-            pixel_values = [
-                image_to_pixel_values_internvl(
-                    image,
-                    input_size=self.image_size,
-                    min_num=self.min_num,
-                    max_num=self.max_num,
-                    use_thumbnail=self.use_thumbnail,
-                ) for image in images
-            ]
-            num_patches_list = [
-                pixel_value.shape[0] for pixel_value in pixel_values
-            ]
+            videos = [videos] if isinstance(videos, np.ndarray) else videos
+            if images is not None:
+                pixel_values_images = [
+                    image_to_pixel_values_internvl(
+                        image,
+                        input_size=self.image_size,
+                        min_num=self.min_num,
+                        max_num=self.max_num,
+                        use_thumbnail=self.use_thumbnail,
+                    ) for image in images
+                ]
+                num_patches_images = [
+                    pixel_value.shape[0] for pixel_value in pixel_values_images
+                ]
+            else:
+                pixel_values_images, num_patches_images = [], []
+
+            if videos is not None:
+                pixel_values_videos = [
+                    video_to_pixel_values_internvl(
+                        video,
+                        input_size=self.image_size,
+                        min_num=1,
+                        max_num=1,
+                        use_thumbnail=False,
+                    ) for video in videos
+                ]
+                num_patches_videos = [
+                    pixel_value.shape[0] for pixel_value in pixel_values_videos
+                ]
+            else:
+                pixel_values_videos, num_patches_videos = [], []
+
+            pixel_values = []
+            while ("<image>" in text) or ("<video>" in text):
+                image_index = text.find("<image>")
+                video_index = text.find("<video>")
+                if image_index == -1 or (video_index > -1
+                                         and video_index < image_index):
+                    num_patches = num_patches_videos.pop(0)
+                    pixel_values.append(pixel_values_videos.pop(0))
+                    context_tokens = IMG_START + \
+                        IMG_CONTEXT * self.num_image_token + IMG_END
+                    video_tokens = ''.join([
+                        f'Frame{i+1}: {context_tokens}'
+                        for i in range(num_patches)
+                    ])
+                    text = text.replace('<video>', video_tokens, 1)
+                else:
+                    num_patches = num_patches_images.pop(0)
+                    pixel_values.append(pixel_values_images.pop(0))
+                    context_tokens = IMG_CONTEXT * self.num_image_token \
+                        * num_patches
+                    image_tokens = IMG_START + context_tokens + IMG_END
+                    text = text.replace('<image>', image_tokens, 1)
             pixel_values = torch.cat(pixel_values, dim=0)
-            for num_patches in num_patches_list:
-                context_tokens = IMG_CONTEXT * self.num_image_token \
-                    * num_patches
-                image_tokens = IMG_START + context_tokens + IMG_END
-                text = text.replace('<image>', image_tokens, 1)
+
             prompt = self.tokenizer(text, return_tensors="pt")
             prompt.update({"pixel_values": pixel_values})
             return prompt

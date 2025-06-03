@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Utility methods for model layers."""
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional
 
 import torch
 
@@ -13,7 +13,7 @@ def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,
     num_seqs: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     # Compute the bin counts for the tokens.
     # vocab_size + 1 for padding.
     bin_counts = torch.zeros((num_seqs, vocab_size + 1),
@@ -70,9 +70,9 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
 def rocm_unquantized_gemm(x: torch.Tensor,
                           weight: torch.Tensor,
                           bias: Optional[torch.Tensor] = None):
-    from vllm.platforms.rocm import on_mi250_mi300
+    from vllm.platforms.rocm import on_gfx9
     k = weight.shape[1]
-    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi250_mi300() and \
+    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
                     x.dtype in [torch.float16, torch.bfloat16] \
                     and k % 8 == 0 and bias is None)
 

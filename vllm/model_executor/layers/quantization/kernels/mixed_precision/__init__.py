@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional, Type
+from typing import Optional
 
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.allspark import (  # noqa: E501
@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKer
 from vllm.platforms import current_platform
 
 # in priority/performance order (when available)
-_POSSIBLE_KERNELS: List[Type[MPLinearKernel]] = [
+_POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
     MacheteLinearKernel,
     AllSparkLinearKernel,
     MarlinLinearKernel,
@@ -29,7 +29,7 @@ _POSSIBLE_KERNELS: List[Type[MPLinearKernel]] = [
 
 def choose_mp_linear_kernel(
         config: MPLinearLayerConfig,
-        compute_capability: Optional[int] = None) -> Type[MPLinearKernel]:
+        compute_capability: Optional[int] = None) -> type[MPLinearKernel]:
     """
     Choose an MPLinearKernel that can implement the given config for the given
      compute capability. Attempts to choose the best kernel in terms of 
@@ -46,7 +46,7 @@ def choose_mp_linear_kernel(
         ValueError: If no kernel can implement the given config.
 
     Returns:
-        Type[MPLinearKernel]: Chosen kernel.
+        type[MPLinearKernel]: Chosen kernel.
     """
     if compute_capability is None:
         if current_platform is None:

@@ -29,7 +29,11 @@ _I_co = TypeVar("_I_co", bound=BaseProcessingInfo, covariant=True)
 
 
 class ProcessingInfoFactory(Protocol[_I_co]):
-    """Constructs a {class}`MultiModalProcessor` instance from the context."""
+    """
+    Constructs a
+    [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor]
+    instance from the context.
+    """
 
     def __call__(
         self,
@@ -40,7 +44,9 @@ class ProcessingInfoFactory(Protocol[_I_co]):
 
 class DummyInputsBuilderFactory(Protocol[_I]):
     """
-    Constructs a {class}`BaseDummyInputsBuilder` instance from the context.
+    Constructs a
+    [`BaseDummyInputsBuilder`][vllm.multimodal.profiling.BaseDummyInputsBuilder]
+    instance from the context.
     """
 
     def __call__(self, info: _I) -> BaseDummyInputsBuilder[_I]:
@@ -48,7 +54,11 @@ class DummyInputsBuilderFactory(Protocol[_I]):
 
 
 class MultiModalProcessorFactory(Protocol[_I]):
-    """Constructs a {class}`MultiModalProcessor` instance from the context."""
+    """
+    Constructs a
+    [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor]
+    instance from the context.
+    """
 
     def __call__(
         self,
@@ -88,6 +98,12 @@ class MultiModalRegistry:
 
         self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
 
+    def reset_processor_cache(self) -> bool:
+        """Reset the multi-modal processing cache."""
+        self._processing_cache.reset()
+
+        return True  # Success
+
     @deprecated("Legacy input processor/mapper pipeline has been removed. "
                 "Please update your model runner to use "
                 "`seq_group_metadata.multi_modal_data` directly without "
@@ -106,7 +122,7 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
 
         seq_len = model_config.max_model_len
@@ -149,8 +165,6 @@ class MultiModalRegistry:
         """
         Get the maximum number of tokens from each modality
         for profiling the memory usage of a model.
-
-        See {meth}`MultiModalPlugin.get_max_multimodal_tokens` for more details.
         """
         mm_limits = self.get_mm_limits_per_prompt(model_config)
 
@@ -164,8 +178,6 @@ class MultiModalRegistry:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.
-
-        See {meth}`MultiModalPlugin.get_max_multimodal_tokens` for more details.
         """
         return sum(self.get_max_tokens_by_modality(model_config).values())
 
@@ -190,7 +202,7 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
         return profiler.get_mm_limits()
 
@@ -207,10 +219,6 @@ class MultiModalRegistry:
 
         When the model receives multi-modal data, the provided function is
         invoked to transform the data into a dictionary of model inputs.
-
-        :::{seealso}
-        {ref}`mm-processing`
-        :::
         """
 
         def wrapper(model_cls: N) -> N:
@@ -253,10 +261,6 @@ class MultiModalRegistry:
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
-
-        :::{seealso}
-        {ref}`mm-processing`
-        :::
         """
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")
@@ -286,7 +290,7 @@ class MultiModalRegistry:
 
         The model is identified by ``model_config``.
         """
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts)
 
@@ -310,7 +314,7 @@ class MultiModalRegistry:
 
         The model is identified by ``model_config``.
         """
-        processor = self.create_processor(model_config, disable_cache=True)
+        processor = self.create_processor(model_config, disable_cache=False)
         profiler = MultiModalProfiler(processor)
         dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts)
 

@@ -24,7 +24,6 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 import math
-from typing import List, Tuple
 
 import torch
 import torchvision.transforms as T
@@ -36,8 +35,8 @@ from transformers.processing_utils import ProcessorMixin
 class ImageTransform:
 
     def __init__(self,
-                 mean: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-                 std: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+                 mean: tuple[float, float, float] = (0.5, 0.5, 0.5),
+                 std: tuple[float, float, float] = (0.5, 0.5, 0.5),
                  normalize: bool = True):
         self.mean = mean
         self.std = std
@@ -62,11 +61,11 @@ class DeepseekVLV2Processor(ProcessorMixin):
     def __init__(
         self,
         tokenizer: LlamaTokenizerFast,
-        candidate_resolutions: Tuple[Tuple[int, int]],
+        candidate_resolutions: tuple[tuple[int, int]],
         patch_size: int,
         downsample_ratio: int,
-        image_mean: Tuple[float, float, float] = (0.5, 0.5, 0.5),
-        image_std: Tuple[float, float, float] = (0.5, 0.5, 0.5),
+        image_mean: tuple[float, float, float] = (0.5, 0.5, 0.5),
+        image_std: tuple[float, float, float] = (0.5, 0.5, 0.5),
         normalize: bool = True,
         image_token: str = "<image>",
         pad_token: str = "<｜▁pad▁｜>",
@@ -170,13 +169,13 @@ class DeepseekVLV2Processor(ProcessorMixin):
 
         return t
 
-    def decode(self, t: List[int], **kwargs) -> str:
+    def decode(self, t: list[int], **kwargs) -> str:
         return self.tokenizer.decode(t, **kwargs)
 
     def process_one(
         self,
         prompt: str,
-        images: List[Image.Image],
+        images: list[Image.Image],
         inference_mode: bool = True,
         **kwargs,
     ):
@@ -184,8 +183,8 @@ class DeepseekVLV2Processor(ProcessorMixin):
 
         Args:
             prompt (str): the formatted prompt;
-            conversations (List[Dict]): conversations with a list of messages;
-            images (List[ImageType]): the list of images;
+            conversations (list[dict]): conversations with a list of messages;
+            images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
             system_prompt (str): the system prompt;
             **kwargs:
@@ -196,7 +195,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 - target_ids (torch.LongTensor): [N + image tokens]
                 - pixel_values (torch.FloatTensor): [n_patches, 3, H, W]
                 - image_id (int): the id of the image token
-                - num_image_tokens (List[int]): the number of image tokens
+                - num_image_tokens (list[int]): the number of image tokens
         """
 
         assert (prompt is not None and images is not None
@@ -257,7 +256,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
         self,
         *,
         prompt: str,
-        images: List[Image.Image],
+        images: list[Image.Image],
         inference_mode: bool = True,
         **kwargs,
     ):
@@ -265,7 +264,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
 
         Args:
             prompt (str): the formatted prompt;
-            images (List[ImageType]): the list of images;
+            images (list[ImageType]): the list of images;
             inference_mode (bool): if True, then remove the last eos token;
             **kwargs:
 
@@ -274,7 +273,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
                 - input_ids (torch.LongTensor): [N + image tokens]
                 - images (torch.FloatTensor): [n_images, 3, H, W]
                 - image_id (int): the id of the image token
-                - num_image_tokens (List[int]): the number of image tokens
+                - num_image_tokens (list[int]): the number of image tokens
         """
 
         prepare = self.process_one(
@@ -288,7 +287,7 @@ class DeepseekVLV2Processor(ProcessorMixin):
     def tokenize_with_images(
         self,
         conversation: str,
-        images: List[Image.Image],
+        images: list[Image.Image],
         bos: bool = True,
         eos: bool = True,
         cropping: bool = True,

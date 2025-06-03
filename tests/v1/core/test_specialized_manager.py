@@ -3,7 +3,7 @@
 import torch
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
@@ -17,8 +17,9 @@ def get_sliding_window_manager(sliding_window_spec, block_pool):
 
 
 def test_sliding_window_possible_cached_prefix():
+    block_size = 2
     sliding_window_spec = SlidingWindowSpec(
-        block_size=2,
+        block_size=block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
@@ -31,7 +32,7 @@ def test_sliding_window_possible_cached_prefix():
 
     def run_one_case(block_is_cached, expect_length):
         block_hash_list = [
-            BlockHashType(i, ()) for i in range(len(block_is_cached))
+            BlockHash(i, ()) for i in range(len(block_is_cached))
         ]
 
         block_pool.cached_block_hash_to_block.clear()
@@ -44,7 +45,9 @@ def test_sliding_window_possible_cached_prefix():
                     i: block_pool.blocks[i + 10]
                 }
 
-        computed_blocks = manager.find_longest_cache_hit(block_hash_list)
+        computed_blocks = manager.find_longest_cache_hit(
+            block_hash_list,
+            len(block_hash_list) * block_size)
         assert len(computed_blocks) == expect_length
 
         assert all(block == block_pool.null_block
