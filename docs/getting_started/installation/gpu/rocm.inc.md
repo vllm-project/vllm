@@ -179,8 +179,6 @@ It is important that the user kicks off the docker build using buildkit. Either 
 It provides flexibility to customize the build of docker image using the following arguments:
 
 - `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using <gh-file:docker/Dockerfile.rocm_base>
-- `USE_CYTHON`: An option to run cython compilation on a subset of python files upon docker build
-- `BUILD_RPD`: Include RocmProfileData profiling tool in the image
 - `ARG_PYTORCH_ROCM_ARCH`: Allows to override the gfx architecture values from the base docker image
 
 Their values can be passed in when running `docker build` with `--build-arg` options.
