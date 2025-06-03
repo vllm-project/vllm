@@ -9,9 +9,6 @@ generation. Supported dataset types include:
   - BurstGPT
   - HuggingFace
   - VisionArena
-
-TODO: Implement CustomDataset to parse a JSON file and convert its contents into
-SampleRequest instances, similar to the approach used in ShareGPT.
 """
 import base64
 import io
@@ -26,6 +23,7 @@ from io import BytesIO
 from typing import Any, Callable, Optional, Union
 
 import numpy as np
+import pandas as pd
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
@@ -62,6 +60,7 @@ class SampleRequest:
 
 class BenchmarkDataset(ABC):
     DEFAULT_SEED = 0
+    IS_MULTIMODAL = False
 
     def __init__(
         self,
@@ -316,13 +315,15 @@ class RandomDataset(BenchmarkDataset):
         )
 
         vocab_size = tokenizer.vocab_size
+        num_special_tokens = tokenizer.num_special_tokens_to_add()
+        real_input_len = input_len - num_special_tokens
 
         prefix_token_ids = (np.random.randint(
             0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
 
         # New sampling logic: [X * (1 - b), X * (1 + b)]
-        input_low = int(input_len * (1 - range_ratio))
-        input_high = int(input_len * (1 + range_ratio))
+        input_low = int(real_input_len * (1 - range_ratio))
+        input_high = int(real_input_len * (1 + range_ratio))
         output_low = int(output_len * (1 - range_ratio))
         output_high = int(output_len * (1 + range_ratio))
 
@@ -345,6 +346,17 @@ class RandomDataset(BenchmarkDataset):
                          vocab_size).tolist()
             token_sequence = prefix_token_ids + inner_seq
             prompt = tokenizer.decode(token_sequence)
+            # After decoding the prompt we have to encode and decode it again.
+            # This is done because in some cases N consecutive tokens
+            # give a string tokenized into != N number of tokens.
+            # For example for GPT2Tokenizer:
+            # [6880, 6881] -> ['Ġcalls', 'here'] ->
+            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+            # To avoid uncontrolled change of the prompt length,
+            # the encoded sequence is truncated before being decode again.
+            re_encoded_sequence = tokenizer.encode(
+                prompt, add_special_tokens=False)[:input_lens[i]]
+            prompt = tokenizer.decode(re_encoded_sequence)
             total_input_len = prefix_len + int(input_lens[i])
             requests.append(
                 SampleRequest(
@@ -427,6 +439,99 @@ class ShareGPTDataset(BenchmarkDataset):
                 ))
         self.maybe_oversample_requests(samples, num_requests)
         return samples
+
+
+# -----------------------------------------------------------------------------
+# Custom Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class CustomDataset(BenchmarkDataset):
+    """
+    Implements the Custom dataset.  Loads data from a JSONL file and generates
+    sample requests based on conversation turns. E.g.,
+    ```
+    {"prompt": "What is the capital of India?"}
+    {"prompt": "What is the capital of Iran?"}
+    {"prompt": "What is the capital of China?"}
+    ```
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        # self.data will be a list of dictionaries
+        # e.g., [{"prompt": "What is the capital of India?"}, ...]
+        # This will be the standardized format which load_data()
+        # has to convert into depending on the filetype of dataset_path.
+        # sample() will assume this standardized format of self.data
+        self.data = []
+
+        # Load the JSONL file
+        if self.dataset_path.endswith(".jsonl"):
+            jsonl_data = pd.read_json(path_or_buf=self.dataset_path,
+                                      lines=True)
+
+            # check if the JSONL file has a 'prompt' column
+            if "prompt" not in jsonl_data.columns:
+                raise ValueError("JSONL file must contain a 'prompt' column.")
+
+            # Convert each row to a dictionary and append to self.data
+            # This will convert the DataFrame to a list of dictionaries
+            # where each dictionary corresponds to a row in the DataFrame.
+            # This is the standardized format we want for self.data
+            for _, row in jsonl_data.iterrows():
+                self.data.append(row.to_dict())
+        else:
+            raise NotImplementedError(
+                "Only JSONL format is supported for CustomDataset.")
+
+        random.seed(self.random_seed)
+        random.shuffle(self.data)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        lora_path: Optional[str] = None,
+        max_loras: Optional[int] = None,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        **kwargs,
+    ) -> list:
+        sampled_requests = []
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["prompt"]
+
+            # apply template
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{
+                        "role": "user",
+                        "content": prompt
+                    }],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+
+        return sampled_requests
 
 
 # -----------------------------------------------------------------------------
@@ -637,6 +742,7 @@ class ConversationDataset(HuggingFaceDataset):
     SUPPORTED_DATASET_PATHS = {
         'lmms-lab/LLaVA-OneVision-Data', 'Aeala/ShareGPT_Vicuna_unfiltered'
     }
+    IS_MULTIMODAL = True
 
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
@@ -701,6 +807,7 @@ class VisionArenaDataset(HuggingFaceDataset):
         "lmarena-ai/vision-arena-bench-v0.1":
         lambda x: x["turns"][0][0]["content"]
     }
+    IS_MULTIMODAL = True
 
     def sample(
         self,
@@ -773,6 +880,64 @@ class InstructCoderDataset(HuggingFaceDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = f"{item['instruction']}:\n{item['input']}"
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# MT-Bench Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MTBenchDataset(HuggingFaceDataset):
+    """
+    MT-Bench Dataset.
+    https://huggingface.co/datasets/philschmid/mt-bench
+
+    We create a single turn dataset for MT-Bench.
+    This is similar to Spec decoding benchmark setup in vLLM
+    https://github.com/vllm-project/vllm/blob/9d98ab5ec/examples/offline_inference/eagle.py#L14-L18
+    """  # noqa: E501
+
+    DEFAULT_OUTPUT_LEN = 256  # avg len used in SD bench in vLLM
+    SUPPORTED_DATASET_PATHS = {
+        "philschmid/mt-bench",
+    }
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list:
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        sampled_requests = []
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["turns"][0]
+
+            # apply template
+            prompt = tokenizer.apply_chat_template(
+                [{
+                    "role": "user",
+                    "content": prompt
+                }],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(
@@ -858,18 +1023,18 @@ def _format_zeta_prompt(
         sample: dict,
         original_start_marker: str = "<|editable_region_start|>") -> dict:
     """Format the zeta prompt for the Next Edit Prediction (NEP) dataset.
-    
-    This function formats examples from the NEP dataset 
-    into prompts and expected outputs. It could be 
+
+    This function formats examples from the NEP dataset
+    into prompts and expected outputs. It could be
     further extended to support more NEP datasets.
-    
+
     Args:
-        sample: The dataset sample containing events, 
+        sample: The dataset sample containing events,
             inputs, and outputs.
-        original_start_marker: The marker indicating the 
-            start of the editable region. Defaults to 
+        original_start_marker: The marker indicating the
+            start of the editable region. Defaults to
             "<|editable_region_start|>".
-            
+
     Returns:
         A dictionary with the formatted prompts and expected outputs.
     """
@@ -919,3 +1084,94 @@ class NextEditPredictionDataset(HuggingFaceDataset):
                 break
         self.maybe_oversample_requests(samples, num_requests)
         return samples
+
+
+# -----------------------------------------------------------------------------
+# ASR Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class ASRDataset(HuggingFaceDataset):
+    """
+    Dataset class for processing a ASR dataset for transcription.
+    Tested on the following set:
+
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    | Dataset        | Domain                                 | Speaking Style           | hf-subset                   |
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    | TED-LIUM       | TED talks                              | Oratory                  | release1, release2, release3|
+    |                |                                        |                          | release3-speaker-adaptation |
+    | VoxPopuli      | European Parliament                    | Oratory                  | en, de, it, fr,  ...        |
+    | LibriSpeech    | Audiobook                              | Narrated                 | "LIUM/tedlium"              |
+    | GigaSpeech     | Audiobook, podcast, YouTube            | Narrated, spontaneous    | xs, s, m, l, xl, dev, test  |
+    | SPGISpeech     | Financial meetings                     | Oratory, spontaneous     | S, M, L, dev, test          |
+    | AMI            | Meetings                               | Spontaneous              | ihm, sdm                    |
+    +----------------+----------------------------------------+--------------------------+-----------------------------+
+
+    """  # noqa: E501
+
+    SUPPORTED_DATASET_PATHS = {
+        "openslr/librispeech_asr",
+        "facebook/voxpopuli",
+        "LIUM/tedlium",
+        "edinburghcstr/ami",
+        "speechcolab/gigaspeech",
+        "kensho/spgispeech",
+    }
+
+    DEFAULT_OUTPUT_LEN = 128
+    IS_MULTIMODAL = True
+
+    # TODO Whisper-specific. Abstract interface when more models are supported.
+    TRANSCRIPTION_PREAMBLE = (
+        "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>")
+    skip_long_audios: bool = True
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list:
+        try:
+            import librosa
+        except ImportError as e:
+            raise ImportError(
+                "librosa is required for ASRDataset. Please install it "
+                "using `pip install librosa`.") from e
+
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
+        prompt_len = len(tokenizer(prompt).input_ids)
+        sampled_requests = []
+        skipped = 0
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            audio = item["audio"]
+            y, sr = audio["array"], audio["sampling_rate"]
+            duration_s = librosa.get_duration(y=y, sr=sr)
+            # Whisper max supported duration
+            if self.skip_long_audios and duration_s > 30:
+                skipped += 1
+                continue
+
+            mm_content = {"audio": (y, sr)}
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                ))
+        if skipped:
+            logger.warning(
+                "%d samples discarded from dataset due to"
+                " their length being greater than"
+                " what Whisper supports.",
+                skipped,
+            )
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
