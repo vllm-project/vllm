@@ -49,7 +49,9 @@ def _make_synced_weight_loader(original_weight_loader):
 
     def _synced_weight_loader(param, *args, **kwargs):
         original_weight_loader(param, *args, **kwargs)
-        torch._sync(param)
+        # torch._sync doesn't support, is not needed for CPU tensors.
+        if param.device != torch.device("cpu"):
+            torch._sync(param)
 
     return _synced_weight_loader
 
