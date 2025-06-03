@@ -83,6 +83,10 @@ class PPLXAll2AllManager(All2AllManagerBase):
         assert has_pplx, "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install pplx_kernels."  # noqa
         super().__init__(cpu_group)
 
+        # TODO(tms): Disable pplx-a2a intranode as it fails with the error:
+        # failed: cuda error /app/pplx/csrc/all_to_all/intranode.cpp:84 'invalid resource handle' # noqa
+        self.internode = True
+
         if self.internode:
             # inter-node communication needs nvshmem,
             # intra-node communication uses p2p mapping directly

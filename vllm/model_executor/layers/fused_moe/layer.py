@@ -269,8 +269,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 hidden_dim_scale_bytes=(0 if moe.in_dtype.itemsize != 1 else (
                     (moe.hidden_dim + moe.block_size - 1) // moe.block_size *
                     torch.float32.itemsize)),
-                group_name=all2all_manager.cpu_group.group_name,
             )
+
+            # Intranode pplx a2a takes a group name while internode does not.
+            if not all2all_manager.internode:
+                all_to_all_args[
+                    "group_name"] = all2all_manager.cpu_group.group_name
 
             handle = all2all_manager.get_handle(all_to_all_args)
 
