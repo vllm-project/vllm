@@ -1791,8 +1791,10 @@ def setup_server(args):
     is_ssl = args.ssl_keyfile and args.ssl_certfile
     host_part = f"[{addr}]" if is_valid_ipv6_address(
         addr) else addr or "0.0.0.0"
-    listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
-
+    if args.uds:
+        listen_address = f"unix:{args.uds}"
+    else:
+        listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
     return listen_address, sock
 
 
