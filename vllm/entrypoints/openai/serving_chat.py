@@ -932,7 +932,8 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
             auto_tools_called = False
-
+            reasoning_content = None
+            content = output.text
             if self.reasoning_parser:
                 try:
                     reasoning_parser = self.reasoning_parser(tokenizer)
@@ -944,9 +945,6 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning_content, content = (
                     reasoning_parser.extract_reasoning_content(
                         output.text, request=request))
-            else:
-                reasoning_content = None
-                content = output.text
 
             # if auto tools are not enabled, and a named tool choice using
             #   outlines is not being used
@@ -981,7 +979,7 @@ class OpenAIServingChat(OpenAIServing):
                 # the fields of FunctionDefinition are a superset of the
                 # tool call outputs and can be used for parsing
                 tool_calls = TypeAdapter(
-                    list[FunctionDefinition]).validate_json(output.text)
+                    list[FunctionDefinition]).validate_json(content)
                 message = ChatMessage(
                     role=role,
                     content="",
