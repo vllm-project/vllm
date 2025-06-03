@@ -2,7 +2,7 @@
 -r common.txt
 
 # Dependencies for TPU
-cmake>=3.26
+cmake>=3.26.1
 packaging>=24.2
 setuptools-scm>=8
 wheel
