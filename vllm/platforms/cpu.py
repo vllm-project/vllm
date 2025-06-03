@@ -159,7 +159,7 @@ class CpuPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
-            compilation_config.backend = "inductor"
+            compilation_config.backend = "eager"
             compilation_config.custom_ops += ["none"]
             compilation_config.inductor_compile_config.update({
                 "dce":

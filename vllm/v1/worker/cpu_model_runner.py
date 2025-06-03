@@ -19,8 +19,6 @@ class CPUModelRunner(GPUModelRunner):
 
         assert device == torch.device("cpu")
         assert self.speculative_config is None, "spec decode is not supported."
-        assert not self.model_config.uses_mrope, "mrope is not supported."
-        assert self.lora_config is None, "lora is not supported."
 
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
