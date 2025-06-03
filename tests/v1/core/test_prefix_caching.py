@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Compare the with and without prefix caching."""
 
+import copy
 from typing import Optional
 
 import pytest
@@ -53,6 +54,38 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
                 ["layer"],
                 FullAttentionSpec(block_size, 1, 1, torch.float32, False),
             )
+        ],
+    )
+
+
+def make_kv_cache_config_hybrid_model(block_size: int,
+                                      num_blocks: int) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(block_size, 1, 1, torch.float32, False),
+            ),
+            KVCacheGroupSpec(
+                ["layer2"],
+                SlidingWindowSpec(block_size,
+                                  1,
+                                  1,
+                                  torch.float32,
+                                  False,
+                                  sliding_window=2 * block_size),
+            ),
+            KVCacheGroupSpec(
+                ["layer3"],
+                SlidingWindowSpec(block_size,
+                                  1,
+                                  1,
+                                  torch.float32,
+                                  False,
+                                  sliding_window=2 * block_size),
+            ),
         ],
     )
 
@@ -176,6 +209,138 @@ def test_prefill(hash_algo):
     assert manager.block_pool.free_block_queue.num_free_blocks == 0
     assert manager.block_pool.free_block_queue.free_list_head is None
     assert manager.block_pool.free_block_queue.free_list_tail is None
+
+
+def test_prefill_hybrid_model():
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config_hybrid_model(block_size, 21),
+        max_model_len=8192,
+        enable_caching=True,
+    )
+
+    hash_fn = hash
+
+    # Complete 3 blocks (48 tokens)
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+
+    # Fully cache miss
+    # Incomplete 1 block (7 tokens)
+    unique_token_ids = [3] * 7
+    all_token_ids = common_token_ids + unique_token_ids
+    req0 = make_request("0", all_token_ids)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert len(manager.req_to_block_hashes[req0.request_id]) == 3
+    assert not computed_blocks.blocks[0]
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(req0, 55,
+                                    len(computed_blocks.blocks[0]) * 16,
+                                    computed_blocks)
+    assert blocks.get_block_ids() == [[1, 2, 3, 4], [5, 6, 7, 8],
+                                      [9, 10, 11, 12]]
+
+    # Check full block metadata
+    parent_block_hash = None
+    for length, block_ids in zip((1, 2, 3),
+                                 ((1, 5, 9), (2, 6, 10), (3, 7, 11))):
+        block_tokens = tuple(all_token_ids[(length - 1) * 16:length * 16])
+        block_hash = hash_block_tokens(hash_fn, parent_block_hash,
+                                       block_tokens)
+        for block_id in block_ids:
+            assert manager.block_pool.blocks[
+                block_id].block_hash.block_hash == block_hash
+            assert manager.block_pool.blocks[block_id].ref_cnt == 1
+        parent_block_hash = block_hash.hash_value
+
+    # Check partial block metadata
+    for block_id in (4, 8, 12):
+        assert manager.block_pool.blocks[block_id].block_hash is None
+        assert manager.block_pool.blocks[block_id].ref_cnt == 1
+
+    # Cache hit in the common prefix
+    # Incomplete 1 block (5 tokens)
+    unique_token_ids = [3] * 5
+    req1 = make_request("1", common_token_ids + unique_token_ids)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    assert len(manager.req_to_block_hashes[req1.request_id]) == 3
+    assert computed_blocks.get_block_ids() == [[1, 2, 3], [0, 6, 7],
+                                               [0, 10, 11]]
+    assert num_computed_tokens == 3 * 16
+    num_new_tokens = 53 - 3 * 16
+    blocks = manager.allocate_slots(req1, num_new_tokens,
+                                    len(computed_blocks.blocks[0]) * 16,
+                                    computed_blocks)
+    assert blocks.get_block_ids() == [[13], [14], [15]]
+    for block_per_group in computed_blocks.blocks:
+        for block in block_per_group:
+            if block != manager.block_pool.null_block:
+                assert block.ref_cnt == 2
+
+    block_hashes = manager.req_to_block_hashes[req1.request_id]
+    manager.free(req0)
+    manager.free(req1)
+
+    cached_block_hash_to_block_bak = copy.copy(
+        manager.block_pool.cached_block_hash_to_block)
+
+    def test_partial_request_hit(request_id: str,
+                                 hash_to_evict: list[BlockHashWithGroupId],
+                                 expect_hit_length: int):
+        req = make_request(request_id, common_token_ids + unique_token_ids)
+        for hash_with_group_id in hash_to_evict:
+            manager.block_pool.cached_block_hash_to_block.pop(
+                hash_with_group_id)
+        computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+        assert len(manager.req_to_block_hashes[req.request_id]) == 3
+        assert num_computed_tokens == expect_hit_length * block_size
+        for block_per_group in computed_blocks.blocks:
+            assert len(block_per_group) == num_computed_tokens // block_size
+        for hash_with_group_id in hash_to_evict:
+            manager.block_pool.cached_block_hash_to_block[
+                hash_with_group_id] = cached_block_hash_to_block_bak[
+                    hash_with_group_id]
+        manager.free(req)
+
+    # Evict the blocks outside sliding window, does not affect the hit length.
+    test_partial_request_hit("2", [
+        BlockHashWithGroupId(block_hashes[0], 1),
+        BlockHashWithGroupId(block_hashes[0], 2)
+    ], 3)
+
+    # Evict the first block of full attention, makes total cache miss.
+    test_partial_request_hit("3", [
+        BlockHashWithGroupId(block_hashes[0], 0),
+    ], 0)
+
+    # Evict the last block of all layers, reduces the hit length to 2.
+    test_partial_request_hit("4", [
+        BlockHashWithGroupId(block_hashes[2], 0),
+        BlockHashWithGroupId(block_hashes[2], 1),
+        BlockHashWithGroupId(block_hashes[2], 2),
+    ], 2)
+
+    # Evict the last block of full attention, reduces the hit length to 2.
+    test_partial_request_hit("5", [BlockHashWithGroupId(block_hashes[2], 0)],
+                             2)
+
+    # Evict the last block of sliding window, reduces the hit length to 2.
+    test_partial_request_hit("6", [BlockHashWithGroupId(block_hashes[2], 1)],
+                             2)
+
+    # Evict the last block of sliding window, reduces the hit length to 2.
+    test_partial_request_hit("7", [BlockHashWithGroupId(block_hashes[2], 2)],
+                             2)
+
+    # Evict different set of blocks for full attention and sliding window makes
+    # total cache miss.
+    # The cache hit length of full attention is 1 * block_size.
+    # The cache hit length of sliding window is 2 * block_size.
+    # Then it is cache miss as the two type of layers have different hit length.
+    test_partial_request_hit("8", [
+        BlockHashWithGroupId(block_hashes[2], 0),
+        BlockHashWithGroupId(block_hashes[0], 1),
+        BlockHashWithGroupId(block_hashes[0], 2),
+    ], 0)
 
 
 def test_prefill_plp():
