@@ -307,7 +307,7 @@ class FlashAttentionMetadataBuilder:
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
-        self.use_full_cuda_graph = compilation_config.full_cuda_graph        
+        self.use_full_cuda_graph = compilation_config.full_cuda_graph
         if self.use_full_cuda_graph:
             assert self.aot_schedule
         self.scheduler_metadata = torch.zeros(self.runner.max_num_reqs + 1,
