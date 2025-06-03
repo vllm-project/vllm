@@ -312,7 +312,7 @@ def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
         output_mask: A boolean tensor indicating which tokens appear in the output.
         repetition_penalties: The repetition penalties of shape (num_seqs, ).
     """
-    if current_platform.is_cuda():
+    if current_platform.is_cuda() and logits.is_contiguous():
         apply_repetition_penalties_cuda(logits, prompt_mask, output_mask,
                                         repetition_penalties)
     else:
