@@ -116,8 +116,6 @@ def test_sliding_window_remove_skipped_blocks():
         1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010
     ]
     block_table = id_to_block_table(original_block_ids)
-    for block in block_table:
-        block.incr_ref()
     manager.req_to_blocks["test"] = block_table
 
     manager.remove_skipped_blocks("test", 0)
@@ -150,5 +148,3 @@ def test_sliding_window_remove_skipped_blocks():
     # of removed blocks should be [1003, 1002].
     manager.remove_skipped_blocks("test", 11)
     assert_block_id(block_table, [null_block_id] * 4 + original_block_ids[4:])
-
-    manager.free("test")
