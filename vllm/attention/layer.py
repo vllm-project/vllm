@@ -190,8 +190,10 @@ class Attention(nn.Module):
         # then self is returned.
         # So to attn_dtype anyway，there will be no additional overhead
         query = query.to(self.attn_dtype)
-        key = key.to(self.attn_dtype)
-        value = value.to(self.attn_dtype)
+        if key is not None:
+            key = key.to(self.attn_dtype)
+        if value is not None:
+            value = value.to(self.attn_dtype)
 
         if self.calculate_kv_scales:
             attn_metadata = get_forward_context().attn_metadata
