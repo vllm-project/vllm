@@ -319,10 +319,13 @@ class OpenAIServingChat(OpenAIServing):
     def extract_tool_call_required_streaming(
         self,
         previous_text: str,
-        current_text: str,
+        current_text: Optional[str],
         delta_text: str,
         function_name_returned: bool,
     ) -> tuple[Optional[DeltaMessage], bool]:
+        if current_text is None or current_text == "":
+            # if the current text is empty, we cannot parse it
+            return None, function_name_returned
         try:
             obj = partial_json_parser.loads(current_text)
         except partial_json_parser.core.exceptions.MalformedJSON:
@@ -649,10 +652,18 @@ class OpenAIServingChat(OpenAIServing):
                         current_text = previous_text + delta_text
                         fn_name_returned = function_name_returned[i]
 
+                        if self.reasoning_parser:
+                            _, content = \
+                                reasoning_parser.extract_reasoning_content(
+                                    current_text,
+                                    request
+                                )
+                        else:
+                            content = current_text
                         delta_message, function_name_returned[i] = (
                             self.extract_tool_call_required_streaming(
                                 previous_text=previous_text,
-                                current_text=current_text,
+                                current_text=content,
                                 delta_text=delta_text,
                                 function_name_returned=fn_name_returned))
 
@@ -932,8 +943,7 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
             auto_tools_called = False
-            reasoning_content = None
-            content = output.text
+
             if self.reasoning_parser:
                 try:
                     reasoning_parser = self.reasoning_parser(tokenizer)
@@ -945,6 +955,9 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning_content, content = (
                     reasoning_parser.extract_reasoning_content(
                         output.text, request=request))
+            else:
+                reasoning_content = None
+                content = output.text
 
             # if auto tools are not enabled, and a named tool choice using
             #   outlines is not being used
@@ -978,6 +991,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 # the fields of FunctionDefinition are a superset of the
                 # tool call outputs and can be used for parsing
+                assert content is not None
                 tool_calls = TypeAdapter(
                     list[FunctionDefinition]).validate_json(content)
                 message = ChatMessage(
