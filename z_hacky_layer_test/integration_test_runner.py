@@ -125,8 +125,8 @@ def compare_outputs(dir1: str, dir2: str):
 
 def main():
     # Run with two different backends
-    backend1 = "GARBAGE"
-    backend2 = "GARBAGE2"
+    backend1 = "FLASH_ATTN"
+    backend2 = "FLASH_ATTN_VLLM_V1"
     
     output_dir1 = run_cache_layer(backend1)
     output_dir2 = run_cache_layer(backend2)
