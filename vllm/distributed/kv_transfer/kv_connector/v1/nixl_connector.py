@@ -435,14 +435,9 @@ class NixlConnectorWorker:
             while True:
                 identity, _, msg = sock.recv_multipart()
                 # Decode the message which contains (GET_META_MSG, rank)
-<<<<<<< HEAD
                 msg, target_rank = msgspec.msgpack.decode(msg)
-                logger.info("Received message from rank %s", target_rank)
+                logger.debug("Received message from rank %s", target_rank)
                 if msg != GET_META_MSG:
-=======
-                msg_tuple = msgspec.msgpack.decode(msg)
-                if msg_tuple[0] != GET_META_MSG:
->>>>>>> 93850c220 (clean logging)
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart(
