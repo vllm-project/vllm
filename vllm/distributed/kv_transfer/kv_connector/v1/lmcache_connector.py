@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
@@ -24,6 +24,9 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
+
+        self.async_save_supported = hasattr(self._lmcache_engine,
+                                            "get_finished")
 
     # ==============================
     # Worker-side methods
@@ -86,6 +89,14 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         self._lmcache_engine.wait_for_save()
 
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        if not self.async_save_supported:
+            return None, None
+
+        return self._lmcache_engine.get_finished(finished_req_ids)
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -104,8 +115,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 computed tokens for this request
 
         Returns:
-            the number of tokens that can be loaded from the 
-            external KV cache beyond what is already computed.
+            * the number of tokens that can be loaded from the
+              external KV cache beyond what is already computed.
+            * true if external KV cache tokens will be loaded
+              asynchronously (between scheduler steps).
         """
         return self._lmcache_engine.get_num_new_matched_tokens(
             request, num_computed_tokens), False
@@ -131,3 +144,23 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         return self._lmcache_engine.build_connector_meta(scheduler_output)
+
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """
+        Called when a request has finished, before its blocks are freed.
+
+        Returns:
+            * True if the request is being saved/sent asynchronously and blocks
+            should not be freed until the request_id is returned from
+            get_finished().
+            * Optional KVTransferParams to be included in the request outputs
+            returned by the engine.
+        """
+        if not self.async_save_supported:
+            return False, None
+
+        return self._lmcache_engine.request_finished(request, block_ids)
