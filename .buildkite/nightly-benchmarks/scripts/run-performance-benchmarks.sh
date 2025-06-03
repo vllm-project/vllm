@@ -459,9 +459,9 @@ main() {
   QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
   # benchmarking
-  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests-$ARCH.json
-  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/latency-tests-$ARCH.json
-  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/throughput-tests-$ARCH.json
+  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests-$ARCH.json}" 
+  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/"${LATENCY_JSON:-latency-tests-$ARCH.json}"
+  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/"${THROUGHPUT_JSON:-throughput-tests-$ARCH.json}"
 
   # postprocess benchmarking results
   pip install tabulate pandas
