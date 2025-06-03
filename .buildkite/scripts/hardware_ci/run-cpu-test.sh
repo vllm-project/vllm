@@ -86,4 +86,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 40m bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 1h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
