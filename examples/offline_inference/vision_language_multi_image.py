@@ -691,6 +691,26 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "omni-research/Tarsier-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    prompt = f"USER: {'<image>' * len(image_urls)}\n{question}\n ASSISTANT:"
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
@@ -712,6 +732,7 @@ model_example_map = {
     "qwen2_vl": load_qwen2_vl,
     "qwen2_5_vl": load_qwen2_5_vl,
     "smolvlm": load_smolvlm,
+    "tarsier": load_tarsier,
 }
 
 
