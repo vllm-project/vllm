@@ -6,6 +6,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from datetime import timedelta
+from enum import IntEnum
 from functools import cache, wraps
 from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
@@ -31,6 +32,22 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 pynvml = import_pynvml()
+
+
+class CudaCapability(IntEnum):
+    """CUDA compute capability constants for different GPU architectures.
+
+    See https://developer.nvidia.com/cuda-gpus
+    """
+    PASCAL_60 = 60
+    VOLTA_70 = 70
+    TURING_75 = 75
+    AMPERE_80 = 80
+    ADA_LOVELACE_89 = 89
+    HOPPER_90 = 90
+    BLACKWELL_100 = 100
+    BLACKWELL_RTX_120 = 120
+
 
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
@@ -61,10 +78,10 @@ class CudaPlatformBase(Platform):
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
-        if self.has_device_capability(80):
+        if self.has_device_capability(CudaCapability.AMPERE_80):
             # Ampere and Hopper or later NVIDIA GPUs.
             return [torch.bfloat16, torch.float16, torch.float32]
-        if self.has_device_capability(60):
+        if self.has_device_capability(CudaCapability.PASCAL_60):
             # Pascal, Volta and Turing NVIDIA GPUs, BF16 is not supported
             return [torch.float16, torch.float32]
         # Kepler and Maxwell NVIDIA GPUs, only FP32 is supported,
@@ -149,7 +166,7 @@ class CudaPlatformBase(Platform):
 
             if envs.VLLM_ATTENTION_BACKEND is None:
                 # Default case
-                if cls.is_device_capability(100):
+                if cls.is_device_capability(CudaCapability.BLACKWELL_100):
                     # Blackwell => Force CutlassMLA.
                     use_cutlass_mla = True
                     # TODO: This does not work, because the
@@ -240,11 +257,11 @@ class CudaPlatformBase(Platform):
             from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
-                selected_backend is None and cls.is_device_capability(100)
-                and block_size == 128)
+                selected_backend is None and cls.is_device_capability(
+                    CudaCapability.BLACKWELL_100) and block_size == 128)
             use_flashinfermla = selected_backend == _Backend.FLASHINFER_MLA or (
-                selected_backend is None and cls.is_device_capability(100)
-                and block_size in [32, 64])
+                selected_backend is None and cls.is_device_capability(
+                    CudaCapability.BLACKWELL_100) and block_size in [32, 64])
             use_flashmla = selected_backend in [
                 _Backend.FLASHMLA, _Backend.FLASHMLA_VLLM_V1
             ] or (selected_backend is None and is_flashmla_supported()[0])
@@ -338,7 +355,7 @@ class CudaPlatformBase(Platform):
 
             # Default backends for V1 engine
             # Prefer FlashInfer for Blackwell GPUs if installed
-            if cls.is_device_capability(100):
+            if cls.is_device_capability(CudaCapability.BLACKWELL_100):
                 if is_default_backend_supported := is_attn_backend_supported(
                         FLASHINFER_V1, head_size, dtype):
                     from vllm.v1.attention.backends.utils import (
@@ -358,8 +375,9 @@ class CudaPlatformBase(Platform):
                         "install FlashInfer for better performance.")
 
             # FlashAttention is the default for SM 8.0+ GPUs
-            if cls.has_device_capability(80):
-                if has_sink and not cls.is_device_capability(90):
+            if cls.has_device_capability(CudaCapability.AMPERE_80):
+                if (has_sink and not cls.is_device_capability(
+                        CudaCapability.HOPPER_90)):
                     logger.info_once("Using Triton backend on V1 engine.")
                     return TRITON_ATTN_VLLM_V1
                 if is_default_backend_supported := is_attn_backend_supported(
@@ -409,7 +427,7 @@ class CudaPlatformBase(Platform):
                 f"with use_v1: {use_v1} use_mla: {use_mla}")
 
         target_backend = _Backend.FLASH_ATTN
-        if not cls.has_device_capability(80):
+        if not cls.has_device_capability(CudaCapability.AMPERE_80):
             # Volta and Turing NVIDIA GPUs.
             logger.info(
                 "Cannot use FlashAttention-2 backend for Volta and Turing "
@@ -472,7 +490,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return cls.has_device_capability(89)
+        return cls.has_device_capability(CudaCapability.ADA_LOVELACE_89)
 
     @classmethod
     def supports_v1(cls, model_config: "ModelConfig") -> bool:
@@ -535,7 +553,7 @@ class CudaPlatformBase(Platform):
             # Default to CutlassMLA for blackwell,
             # FlashMLA otherwise
             if attention_backend is None:
-                if cls.is_device_capability(100):
+                if cls.is_device_capability(CudaCapability.BLACKWELL_100):
                     attention_backend = "CUTLASS_MLA"
                 else:
                     attention_backend = "FLASHMLA"
@@ -553,7 +571,7 @@ class CudaPlatformBase(Platform):
                 attention_backend = "FLASH_ATTN_VLLM_V1"
 
             # All Blackwell backends support fp8
-            if cls.is_device_capability(100):
+            if cls.is_device_capability(CudaCapability.BLACKWELL_100):
                 supported = True
             elif attention_backend == "FLASH_ATTN_VLLM_V1":
                 if fp8_attention:
