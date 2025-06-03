@@ -200,7 +200,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            block_size=self.block_size,
+            block_sizes=[self.block_size],
         )
 
         # Cached torch/numpy tensor
@@ -1358,8 +1358,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
                 pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
-                block_size=kv_cache_config.kv_cache_groups[0].kv_cache_spec.
-                block_size,
+                block_sizes=[
+                    kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+                ],
             )
         # Verify dtype compatibility between block_table_cpu and input_batch
         assert self.block_table_cpu.dtype == self.input_batch.block_table[
