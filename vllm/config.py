@@ -704,12 +704,12 @@ class ModelConfig:
             )
         else:
             self.dtype = _get_and_verify_dtype(
-                    self.model,
-                    self.hf_config,
-                    self.dtype,
-                    is_pooling_model=is_pooling_model,
-                    revision=self.revision,
-                )
+                self.model,
+                self.hf_config,
+                self.dtype,
+                is_pooling_model=is_pooling_model,
+                revision=self.revision,
+            )
             if self.attn_dtype == "auto":
                 self.attn_dtype = self.dtype
             else:

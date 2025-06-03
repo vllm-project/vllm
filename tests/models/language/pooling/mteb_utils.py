@@ -78,11 +78,15 @@ def run_mteb_embed_task_st(model_name, tasks):
     return run_mteb_embed_task(model, tasks)
 
 
-def mteb_test_embed_models(hf_runner,
-                           vllm_runner,
-                           model_info: EmbedModelInfo,
-                           vllm_extra_kwargs=None,
-                           hf_model_callback=None):
+def mteb_test_embed_models(
+    hf_runner,
+    vllm_runner,
+    model_info: EmbedModelInfo,
+    vllm_extra_kwargs=None,
+    hf_model_callback=None,
+    st_main_score=None,
+    st_dtype=None,
+):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
@@ -110,19 +114,22 @@ def mteb_test_embed_models(hf_runner,
                                               MTEB_EMBED_TASKS)
         vllm_dtype = vllm_model.model.llm_engine.model_config.dtype
 
-    with set_default_torch_dtype(vllm_dtype):
-        with hf_runner(model_info.name,
-                       is_sentence_transformer=True,
-                       dtype=vllm_dtype) as hf_model:
+    if st_main_score is None:
+        with set_default_torch_dtype(vllm_dtype):
+            with hf_runner(model_info.name,
+                           is_sentence_transformer=True,
+                           dtype=vllm_dtype) as hf_model:
 
-            if hf_model_callback is not None:
-                hf_model_callback(hf_model)
+                if hf_model_callback is not None:
+                    hf_model_callback(hf_model)
 
-            st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
-            st_dtype = next(hf_model.model.parameters()).dtype
+                st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
+                st_dtype = next(hf_model.model.parameters()).dtype
 
     print("VLLM:", vllm_dtype, vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
     assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_EMBED_TOL)
+
+    return vllm_main_score, st_main_score, vllm_dtype, st_dtype

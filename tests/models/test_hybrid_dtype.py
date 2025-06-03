@@ -46,12 +46,22 @@ def test_embed_models_mteb(hf_runner, vllm_runner, dtype: DTypeInfo):
     model_info = EmbedModelInfo(embed_model,
                                 architecture="BertModel",
                                 dtype=dtype)
-
+    st_main_score, st_dtype = None, None
     if model_info.dtype in high_precision_data_types:
-        mteb_test_embed_models(hf_runner, vllm_runner, model_info)
+        _, st_main_score, _, st_dtype = mteb_test_embed_models(
+            hf_runner,
+            vllm_runner,
+            model_info,
+            st_main_score=st_main_score,
+            st_dtype=st_dtype)
     else:
         with pytest.raises(AssertionError):
-            mteb_test_embed_models(hf_runner, vllm_runner, model_info)
+            _, st_main_score, _, st_dtype = mteb_test_embed_models(
+                hf_runner,
+                vllm_runner,
+                model_info,
+                st_main_score=st_main_score,
+                st_dtype=st_dtype)
 
 
 @pytest.mark.parametrize("model", [generate_model])
