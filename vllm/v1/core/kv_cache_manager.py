@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
 from dataclasses import dataclass
@@ -8,7 +9,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          hash_request_tokens)
 from vllm.v1.core.single_type_kv_cache_manager import (
     get_manager_for_kv_cache_spec)
@@ -92,7 +93,7 @@ class KVCacheManager:
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
         self.req_to_block_hashes: defaultdict[
-            str, list[BlockHashType]] = defaultdict(list)
+            str, list[BlockHash]] = defaultdict(list)
 
     @property
     def usage(self) -> float:
