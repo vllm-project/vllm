@@ -225,6 +225,8 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "",
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
+        # FIXME: https://github.com/huggingface/transformers/pull/38510
+        marks=[pytest.mark.skip("Model is broken")],
     ),
     "chameleon": VLMTestInfo(
         models=["facebook/chameleon-7b"],
