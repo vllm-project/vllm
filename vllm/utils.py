@@ -1456,17 +1456,24 @@ class FlexibleArgumentParser(ArgumentParser):
         if '--config' in args:
             args = self._pull_args_from_config(args)
 
+        def repl(match: re.Match) -> str:
+            """Replaces underscores with dashes in the matched string."""
+            return match.group(0).replace("_", "-")
+
+        # Everything between the first -- and the first .
+        pattern = re.compile(r"(?<=--)[^\.]*")
+
         # Convert underscores to dashes and vice versa in argument names
         processed_args = []
         for arg in args:
             if arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
-                    key = '--' + key[len('--'):].replace('_', '-')
+                    key = pattern.sub(repl, key, count=1)
                     processed_args.append(f'{key}={value}')
                 else:
-                    processed_args.append('--' +
-                                          arg[len('--'):].replace('_', '-'))
+                    key = pattern.sub(repl, arg, count=1)
+                    processed_args.append(key)
             elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
                 # allow -O flag to be used without space, e.g. -O3
                 processed_args.append('-O')
