@@ -1759,8 +1759,8 @@ def qr_destroy(fa: int) -> None:
 
 
 def qr_all_reduce(fa: int, inp: torch.Tensor, out: torch.Tensor,
-                  algo_int: int) -> None:
-    torch.ops._C_custom_ar.qr_all_reduce(fa, inp, out, algo_int)
+                  quantized: bool) -> None:
+    torch.ops._C_custom_ar.qr_all_reduce(fa, inp, out, quantized)
 
 
 def qr_get_handle(fa: int) -> torch.Tensor:
@@ -1773,10 +1773,6 @@ def qr_open_handles(fa: int, handles: list[torch.Tensor]) -> None:
 
 def qr_max_size() -> int:
     return torch.ops._C_custom_ar.qr_max_size()
-
-
-def qr_min_size() -> int:
-    return torch.ops._C_custom_ar.qr_min_size()
 
 
 def get_flash_mla_metadata(

@@ -31,8 +31,6 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerMode, TokenizerPoolConfig,
                          VllmConfig, get_attr_docs, get_field)
-from vllm.distributed.device_communicators.quick_all_reduce import (
-    QuickReduceAlgo)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -341,8 +339,6 @@ class EngineArgs:
     enforce_eager: bool = ModelConfig.enforce_eager
     max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    quick_reduce_allreduce_algo: Optional[
-        QuickReduceAlgo] = ParallelConfig.quick_reduce_allreduce_algo
     # The following three fields are deprecated and will be removed in a future
     # release. Setting them will have no effect. Please remove them from your
     # configurations.
@@ -666,9 +662,6 @@ class EngineArgs:
         parallel_group.add_argument(
             "--disable-custom-all-reduce",
             **parallel_kwargs["disable_custom_all_reduce"])
-        parallel_group.add_argument(
-            "--quick-reduce-allreduce-algo",
-            **parallel_kwargs["quick_reduce_allreduce_algo"])
         parallel_group.add_argument("--worker-cls",
                                     **parallel_kwargs["worker_cls"])
         parallel_group.add_argument("--worker-extension-cls",
@@ -1131,7 +1124,6 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
-            quick_reduce_allreduce_algo=self.quick_reduce_allreduce_algo,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             placement_group=placement_group,
             distributed_executor_backend=self.distributed_executor_backend,

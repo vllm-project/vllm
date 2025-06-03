@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
-from enum import Enum
+import os
 from typing import Union
 
 import torch
@@ -20,23 +20,12 @@ except Exception:
     ops_available = False
 
 
-class QuickReduceAlgo(Enum):
-    OneShotFP = 0
-    TwoShotFP = 1
-    TwoShotQ8Symm = 2
-    TwoShotQ4Symm = 3
-    TwoShotQ8Asymm = 4
-    TwoShotQ4Asymm = 5
-
-
 class QuickAllReduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
 
-    def __init__(self,
-                 group: ProcessGroup,
-                 device: Union[int, str, torch.device],
-                 algo: QuickReduceAlgo = QuickReduceAlgo.TwoShotFP) -> None:
+    def __init__(self, group: ProcessGroup,
+                 device: Union[int, str, torch.device]) -> None:
         self.disabled = True
         if not ops_available:
             # disable because of missing quick reduce library
@@ -46,14 +35,14 @@ class QuickAllReduce:
             return
 
         self.max_size = ops.qr_max_size()
-        self.min_size = ops.qr_min_size()
         self.group = group
-        if isinstance(algo, str):
-            assert algo in QuickReduceAlgo.__members__, \
-                "Algo {} is not supported by QuickReduce".format(algo)
-            self.algo = QuickReduceAlgo[algo]
-        else:
-            self.algo = algo
+        self.quantized = os.environ.get("VLLM_ROCM_CA_QUANTIZED", "0") == "1"
+
+        # On RocM bfloat16 kernels are slower than fp16
+        # due to slower match operations
+        # If environment is not set to 1 we convert input to fp16
+        self.use_bf16_kernels = os.environ.get("VLLM_ROCM_CA_BF16_KERNELS",
+                                               "0") == "1"
 
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "QuickReduce should be attached to a non-NCCL group.")
@@ -67,7 +56,7 @@ class QuickAllReduce:
             logger.warning(
                 "QuickReduce allreduce is disabled due to an unsupported world"
                 " size: %d. Supported world sizes: %s."
-                " To disable this warning set quick_reduce_allreduce_algo"
+                " To disable this warning set VLLM_ROCM_CA_BACKEND"
                 " to None", world_size,
                 str(QuickAllReduce._SUPPORTED_WORLD_SIZES))
             return
@@ -105,11 +94,14 @@ class QuickAllReduce:
         if inp_size >= self.max_size:
             return None
 
+        inp_dtype = inp.dtype
+        if inp_dtype == torch.bfloat16 and not self.use_bf16_kernels:
+            inp = inp.to(torch.float16)
         if out is None:
             out = torch.empty_like(inp)
 
-        ops.qr_all_reduce(self._ptr, inp, out, self.algo.value)
-        return out
+        ops.qr_all_reduce(self._ptr, inp, out, self.quantized)
+        return out.to(inp_dtype)
 
     def close(self):
         if not self.disabled and getattr(self, "_ptr", None):
@@ -127,4 +119,4 @@ class QuickAllReduce:
         if inp_size % 16 != 0:
             return False
         return inp.dtype in QuickAllReduce._SUPPORTED_DTYPES and \
-            inp_size < self.max_size and inp_size >= self.min_size
+            inp_size < self.max_size
