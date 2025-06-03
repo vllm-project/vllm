@@ -6,6 +6,7 @@ import os
 import pprint
 import time
 from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 import torch
@@ -309,6 +310,23 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         return output
 
 
+# the tag for the part of model being compiled,
+# e.g. backbone/eagle_head
+model_tag: str = "backbone"
+
+
+@contextmanager
+def set_model_tag(tag: str):
+    """Context manager to set the model tag."""
+    global model_tag
+    old_tag = model_tag
+    model_tag = tag
+    try:
+        yield
+    finally:
+        model_tag = old_tag
+
+
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
     It is used for compilation level of `CompilationLevel.PIECEWISE`,
@@ -343,7 +361,13 @@ class VllmBackend:
         prefix: str = "",
     ):
 
-        self.prefix = prefix or "backbone"
+        # if the model is initialized with a non-empty prefix,
+        # then usually it's enough to use that prefix,
+        # e.g. launguage_model, vision_model, etc.
+        # when multiple parts are initialized as independent
+        # models, we need to use the model_tag to distinguish
+        # them, e.g. backbone (default), eagle_head, etc.
+        self.prefix = prefix or model_tag
 
         global global_graph_pool
         if global_graph_pool is None:
