@@ -19,6 +19,9 @@ class model_aware_kv_ops_helper:
         self.use_mla_opt = not envs.VLLM_MLA_DISABLE
         self.tp_size = config.parallel_config.tensor_parallel_size
 
+    def use_mla(self):
+        return self.is_deepseek_mla and self.use_mla_opt
+
     def get_model_args(self, model_executable: torch.nn.Module):
 
         model_config = model_executable.model.config

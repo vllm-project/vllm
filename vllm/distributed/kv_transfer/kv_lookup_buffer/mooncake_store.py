@@ -18,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
     KVStoreBufferBase)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
@@ -125,8 +126,15 @@ class MooncakeStore(KVStoreBufferBase):
         value: torch.Tensor,
     ) -> None:
         """Put KVCache to Mooncake Store"""
-        device_id = value.device.index if value.device.type == 'cuda' else -1
-        device_tensor = torch.tensor(device_id, dtype=torch.int32)
+        if value.device.type in ['cuda', 'hpu']:
+            device_id = value.device.index
+        else:
+            device_id = -1
+        logger.debug("putting, device id: %s", device_id)
+        device_tensor = torch.tensor(device_id,
+                                     dtype=torch.int32,
+                                     device="cpu")
+        value = value.cpu()
         value_bytes = safetensors_save({
             "tensor": value,
             "device_id": device_tensor
@@ -153,8 +161,17 @@ class MooncakeStore(KVStoreBufferBase):
             tensor = loaded_tensors["tensor"]
             device_id_tensor = loaded_tensors["device_id"]
             device_id = int(device_id_tensor.item())
-            device = torch.device(
-                'cuda', device_id) if device_id >= 0 else torch.device('cpu')
+            if device_id >= 0:
+                if current_platform.is_hpu():
+                    device = torch.device('hpu', device_id)
+                elif current_platform.is_cuda():
+                    device = torch.device('cuda', device_id)
+                else:
+                    raise RuntimeError(
+                        "Unsupported device type. "
+                        "Please ensure you are using a supported device.")
+            else:
+                device = torch.device('cpu')
             return tensor.to(device)
 
         return None
