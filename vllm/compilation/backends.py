@@ -340,7 +340,11 @@ class VllmBackend:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ):
+
+        self.prefix = prefix or "backbone"
+
         global global_graph_pool
         if global_graph_pool is None:
             global_graph_pool = current_platform.graph_pool_handle()
@@ -440,16 +444,13 @@ class VllmBackend:
             )
             self.compilation_config.cache_dir = cache_dir
 
-        if compilation_counter.num_graphs_seen > 0:
-            cache_dir = self.compilation_config.cache_dir + \
-                f'-{compilation_counter.num_graphs_seen}'
-        else:
-            cache_dir = self.compilation_config.cache_dir
+        cache_dir = self.compilation_config.cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_rank
-        local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
+        local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}",
+                                       self.prefix)
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 

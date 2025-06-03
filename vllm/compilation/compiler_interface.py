@@ -251,10 +251,12 @@ class InductorAdaptor(CompilerInterface):
         # to another machine to reuse the cache.
         inductor_cache = os.path.join(cache_dir, "inductor_cache")
         os.makedirs(inductor_cache, exist_ok=True)
-        os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
+        if "TORCHINDUCTOR_CACHE_DIR" not in os.environ:
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
         triton_cache = os.path.join(cache_dir, "triton_cache")
         os.makedirs(triton_cache, exist_ok=True)
-        os.environ["TRITON_CACHE_DIR"] = triton_cache
+        if "TRITON_CACHE_DIR" not in os.environ:
+            os.environ["TRITON_CACHE_DIR"] = triton_cache
 
     def compile(
         self,
