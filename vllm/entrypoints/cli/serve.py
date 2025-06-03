@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import datetime
+import json
 import os
 import signal
+import subprocess
 import sys
+import uuid
 
 import uvloop
 import zmq
@@ -35,7 +39,7 @@ logger = init_logger(__name__)
 
 
 class ServeSubcommand(CLISubcommand):
-    """The `serve` subcommand for the vLLM CLI. """
+    """The `serve` subcommand for the vLLM CLI."""
 
     def __init__(self):
         self.name = "serve"
@@ -44,10 +48,12 @@ class ServeSubcommand(CLISubcommand):
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         # If model is specified in CLI (as positional arg), it takes precedence
-        if hasattr(args, 'model_tag') and args.model_tag is not None:
+        if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
-        if args.headless or args.api_server_count < 1:
+        if getattr(args, "detach", False):
+            run_detached()
+        elif args.headless or args.api_server_count < 1:
             run_headless(args)
         elif args.api_server_count > 1:
             run_multi_api_server(args)
@@ -65,37 +71,49 @@ class ServeSubcommand(CLISubcommand):
             "serve",
             help="Start the vLLM OpenAI Compatible API server.",
             description="Start the vLLM OpenAI Compatible API server.",
-            usage="vllm serve [model_tag] [options]")
-        serve_parser.add_argument("model_tag",
-                                  type=str,
-                                  nargs='?',
-                                  help="The model tag to serve "
-                                  "(optional if specified in config)")
+            usage="vllm serve [model_tag] [options]",
+        )
+        serve_parser.add_argument(
+            "model_tag",
+            type=str,
+            nargs="?",
+            help="The model tag to serve (optional if specified in config)",
+        )
         serve_parser.add_argument(
             "--headless",
-            action='store_true',
+            action="store_true",
             default=False,
             help="Run in headless mode. See multi-node data parallel "
-            "documentation for more details.")
+            "documentation for more details.",
+        )
         serve_parser.add_argument(
-            '--data-parallel-start-rank',
-            '-dpr',
+            "--data-parallel-start-rank",
+            "-dpr",
             type=int,
             default=0,
-            help='Starting data parallel rank for secondary nodes.')
-        serve_parser.add_argument('--api-server-count',
-                                  '-asc',
-                                  type=int,
-                                  default=1,
-                                  help='How many API server processes to run.')
+            help="Starting data parallel rank for secondary nodes.",
+        )
+        serve_parser.add_argument(
+            "--api-server-count",
+            "-asc",
+            type=int,
+            default=1,
+            help="How many API server processes to run.",
+        )
         serve_parser.add_argument(
             "--config",
             type=str,
-            default='',
+            default="",
             required=False,
             help="Read CLI options from a config file."
             "Must be a YAML with the following options:"
-            "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference"
+            "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference",
+        )
+        serve_parser.add_argument(
+            "-d",
+            "--detach",
+            action="store_true",
+            help="Run the vLLM server in detached mode (background).",
         )
 
         serve_parser = make_arg_parser(serve_parser)
@@ -109,7 +127,6 @@ def cmd_init() -> list[CLISubcommand]:
 
 
 def run_headless(args: argparse.Namespace):
-
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
 
@@ -128,8 +145,8 @@ def run_headless(args: argparse.Namespace):
     handshake_address = get_tcp_uri(host, port)
 
     if local_engine_count <= 0:
-        raise ValueError("data_parallel_size_local must be > 0 in "
-                         "headless mode")
+        raise ValueError(
+            "data_parallel_size_local must be > 0 in headless mode")
 
     # Catch SIGTERM and SIGINT to allow graceful shutdown.
     def signal_handler(signum, frame):
@@ -141,7 +158,10 @@ def run_headless(args: argparse.Namespace):
 
     logger.info(
         "Launching %d data parallel engine(s) in headless mode, "
-        "with head node address %s.", local_engine_count, handshake_address)
+        "with head node address %s.",
+        local_engine_count,
+        handshake_address,
+    )
 
     # Create the engines.
     engine_manager = CoreEngineProcManager(
@@ -164,7 +184,6 @@ def run_headless(args: argparse.Namespace):
 
 
 def run_multi_api_server(args: argparse.Namespace):
-
     assert not args.headless
     num_api_servers = args.api_server_count
     assert num_api_servers > 0
@@ -234,7 +253,6 @@ def run_multi_api_server(args: argparse.Namespace):
 
     with zmq_socket_ctx(handshake_address, zmq.ROUTER,
                         bind=True) as handshake_socket:
-
         # Start local engines.
         if not local_engine_count:
             local_engine_manager = None
@@ -248,7 +266,8 @@ def run_multi_api_server(args: argparse.Namespace):
                 on_head_node=True,
                 local_engine_count=local_engine_count,
                 start_index=0,
-                local_start_index=0)
+                local_start_index=0,
+            )
 
         # Start API servers using the manager
         api_server_manager = APIServerProcessManager(
@@ -259,7 +278,8 @@ def run_multi_api_server(args: argparse.Namespace):
             num_servers=num_api_servers,
             input_addresses=input_addresses,
             output_addresses=output_addresses,
-            stats_update_address=stats_update_address)
+            stats_update_address=stats_update_address,
+        )
 
         # Wait for engine handshakes to complete.
         core_engines = [
@@ -280,7 +300,8 @@ def run_multi_api_server(args: argparse.Namespace):
         wait_for_completion_or_failure(
             api_server_manager=api_server_manager,
             local_engine_manager=local_engine_manager,
-            coordinator=coordinator)
+            coordinator=coordinator,
+        )
 
 
 def run_api_server_worker_proc(listen_address,
@@ -292,6 +313,7 @@ def run_api_server_worker_proc(listen_address,
 
     # Add process-specific prefix to stdout and stderr.
     from multiprocessing import current_process
+
     process_name = current_process().name
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
@@ -300,3 +322,58 @@ def run_api_server_worker_proc(listen_address,
     uvloop.run(
         run_server_worker(listen_address, sock, args, client_config,
                           **uvicorn_kwargs))
+
+
+def run_detached():
+    PROCESS_DIR = os.path.expanduser("~/.vllm_process")
+    os.makedirs(PROCESS_DIR, exist_ok=True)
+
+    instance_id = str(uuid.uuid4())[:8]
+
+    # Build command
+    cmd = ["vllm", "serve"]
+    filtered_args = [
+        arg for arg in sys.argv[2:] if arg not in ("-d", "--detach")
+    ]
+    cmd += filtered_args
+    full_cmd_str = " ".join(cmd)
+
+    log_file = os.path.join(PROCESS_DIR, f"{instance_id}.log")
+    process_list_file = os.path.join(PROCESS_DIR, "vllm_processes.json")
+
+    # Start process
+    with open(log_file, "w") as log:
+        process = subprocess.Popen(cmd,
+                                   stdout=log,
+                                   stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+
+    pid = process.pid
+
+    # Load existing process list
+    if os.path.exists(process_list_file):
+        with open(process_list_file) as f:
+            process_list = json.load(f)
+    else:
+        process_list = []
+
+    # Add new record
+    new_record = {
+        "instance_id": instance_id,
+        "pid": pid,
+        "status": "Running",
+        "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "log": log_file,
+        "cmd": full_cmd_str,
+    }
+
+    process_list.append(new_record)
+
+    # Save
+    with open(process_list_file, "w") as f:
+        json.dump(process_list, f, indent=2)
+
+    print(f"Running detached: {full_cmd_str}")
+    print("vLLM server started in detached mode "
+          f"(instance_id: {instance_id}, pid: {pid}).")
+    print(f"Logs: {log_file}")
