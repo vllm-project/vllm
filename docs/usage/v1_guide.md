@@ -1,5 +1,7 @@
 # vLLM V1
 
+**We have started the process of deprecating V0. Please read [RFC #18571](https://github.com/vllm-project/vllm/issues/18571) for more details.**
+
 V1 is now enabled by default for all supported use cases, and we will gradually enable it for every use case we plan to support. Please share any feedback on [GitHub](https://github.com/vllm-project/vllm) or in the [vLLM Slack](https://inviter.co/vllm-slack).
 
 To disable V1, please set the environment variable as: `VLLM_USE_V1=0`, and send us a GitHub issue sharing the reason!
@@ -51,9 +53,9 @@ This living user guide outlines a few known **important changes and limitations*
 | **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
 | **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
 | **Structured Output Alternative Backends**  | <nobr>🟡 Planned</nobr>                                                           |
-| **Embedding Models**                        | <nobr>🟡 Planned ([RFC #12249](https://github.com/vllm-project/vllm/issues/12249))</nobr> |
+| **Embedding Models**                        | <nobr>🚧 WIP ([PR #18015](https://github.com/vllm-project/vllm/pull/18015))</nobr> |
 | **Mamba Models**                            | <nobr>🟡 Planned</nobr>                                                           |
-| **Encoder-Decoder Models**                  | <nobr>🟡 Planned</nobr>                                                           |
+| **Encoder-Decoder Models**                  | <nobr>🟠 Delayed</nobr>                                                           |
 | **Request-level Structured Output Backend** | <nobr>🔴 Deprecated</nobr>                                                        |
 | **best_of**                                 | <nobr>🔴 Deprecated ([RFC #13361](https://github.com/vllm-project/vllm/issues/13361))</nobr>|
 | **Per-Request Logits Processors**           | <nobr>🔴 Deprecated ([RFC #13360](https://github.com/vllm-project/vllm/pull/13360))</nobr> |
@@ -63,10 +65,11 @@ This living user guide outlines a few known **important changes and limitations*
 - **🟢 Functional**: Fully operational, with ongoing optimizations.  
 - **🚧 WIP**: Under active development.  
 - **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).  
-- **🔴 Deprecated**: Not planned for v1 unless there is strong demand.
+- **🟠 Delayed**: Temporarily dropped in V1 but planned to be re-introduced later.
+- **🔴 Deprecated**: Not planned for V1 unless there is strong demand.
 
 **Note**: vLLM V1’s unified scheduler treats both prompt and output tokens the same
-way by using a simple dictionary (e.g., {request_id: num_tokens}) to dynamically
+way by using a simple dictionary (e.g., `{request_id: num_tokens}`) to dynamically
 allocate a fixed token budget per request, enabling features like chunked prefills,
 prefix caching, and speculative decoding without a strict separation between prefill
 and decode phases.
@@ -140,7 +143,9 @@ vLLM V1 currently excludes model architectures with the `SupportsV0Only` protoco
 and the majority fall into the following categories. V1 support for these models will be added eventually.
 
 **Embedding Models**  
-Instead of having a separate model runner, hidden states processor [RFC #12249](https://github.com/vllm-project/vllm/issues/12249), which is based on global logits processor [RFC #13360](https://github.com/vllm-project/vllm/pull/13360), has been proposed to enable simultaneous generation and embedding using the same engine instance in V1. It is still in the planning stage.
+Initially, we will create a [separate model runner](https://github.com/vllm-project/vllm/pull/18015) to provide V1 support without conflicting with other ongoing work.
+
+Later, we will consider using [hidden states processor](https://github.com/vllm-project/vllm/issues/12249), which is based on [global logits processor](https://github.com/vllm-project/vllm/pull/13360) to enable simultaneous generation and embedding using the same engine instance in V1. [PR #16188](https://github.com/vllm-project/vllm/pull/16188) is the first step towards enabling this.
 
 **Mamba Models**  
 Models using selective state-space mechanisms (instead of standard transformer attention)
