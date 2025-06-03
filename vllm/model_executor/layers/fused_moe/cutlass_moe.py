@@ -353,7 +353,7 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
         expert_offsets,
         blockscale_offsets,
         num_topk,
-        expert_map=a_map)
+        shuffle_map=a_map)
 
     c1 = ops.cutlass_fp4_moe_mm(rep_a_fp4, w1_fp4, rep_a_blockscale,
                                 w1_blockscale, w1_alphas, problem_sizes1,

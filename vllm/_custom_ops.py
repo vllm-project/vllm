@@ -1104,14 +1104,14 @@ def scaled_fp4_experts_quant(
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
     topk: int,
-    expert_map: Optional[torch.Tensor] = None,
+    shuffle_map: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale, for
     packed MoE Inputs.
     Args:
-        input: The input tensor to be quantized to FP4
-        expert_map: The expert map tensor
+        input_tensor: The input tensor to be quantized to FP4
+        shuffle_map: The shuffle map tensor
         input_global_scale: A scalar scaling factor for the entire tensor.
         expert_offsets: The expert offsets tensor
         blockscale_offsets: The blockscale offsets tensor
@@ -1124,7 +1124,7 @@ def scaled_fp4_experts_quant(
         f'input.ndim needs to be == 2, but got {input_tensor.ndim}.')
 
     MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
-    input_tensor = shuffle_rows(input_tensor, expert_map) if expert_map is not None else input_tensor
+    input_tensor = shuffle_rows(input_tensor, shuffle_map) if shuffle_map is not None else input_tensor
     m_numtopk, k = input_tensor.shape
 
     assert (m_numtopk <= MAX_TOKENS_PER_EXPERT * topk), (

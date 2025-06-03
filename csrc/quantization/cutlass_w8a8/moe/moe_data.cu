@@ -5,11 +5,6 @@
 
 #include <iostream>
 
-#include <cutlass/array.h>
-#include <cutlass/numeric_types.h>
-
-#include "../../../moe/permute_unpermute_kernels/dispatch.h"
-
 
 constexpr uint64_t THREADS_PER_EXPERT = 512;
 
