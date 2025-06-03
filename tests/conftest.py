@@ -311,6 +311,7 @@ class HfRunner:
         dtype: str = "auto",
         *,
         model_kwargs: Optional[dict[str, Any]] = None,
+        trust_remote_code: bool = True,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
@@ -320,10 +321,15 @@ class HfRunner:
 
         self.config = AutoConfig.from_pretrained(
             model_name,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
         )
         self.device = self.get_default_device()
-        self.dtype = torch_dtype = _get_and_verify_dtype(self.config, dtype)
+        self.dtype = torch_dtype = _get_and_verify_dtype(
+            self.model_name,
+            self.config,
+            dtype=dtype,
+            is_pooling_model=is_sentence_transformer or is_cross_encoder,
+        )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
         model_kwargs.setdefault("torch_dtype", torch_dtype)
@@ -336,7 +342,7 @@ class HfRunner:
                 model_name,
                 device=self.device,
                 model_kwargs=model_kwargs,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
         elif is_cross_encoder:
             # Lazy init required for AMD CI
@@ -346,12 +352,12 @@ class HfRunner:
                 model_name,
                 device=self.device,
                 automodel_args=model_kwargs,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
         else:
             model = auto_cls.from_pretrained(
                 model_name,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
                 **model_kwargs,
             )
 
@@ -372,7 +378,7 @@ class HfRunner:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
-                trust_remote_code=True,
+                trust_remote_code=trust_remote_code,
             )
 
         # don't put this import at the top level
@@ -381,7 +387,7 @@ class HfRunner:
         self.processor = AutoProcessor.from_pretrained(
             model_name,
             torch_dtype=torch_dtype,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
         )
         if skip_tokenizer_init:
             self.tokenizer = self.processor.tokenizer

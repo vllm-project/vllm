@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
-from re import escape as regex_escape
 
 import llguidance
+from regex import escape as regex_escape
 from transformers import PreTrainedTokenizerBase
 
 from vllm.model_executor.guided_decoding.guidance_logits_processors import (
