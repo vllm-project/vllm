@@ -13,7 +13,6 @@ from torch.multiprocessing import (
     spawn)  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import Concatenate, ParamSpec
 
-
 has_deep_ep = importlib.util.find_spec("deep_ep") is not None
 if has_deep_ep:
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
