@@ -153,6 +153,14 @@ class RocmPlatform(Platform):
         "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
         "quark", "ptpc_fp8"
     ]
+    _supports_mx = None
+    _supports_fp8 = None
+    _is_fp8_fnuz = None
+    _use_custom_allreduce = None
+    _get_cu_count = {}
+    _is_navi = None
+    _get_device_capability = {}
+    _get_device_name = {}
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -365,16 +373,45 @@ class RocmPlatform(Platform):
         return any(gfx in gcn_arch for gfx in ["gfx95"])
 
     @classmethod
+    @cache
     def supports_fp8(cls) -> bool:
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         return any(gfx in gcn_arch for gfx in ['gfx94', 'gfx95', 'gfx12'])
 
     @classmethod
+    @cache
     def is_fp8_fnuz(cls) -> bool:
         # only device 0 is checked, this assumes MI300 platforms are homogeneous
         return 'gfx94' in torch.cuda.get_device_properties(0).gcnArchName
 
     @classmethod
+    @cache
+    def get_device_capability(cls,
+                              device_id: int = 0
+                              ) -> Optional[DeviceCapability]:
+        if device_id not in cls._get_device_capability:
+            major, minor = torch.cuda.get_device_capability(device_id)
+            cls._get_device_capability[device_id] = DeviceCapability(
+                major=major, minor=minor)
+        return cls._get_device_capability[device_id]
+
+    @classmethod
+    @with_amdsmi_context
+    def get_device_name(cls, device_id: int = 0) -> str:
+        if device_id not in cls._get_device_name:
+            physical_device_id = cls.device_id_to_physical_device_id(device_id)
+            handle = amdsmi_get_processor_handles()[physical_device_id]
+            asic_info = amdsmi_get_gpu_asic_info(handle)
+            device_name: str = asic_info["device_id"]
+            if device_name in _ROCM_DEVICE_ID_NAME_MAP:
+                cls._get_device_name[device_id] = _ROCM_DEVICE_ID_NAME_MAP[
+                    device_name]
+            else:
+                cls._get_device_name[device_id] = asic_info["market_name"]
+        return cls._get_device_name[device_id]
+
+    @classmethod
+    @cache
     def fp8_dtype(cls) -> torch.dtype:
         if cls.is_fp8_fnuz():
             return torch.float8_e4m3fnuz
@@ -387,6 +424,7 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
+    @cache
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
@@ -399,6 +437,7 @@ class RocmPlatform(Platform):
             device_id).multi_processor_count
 
     @classmethod
+    @cache
     def is_navi(cls) -> bool:
         return 'gfx1' in torch.cuda.get_device_properties(0).gcnArchName
 
