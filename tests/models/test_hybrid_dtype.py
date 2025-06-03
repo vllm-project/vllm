@@ -8,9 +8,8 @@ from tests.models.utils import DTypeInfo, EmbedModelInfo
 from vllm.config import _STR_DTYPE_TO_TORCH_DTYPE
 
 high_precision_data_types = [
-    DTypeInfo(dtype="auto"),  # hybrid
+    DTypeInfo(dtype="auto"),
     DTypeInfo(dtype="float32"),
-    DTypeInfo(dtype="hybrid"),
     DTypeInfo(dtype="float32", attn_dtype="float16"),
     DTypeInfo(dtype="float32", attn_dtype="bfloat16")
 ]
@@ -30,7 +29,7 @@ def test_dtype(vllm_runner, dtype: DTypeInfo):
                      max_model_len=None,
                      attn_dtype=dtype.attn_dtype) as vllm_model:
         model_config = vllm_model.model.llm_engine.model_config
-        if dtype.dtype == "hybrid" or dtype.dtype == "auto":
+        if dtype.dtype == "auto": # hybrid dtype
             assert model_config.dtype == torch.float32
             assert model_config.attn_dtype == torch.float16
         elif dtype.attn_dtype == "auto":
@@ -71,7 +70,7 @@ def test_embed_models_mteb(hf_runner, vllm_runner, dtype: DTypeInfo):
 def test_generate_models(hf_runner, vllm_runner, example_prompts, model: str,
                          dtype: DTypeInfo, max_tokens: int,
                          num_logprobs: int) -> None:
-    if dtype.attn_dtype == "auto" and dtype.dtype != "hybrid":
+    if dtype.attn_dtype == "auto":
         with vllm_runner(model, dtype=dtype.dtype,
                          attn_dtype=dtype.attn_dtype):
             pass

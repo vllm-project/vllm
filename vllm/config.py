@@ -230,9 +230,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
-ModelDType = Literal["auto", "hybrid", "half", "float16", "bfloat16", "float",
-                     "float32"]
-AttnDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
+DType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
 @config
@@ -261,18 +259,16 @@ class ModelConfig:
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
-    dtype: Union[ModelDType, torch.dtype] = "auto"
+    dtype: Union[DType, torch.dtype] = "auto"
     """Data type for model weights and activations:\n
     - "auto" will use FP16 precision for FP32 and FP16 models, and BF16
     precision for BF16 models.\n
-    - "hybrid" will use FP32 for weights and activation 
-    and FP16/BF16 for attention.\n
     - "half" for FP16. Recommended for AWQ quantization.\n
     - "float16" is the same as "half".\n
     - "bfloat16" for a balance between precision and range.\n
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
-    attn_dtype: Union[AttnDType, torch.dtype] = "auto"
+    attn_dtype: Union[DType, torch.dtype] = "auto"
     """
     Data type for attention:
     - "auto" attn_dtype is the same as model dtype. \n
@@ -689,11 +685,12 @@ class ModelConfig:
 
         # For pooling models
         # If config_dtype is float32, use hybrid dtype by default.
+        hybrid_dtype = False
         if (is_pooling_model and config_dtype == torch.float32
                 and self.dtype == "auto"):
-            self.dtype = "hybrid"
+            hybrid_dtype = True
 
-        if self.dtype == "hybrid":
+        if hybrid_dtype:
             self.dtype = torch.float32
             self.attn_dtype = _get_and_verify_dtype(
                 self.model,

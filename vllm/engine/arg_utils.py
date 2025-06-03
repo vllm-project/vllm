@@ -18,19 +18,19 @@ from pydantic import SkipValidation, TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.config import (AttnDType, BlockSize, CacheConfig, CacheDType,
-                         CompilationConfig, ConfigFormat, ConfigType,
-                         DecodingConfig, DetailedTraceModules, Device,
-                         DeviceConfig, DistributedExecutorBackend,
+from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
+                         ConfigFormat, ConfigType, DecodingConfig,
+                         DetailedTraceModules, Device, DeviceConfig,
+                         DistributedExecutorBackend, DType,
                          GuidedDecodingBackend, GuidedDecodingBackendV1,
                          HfOverrides, KVEventsConfig, KVTransferConfig,
                          LoadConfig, LoadFormat, LoRAConfig, ModelConfig,
-                         ModelDType, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, PromptAdapterConfig,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field)
+                         ModelImpl, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerMode,
+                         TokenizerPoolConfig, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -274,8 +274,8 @@ class EngineArgs:
     download_dir: Optional[str] = LoadConfig.download_dir
     load_format: str = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
-    dtype: ModelDType = ModelConfig.dtype
-    attn_dtype: AttnDType = ModelConfig.attn_dtype
+    dtype: DType = ModelConfig.dtype
+    attn_dtype: DType = ModelConfig.attn_dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
     max_model_len: Optional[int] = ModelConfig.max_model_len

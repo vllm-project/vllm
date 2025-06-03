@@ -7,7 +7,7 @@ from typing import Any, NamedTuple, Optional, Union
 import torch
 import torch.nn.functional as F
 
-from vllm.config import AttnDType, ModelConfig, ModelDType, TaskOption
+from vllm.config import DType, ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
@@ -329,8 +329,8 @@ def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
 
 
 class DTypeInfo(NamedTuple):
-    dtype: ModelDType
-    attn_dtype: AttnDType = "auto"
+    dtype: DType
+    attn_dtype: DType = "auto"
 
 
 class EmbedModelInfo(NamedTuple):

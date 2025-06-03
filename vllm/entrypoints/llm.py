@@ -14,7 +14,7 @@ from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
+from vllm.config import (CompilationConfig, DType, TokenizerMode,
                          is_init_field)
 from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
                                    TaskOption)
@@ -162,7 +162,7 @@ class LLM:
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
         tensor_parallel_size: int = 1,
-        dtype: ModelDType = "auto",
+        dtype: DType = "auto",
         quantization: Optional[QuantizationMethods] = None,
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
