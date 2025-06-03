@@ -184,12 +184,13 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             blocksparse_params: Optional[Dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
+            kv_sharing_target_layer_name: Optional[str] = None,
             # MLA Specific Arguments
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+                         kv_sharing_target_layer_name, **mla_args)
 
         assert is_flashmla_supported(), \
             "FlashMLA is not supported on this device"

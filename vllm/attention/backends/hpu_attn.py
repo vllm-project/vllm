@@ -110,9 +110,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         max_seq_len: int = 4096,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
         super(AttentionImpl, self).__init__()
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0.")
         if use_irope:
             logger.warning_once(
                 "Using irope in HPU is not supported yet, it will fall back "

@@ -485,6 +485,7 @@ class FlashAttentionImpl(AttentionImpl):
         blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
@@ -506,6 +507,7 @@ class FlashAttentionImpl(AttentionImpl):
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -569,22 +571,26 @@ class FlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        # Reshape the input keys and values and store them in the cache.
-        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-        # not padded. However, we don't need to do key[:num_actual_tokens] and
-        # value[:num_actual_tokens] because the reshape_and_cache_flash op uses
-        # the slot_mapping's shape to determine the number of actual tokens.
         key_cache, value_cache = kv_cache.unbind(0)
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            attn_metadata.slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
+
+        if self.kv_sharing_target_layer_name is None:
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+            # not padded. However, we don't need to do key[:num_actual_tokens]
+            # and value[:num_actual_tokens] because the reshape_and_cache_flash
+            # op uses the slot_mapping's shape to determine the number of
+            # actual tokens.
+            torch.ops._C_cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(torch.float8_e4m3fn)
