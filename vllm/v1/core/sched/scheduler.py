@@ -777,6 +777,8 @@ class Scheduler(SchedulerInterface):
                 pooler_output = pooler_outputs[req_index]
                 stopped = check_stop(request, self.max_model_len,
                                      pooler_output)
+                if stopped:
+                    kv_transfer_params = self._free_request(request)
 
             # Extract sample logprobs if needed.
             if request.sampling_params is not None \
@@ -889,6 +891,7 @@ class Scheduler(SchedulerInterface):
         For example, the API server can abort a request when the client
         disconnects.
         """
+        print("finish requests")
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
             request_ids = (request_ids, )
