@@ -125,6 +125,9 @@ class KVCacheBlock:
     prev_free_block: Optional["KVCacheBlock"] = None
     next_free_block: Optional["KVCacheBlock"] = None
 
+    # Whether the block is a null block that should never be cached.
+    is_null: bool = False
+
     def incr_ref(self):
         self.ref_cnt += 1
 
