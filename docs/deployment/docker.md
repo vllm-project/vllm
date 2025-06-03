@@ -46,11 +46,11 @@ You can add any other [engine-args][engine-args] you need after the image tag (`
     create a custom Dockerfile on top of the base image with an extra layer that installs them:
 
     ```Dockerfile
-    FROM vllm/vllm-openai:v0.8.3
+    FROM vllm/vllm-openai:v0.9.0
 
     # e.g. install the `audio` optional dependencies
     # NOTE: Make sure the version of vLLM matches the base image!
-    RUN uv pip install --system vllm[audio]==0.8.3
+    RUN uv pip install --system vllm[audio]==0.9.0
     ```
 
 !!! tip
