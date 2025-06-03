@@ -125,15 +125,15 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         ubatch_ctx = get_current_ubatch_context()
         ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
-        yield_and_switch_from_compute_to_comm_impl(schedule="default")
+        # yield_and_switch_from_compute_to_comm_impl(schedule="default")
         dispatch(True)  # Send
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER SEND SYNC", flush=True)
         dispatch(False)  # Recv
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER RECV SYNC", flush=True)
-        yield_and_switch_from_comm_to_compute_impl(schedule="default")
-        torch.cuda.synchronize()
+        # yield_and_switch_from_comm_to_compute_impl(schedule="default")
+        # torch.cuda.synchronize()
         return expert_x, expert_x_scale, expert_num_tokens
 
     def finalize(
@@ -173,11 +173,11 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_recv=not send,
             )
 
-        yield_and_switch_from_compute_to_comm_impl(schedule="default")
+        # yield_and_switch_from_compute_to_comm_impl(schedule="default")
         combine(True)
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER COMBINE SEND SYNC", flush=True)
         combine(False)
         # print(f"{ubatch_id} AFTER COMBINE RECV SYNC", flush=True)
-        yield_and_switch_from_comm_to_compute_impl(schedule="default")
+        # yield_and_switch_from_comm_to_compute_impl(schedule="default")
         torch.cuda.synchronize()

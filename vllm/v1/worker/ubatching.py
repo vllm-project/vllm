@@ -115,32 +115,32 @@ class UBatchContext:
 
     def yield_and_switch_from_compute_to_comm(self):
         assert current_stream() == self.compute_stream
-        dp_rank = get_dp_group().rank_in_group
-        print(f"DP: {dp_rank} UB: {self.id} "
-              f"Yield and switch from {self.stream_string()}", flush=True)
+        # dp_rank = get_dp_group().rank_in_group
+        # print(f"DP: {dp_rank} UB: {self.id} "
+        #       f"Yield and switch from {self.stream_string()}", flush=True)
         self.ctx_valid_state()
         self._signal_compute_done()
         self._cpu_yield()
         self.ctx_valid_state()
         assert self.current_stream == self.compute_stream
         self.update_stream(self.comm_stream)
-        print(f"DP: {dp_rank} UB: {self.id} "
-              f"Resuming on stream {self.stream_string()}", flush=True)
+        # print(f"DP: {dp_rank} UB: {self.id} "
+        #       f"Resuming on stream {self.stream_string()}", flush=True)
         self._wait_compute_done()
 
     def yield_and_switch_from_comm_to_compute(self):
         assert current_stream() == self.comm_stream
-        dp_rank = get_dp_group().rank_in_group
-        print(f"DP: {dp_rank} UB: {self.id} "
-              f"Yield and switch from {self.stream_string()}", flush=True)
+        # dp_rank = get_dp_group().rank_in_group
+        # print(f"DP: {dp_rank} UB: {self.id} "
+        #       f"Yield and switch from {self.stream_string()}", flush=True)
         self.ctx_valid_state()
         self._signal_comm_done()
         self._cpu_yield()
         self.ctx_valid_state()
         assert self.current_stream == self.comm_stream
         self.update_stream(self.compute_stream)
-        print(f"DP: {dp_rank} UB: {self.id} "
-              f"Resuming on stream {self.stream_string()}", flush=True)
+        # print(f"DP: {dp_rank} UB: {self.id} "
+        #       f"Resuming on stream {self.stream_string()}", flush=True)
         self._wait_comm_done()
 
 

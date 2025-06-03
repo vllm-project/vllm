@@ -1363,12 +1363,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         @torch.inference_mode()
         def _ubatch_thread(ubatch_ctx, token_slice, results, save_results,
                            use_dummy_input):
-            print(f"Starting Request on ubatch: {ubatch_ctx.id}", flush=True)
+            # print(f"Starting Request on ubatch: {ubatch_ctx.id}", flush=True)
             model_output = _run(token_slice, ubatch_ctx, use_dummy_input)
 
             if save_results:
                 results.append(model_output)
-            print(f"Finishing Request on ubatch: {ubatch_ctx.id}", flush=True)
+            # print(f"Finishing Request on ubatch: {ubatch_ctx.id}", flush=True)
 
         def _run_ubatches(ubatch_slices, attn_metadata,
                           is_dummy_run) -> torch.Tensor:
