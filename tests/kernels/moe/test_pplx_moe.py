@@ -40,8 +40,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
+#from tests.kernels.quant_utils import native_w8a8_block_matmul
 from tests.kernels.moe.utils import (
-    native_w8a8_block_matmul,
     torch_moe2,
     naive_batched_moe,
 )
