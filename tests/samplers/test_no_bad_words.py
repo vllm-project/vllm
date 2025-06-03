@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Make sure bad_words works.
 
 Run `pytest tests/samplers/test_no_bad_words.py`.

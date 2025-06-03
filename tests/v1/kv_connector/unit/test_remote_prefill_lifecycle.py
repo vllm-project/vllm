@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT

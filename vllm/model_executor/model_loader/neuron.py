@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for selecting and loading Neuron models in transformers-neuronx
 framework."""
 import ast

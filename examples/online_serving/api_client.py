@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Example Python client for `vllm.entrypoints.api_server`
 Start the demo server:
     python -m vllm.entrypoints.api_server --model <model_name>

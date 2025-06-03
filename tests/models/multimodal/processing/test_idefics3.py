@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Idefics3's multimodal preprocessing kwargs."""
 import pytest
 from transformers import Idefics3Config

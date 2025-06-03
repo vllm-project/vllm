@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers for building inputs that can be leveraged for different test types.
 """
 from collections.abc import Iterable

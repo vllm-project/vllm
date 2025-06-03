@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file demonstrates the example usage of guided decoding
 to generate structured outputs using vLLM. It shows how to apply

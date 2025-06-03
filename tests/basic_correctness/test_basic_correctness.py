@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.

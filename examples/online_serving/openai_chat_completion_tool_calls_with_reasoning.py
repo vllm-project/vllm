@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 An example demonstrates how to use tool calling with reasoning models 
 like QwQ-32B. The reasoning_content will not be parsed by the tool 

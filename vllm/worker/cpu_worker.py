@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A CPU worker class."""
 import os
 from typing import Dict, List, Optional, Set, Tuple, Type

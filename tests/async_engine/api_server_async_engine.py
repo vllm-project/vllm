@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """vllm.entrypoints.api_server with some extra logging for testing."""
 from collections.abc import Iterable
 from typing import Any
