@@ -5,6 +5,7 @@ import atexit
 import gc
 import importlib
 import inspect
+import json
 import multiprocessing
 import os
 import signal
@@ -16,7 +17,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from json import JSONDecodeError
 from typing import Annotated, Any, Optional
 
 import prometheus_client
@@ -930,7 +930,7 @@ async def invocations(raw_request: Request):
     """
     try:
         body = await raw_request.json()
-    except JSONDecodeError as e:
+    except json.JSONDecodeError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=f"JSON decode error: {e}") from e
 
@@ -1001,6 +1001,18 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
                                 status_code=response.code)
 
         return Response(status_code=200, content=response)
+
+
+def load_log_config(log_config_file: Optional[str]) -> Optional[dict]:
+    if not log_config_file:
+        return None
+    try:
+        with open(log_config_file) as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning("Failed to load log config from file %s: error %s",
+                       log_config_file, e)
+        return None
 
 
 def build_app(args: Namespace) -> FastAPI:
@@ -1323,6 +1335,11 @@ async def run_server_worker(listen_address,
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     server_index = client_config.get("client_index", 0) if client_config else 0
+
+    # Load logging config for uvicorn if specified
+    log_config = load_log_config(args.log_config_file)
+    if log_config is not None:
+        uvicorn_kwargs['log_config'] = log_config
 
     async with build_async_engine_client(args, client_config) as engine_client:
         app = build_app(args)
