@@ -155,8 +155,12 @@ class PoolingModelRunner(
         if not self.is_driver_worker:
             return []
 
+        # convert the embedding output to float32,
+        # otherwise precision will be lost. See #18940
+        hidden_states = hidden_or_intermediate_states.to(torch.float32)
+
         return [
-            self.model.pooler(hidden_states=hidden_or_intermediate_states,
+            self.model.pooler(hidden_states=hidden_states,
                               pooling_metadata=model_input.pooling_metadata)
         ]
 
