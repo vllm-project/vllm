@@ -36,8 +36,8 @@ class GGUFTestConfig(NamedTuple):
 
 LLAMA_CONFIG = GGUFTestConfig(
     original_model="meta-llama/Llama-3.2-1B-Instruct",
-    gguf_repo="bartowski/Llama-3.2-1B-Instruct-GGUF",
-    gguf_filename="Llama-3.2-1B-Instruct-IQ4_XS.gguf",
+    gguf_repo="unsloth/Llama-3.2-1B-Instruct-GGUF",
+    gguf_filename="Llama-3.2-1B-Instruct-IQ4_NL.gguf",
 )
 
 QWEN2_CONFIG = GGUFTestConfig(
