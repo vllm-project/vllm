@@ -98,9 +98,7 @@ steps:
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
 
 - label: Core Test # 10min
-  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amdexperimental, amdproduction]
-  amd_gpus: 4   # Just for the sake of queue testing
   fast_check: true
   source_file_dependencies:
   - vllm/core
@@ -114,7 +112,6 @@ steps:
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
-  amd_gpus: 2   # Just for the sake of queue testing
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
@@ -207,7 +204,6 @@ steps:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
-  working_dir: "/vllm-workspace/tests" # optional
 
 - label: V1 Test
   mirror_hardwares: [amdexperimental]
@@ -261,7 +257,6 @@ steps:
     - VLLM_USE_V1=0 python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min
-  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/
@@ -292,9 +287,7 @@ steps:
     - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
-  working_dir: "/vllm-workspace/tests"
-  mirror_hardwares: [amdexperimental]
-  amd_gpus: 8
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -335,10 +328,8 @@ steps:
   commands:
   - pytest -v -s compile/test_full_graph.py
 
-- label: Kernels Test %N # 1h each
-  working_dir: "/vllm-workspace/tests"
-  # mirror_hardwares: [amdexperimental, amdproduction]
-  amd_gpus: 8
+- label: Kernels Core Operation Test
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
@@ -384,7 +375,6 @@ steps:
     - pytest -v -s kernels/mamba
 
 - label: Tensorizer Test # 11min
-  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amdexperimental, amdproduction]
   soft_fail: true
   source_file_dependencies:
@@ -461,7 +451,6 @@ steps:
     - pytest -v -s encoder_decoder
 
 - label: OpenAI-Compatible Tool Use # 20 min
-  working_dir: "/vllm-workspace/tests" 
   mirror_hardwares: [amdexperimental]
   fast_check: false
   source_file_dependencies:

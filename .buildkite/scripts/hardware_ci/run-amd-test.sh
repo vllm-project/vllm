@@ -94,6 +94,10 @@ if [[ $commands == *"pytest -v -s compile/test_basic_correctness.py"* ]]; then
   commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s compile/test_basic_correctness.py"}
 fi
 
+if [[ $commands == *"pytest -v -s lora"* ]]; then
+  commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
+fi
+
 #ignore certain kernels tests
 if [[ $commands == *" kernels/core"* ]]; then
   commands="${commands} \
