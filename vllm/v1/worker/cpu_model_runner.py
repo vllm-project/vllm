@@ -18,7 +18,7 @@ class CPUModelRunner(GPUModelRunner):
         super().__init__(vllm_config, device)
 
         assert device == torch.device("cpu")
-        assert not self.use_spec_decode, "spec decode is not supported."
+        assert self.speculative_config is None, "spec decode is not supported."
         assert not self.model_config.uses_mrope, "mrope is not supported."
         assert self.lora_config is None, "lora is not supported."
 
@@ -58,7 +58,7 @@ class CPUModelRunner(GPUModelRunner):
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
         with _set_global_compilation_settings():
-            self._dummy_run(self.max_num_tokens)
+            self._dummy_run(max(16, self.max_num_reqs))
         logger.info("Warming up done.")
 
     def _init_device_properties(self) -> None:
