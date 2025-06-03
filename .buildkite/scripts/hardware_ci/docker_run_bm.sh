@@ -94,7 +94,7 @@ fi
 # and assert meeting the expectation
 # 
 if [[ -z "$throughput" || ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-  echo "faieled to get the throughput"
+  echo "Failed to get the throughput"
   exit 1
 fi
 
