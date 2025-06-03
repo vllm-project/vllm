@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
 from flashinfer.sampling import top_k_renorm_probs, top_p_renorm_probs
