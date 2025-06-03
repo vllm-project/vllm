@@ -207,12 +207,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
-from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     from vllm.attention.ops.triton_flash_attention import triton_attention
 else:
