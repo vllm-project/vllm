@@ -525,11 +525,13 @@ class EmbeddingAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
                 epsilon=self.epsilon,
             )
 
+            reshape = torch.ops.aten.reshape.default(
+                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             static_fp8 = torch.ops.higher_order.auto_functionalized(
                 # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=result,
-                input=rmsnorm[1],
+                input=reshape,
                 scale=scale,
             )
 
@@ -560,12 +562,14 @@ class EmbeddingAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
                 epsilon=self.epsilon,
             )
 
+            reshape = torch.ops.aten.reshape.default(
+                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             quant_result = torch.empty_like(rmsnorm[1], dtype=result.dtype)
             static_fp8 = torch.ops.higher_order.auto_functionalized(
                 # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=quant_result,
-                input=rmsnorm[1],
+                input=reshape,
                 scale=scale,
             )
 
@@ -620,11 +624,13 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
                 epsilon=self.epsilon,
             )
 
+            reshape = torch.ops.aten.reshape.default(
+                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             static_fp8 = torch.ops.higher_order.auto_functionalized(
                 # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=result,
-                input=rmsnorm[1],
+                input=reshape,
                 scale=scale,
             )
 
@@ -651,11 +657,13 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
             )
 
             quant_result = torch.empty_like(rmsnorm[1], dtype=result.dtype)
+            reshape = torch.ops.aten.reshape.default(
+                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             static_fp8 = torch.ops.higher_order.auto_functionalized(
                 # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=quant_result,
-                input=rmsnorm[1],
+                input=reshape,
                 scale=scale,
             )
 
@@ -709,11 +717,13 @@ class LastAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
                 epsilon=self.epsilon,
             )
 
+            reshape = torch.ops.aten.reshape.default(
+                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             static_fp8 = torch.ops.higher_order.auto_functionalized(
                 # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=result,
-                input=rmsnorm[1],
+                input=reshape,
                 scale=scale,
             )
 
@@ -740,11 +750,13 @@ class LastAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
             )
 
             quant_result = torch.empty_like(rmsnorm[1], dtype=result.dtype)
+            reshape = torch.ops.aten.reshape.default(
+                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             static_fp8 = torch.ops.higher_order.auto_functionalized(
                 # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=quant_result,
-                input=rmsnorm[1],
+                input=reshape,
                 scale=scale,
             )
 

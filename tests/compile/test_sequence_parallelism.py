@@ -78,6 +78,61 @@ class TestModel(torch.nn.Module):
         return [torch.ops._C.fused_add_rms_norm.default]
 
 
+class TestQuantModel(torch.nn.Module):
+
+    def __init__(self, hidden_size=16, intermediate_size=32):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.gate_proj = torch.nn.Parameter(
+            torch.empty((intermediate_size, hidden_size)))
+        self.norm = RMSNorm(hidden_size, 1e-05)
+        # Initialize weights
+        torch.nn.init.normal_(self.gate_proj, std=0.02)
+
+    def forward(self, hidden_states, residual):
+        """
+        Forward pass implementing the operations in the FX graph
+        
+        Args:
+            hidden_states: Input tensor
+            residual: Residual tensor from previous layer
+            
+        Returns:
+            Tuple containing the output tensor
+        """
+        # Reshape input
+        view = hidden_states.reshape(-1, self.hidden_size)
+
+        #matrix multiplication
+        permute = self.gate_proj.permute(1, 0)
+        mm = torch.mm(view, permute)
+
+        # Tensor parallel all-reduce
+        all_reduce = tensor_model_parallel_all_reduce(mm)
+
+        # layer normalization
+        norm_output, residual_output = self.norm(all_reduce, residual)
+        norm_output = norm_output.reshape(-1, self.hidden_size)
+        static_scaled_fp8_quant = \
+            torch.ops.vllm.static_scaled_fp8_quant.default(
+            norm_output, dtype=torch.float16)
+
+        return static_scaled_fp8_quant, residual_output
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_reduce.default]
+
+    def ops_in_model_after(self):
+        return [
+            torch.ops.vllm.reduce_scatter.default,
+            torch.ops.vllm.all_gather.default
+        ]
+
+    def ops_in_model(self):
+        return [torch.ops._C.fused_add_rms_norm.default]
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [16])
@@ -145,7 +200,7 @@ def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
     func_pass = FixFunctionalizationPass(vllm_config)
     backend_func = TestBackend(sequence_parallelism_pass, func_pass)
 
-    model = TestModel(hidden_size, hidden_size * 2)
+    model = TestQuantModel(hidden_size, hidden_size * 2)
     hidden_states = torch.randn((batch_size * seq_len, hidden_size),
                                 dtype=dtype)
     residual = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
