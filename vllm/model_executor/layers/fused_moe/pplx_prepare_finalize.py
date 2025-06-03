@@ -45,7 +45,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        assert False
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
         ubatch_ctx = get_current_ubatch_context()
@@ -128,10 +127,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
         yield_and_switch_from_compute_to_comm_impl(schedule="default")
         dispatch(True)  # Send
-        # torch.cuda.synchronize()
+        torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER SEND SYNC", flush=True)
         dispatch(False)  # Recv
-        # torch.cuda.synchronize()
+        torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER RECV SYNC", flush=True)
         yield_and_switch_from_comm_to_compute_impl(schedule="default")
         torch.cuda.synchronize()
@@ -145,7 +144,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> None:
-        assert False
         num_tokens = output.size(0)  # M
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
@@ -177,9 +175,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         yield_and_switch_from_compute_to_comm_impl(schedule="default")
         combine(True)
-        # torch.cuda.synchronize()
+        torch.cuda.synchronize()
         # print(f"{ubatch_id} AFTER COMBINE SEND SYNC", flush=True)
         combine(False)
         # print(f"{ubatch_id} AFTER COMBINE RECV SYNC", flush=True)
         yield_and_switch_from_comm_to_compute_impl(schedule="default")
-        # torch.cuda.synchronize()
+        torch.cuda.synchronize()

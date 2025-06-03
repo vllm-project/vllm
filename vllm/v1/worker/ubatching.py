@@ -8,6 +8,7 @@ from torch.library import custom_op
 
 from vllm import forward_context
 from vllm.utils import current_stream
+from vllm.distributed.parallel_state import get_dp_group
 
 
 class UBatchContext:
@@ -69,28 +70,28 @@ class UBatchContext:
         torch.cuda.set_stream(self.current_stream)
 
     def ctx_valid_state(self):
-        # assert forward_context._forward_context == self.forward_context
-        # assert current_stream() == self.current_stream
-        # assert not self.cpu_wait_event.is_set()
+        assert forward_context._forward_context == self.forward_context
+        assert current_stream() == self.current_stream
+        assert not self.cpu_wait_event.is_set()
         pass
 
     def _signal_comm_done(self):
-        # self.ctx_valid_state()
+        self.ctx_valid_state()
         self.gpu_comm_done_event.record(self.comm_stream)
 
     def _signal_compute_done(self):
-        # self.ctx_valid_state()
+        self.ctx_valid_state()
         self.gpu_compute_done_event.record(self.compute_stream)
 
     def _wait_compute_done(self):
         # print(f"{self.id} Waiting on COMPUTE stream", flush=True)
-        # self.ctx_valid_state()
+        self.ctx_valid_state()
         self.comm_stream.wait_event(self.gpu_compute_done_event)
         # print("Compute stream done", flush=True)
 
     def _wait_comm_done(self):
         # print(f"{self.id} Waiting on COMM stream", flush=True)
-        # self.ctx_valid_state()
+        self.ctx_valid_state()
         self.compute_stream.wait_event(self.gpu_comm_done_event)
         # print("Comm stream done", flush=True)
 
@@ -104,42 +105,42 @@ class UBatchContext:
 
     def _cpu_yield(self):
         # print(f"UBatchContext: {self.id} yielding CPU", flush=True)
-        # self.ctx_valid_state()
+        self.ctx_valid_state()
         self.cpu_signal_event.set()
         self.cpu_wait_event.wait()
         self.cpu_wait_event.clear()
         self._restore_context()
-        # self.ctx_valid_state()
+        self.ctx_valid_state()
         # print(f"UBatchContext: {self.id} resuming CPU", flush=True)
 
     def yield_and_switch_from_compute_to_comm(self):
         assert current_stream() == self.compute_stream
-        # dp_rank = get_dp_group().rank_in_group
-        # print(f"DP: {dp_rank} UB: {self.id} "
-        #       f"Yield and switch from {self.stream_string()}", flush=True)
-        # self.ctx_valid_state()
+        dp_rank = get_dp_group().rank_in_group
+        print(f"DP: {dp_rank} UB: {self.id} "
+              f"Yield and switch from {self.stream_string()}", flush=True)
+        self.ctx_valid_state()
         self._signal_compute_done()
         self._cpu_yield()
-        # self.ctx_valid_state()
+        self.ctx_valid_state()
         assert self.current_stream == self.compute_stream
         self.update_stream(self.comm_stream)
-        # print(f"DP: {dp_rank} UB: {self.id} "
-        #       f"Resuming on stream {self.stream_string()}", flush=True)
+        print(f"DP: {dp_rank} UB: {self.id} "
+              f"Resuming on stream {self.stream_string()}", flush=True)
         self._wait_compute_done()
 
     def yield_and_switch_from_comm_to_compute(self):
         assert current_stream() == self.comm_stream
-        # dp_rank = get_dp_group().rank_in_group
-        # print(f"DP: {dp_rank} UB: {self.id} "
-        #       f"Yield and switch from {self.stream_string()}", flush=True)
-        # self.ctx_valid_state()
+        dp_rank = get_dp_group().rank_in_group
+        print(f"DP: {dp_rank} UB: {self.id} "
+              f"Yield and switch from {self.stream_string()}", flush=True)
+        self.ctx_valid_state()
         self._signal_comm_done()
         self._cpu_yield()
-        # self.ctx_valid_state()
+        self.ctx_valid_state()
         assert self.current_stream == self.comm_stream
         self.update_stream(self.compute_stream)
-        # print(f"DP: {dp_rank} UB: {self.id} "
-        #       f"Resuming on stream {self.stream_string()}", flush=True)
+        print(f"DP: {dp_rank} UB: {self.id} "
+              f"Resuming on stream {self.stream_string()}", flush=True)
         self._wait_comm_done()
 
 
