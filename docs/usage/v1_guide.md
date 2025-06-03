@@ -72,7 +72,13 @@ This living user guide outlines a few known **important changes and limitations*
 way by using a simple dictionary (e.g., `{request_id: num_tokens}`) to dynamically
 allocate a fixed token budget per request, enabling features like chunked prefills,
 prefix caching, and speculative decoding without a strict separation between prefill
-and decode phases. The V1 scheduler supports multiple scheduling policies, including First-Come, First-Served (FCFS) and priority-based scheduling (where requests are processed based on assigned priority, with FCFS as a tie-breaker), configurable via the `--scheduling-policy` argument.
+and decode phases. 
+
+!!! note
+    The V1 scheduler supports multiple scheduling policies, including First-Come, 
+    First-Served (FCFS) and priority-based scheduling (where requests are processed 
+    based on assigned priority, with FCFS as a tie-breaker), configurable via the 
+    `--scheduling-policy` argument.
 
 ### Semantic Changes and Deprecated Features
 
