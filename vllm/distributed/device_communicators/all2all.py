@@ -169,19 +169,20 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
     def _make_all2all_kwargs(self) -> dict[Any, Any]:
         # Defaults for internode and intranode are taken from DeepEP tests.
-        num_nvl_bytes = 0
-        num_rdma_bytes = 0
-        num_qps_per_rank = 1
+        num_nvl_bytes = 1024 * 1024 * 1024
+        num_rdma_bytes = None
+        num_qps_per_rank = None
+
         if self.internode:
-            num_nvl_bytes = 1024 * 1024 * 1024
             num_rdma_bytes = 1024 * 1024 * 1024
             num_qps_per_rank = self.num_sms // 2
         else:
             assert self.intranode
-            num_nvl_bytes = 1024 * 1024 * 1024
             num_rdma_bytes = 0
             num_qps_per_rank = 1
 
+        assert num_rdma_bytes is not None
+        assert num_qps_per_rank is not None
         return dict(group=self.cpu_group,
                     num_nvl_bytes=num_nvl_bytes,
                     num_rdma_bytes=num_rdma_bytes,
@@ -234,12 +235,9 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         import deep_ep
 
         # Defaults for internode and intranode are taken from DeepEP tests.
-        num_nvl_bytes = 0
-        num_rdma_bytes = 0
-        num_qps_per_rank = 1
-
         num_nvl_bytes = 1024 * 1024 * 1024
         num_qps_per_rank = num_local_experts
+        num_rdma_bytes = None
 
         if self.internode:
             num_rdma_bytes = 1024 * 1024 * 1024
@@ -251,6 +249,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
                 num_ranks=num_ep_ranks,
                 num_experts=num_global_experts)
 
+        assert num_rdma_bytes is not None
         return dict(group=self.cpu_group,
                     num_nvl_bytes=num_nvl_bytes,
                     num_rdma_bytes=num_rdma_bytes,
