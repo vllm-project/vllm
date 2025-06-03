@@ -8,6 +8,8 @@ import pytest
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
+from vllm.config import TokenizerMode
+
 
 @dataclass(frozen=True)
 class _HfExamplesInfo:
@@ -20,7 +22,7 @@ class _HfExamplesInfo:
     tokenizer: Optional[str] = None
     """Set the tokenizer to load for this architecture."""
 
-    tokenizer_mode: str = "auto"
+    tokenizer_mode: TokenizerMode = "auto"
     """Set the tokenizer type for this architecture."""
 
     speculative_model: Optional[str] = None
@@ -281,7 +283,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "ModernBertModel": _HfExamplesInfo("Alibaba-NLP/gte-modernbert-base",
                                 trust_remote_code=True),
-    "NomicBertModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-long",  # noqa: E501
+    "NomicBertModel": _HfExamplesInfo("nomic-ai/nomic-embed-text-v2-moe",
                                                trust_remote_code=True),
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
     "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B"),
@@ -334,7 +336,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                       max_transformers_version="4.48",  # noqa: E501
                                       transformers_version_reason="HF model is not compatible."),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
-                                         extras={"2B": "OpenGVLab/InternVL2-2B"},  # noqa: E501
+                                         extras={"2B": "OpenGVLab/InternVL2-2B",
+                                                 "3.0": "OpenGVLab/InternVL3-1B"},  # noqa: E501
                                          trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
@@ -387,8 +390,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
-                                                       tokenizer_mode="mistral",
-                                                       v0_only=True),
+                                                       tokenizer_mode="mistral"),
     "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",
                                                       extras={"chat": "Qwen/Qwen-VL-Chat"},  # noqa: E501
                                                       trust_remote_code=True,
@@ -398,6 +400,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct"),  # noqa: E501
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B",
                                         min_transformers_version="4.52"),
+    "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ",  # noqa: E501
+                                                           min_transformers_version="4.52"),
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct"),  # noqa: E501
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
@@ -430,6 +434,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+    "EagleMiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-1B-sft-bf16",
+                                            trust_remote_code=True,
+                                            is_available_online=False,
+                                            speculative_model="openbmb/MiniCPM-2B-sft-bf16",
+                                            tokenizer="openbmb/MiniCPM-2B-sft-bf16"),
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                     trust_remote_code=True,
                                     speculative_model="XiaomiMiMo/MiMo-7B-RL")

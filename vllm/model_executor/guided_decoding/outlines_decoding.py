@@ -5,9 +5,9 @@ import concurrent.futures
 import os
 from enum import Enum
 from json import dumps as json_dumps
-from re import escape as regex_escape
 from typing import Optional, Union
 
+from regex import escape as regex_escape
 from transformers import PreTrainedTokenizerBase
 
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (

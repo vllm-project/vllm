@@ -17,6 +17,8 @@ from neuronx_distributed_inference.models.config import (
     FusedSpecNeuronConfig, OnDeviceSamplingConfig)
 from neuronx_distributed_inference.models.mllama.utils import (
     create_vision_mask)
+from neuronx_distributed_inference.modules.lora_serving import (
+    LoraServingConfig)
 from neuronx_distributed_inference.utils.hf_adapter import (
     load_pretrained_config)
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
@@ -80,25 +82,26 @@ class NeuronCausalLM(nn.Module):
         # Lazy initialized
         self.model: nn.Module
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        input_block_ids: torch.Tensor,
-        sampling_params: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                input_block_ids: torch.Tensor,
+                sampling_params: torch.Tensor,
+                prev_hidden: Optional[torch.Tensor] = None,
+                adapter_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         # sort block ids sequentially for perf/neuron support reasons
         sorted_input_block_ids, sorted_indices = torch.sort(input_block_ids)
         input_ids = torch.index_select(input_ids, 0, sorted_indices)
         positions = torch.index_select(positions, 0, sorted_indices)
         sampling_params = torch.index_select(sampling_params, 0,
                                              sorted_indices)
-
         output = self.model(input_ids,
                             attention_mask=None,
                             position_ids=positions,
                             seq_ids=sorted_input_block_ids,
-                            sampling_params=sampling_params)
+                            sampling_params=sampling_params,
+                            prev_hidden=prev_hidden,
+                            adapter_ids=adapter_ids)
         # on-device sampling
         if self.config.neuron_config.on_device_sampling_config:
             output = output.hidden_states
@@ -201,6 +204,11 @@ class NeuronMllamaForCausalLM(nn.Module):
                  config: PretrainedConfig,
                  on_device_sampling_disabled: bool = False) -> None:
         super().__init__()
+        # has_image is the only multimodal input that is used in
+        # token-generation
+        # This is a cache (on CPU) that saves has_image data per sequence id
+        # The number of entries in this cache is <= Batch-Size
+        self.has_image_cache: dict[int, torch.Tensor] = {}
         self.config = config
         self.logits_processor = LogitsProcessor(
             config.get_text_config().vocab_size, logits_as_input=True)
@@ -212,11 +220,57 @@ class NeuronMllamaForCausalLM(nn.Module):
 
         # Lazy initialized
         self.model: nn.Module
+        self.is_reorder_needed: bool = True
+
+    def read_from_has_image_cache(self, seq_ids: torch.Tensor):
+        has_image_list = []
+        for index in range(len(seq_ids)):
+            seq_id = seq_ids[index].item()
+            if seq_id in self.has_image_cache:
+                has_image_list.append(self.has_image_cache[seq_id])
+            else:
+                has_image_list.append(torch.tensor([0]))
+        return torch.tensor(has_image_list)
+
+    def write_to_has_image_cache(self, seq_ids: torch.Tensor,
+                                 has_image: torch.Tensor):
+        for index in range(len(seq_ids)):
+            seq_id = seq_ids[index].item()
+            if index < len(has_image):
+                self.has_image_cache[seq_id] = has_image[index]
+            else:
+                self.has_image_cache[seq_id] = torch.zeros(1)
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 seq_ids: torch.Tensor, pixel_values: torch.Tensor,
                 aspect_ratios: torch.Tensor, num_chunks: torch.Tensor,
                 has_image: torch.Tensor, sampling_params) -> torch.Tensor:
+
+        # We update the has_image cache during prefill
+        # and read the has_image cache during decode
+        if input_ids.shape[-1] > 1:  # prefill
+            self.write_to_has_image_cache(seq_ids, has_image)
+        else:
+            has_image = self.read_from_has_image_cache(seq_ids)
+            bs = input_ids.shape[0]
+            num_chunks = torch.zeros((bs, 1))
+            aspect_ratios = torch.zeros((bs, 1, 2))
+
+        input_block_ids = seq_ids
+        origin_input_block_ids = seq_ids
+        if self.is_reorder_needed:
+            # sort block ids sequentially for perf/neuron support reasons
+            input_block_ids, sorted_indices = torch.sort(input_block_ids)
+            input_ids = torch.index_select(input_ids, 0, sorted_indices)
+            positions = torch.index_select(positions, 0, sorted_indices)
+            sampling_params = torch.index_select(sampling_params, 0,
+                                                 sorted_indices)
+            pixel_values = torch.index_select(pixel_values, 0, sorted_indices)
+            aspect_ratios = torch.index_select(aspect_ratios, 0,
+                                               sorted_indices)
+            num_chunks = torch.index_select(num_chunks, 0, sorted_indices)
+            has_image = torch.index_select(has_image, 0, sorted_indices)
+
         self.vision_mask = create_vision_mask(input_ids, self.vision_token_id)
         output = self.model(
             input_ids.to(torch.int32),
@@ -232,8 +286,14 @@ class NeuronMllamaForCausalLM(nn.Module):
             has_image=has_image.to(torch.int32),
         )
         if self.config.neuron_config.on_device_sampling_config:
-            return output.hidden_states
-        return output.logits[:, -1, :]
+            output = output.hidden_states
+        else:
+            output = output.logits[:, -1, :]
+
+        if self.is_reorder_needed and origin_input_block_ids.shape[0] != 1:
+            restored_indices = torch.argsort(sorted_indices)
+            output = torch.index_select(output, 0, restored_indices)
+        return output
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
@@ -296,7 +356,7 @@ class NeuronMllamaForCausalLM(nn.Module):
             self.model = neuronx_model_cls(compiled_model_path)
             tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
             self.vision_token_id = tokenizer(
-                "<|image|>", add_special_tokens=False).input_ids
+                "<|image|>", add_special_tokens=False).input_ids[0]
             self.model.load(compiled_model_path)
             return
         except (FileNotFoundError, ValueError):
@@ -323,7 +383,7 @@ class NeuronMllamaForCausalLM(nn.Module):
 
         # Read "<|image|>" token_id from the tokenizer
         self.vision_token_id = tokenizer("<|image|>",
-                                         add_special_tokens=False).input_ids
+                                         add_special_tokens=False).input_ids[0]
         logger.info("\nLoading model from compiled checkpoint...")
         self.model.load(compiled_model_path)
 
@@ -522,7 +582,8 @@ def _get_model_architecture(config: PretrainedConfig) -> str:
 
 def _get_default_neuron_config(model_config: ModelConfig,
                                parallel_config: ParallelConfig,
-                               scheduler_config: SchedulerConfig):
+                               scheduler_config: SchedulerConfig,
+                               lora_serving_config: LoraServingConfig):
     """Generate a neuron config based on vllm config args."""
     on_device_sampling_config = OnDeviceSamplingConfig(dynamic=True,
                                                        deterministic=False)
@@ -541,7 +602,7 @@ def _get_default_neuron_config(model_config: ModelConfig,
         padding_side="right",
         on_device_sampling_config=on_device_sampling_config,
         sequence_parallel_enabled=True,
-    )
+        lora_serving_config=lora_serving_config)
     return neuron_config
 
 
@@ -581,7 +642,8 @@ def _get_neuron_config_after_override(default_neuron_config,
 
 def get_neuron_model(model_config: ModelConfig,
                      parallel_config: ParallelConfig,
-                     scheduler_config: SchedulerConfig) -> nn.Module:
+                     scheduler_config: SchedulerConfig,
+                     lora_serving_config: LoraServingConfig) -> nn.Module:
     """Initializes a neuron-optimized model for inference."""
     model_arch = _get_model_architecture(model_config.hf_config)
     if model_arch == "MllamaForConditionalGeneration":
@@ -589,7 +651,7 @@ def get_neuron_model(model_config: ModelConfig,
     else:
         model = NeuronCausalLM(model_config.hf_config)
     default_neuron_config_args = _get_default_neuron_config(
-        model_config, parallel_config, scheduler_config)
+        model_config, parallel_config, scheduler_config, lora_serving_config)
     neuron_config = _get_neuron_config_after_override(
         default_neuron_config_args, model_config.override_neuron_config)
 
