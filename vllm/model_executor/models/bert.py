@@ -414,9 +414,9 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids=input_ids,
-                          position_ids=positions,
-                          inputs_embeds=inputs_embeds,
-                          intermediate_tensors=intermediate_tensors)
+                                   position_ids=positions,
+                                   inputs_embeds=inputs_embeds,
+                                   intermediate_tensors=intermediate_tensors)
 
         # convert the embedding output to float32,
         # otherwise precision will be lost significantly

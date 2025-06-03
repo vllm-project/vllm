@@ -101,13 +101,10 @@ def mteb_test_embed_models(hf_runner,
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
         vllm_dtype = vllm_model.model.llm_engine.model_config.dtype
-        model_dtype = getattr(
-            vllm_model.model.llm_engine.model_config.hf_config, "torch_dtype",
-            vllm_dtype)
 
     with hf_runner(model_info.name,
                    is_sentence_transformer=True,
-                   dtype=model_dtype) as hf_model:
+                   dtype="float32") as hf_model:
 
         if hf_model_callback is not None:
             hf_model_callback(hf_model)
