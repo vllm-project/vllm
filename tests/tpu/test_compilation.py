@@ -66,12 +66,13 @@ def test_tpu_compilation():
 
     # Check all the compilations are as expected
     compiled_fns = sorted(glob.glob(
-        os.path.join(temp_dir, "__compiled_fn*Captured*.py")),
+        os.path.join(temp_dir, "__compiled_fn*Forward_graph*.py")),
                           key=lambda s: extract_compiled_index(s))
 
     for i, compiled_fn in enumerate(compiled_fns):
         print("{} file: {}".format(i + 1, compiled_fn))
 
+    breakpoint()
     # The first compilation should not have any kv_caches
     with open(compiled_fns[0]) as f:
         content = f.read()
