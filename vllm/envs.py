@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
 import os
@@ -825,6 +826,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Available options:
     # - "naive": naive all2all implementation using all-reduce
     # - "pplx": use pplx kernels
+    # - "deepep_high_throughput", use deepep high-throughput kernels
+    # - "deepep_low_latency", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 
