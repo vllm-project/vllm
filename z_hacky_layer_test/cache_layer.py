@@ -16,6 +16,8 @@ def main():
                         choices=["FLASH_ATTN", "FLASH_ATTN_VLLM_V1", "FLASHINFER", "BOK", "GARBAGE", "GARBAGE2"],
                         default="FLASHINFER",
                         help="vLLM attention backend to use")
+    parser.add_argument("--max-tokens", type=int, default=2,
+                        help="Maximum number of tokens to generate")
     args = parser.parse_args()
     
     # Set the environment variable for the backend
@@ -152,7 +154,7 @@ def main():
     
     # Generate output with the model to trigger the hook
     sampling_params = SamplingParams(
-        max_tokens=2,
+        max_tokens=args.max_tokens,
         temperature=0.0,
         top_k=1,
     )
