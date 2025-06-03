@@ -196,7 +196,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
         import deep_ep
         buffer_kwargs = self._make_all2all_kwargs()
-        print(f"deepep a2a {buffer_kwargs}")
+        logger.debug("DeepEP all2all args %s", buffer_kwargs)
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer)
         # It is dangerous to set num sms outside this function. num_sms is not
@@ -264,7 +264,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         """
         import deep_ep
         buffer_kwargs = self._make_all2all_kwargs(**kwargs)
-        print(f"deepep a2a {buffer_kwargs}")
+        logger.debug("DeepEP all2all args %s", buffer_kwargs)
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer)
         # It is dangerous to set num sms outside this function. num_sms is not
