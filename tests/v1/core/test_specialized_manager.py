@@ -3,7 +3,7 @@
 import torch
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
@@ -32,7 +32,7 @@ def test_sliding_window_possible_cached_prefix():
 
     def run_one_case(block_is_cached, expect_length):
         block_hash_list = [
-            BlockHashType(i, ()) for i in range(len(block_is_cached))
+            BlockHash(i, ()) for i in range(len(block_is_cached))
         ]
 
         block_pool.cached_block_hash_to_block.clear()

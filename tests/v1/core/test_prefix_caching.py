@@ -12,7 +12,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
-from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          hash_block_tokens)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, SlidingWindowSpec)
@@ -547,7 +547,7 @@ def test_cache_blocks(hash_fn):
 
     # Test that blocks are cached correctly for 2 full blocks from the start.
     blocks = [KVCacheBlock(block_id=i) for i in range(2)]
-    block_hashes: list[BlockHashType] = []
+    block_hashes: list[BlockHash] = []
 
     block_pool.cache_full_blocks(
         request=req,
