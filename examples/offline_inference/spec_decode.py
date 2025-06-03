@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=-1)
     parser.add_argument("--print-output", action="store_true")
+    parser.add_argument("--output-len", type=int, default=256)
     return parser.parse_args()
 
 
@@ -92,7 +93,7 @@ def main():
         disable_log_stats=False,
     )
 
-    sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
+    sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
     outputs = llm.generate(prompt_token_ids=prompt_ids, sampling_params=sampling_params)
 
     # print the generated text
