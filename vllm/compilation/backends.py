@@ -70,6 +70,21 @@ class CompilerManager:
                          cache_dir: str,
                          disable_cache: bool = False,
                          prefix: str = ""):
+        """
+        Initialize the cache directory for the compiler.
+
+        The organization of the cache directory is as follows:
+        cache_dir=/path/to/hash_str/rank_i_j/prefix/
+        inside cache_dir, there will be:
+        - vllm_compile_cache.py
+        - computation_graph.py
+        - transformed_code.py
+
+        for multiple prefixes, they can share the same
+        base cache dir of /path/to/hash_str/rank_i_j/ ,
+        to store some common compilation artifacts.
+        """
+
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
