@@ -257,24 +257,34 @@ def test_no_model_tag(parser_with_config, cli_config_file):
 def test_dict_args(parser):
     args = [
         "--model-name=something.something",
-        # Tests underscore in key not replaced with dash
-        "--hf_overrides.key_1",
+        "--hf-overrides.key1",
         "val1",
+        # Test nesting
         "--hf-overrides.key2.key3",
         "val2",
         "--hf-overrides.key2.key4",
         "val3",
+        # Test = sign
         "--hf-overrides.key5=val4",
+        # Test underscore to dash conversion
+        "--hf_overrides.key_6",
+        "val5",
+        "--hf_overrides.key-7.key_8",
+        "val6",
     ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.model_name == "something.something"
     assert parsed_args.hf_overrides == {
-        "key_1": "val1",
+        "key1": "val1",
         "key2": {
             "key3": "val2",
             "key4": "val3",
         },
         "key5": "val4",
+        "key_6": "val5",
+        "key-7": {
+            "key_8": "val6",
+        },
     }
 
 
