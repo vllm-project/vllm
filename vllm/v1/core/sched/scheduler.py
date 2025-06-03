@@ -991,9 +991,10 @@ class Scheduler(SchedulerInterface):
             request.request_id not in
             self.kv_cache_manager.single_type_manager.req_to_blocks):
             # Ensure empty blocks ids are passed to respect connector interface
-            block_ids = KVCacheBlocks.create_empty().get_block_ids()
+            block_ids = KVCacheBlocks.create_empty().get_block_ids()[0]
         else:
-            block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
+            block_ids = self.kv_cache_manager.get_block_ids(
+                request.request_id)[0]
         return self.connector.request_finished(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
