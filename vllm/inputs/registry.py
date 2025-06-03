@@ -159,22 +159,25 @@ class InputProcessingContext(InputContext):
             allow_var_kwargs=True,
         )
 
+        def maybe_cast_dtype(x):
+            # This mimics the behavior of transformers.BatchFeature
+            if isinstance(x, torch.Tensor) and x.is_floating_point():
+                return x.to(dtype=self.model_config.dtype)
+            return x
+
         try:
             output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            # this emulates output.to(dtype=self.model_config.dtype)
+            cast_output = json_map_leaves(maybe_cast_dtype, output)
             if isinstance(output, BatchFeature):
-                return output.to(dtype=self.model_config.dtype)
-
-            def maybe_cast_dtype(x):
-                # This mimics the behavior of transformers.BatchFeature
-                if isinstance(x, torch.Tensor) and x.is_floating_point():
-                    return x.to(dtype=self.model_config.dtype)
-                return x
+                return BatchFeature(cast_output)
 
             logger.warning_once(
                 f"{type(hf_processor).__name__} did not return `BatchFeature`. "
                 "Make sure to match the behaviour of `ProcessorMixin` when "
                 "implementing custom processors.")
-            return json_map_leaves(maybe_cast_dtype, output)
+            return cast_output
+
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
