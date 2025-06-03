@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
@@ -205,12 +206,13 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
             blocksparse_params: Optional[Dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
+            kv_sharing_target_layer_name: Optional[str],
             # MLA Specific Arguments
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+                         kv_sharing_target_layer_name, **mla_args)
 
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
