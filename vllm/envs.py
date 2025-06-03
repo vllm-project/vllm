@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
-    VLLM_USE_SDPA_ATTENTION: bool = False
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
@@ -286,11 +285,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # library file in the locations specified by `LD_LIBRARY_PATH`
     "LD_LIBRARY_PATH":
     lambda: os.environ.get("LD_LIBRARY_PATH", None),
-
-    # flag to control if vllm should use naive scaled dot-product attention
-    "VLLM_USE_SDPA_ATTENTION":
-    lambda: (os.environ.get("VLLM_USE_SDPA_ATTENTION", "False").lower() in
-             ("true", "1")),
 
     # flag to control if vllm should use triton flash attention
     "VLLM_USE_TRITON_FLASH_ATTN":

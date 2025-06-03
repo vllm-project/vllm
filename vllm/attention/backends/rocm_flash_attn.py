@@ -535,7 +535,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {supported_head_sizes}.")
 
-        self.use_naive_attn = envs.VLLM_USE_SDPA_ATTENTION  # Default False
+        self.use_naive_attn = False
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
         self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         if self.use_triton_flash_attn:
