@@ -33,8 +33,6 @@ from typing_extensions import deprecated, runtime_checkable
 import vllm.envs as envs
 from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.distributed.device_communicators.quick_all_reduce import (
-    QuickReduceAlgo)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      QuantizationMethods,
@@ -1771,13 +1769,6 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
-
-    quick_reduce_allreduce_algo: Optional[QuickReduceAlgo] = None
-    """Enable alternative to custom all-reduce.
-    Supports asymmetric and symmetric quantization (4 and 8 bits)
-    for 2 Shot algorithm. Only supported on AMD, 
-    for bf16 and fp16 input data types.
-    """
 
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
     """This parameter is deprecated and will be removed in a future release.

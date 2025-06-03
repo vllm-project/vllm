@@ -52,7 +52,7 @@ void qr_open_handles(quickreduce::fptr_t _fa,
 }
 
 void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
-                   torch::Tensor& out, int64_t algo_int) {
+                   torch::Tensor& out, bool quantized) {
   auto fa = reinterpret_cast<quickreduce::DeviceComms*>(_fa);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
   auto stream = at::cuda::getCurrentHIPStreamMasqueradingAsCUDA();
@@ -60,17 +60,15 @@ void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
   TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
   TORCH_CHECK_EQ(inp.numel(), out.numel());
 
-  auto algo = static_cast<quickreduce::QuickReduceAlgo>(algo_int);
   if (out.scalar_type() == at::ScalarType::Half) {
-    fa->allreduce<half>(algo_int, stream,
-                        reinterpret_cast<half*>(inp.data_ptr()),
-                        reinterpret_cast<half*>(out.data_ptr()), out.numel());
+    fa->allreduce<half>(reinterpret_cast<half*>(inp.data_ptr()),
+                        reinterpret_cast<half*>(out.data_ptr()), out.numel(),
+                        quantized, stream);
   } else if (out.scalar_type() == at::ScalarType::BFloat16) {
     fa->allreduce<quickreduce::nv_bfloat16>(
-        algo_int, stream,
         reinterpret_cast<quickreduce::nv_bfloat16*>(inp.data_ptr()),
         reinterpret_cast<quickreduce::nv_bfloat16*>(out.data_ptr()),
-        out.numel());
+        out.numel(), quantized, stream);
   } else {
     throw std::runtime_error(
         "quick allreduce only supports float16 and bfloat16");
@@ -79,11 +77,6 @@ void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
 
 int64_t qr_max_size() {
   return static_cast<int64_t>(quickreduce::DeviceComms::kMaxProblemSize);
-}
-
-int64_t qr_min_size() {
-  return static_cast<int64_t>(quickreduce::kBlockSize * quickreduce::kAtoms *
-                              sizeof(quickreduce::int32x4_t));
 }
 
 #endif  // USE_ROCM

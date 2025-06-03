@@ -9,11 +9,8 @@ import torch.distributed as dist
 
 from vllm.distributed.communication_op import (  # noqa
     tensor_model_parallel_all_reduce)
-from vllm.distributed.device_communicators.quick_all_reduce import (
-    QuickReduceAlgo)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
-                                             get_tp_group, graph_capture,
-                                             set_quick_reduce_algo)
+                                             get_tp_group, graph_capture)
 
 from ..utils import init_test_distributed_environment, multi_process_parallel
 
@@ -37,7 +34,6 @@ def graph_allreduce(
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(device)
-        set_quick_reduce_algo(QuickReduceAlgo.TwoShotFP)
         init_test_distributed_environment(tp_size, pp_size, rank,
                                           distributed_init_port)
 
@@ -99,7 +95,6 @@ def eager_quick_allreduce(
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
-        set_quick_reduce_algo(QuickReduceAlgo.TwoShotFP)
         device = torch.device(f"cuda:{rank}")
         torch.cuda.set_device(device)
         init_test_distributed_environment(tp_size, pp_size, rank,

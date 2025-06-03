@@ -18,8 +18,6 @@ from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
                          is_init_field)
-from vllm.distributed.device_communicators.quick_all_reduce import (
-    QuickReduceAlgo)
 from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
                                    TaskOption)
 from vllm.engine.llm_engine import LLMEngine
@@ -177,7 +175,6 @@ class LLM:
         enforce_eager: bool = False,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
-        quick_reduce_allreduce_algo: Optional[QuickReduceAlgo] = None,
         disable_async_output_proc: bool = False,
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
@@ -252,7 +249,6 @@ class LLM:
             enforce_eager=enforce_eager,
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
-            quick_reduce_allreduce_algo=quick_reduce_allreduce_algo,
             disable_async_output_proc=disable_async_output_proc,
             hf_token=hf_token,
             hf_overrides=hf_overrides,

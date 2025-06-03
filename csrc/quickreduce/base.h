@@ -6,12 +6,14 @@
 #include <hip/hip_bf16.h>
 
 #define __quickreduce_device_inline__ __device__ __forceinline__
-#define __quickreduce_launch_bounds__ __launch_bounds__(256, 4)
+#define __quickreduce_launch_bounds_two_shot__ __launch_bounds__(256, 4)
+#define __quickreduce_launch_bounds_one_shot__ __launch_bounds__(512, 4)
 
 namespace quickreduce {
 
 typedef __hip_bfloat16 nv_bfloat16;
 typedef __hip_bfloat162 nv_bfloat162;
+using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 
 // Setup acquire-release semantics for vector memory reads (mubuf instruction)
 // as per architecture.
@@ -24,26 +26,6 @@ typedef __hip_bfloat162 nv_bfloat162;
   #define MUBUF_ACQUIRE 1
   #define MUBUF_RELEASE 0
 #endif
-
-// Vector types
-using int8x8_t = __attribute__((__vector_size__(8 * sizeof(int8_t)))) int8_t;
-
-using int32x2_t = __attribute__((__vector_size__(2 * sizeof(int)))) int;
-using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
-using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
-using int32x16_t = __attribute__((__vector_size__(16 * sizeof(int)))) int;
-
-using fp8_t = uint8_t;
-using fp8x8_t = __attribute__((__vector_size__(8 * sizeof(uint8_t)))) uint8_t;
-
-using fp16x4_t = __attribute__((__vector_size__(4 * sizeof(__fp16)))) __fp16;
-using fp16x8_t = __attribute__((__vector_size__(8 * sizeof(__fp16)))) __fp16;
-using fp16x16_t = __attribute__((__vector_size__(16 * sizeof(__fp16)))) __fp16;
-
-using fp32x2_t = __attribute__((__vector_size__(2 * sizeof(float)))) float;
-using fp32x4_t = __attribute__((__vector_size__(4 * sizeof(float)))) float;
-using fp32x8_t = __attribute__((__vector_size__(8 * sizeof(float)))) float;
-using fp32x16_t = __attribute__((__vector_size__(16 * sizeof(float)))) float;
 
 static constexpr int kNegOne = 0xBC00BC00;  // {-1, -1}, fp16x2_t
 
@@ -65,7 +47,10 @@ static constexpr int kMaxNumBlocks = 304 * 4;
 static constexpr int kWavefront = 64;
 
 // 256 thread, 4 wavefronts.
-static dim3 constexpr kBlock = {kWavefront, kBlockSize / kWavefront, 1};
+static dim3 constexpr kBlockTwoShot = {kWavefront, kBlockSize / kWavefront, 1};
+
+static constexpr int kThreadsOneShot = 512;
+static dim3 constexpr kBlockOneShot = {kThreadsOneShot, 1, 1};
 
 // Number of threads in a group for quantization
 // It corresponds to 32 F16 elements in quantization block
@@ -101,25 +86,6 @@ __quickreduce_device_inline__ static int32x4_t buffer_load_dwordx4(
 __quickreduce_device_inline__ static void buffer_store_dwordx4(
     int32x4_t data, int32x4_t srsrc, int32_t voffset, int32_t soffset,
     int32_t aux) __asm("llvm.amdgcn.raw.buffer.store.v4i32");
-
-// NOTE: Setting fp16 flag does not seem to have an effect for gfx942
-// The register offset has to be validated
-// So we don't use it in Codecs for now.
-__quickreduce_device_inline__ static void set_fp16_ovfl(bool const value) {
-  // short size = 0b00001;    // Specifies the bit size to modify
-  // const short offset = 0b10111;  // Corrected offset to 23, which is the bit
-  // position of FP16_OVFL const short hwRegId = 0b000001; // HW register ID for
-  // MODE const short simm16 = (size << 11) | (offset << 6) | hwRegId; simm16 =
-  // 0xdc1
-
-#if defined(__gfx942__)
-  if (value) {
-    asm volatile("s_setreg_imm32_b32 0xdc1, 1;" ::);
-  } else {
-    asm volatile("s_setreg_imm32_b32 0xdc1, 0;" ::);
-  }
-#endif
-}
 
 template <typename T>
 __quickreduce_device_inline__ void packed_assign_add(int32x4_t* A,
@@ -328,6 +294,47 @@ __quickreduce_device_inline__ float T2float_cast<nv_bfloat16>(nv_bfloat16 a) {
 }
 
 template <typename T>
+__quickreduce_device_inline__ unsigned char T2uchar_cast(T a);
+
+template <>
+__quickreduce_device_inline__ unsigned char T2uchar_cast<half>(half a) {
+  return static_cast<unsigned char>(__half2ushort_rz(a));
+}
+
+template <>
+__quickreduce_device_inline__ unsigned char T2uchar_cast<nv_bfloat16>(
+    nv_bfloat16 a) {
+  return static_cast<unsigned char>(__bfloat16_as_ushort(a));
+}
+
+template <typename T>
+__quickreduce_device_inline__ T uchar2T_cast(unsigned char a);
+
+template <>
+__quickreduce_device_inline__ half uchar2T_cast<half>(unsigned char a) {
+  return __ushort2half_rz(static_cast<unsigned short>(a));
+}
+
+template <>
+__quickreduce_device_inline__ nv_bfloat16
+uchar2T_cast<nv_bfloat16>(unsigned char a) {
+  return __ushort_as_bfloat16(static_cast<unsigned short>(a));
+}
+
+template <typename T>
+__quickreduce_device_inline__ int T2int_cast(T a);
+
+template <>
+__quickreduce_device_inline__ int T2int_cast<half>(half a) {
+  return __half2int_rz(a);
+}
+
+template <>
+__quickreduce_device_inline__ int T2int_cast<nv_bfloat16>(nv_bfloat16 a) {
+  return static_cast<int>(__bfloat16_as_ushort(a));
+}
+
+template <typename T>
 __quickreduce_device_inline__ int group_abs_max(int32x4_t atom) {
   const int group_leader = (threadIdx.x / kThreadGroupSize) * kThreadGroupSize;
 
@@ -361,18 +368,26 @@ __quickreduce_device_inline__ int group_abs_max(int32x4_t atom) {
 
 template <typename T>
 __quickreduce_device_inline__ void group_max_min(int32x4_t atom, int& wblockmax,
-                                                 int& wblockmin) {
+                                                 int& wblockmin,
+                                                 int valid_data) {
   const int group_leader = (threadIdx.x / kThreadGroupSize) * kThreadGroupSize;
+  static constexpr int FP_MAX =
+      std::is_same<T, half>::value ? 0x7BFF7BFF : 0x7F7F7F7F;
+  static constexpr int FP_MIN =
+      std::is_same<T, half>::value ? 0xFBFFFBFF : 0xFF7FFF7F;
 
   int wmax, wmin;
   int a, b;
   a = packed_max<T>(atom[0], atom[1]);
   b = packed_max<T>(atom[2], atom[3]);
-  wmax = packed_max<T>(a, b);
+  // In case the data was loaded out of range (and initialized to 0)
+  // we set max min values to sentinel values
+  // so that they do not spoil the group max min values
+  wmax = valid_data * packed_max<T>(a, b) + (!valid_data) * FP_MIN;
 
   a = packed_min<T>(atom[0], atom[1]);
   b = packed_min<T>(atom[2], atom[3]);
-  wmin = packed_min<T>(a, b);
+  wmin = valid_data * packed_min<T>(a, b) + (!valid_data) * FP_MAX;
 
   // Reduce the max and min among a group of threads
   // Note: This is basically 2 blocks of values setup as the
