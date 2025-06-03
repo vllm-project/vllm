@@ -87,6 +87,11 @@ DOCKER_BUILDKIT=1 docker build . \
     If you are using Podman instead of Docker, you might need to disable SELinux labeling by
     adding `--security-opt label=disable` when running `podman build` command to avoid certain [existing issues](https://github.com/containers/buildah/discussions/4184).
 
+!!! tip
+    If you experience slow access to the official Ubuntu repository, you can use an Ubuntu mirror for
+    acceleration by adding the build argument `UBUNTU_MIRROR`. For example:
+    `--build-arg UBUNTU_MIRROR=http://mirrors.aliyun.com`.
+
 ## Building for Arm64/aarch64
 
 A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper. At time of this writing, this requires the use
