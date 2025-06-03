@@ -299,7 +299,7 @@ def batched_triton_kernel(
     if use_fp8_w8a8:
         # block-wise
         if group_k > 0 and group_n > 0:
-            a_scale_ptr = a_scale_ptr + expert_id * stride_ase + cta_m_start * stride_asm
+            a_scale_ptr = a_scale_ptr + (expert_id * stride_ase) + cta_m_start * stride_asm
         # channel-wise
         elif per_channel_quant:
             a_scale_ptr = a_scale_ptr + (expert_id * stride_ase)
@@ -690,8 +690,9 @@ def batched_moe_kernel_quantize_input(
     per_channel_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    if (True or torch.compiler.is_compiling()
-            or torch.cuda.is_current_stream_capturing()):
+    if (True or
+        torch.compiler.is_compiling()
+        or torch.cuda.is_current_stream_capturing()):
         # Note: this does a bunch of extra work because expert_num_tokens is
         # ignored but it does support torch.compile + cudagraphs.
         hidden_dim = A.size(-1)
@@ -701,6 +702,11 @@ def batched_moe_kernel_quantize_input(
                                                    qtype, per_channel_quant,
                                                    block_shape)
         A_q = A_q.view(E, -1, hidden_dim)
+
+        # for e in range(len(expert_num_tokens)):
+        #     num = expert_num_tokens[e]
+        #     A_q_scale[e, num:].fill_(0)
+
         if A_q_scale is not None:
             if A_q_scale.numel() == 1:
                 A_q_scale = A_q_scale.view(1)
@@ -708,7 +714,7 @@ def batched_moe_kernel_quantize_input(
             else:
                 A_q_scale = A_q_scale.view(E, -1, A_q_scale.size(-1))
 
-        #print(f"A2Q_SCALE {A_q_scale.shape}")
+        #print(f"A2Q_SCALE {A_q_scale.shape}\n{A_q_scale}")
         #A_q_scale.fill_(0.0001)
         #print(f"A_q_scale.stride = {A_q_scale.stride()}")
 
@@ -720,7 +726,7 @@ def batched_moe_kernel_quantize_input(
         block_n, block_k = block_shape
         n_tiles = ((N // 2) + block_n - 1) // block_n
         scale_shape = (E, num_tokens, n_tiles)
-        A_q_scale = torch.empty(scale_shape,
+        A_q_scale = torch.zeros(scale_shape,
                                 dtype=torch.float32,
                                 device=A.device)
         for e in range(E):
@@ -731,6 +737,15 @@ def batched_moe_kernel_quantize_input(
                     A_scale[e, :num_tokens] if A_scale else None, qtype,
                     per_channel_quant, block_shape)
                 A_q_scale[e, :tmp_scale.shape[0]] = tmp_scale
+
+        if A_q_scale is not None:
+            if A_q_scale.numel() == 1:
+                A_q_scale = A_q_scale.view(1)
+                A_q_scale = torch.repeat_interleave(A_q_scale, E, dim=0).view(E, 1, 1)
+            else:
+                A_q_scale = A_q_scale.view(E, -1, A_q_scale.size(-1))
+
+        #print(f"A2Q_SCALE {A_q_scale.shape}\n{A_q_scale}")
 
         return A_q, A_q_scale
     else:
@@ -877,6 +892,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         intermediate_cache2 = _resize_cache(workspace2,
                                             (E, max_num_tokens, N // 2))
 
+        intermediate_cache1.fill_(0)
+
         # MM1
         invoke_moe_batched_triton_kernel(A=hidden_states,
                                          B=w1,
@@ -893,10 +910,29 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                          per_act_token_quant=self.per_act_token_quant,
                                          block_shape=self.block_shape)
 
+        #print(f"BATCHED INTER {intermediate_cache1.shape}\n{intermediate_cache1}")
+
+        intermediate_cache2.fill_(0)
+
         # TODO: would be nice to use expert_num_tokens here to reduce
         # garbage compute
-        self.activation(activation, intermediate_cache2.view(-1, N // 2),
-                        intermediate_cache1.view(-1, N))
+        if False:
+            # TODO: check expert_num_tokens
+            tmp = torch.empty_like(intermediate_cache2[0])
+            for e in range(E):
+                num_tokens = expert_num_tokens[e]
+                self.activation(
+                    activation,
+                    tmp[:num_tokens],
+                    intermediate_cache1[e, :num_tokens])
+                intermediate_cache2[e, :num_tokens] = tmp[:num_tokens]
+        else:
+            self.activation(
+                activation,
+                intermediate_cache2.view(-1, N // 2),
+                intermediate_cache1.view(-1, N))
+
+        #print(f"BATCHED ACT {intermediate_cache2.shape}\n{intermediate_cache2}")
 
         qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
             intermediate_cache2, a2_scale, num_tokens, E, N, expert_num_tokens,

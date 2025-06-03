@@ -94,9 +94,14 @@ def ref_dynamic_per_tensor_fp8_quant(x: torch.tensor) \
     return ref_out, ref_scale.view((1, ))
 
 
-def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor,
-                             As: torch.Tensor, Bs: torch.Tensor, block_size,
-                             output_dtype):
+def native_w8a8_block_matmul(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        block_size: list[int],
+        output_dtype: torch.dtype
+) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise
     quantization using native torch.
     It is agnostic to the input data type and can be used for both int8 and
@@ -106,8 +111,13 @@ def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor,
     `Bs` (float32).
     The output is returned in the specified `output_dtype`.
     """
-    A = A.to(torch.float32)
-    B = B.to(torch.float32)
+    if A.dtype.itemsize <= 2:
+        compute_type = torch.bfloat16
+    else:
+        compute_type = torch.float32
+
+    A = A.to(compute_type)
+    B = B.to(compute_type)
     assert A.shape[-1] == B.shape[-1]
     assert B.ndim == 2 and B.is_contiguous() and Bs.ndim == 2
     assert len(block_size) == 2
@@ -122,11 +132,11 @@ def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor,
     As = As.reshape(M, As.shape[-1])
     n_tiles = (N + block_n - 1) // block_n
     k_tiles = (K + block_k - 1) // block_k
-    assert n_tiles == Bs.shape[0]
-    assert k_tiles == Bs.shape[1]
+    assert n_tiles == Bs.shape[0], f"{n_tiles} == {Bs.shape[0]}"
+    assert k_tiles == Bs.shape[1], f"{k_tiles} == {Bs.shape[1]}"
 
     C_shape = (M, N)
-    C = torch.zeros(C_shape, dtype=torch.float32, device=A.device)
+    C = torch.zeros(C_shape, dtype=compute_type, device=A.device)
 
     A_tiles = [
         A[:, i * block_k:min((i + 1) * block_k, K)] for i in range(k_tiles)

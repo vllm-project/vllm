@@ -462,6 +462,74 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
+
+def prepare_scales(
+    a1: torch.Tensor,
+    a1_scale: Optional[torch.Tensor],
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    quant_dtype: Optional[torch.dtype],
+    block_shape: Optional[list[int]],
+    msg: str,
+):
+    from vllm.utils import round_up
+    max_num_tokens = round_up(a1.shape[0], 64)
+    num_tokens, hidden_dim = a1.size()
+    topk = topk_ids.size(1)
+
+    tokens_per_expert = torch.zeros(num_experts,
+                                    dtype=torch.int,
+                                    device=a1.device)
+
+    num_local_experts = num_experts
+
+    b_a1 = torch.zeros(
+        (num_local_experts, max_num_tokens, hidden_dim),
+        dtype=quant_dtype
+        if quant_dtype is not None else a1.dtype,
+        device=a1.device)
+
+    if quant_dtype is not None:
+        if block_shape is not None:
+            _, block_k = block_shape
+            k_tiles = (hidden_dim + block_k - 1) // block_k
+            scale_shape = (num_local_experts, max_num_tokens, k_tiles)
+        else:
+            num = 1
+            scale_shape = (num_local_experts, num, 1)
+
+        b_a1_scale = torch.zeros(
+            scale_shape,
+            dtype=torch.float32,
+            device=a1.device)
+    else:
+        assert a1_scale is None
+        b_a1_scale = None
+
+    first_expert = 0
+    last_expert = first_expert + num_local_experts
+
+    for expert_id in range(first_expert, last_expert):
+        topks = torch.any(topk_ids == expert_id, dim=1).flatten()
+        rows = torch.count_nonzero(topks.flatten())
+        rhs = a1[:topks.numel()][topks]
+        idx = expert_id - first_expert
+        b_a1[idx, :rows, :] = rhs
+        if quant_dtype is not None:
+            rhs_a1_scale = a1_scale[:topks.numel()][topks]
+            if block_shape is None:
+                b_a1_scale[idx] = rhs_a1_scale
+            else:
+                assert rows == rhs_a1_scale.shape[0] and b_a1_scale.shape[-1] == rhs_a1_scale.shape[-1]
+                b_a1_scale[idx, :rows] = rhs_a1_scale
+
+        tokens_per_expert[idx] = rows
+
+    print(f"{msg} {b_a1_scale.shape}\n{b_a1_scale}")
+
+    return b_a1, b_a1_scale, tokens_per_expert
+
+
 def invoke_fused_moe_kernel(A: torch.Tensor,
                             B: torch.Tensor,
                             C: torch.Tensor,
@@ -1340,6 +1408,17 @@ def fused_experts_impl(
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
+        if False:
+            prepare_scales(
+                qcurr_hidden_states,
+                a1q_scale,
+                curr_topk_ids,
+                global_num_experts,
+                torch.float8_e4m3fn if use_fp8_w8a8 else None,
+                block_shape,
+                "First",
+            )
+
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
                                 intermediate_cache1,
@@ -1376,6 +1455,17 @@ def fused_experts_impl(
             qtype=qtype,
             per_channel_quant=per_channel_quant,
             block_shape=block_shape)
+
+        if False:
+            prepare_scales(
+                qintermediate_cache2,
+                a2q_scale,
+                curr_topk_ids,
+                global_num_experts,
+                torch.float8_e4m3fn if use_fp8_w8a8 else None,
+                block_shape,
+                "Second",
+            )
 
         invoke_fused_moe_kernel(qintermediate_cache2,
                                 w2,

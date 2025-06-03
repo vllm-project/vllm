@@ -13,8 +13,10 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     NaiveBatchedExperts)
 from vllm.utils import round_up
 
+from tests.kernels.quant_utils import native_w8a8_block_matmul
 
-def native_w8a8_block_matmul(A: torch.Tensor,
+
+def Xnative_w8a8_block_matmul(A: torch.Tensor,
                              B: torch.Tensor,
                              As: torch.Tensor,
                              Bs: torch.Tensor,
@@ -29,7 +31,10 @@ def native_w8a8_block_matmul(A: torch.Tensor,
     `Bs` (float32).
     The output is returned in the specified `output_dtype`.
     """
-    compute_type = torch.bfloat16
+    if A.dtype.itemsize <= 2:
+        compute_type = torch.bfloat16
+    else:
+        compute_type = torch.float32
 
     A = A.to(compute_type)
     B = B.to(compute_type).contiguous()
@@ -48,7 +53,7 @@ def native_w8a8_block_matmul(A: torch.Tensor,
     As = As.reshape(M, As.shape[-1])
     n_tiles = (N + block_n - 1) // block_n
     k_tiles = (K + block_k - 1) // block_k
-    assert n_tiles == Bs.shape[0], f"{n_tiles * block_n} == {Bs.shape[0]}"
+    assert n_tiles == Bs.shape[0], f"{n_tiles} == {Bs.shape[0]}"
     assert k_tiles == Bs.shape[1], f"{k_tiles} == {Bs.shape[1]}"
 
     C_shape = (M, N)
@@ -94,6 +99,7 @@ def torch_moe2(
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
     M, K = a.shape
+    N = w1.shape[1]
     topk = topk_ids.shape[1]
 
     a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
@@ -106,13 +112,15 @@ def torch_moe2(
         block_shape
     )
 
-    #print(f"quant_type {quant_type} {block_shape}")
-
     out = torch.zeros(M * topk,
                       w2.shape[1],
                       dtype=torch.bfloat16,
                       device=a.device)
     num_experts = w1.shape[0]
+
+    #inters = torch.zeros((num_experts, M, N), device=a.device, dtype=out.dtype)
+    #acts = torch.zeros((num_experts, M, N//2), device=a.device, dtype=out.dtype)
+
     for i in range(num_experts):
         mask = (topk_ids == i).view(-1)
         if mask.sum():
@@ -122,21 +130,32 @@ def torch_moe2(
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
             elif block_shape is not None:
                 tmp1 = native_w8a8_block_matmul(a[mask], w1[i], a_scale[mask],
-                                                w1_scale[i], block_shape)
+                                                w1_scale[i], block_shape, out.dtype)
+
+                #print(f"TORCH INTER[{i}] {tmp1.shape}\n{tmp1}")
+                #inters[i, :tmp1.shape[0]] = tmp1
 
                 tmp2 = SiluAndMul()(tmp1)
+
+                #print(f"TORCH ACT[{i}] {tmp2.shape}\n{tmp2}")
+                #acts[i, :tmp2.shape[0]] = tmp2
+
                 tmp2, b_scale = moe_kernel_quantize_input(tmp2, None, quant_type,
                                                           per_act_token_quant,
                                                           block_shape)
 
                 out[mask] = native_w8a8_block_matmul(tmp2, w2[i], b_scale,
                                                      w2_scale[i], block_shape,
-                                                     torch.bfloat16)
+                                                     out.dtype)
             else:
+                # XXXX need scales here
                 compute_type = torch.bfloat16
                 tmp1 = a[mask].to(compute_type) @ w1[i].transpose(0, 1).to(compute_type)
                 tmp2 = SiluAndMul()(tmp1)
                 out[mask] = (tmp2 @ w2[i].transpose(0, 1).to(compute_type)).to(out.dtype)
+
+    #print(f"TORCH INTER {inters.shape}\n{inters}")
+    #print(f"TORCH ACT {acts.shape}\n{acts}")
 
     return (out.view(M, -1, w2.shape[1]) *
             topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)

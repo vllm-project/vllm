@@ -598,7 +598,7 @@ def w8a8_block_fp8_matmul(
 
     assert A.shape[-1] == B.shape[-1]
     assert A.shape[:-1] == As.shape[:-1] and A.is_contiguous()
-    assert triton.cdiv(A.shape[-1], block_k) == As.shape[-1]
+    assert triton.cdiv(A.shape[-1], block_k) == As.shape[-1], f"{block_k}, {triton.cdiv(A.shape[-1], block_k)} == As.shape[-1]"
     M = A.numel() // A.shape[-1]
 
     assert B.ndim == 2 and Bs.ndim == 2
