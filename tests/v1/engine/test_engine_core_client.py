@@ -11,6 +11,7 @@ from typing import Optional
 import pytest
 from transformers import AutoTokenizer
 
+from tests.utils import multi_gpu_test
 from vllm import SamplingParams
 from vllm.distributed.kv_events import (BlockStored, KVEventBatch,
                                         ZmqEventPublisher)
@@ -257,9 +258,7 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
                     await client.abort_requests_async([request.request_id])
 
             outputs = {req_id: [] for req_id in request_ids}
-            await asyncio.wait_for(loop_until_fully_done_async(
-                client, outputs),
-                                   timeout=20.0)
+            await loop_until_done_async(client, outputs)
 
             for idx, req_id in enumerate(request_ids):
                 if idx % 2 == 0:
@@ -365,6 +364,7 @@ def test_kv_cache_events(
     [(True, "tcp")],
     indirect=["publisher_config"],
 )
+@multi_gpu_test(num_gpus=4)
 async def test_kv_cache_events_dp(
     monkeypatch: pytest.MonkeyPatch,
     multiprocessing_mode: bool,
@@ -435,7 +435,9 @@ async def test_kv_cache_events_dp(
             }
 
             print("processing requests...")
-            await loop_until_fully_done_async(client, outputs)
+            await asyncio.wait_for(loop_until_fully_done_async(
+                client, outputs),
+                                   timeout=20.0)
 
             # Receive from subscriber until no more messages
             print("collecting results...")
