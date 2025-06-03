@@ -5,7 +5,7 @@ from abc import abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional, overload
 
 import torch
 import torch.nn.functional as F
@@ -1016,12 +1016,31 @@ class FusedMoE(torch.nn.Module):
             return expert_id
         return self.expert_map[expert_id].item()
 
+    @overload
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
-                      shard_id: str, expert_id: int) -> None:
+                      shard_id: str, expert_id: int,
+                      return_success: Literal[False]) -> None:
+        ...
+
+    @overload
+    def weight_loader(self, param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor, weight_name: str,
+                      shard_id: str, expert_id: int,
+                      return_success: Literal[True]) -> bool:
+        ...
+
+    def weight_loader(self,
+                      param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor,
+                      weight_name: str,
+                      shard_id: str,
+                      expert_id: int,
+                      return_success: bool = False) -> Optional[bool]:
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id == -1:
-            return
+            # Failed to load this param since it's not local to this rank
+            return False if return_success else None
         # Hereafter, `expert_id` is local physical id
 
         quant_method_name = self.quant_method.__class__.__name__
@@ -1050,7 +1069,7 @@ class FusedMoE(torch.nn.Module):
         if is_gguf_weight_type:
             param.weight_type = loaded_weight.item()
             param.data.copy_(loaded_weight)
-            return
+            return True if return_success else None
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ, compressed-tensors
@@ -1089,7 +1108,7 @@ class FusedMoE(torch.nn.Module):
             self._load_single_value(param=param,
                                     loaded_weight=loaded_weight,
                                     expert_id=expert_id)
-            return
+            return True if return_success else None
 
         # Case g_idx
         if "g_idx" in weight_name:
@@ -1098,7 +1117,7 @@ class FusedMoE(torch.nn.Module):
                              loaded_weight=loaded_weight,
                              expert_data=expert_data,
                              tp_rank=self.tp_rank)
-            return
+            return True if return_success else None
 
         if "ModelOpt" in quant_method_name:
             if ('weight_scale_2' in weight_name
@@ -1114,7 +1133,7 @@ class FusedMoE(torch.nn.Module):
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=self.tp_rank)
-            return
+            return True if return_success else None
 
         # Case weight scales, zero_points and offset
         if ("scale" in weight_name or "zero" in weight_name
@@ -1151,7 +1170,7 @@ class FusedMoE(torch.nn.Module):
             else:
                 raise ValueError(
                     f"quant method must be one of {WEIGHT_SCALE_SUPPORTED}")
-            return
+            return True if return_success else None
 
         # Case weight_shape
         if "weight_shape" in weight_name:
@@ -1159,7 +1178,7 @@ class FusedMoE(torch.nn.Module):
             self._load_single_value(param=param,
                                     loaded_weight=loaded_weight,
                                     expert_id=expert_id)
-            return
+            return True if return_success else None
 
         # Case model weights
         if "weight" in weight_name:
@@ -1169,7 +1188,9 @@ class FusedMoE(torch.nn.Module):
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
                 tp_rank=self.tp_rank)
-            return
+            return True if return_success else None
+
+        return False if return_success else None
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         weights = list(self.parameters())

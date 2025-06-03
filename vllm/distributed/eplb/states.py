@@ -167,7 +167,7 @@ class EplbState:
             logical_replica_count,
         )
 
-        return EplbState(
+        return cls(
             physical_to_logical_map,
             logical_to_physical_map,
             logical_replica_count,
