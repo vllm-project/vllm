@@ -1140,21 +1140,21 @@ def scaled_fp4_experts_quant(
 FP8_DTYPE = current_platform.fp8_dtype()
 FP8_MAX = 224.0 if current_platform.is_rocm() else torch.finfo(FP8_DTYPE).max
 FP8_MIN = -224.0 if current_platform.is_rocm() else torch.finfo(FP8_DTYPE).min
+FP8_MIN_SCALING_FACTOR = 1.0 / (FP8_MAX * 512.0)
 
 
 @torch.compile()
 def dynamic_per_token_quant_fp8(
     x: torch.Tensor,
-    scale_ub: Optional[torch.Tensor] = None
+    scale_ub: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Compute scales
     x_token_max, _ = x.abs().max(dim=-1)
     x_token_max = x_token_max.to(torch.float32)
     if scale_ub is not None:
         x_token_max = x_token_max.clamp(max=scale_ub)
-    scales = (x_token_max / FP8_MAX)[:, None]
-    min_scaling_factor = 1.0 / (FP8_MAX * 512.0)
-    scales = scales.clamp(min=min_scaling_factor)
+    scales = (x_token_max / FP8_MAX).unsqueeze(-1)
+    scales = scales.clamp(min=FP8_MIN_SCALING_FACTOR)
     # Quant
     out = x.to(torch.float32) / scales
     out = out.clamp(FP8_MIN, FP8_MAX).to(FP8_DTYPE)

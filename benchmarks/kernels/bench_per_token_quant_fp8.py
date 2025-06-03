@@ -8,7 +8,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
 
-def triton_per_token_quant_fp8(
+def torch_per_token_quant_fp8(
     input: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return ops.dynamic_per_token_quant_fp8(input)
@@ -31,12 +31,12 @@ def calculate_diff(batch_size: int, seq_len: int):
     device = torch.device("cuda")
     x = torch.rand((batch_size * seq_len, 4096), dtype=torch.float16, device=device)
 
-    triton_out, triton_scale = triton_per_token_quant_fp8(x)
+    torch_out, torch_scale = torch_per_token_quant_fp8(x)
     cuda_out, cuda_scale = cuda_per_token_quant_fp8(x)
 
     if torch.allclose(
-        cuda_out.to(torch.float32), triton_out.to(torch.float32), rtol=1e-3, atol=1e-5
-    ) and torch.allclose(cuda_scale, triton_scale, rtol=1e-3, atol=1e-5):
+        cuda_out.to(torch.float32), torch_out.to(torch.float32), rtol=1e-3, atol=1e-5
+    ) and torch.allclose(cuda_scale, torch_scale, rtol=1e-3, atol=1e-5):
         print("✅ All implementations match")
     else:
         print("❌ Implementations differ")
@@ -53,8 +53,8 @@ configs = list(itertools.product(batch_size_range, seq_len_range))
         x_names=["batch_size", "seq_len"],
         x_vals=configs,
         line_arg="provider",
-        line_vals=["triton", "cuda"],
-        line_names=["Triton", "CUDA"],
+        line_vals=["torch", "cuda"],
+        line_names=["Torch", "CUDA"],
         styles=[("blue", "-"), ("green", "-")],
         ylabel="us",
         plot_name="per-token-dynamic-quant-fp8-performance",
@@ -69,8 +69,8 @@ def benchmark_quantization(batch_size, seq_len, provider):
 
     quantiles = [0.5, 0.2, 0.8]
 
-    if provider == "triton":
-        fn = lambda: triton_per_token_quant_fp8(x.clone())
+    if provider == "torch":
+        fn = lambda: torch_per_token_quant_fp8(x.clone())
     elif provider == "cuda":
         fn = lambda: cuda_per_token_quant_fp8(x.clone())
 
