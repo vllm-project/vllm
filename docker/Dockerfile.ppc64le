@@ -13,7 +13,7 @@ RUN microdnf install -y dnf && dnf install -y gcc-toolset-13 make wget unzip \
     && wget https://github.com/OpenMathLib/OpenBLAS/releases/download/v$OPENBLAS_VERSION/OpenBLAS-$OPENBLAS_VERSION.zip \
     && unzip OpenBLAS-$OPENBLAS_VERSION.zip \
     && cd OpenBLAS-$OPENBLAS_VERSION \
-    &&  make -j${MAX_JOBS} TARGET=POWER10 BINARY=64 USE_OPENMP=1 USE_THREAD=1 NUM_THREADS=120 DYNAMIC_ARCH=1 INTERFACE64=0 \
+    &&  make -j${MAX_JOBS} TARGET=POWER9 BINARY=64 USE_OPENMP=1 USE_THREAD=1 NUM_THREADS=120 DYNAMIC_ARCH=1 INTERFACE64=0 \
     && cd /tmp && touch control
 
 
