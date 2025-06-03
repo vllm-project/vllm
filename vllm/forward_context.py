@@ -47,8 +47,12 @@ class DPMetadata:
         return num_tokens_tensor
 
     @staticmethod
-    def make(parallel_config: ParallelConfig, attn_metadata: Any,
-             num_tokens: int) -> "DPMetadata":
+    def make(
+            parallel_config: ParallelConfig,
+            attn_metadata: Any,
+            num_tokens: int,
+            num_tokens_across_dp: Optional[torch.Tensor] = None
+    ) -> "DPMetadata":
 
         assert parallel_config.data_parallel_size > 1
         dp_size = parallel_config.data_parallel_size
@@ -62,10 +66,15 @@ class DPMetadata:
             # for v1 attention backends or no attn_metadata
             batchsize = num_tokens
 
-        num_tokens_tensor = DPMetadata.num_tokens_across_dp(
-            batchsize, dp_size, dp_rank)
-        max_tokens_across_dp_cpu = torch.max(num_tokens_tensor)
-        cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
+        # If num_tokens_across_dp is None, it will be computed by all_reduce
+        # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
+        assert (num_tokens_across_dp is None
+                or num_tokens_across_dp[dp_rank] == batchsize)
+        if num_tokens_across_dp is None:
+            num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+                batchsize, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp)
+        cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
         return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu)
 
 
@@ -101,7 +110,8 @@ def get_forward_context() -> ForwardContext:
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
                         virtual_engine: int = 0,
-                        num_tokens: Optional[int] = None):
+                        num_tokens: Optional[int] = None,
+                        num_tokens_across_dp: Optional[torch.Tensor] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -114,7 +124,8 @@ def set_forward_context(attn_metadata: Any,
     if vllm_config.parallel_config.data_parallel_size > 1 and (
             attn_metadata is not None or num_tokens is not None):
         dp_metadata = DPMetadata.make(vllm_config.parallel_config,
-                                      attn_metadata, num_tokens or 0)
+                                      attn_metadata, num_tokens or 0,
+                                      num_tokens_across_dp)
 
     global _forward_context
     prev_context = _forward_context

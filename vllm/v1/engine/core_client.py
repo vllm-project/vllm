@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import queue
+import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -9,34 +10,34 @@ from collections import deque
 from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
-from enum import Enum, auto
 from threading import Thread
 from typing import Any, Callable, Optional, TypeVar, Union
 
-import msgspec
+import msgspec.msgpack
 import zmq
 import zmq.asyncio
 
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.utils import (get_open_port, get_open_zmq_inproc_path,
-                        get_open_zmq_ipc_path, get_tcp_uri, make_zmq_socket)
+from vllm.utils import (get_open_zmq_inproc_path, make_zmq_socket,
+                        zmq_socket_ctx)
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
+from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
-from vllm.v1.utils import CoreEngineProcManager
+from vllm.v1.utils import (CoreEngine, CoreEngineProcManager,
+                           EngineZmqAddresses, get_engine_client_zmq_addr,
+                           wait_for_engine_startup)
 
 logger = init_logger(__name__)
 
 AnyFuture = Union[asyncio.Future[Any], Future[Any]]
 
 _R = TypeVar('_R')  # Return type for collective_rpc
-
-STARTUP_POLL_PERIOD_MS = 10000
 
 
 class EngineCoreClient(ABC):
@@ -207,7 +208,7 @@ class InprocClient(EngineCoreClient):
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, _ = self.engine_core.step()
-        return outputs
+        return outputs.get(0) or EngineCoreOutputs()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         self.engine_core.add_request(request)
@@ -266,24 +267,6 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
 
-class CoreEngineState(Enum):
-    NEW = auto()
-    CONNECTED = auto()
-    READY = auto()
-
-
-class CoreEngine:
-    """One per data parallel rank."""
-
-    def __init__(self, index: int = 0, local: bool = True):
-        self.local = local
-        self.index = index
-        self.identity = index.to_bytes(length=2, byteorder="little")
-
-        self.state = CoreEngineState.NEW
-        self.num_reqs_in_flight = 0
-
-
 @dataclass
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
@@ -291,9 +274,12 @@ class BackgroundResources:
 
     ctx: Union[zmq.Context]
     local_engine_manager: Optional[CoreEngineProcManager] = None
+    coordinator: Optional[DPCoordinator] = None
     output_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     input_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
+    first_req_send_socket: Optional[zmq.asyncio.Socket] = None
     output_queue_task: Optional[asyncio.Task] = None
+    stats_update_task: Optional[asyncio.Task] = None
     shutdown_path: Optional[str] = None
 
     # Set if any of the engines are dead. Here so that the output
@@ -306,16 +292,21 @@ class BackgroundResources:
         self.engine_dead = True
         if self.local_engine_manager is not None:
             self.local_engine_manager.close()
+        if self.coordinator is not None:
+            self.coordinator.close()
 
         if self.output_queue_task is not None:
             self.output_queue_task.cancel()
+        if self.stats_update_task is not None:
+            self.stats_update_task.cancel()
 
         # ZMQ context termination can hang if the sockets
         # aren't explicitly closed first.
-        if self.output_socket is not None:
-            self.output_socket.close(linger=0)
-        if self.input_socket is not None:
-            self.input_socket.close(linger=0)
+        for socket in (self.output_socket, self.input_socket,
+                       self.first_req_send_socket):
+            if socket is not None:
+                socket.close(linger=0)
+
         if self.shutdown_path is not None:
             # We must ensure that the sync output socket is
             # closed cleanly in its own thread.
@@ -350,6 +341,7 @@ class MPClient(EngineCoreClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
+        client_addresses: Optional[dict[str, str]] = None,
     ):
         self.vllm_config = vllm_config
         # Serialization setup.
@@ -369,8 +361,9 @@ class MPClient(EngineCoreClient):
         try:
             parallel_config = vllm_config.parallel_config
             local_engine_count = parallel_config.data_parallel_size_local
-            start_index = parallel_config.data_parallel_rank
             local_start_index = parallel_config.data_parallel_rank_local
+            dp_size = parallel_config.data_parallel_size
+            dp_rank = parallel_config.data_parallel_rank
 
             # SPMD mode is where there is an LLM instance per DP rank and
             # one core engine per LLM, see
@@ -378,46 +371,55 @@ class MPClient(EngineCoreClient):
             spmd_mode = local_start_index is not None
             if spmd_mode:
                 assert local_engine_count == 1
-                self.core_engines = [
-                    CoreEngine(index=local_start_index, local=True)
-                ]
+                self.core_engines = [CoreEngine(index=dp_rank, local=True)]
             else:
-                assert start_index == 0
+                assert dp_rank == 0
                 local_start_index = 0
                 self.core_engines = [
                     CoreEngine(index=i, local=(i < local_engine_count))
-                    for i in range(parallel_config.data_parallel_size)
+                    for i in range(dp_size)
                 ]
 
-            input_address, output_address = self._get_zmq_addresses(
-                parallel_config, spmd_mode)
+            local_only = spmd_mode or local_engine_count == dp_size
+
+            self.stats_update_address: Optional[str] = None
+            if client_addresses is not None:
+                input_address = client_addresses["input_address"]
+                output_address = client_addresses["output_address"]
+                self.stats_update_address = client_addresses.get(
+                    "stats_update_address")
+            else:
+                host = parallel_config.data_parallel_master_ip
+                input_address = get_engine_client_zmq_addr(local_only, host)
+                output_address = get_engine_client_zmq_addr(local_only, host)
 
             # Create input and output sockets.
             self.input_socket = self.resources.input_socket = make_zmq_socket(
                 self.ctx, input_address, zmq.ROUTER, bind=True)
-
             self.resources.output_socket = make_zmq_socket(
-                self.ctx, output_address, zmq.constants.PULL)
-            # Start local engines.
-            if local_engine_count:
-                # In server mode, start_index and local_start_index will
-                # both be 0.
-                self.resources.local_engine_manager = CoreEngineProcManager(
-                    EngineCoreProc.run_engine_core,
-                    vllm_config=vllm_config,
-                    executor_class=executor_class,
-                    log_stats=log_stats,
-                    input_address=input_address,
-                    on_head_node=True,
-                    local_engine_count=local_engine_count,
-                    start_index=start_index,
-                    local_start_index=local_start_index)
+                self.ctx, output_address, zmq.PULL)
+
+            if client_addresses is None:
+                self._init_engines_direct(vllm_config, local_only,
+                                          local_start_index, input_address,
+                                          output_address, executor_class,
+                                          log_stats)
+                coordinator = self.resources.coordinator
+                if coordinator:
+                    self.stats_update_address = (
+                        coordinator.get_stats_publish_address())
+
+            # Wait for ready messages from each engine on the input socket.
+            identities = set(e.identity for e in self.core_engines)
+            sync_input_socket = zmq.Socket.shadow(self.input_socket)
+            while identities:
+                if not sync_input_socket.poll(timeout=600_000):
+                    raise TimeoutError("Timed out waiting for engines to send"
+                                       "initial message on input socket.")
+                identity, _ = sync_input_socket.recv_multipart()
+                identities.remove(identity)
 
             self.core_engine = self.core_engines[0]
-
-            # Wait for engine core process(es) to start.
-            self._wait_for_engine_startup(output_address, parallel_config)
-
             self.utility_results: dict[int, AnyFuture] = {}
 
             # Request objects which may contain pytorch-allocated tensors
@@ -430,116 +432,67 @@ class MPClient(EngineCoreClient):
             if not success:
                 self._finalizer()
 
-    @staticmethod
-    def _get_zmq_addresses(parallel_config: ParallelConfig,
-                           spmd_mode: bool) -> tuple[str, str]:
-        """Returns (input_address, output_address)."""
-        dp_size = parallel_config.data_parallel_size
+    def _init_engines_direct(self, vllm_config: VllmConfig, local_only: bool,
+                             local_start_index: int, input_address: str,
+                             output_address: str,
+                             executor_class: type[Executor], log_stats: bool):
+        """Self-contained client mode, launch engine and coordinator process
+        as needed."""
+
+        parallel_config = vllm_config.parallel_config
         local_engine_count = parallel_config.data_parallel_size_local
+        start_index = parallel_config.data_parallel_rank
+        host = parallel_config.data_parallel_master_ip
 
-        if local_engine_count == dp_size or spmd_mode:
-            input_address = get_open_zmq_ipc_path()
-            output_address = get_open_zmq_ipc_path()
-        else:
-            host = parallel_config.data_parallel_master_ip
-            input_port = parallel_config.data_parallel_rpc_port
-            output_port = get_open_port()
-            input_address = get_tcp_uri(host, input_port)
-            output_address = get_tcp_uri(host, output_port)
+        if len(self.core_engines) > 1:
+            self.resources.coordinator = DPCoordinator(parallel_config)
 
-        return input_address, output_address
+        handshake_address = get_engine_client_zmq_addr(
+            local_only, host, parallel_config.data_parallel_rpc_port)
 
-    def _wait_for_engine_startup(self, output_address: str,
-                                 parallel_config: ParallelConfig):
-        # Get a sync handle to the socket which can be sync or async.
-        sync_input_socket = zmq.Socket.shadow(self.input_socket)
+        with zmq_socket_ctx(handshake_address, zmq.ROUTER,
+                            bind=True) as handshake_socket:
 
-        # Wait for engine core process(es) to send ready messages.
-        local_count = parallel_config.data_parallel_size_local
-        remote_count = len(self.core_engines) - local_count
-        # [local, remote] counts
-        conn_pending, start_pending = [local_count, remote_count], [0, 0]
+            # Start local engines.
+            if local_engine_count:
+                # In server mode, start_index and local_start_index will
+                # both be 0.
+                self.resources.local_engine_manager = CoreEngineProcManager(
+                    EngineCoreProc.run_engine_core,
+                    vllm_config=vllm_config,
+                    executor_class=executor_class,
+                    log_stats=log_stats,
+                    handshake_address=handshake_address,
+                    on_head_node=True,
+                    local_engine_count=local_engine_count,
+                    start_index=start_index,
+                    local_start_index=local_start_index)
 
-        poller = zmq.Poller()
-        poller.register(sync_input_socket, zmq.POLLIN)
-        proc_manager = self.resources.local_engine_manager
-        if proc_manager is not None:
-            for sentinel in proc_manager.sentinels():
-                poller.register(sentinel, zmq.POLLIN)
-        while any(conn_pending) or any(start_pending):
-            events = poller.poll(STARTUP_POLL_PERIOD_MS)
-            if not events:
-                if any(conn_pending):
-                    logger.debug(
-                        "Waiting for %d local, %d remote core engine proc(s) "
-                        "to connect.", *conn_pending)
-                if any(start_pending):
-                    logger.debug(
-                        "Waiting for %d local, %d remote core engine proc(s) "
-                        "to start.", *start_pending)
-                continue
-            if len(events) > 1 or events[0][0] != sync_input_socket:
-                # One of the local core processes exited.
-                finished = proc_manager.finished_procs(
-                ) if proc_manager else {}
-                raise RuntimeError("Engine core initialization failed. "
-                                   "See root cause above. "
-                                   f"Failed core proc(s): {finished}")
+            # Wait for engine core process(es) to start.
+            self._wait_for_engine_startup(handshake_socket, input_address,
+                                          output_address)
 
-            # Receive HELLO and READY messages from the input socket.
-            eng_identity, ready_msg_bytes = sync_input_socket.recv_multipart()
-            eng_index = int.from_bytes(eng_identity, byteorder="little")
-            engine = next(
-                (e for e in self.core_engines if e.identity == eng_identity),
-                None)
-            if engine is None:
-                raise RuntimeError(f"Message from engine with unexpected data "
-                                   f"parallel rank: {eng_index}")
-            msg = msgspec.msgpack.decode(ready_msg_bytes)
-            status, local = msg["status"], msg["local"]
-            if local != engine.local:
-                raise RuntimeError(f"{status} message from "
-                                   f"{'local' if local else 'remote'} "
-                                   f"engine {eng_index}, expected it to be "
-                                   f"{'local' if engine.local else 'remote'}")
+    def _wait_for_engine_startup(self, handshake_socket: zmq.Socket,
+                                 input_address: str, output_address: str):
+        addresses = EngineZmqAddresses(
+            inputs=[input_address],
+            outputs=[output_address],
+        )
 
-            if status == "HELLO" and engine.state == CoreEngineState.NEW:
+        coordinator = self.resources.coordinator
+        if coordinator is not None:
+            addresses.coordinator_input, addresses.coordinator_output = (
+                coordinator.get_engine_socket_addresses())
 
-                # Send init message with DP config info.
-                init_message = self.encoder.encode({
-                    "output_socket_address": output_address,
-                    "parallel_config": {
-                        "data_parallel_master_ip":
-                        parallel_config.data_parallel_master_ip,
-                        "data_parallel_master_port":
-                        parallel_config.data_parallel_master_port,
-                        "data_parallel_size":
-                        parallel_config.data_parallel_size,
-                    },
-                })
-                sync_input_socket.send_multipart((eng_identity, *init_message),
-                                                 copy=False)
-                conn_pending[0 if local else 1] -= 1
-                start_pending[0 if local else 1] += 1
-                engine.state = CoreEngineState.CONNECTED
-            elif status == "READY" and (engine.state
-                                        == CoreEngineState.CONNECTED):
-                # Setup KV cache config with initialization state from
-                # engine core process. Sum values from all engines in DP case.
-                cache_config = self.vllm_config.cache_config
-                num_gpu_blocks = cache_config.num_gpu_blocks or 0
-                num_gpu_blocks += msg['num_gpu_blocks']
-                cache_config.num_gpu_blocks = num_gpu_blocks
-
-                start_pending[0 if local else 1] -= 1
-                engine.state = CoreEngineState.READY
-            else:
-                raise RuntimeError(f"Unexpected {status} message for "
-                                   f"{'local' if local else 'remote'} engine "
-                                   f"{eng_index} in {engine.state} state.")
-
-            logger.debug("%s from %s core engine process %s.", status,
-                         "local" if local else "remote", eng_index)
+        wait_for_engine_startup(
+            handshake_socket,
+            addresses,
+            self.core_engines,
+            self.vllm_config.parallel_config,
+            self.vllm_config.cache_config,
+            self.resources.local_engine_manager,
+            coordinator.proc if coordinator else None,
+        )
 
     def shutdown(self):
         # Terminate background resources.
@@ -605,8 +558,8 @@ class SyncMPClient(MPClient):
             try:
                 shutdown_socket.bind(shutdown_path)
                 poller = zmq.Poller()
-                poller.register(shutdown_socket)
-                poller.register(out_socket)
+                poller.register(shutdown_socket, zmq.POLLIN)
+                poller.register(out_socket, zmq.POLLIN)
                 while True:
                     socks = poller.poll()
                     if not socks:
@@ -668,7 +621,7 @@ class SyncMPClient(MPClient):
         future: Future[Any] = Future()
         self.utility_results[call_id] = future
         self._send_input(EngineCoreRequestType.UTILITY,
-                         (call_id, method, args))
+                         (0, call_id, method, args))
 
         return future.result()
 
@@ -730,15 +683,21 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
-                 log_stats: bool):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 executor_class: type[Executor],
+                 log_stats: bool,
+                 client_addresses: Optional[dict[str, str]] = None,
+                 client_index: int = 0):
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=log_stats,
+            client_addresses=client_addresses,
         )
 
+        self.client_index = client_index
         self.outputs_queue = asyncio.Queue[Union[EngineCoreOutputs,
                                                  Exception]]()
         try:
@@ -854,12 +813,13 @@ class AsyncMPClient(MPClient):
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
         message = (EngineCoreRequestType.UTILITY.value, *self.encoder.encode(
-            (call_id, method, args)))
+            (self.client_index, call_id, method, args)))
         await self._send_input_message(message, engine, args)
         self._ensure_output_queue_task()
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
 
@@ -921,16 +881,119 @@ class DPAsyncMPClient(AsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
     EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
-                 log_stats: bool):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 executor_class: type[Executor],
+                 log_stats: bool,
+                 client_addresses: Optional[dict[str, str]] = None,
+                 client_index: int = 0):
 
         self.current_wave = 0
         self.engines_running = False
+        # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
-        super().__init__(vllm_config, executor_class, log_stats)
+        super().__init__(vllm_config, executor_class, log_stats,
+                         client_addresses, client_index)
 
         assert len(self.core_engines) > 1
+
+        # List of [waiting, running] pair per engine.
+        self.lb_engines: list[list[int]] = []
+
+        self.first_req_sock_addr = get_open_zmq_inproc_path()
+        self.first_req_send_socket = self.resources.first_req_send_socket = (
+            make_zmq_socket(self.ctx,
+                            self.first_req_sock_addr,
+                            zmq.PAIR,
+                            bind=True))
+        try:
+            # If we are running in an asyncio event loop, start the stats task.
+            # Otherwise, it will be started lazily.
+            asyncio.get_running_loop()
+            self._ensure_stats_update_task()
+        except RuntimeError:
+            pass
+
+    def _ensure_stats_update_task(self):
+        resources = self.resources
+        if resources.stats_update_task is not None:
+            return
+
+        assert self.stats_update_address is not None
+
+        async def run_engine_stats_update_task():
+            with make_zmq_socket(self.ctx, self.stats_update_address,
+                                 zmq.XSUB) as socket, make_zmq_socket(
+                                     self.ctx,
+                                     self.first_req_sock_addr,
+                                     zmq.PAIR,
+                                     bind=False) as first_req_rcv_socket:
+                # Send subscription message.
+                await socket.send(b'\x01')
+
+                poller = zmq.asyncio.Poller()
+                poller.register(socket, zmq.POLLIN)
+                poller.register(first_req_rcv_socket, zmq.POLLIN)
+
+                while True:
+                    events = await poller.poll()
+                    if not self.engines_running and len(events) == 2 or (
+                            events[0][0] == first_req_rcv_socket):
+                        # Send a message to notify the coordinator that
+                        # we're sending a request while the engines are
+                        # paused, so that it can wake the others up
+                        # (to run dummy EP loop).
+                        self.engines_running = True
+                        buf = first_req_rcv_socket.recv(
+                            flags=zmq.NOBLOCK).result()
+                        target_eng_index = int.from_bytes(buf, "little")
+                        msg = msgspec.msgpack.encode(
+                            (target_eng_index, self.current_wave))
+                        await socket.send(msg)
+
+                    buf = None
+                    while True:
+                        # Drain all stats events (we only care about latest).
+                        future: asyncio.Future[bytes] = socket.recv(
+                            flags=zmq.NOBLOCK)
+                        if isinstance(future.exception(), zmq.Again):
+                            break
+                        buf = future.result()
+                    if buf is None:
+                        continue
+
+                    # Update local load-balancing state.
+                    counts, wave, running = msgspec.msgpack.decode(buf)
+                    self.current_wave = wave
+                    self.engines_running = running
+                    self.lb_engines = counts
+
+        resources.stats_update_task = asyncio.create_task(
+            run_engine_stats_update_task())
+
+    def get_core_engine_for_request(self) -> CoreEngine:
+        if not self.lb_engines:
+            return self.core_engines[0]
+        # TODO use P2C alg for larger DP sizes
+        num_engines = len(self.lb_engines)
+        min_counts = [sys.maxsize, sys.maxsize]
+        eng_index = 0
+        for i in range(num_engines):
+            # Start from client_index to help with balancing when engines
+            # are empty.
+            idx = (self.client_index + i) % num_engines
+            counts = self.lb_engines[idx]
+            if counts < min_counts:
+                min_counts = counts
+                eng_index = idx
+        # Adjust local counts for better balancing between stats updates
+        # from the coordinator (which happen every 100ms).
+        if min_counts[0]:
+            min_counts[0] += 1
+        else:
+            min_counts[1] += 1
+        return self.core_engines[eng_index]
 
     async def call_utility_async(self, method: str, *args) -> Any:
         # Only the result from the first engine is returned.
@@ -940,62 +1003,30 @@ class DPAsyncMPClient(AsyncMPClient):
         ]))[0]
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        self._ensure_stats_update_task()
+
         request.current_wave = self.current_wave
+        request.client_index = self.client_index
 
         chosen_engine = self.get_core_engine_for_request()
         self.reqs_in_flight[request.request_id] = chosen_engine
-        chosen_engine.num_reqs_in_flight += 1
 
         to_await = self._send_input(EngineCoreRequestType.ADD, request,
                                     chosen_engine)
         if not self.engines_running:
-            # Send request to chosen engine and dp start loop
-            # control message to all other engines.
-            self.engines_running = True
-            to_await = asyncio.gather(
-                to_await,  # type: ignore[assignment]
-                *self._start_wave_coros(exclude_index=chosen_engine.index))
+            # Notify coordinator that we're sending a request
+            await self.first_req_send_socket.send(chosen_engine.identity)
 
         await to_await
 
         self._ensure_output_queue_task()
 
-    def get_core_engine_for_request(self) -> CoreEngine:
-        return min(self.core_engines, key=lambda e: e.num_reqs_in_flight)
-
     @staticmethod
     async def process_engine_outputs(self: "DPAsyncMPClient",
                                      outputs: EngineCoreOutputs):
-        if self.reqs_in_flight:
-            for req_id in outputs.finished_requests or ():
-                if engine := self.reqs_in_flight.pop(req_id, None):
-                    engine.num_reqs_in_flight -= 1
-
-        if outputs.wave_complete is not None:
-            # Current wave is complete, move to next wave number
-            # and mark engines as paused.
-            if self.current_wave <= outputs.wave_complete:
-                self.current_wave = outputs.wave_complete + 1
-                self.engines_running = False
-
-        elif outputs.start_wave is not None and (
-                outputs.start_wave > self.current_wave or
-            (outputs.start_wave == self.current_wave
-             and not self.engines_running)):
-            # Engine received request for a non-current wave so we must ensure
-            # that other engines progress to the next wave.
-            self.current_wave = outputs.start_wave
-            self.engines_running = True
-            await asyncio.gather(*self._start_wave_coros(
-                exclude_index=outputs.engine_index))
-
-    def _start_wave_coros(self, exclude_index: int) -> list[Awaitable[None]]:
-        logger.debug("Sending start DP wave %d.", self.current_wave)
-        return [
-            self._send_input(EngineCoreRequestType.START_DP_WAVE,
-                             self.current_wave, engine)
-            for engine in self.core_engines if engine.index != exclude_index
-        ]
+        if outputs.finished_requests and self.reqs_in_flight:
+            for req_id in outputs.finished_requests:
+                self.reqs_in_flight.pop(req_id, None)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if not request_ids:
