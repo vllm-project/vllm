@@ -30,6 +30,10 @@ class RayPrometheusMetric:
 
             self.metric.set_default_tags(labelskwargs)
 
+        if labels:
+            self.metric.set_default_tags(
+                dict(zip(self.metric._tag_keys, labels)))
+
         return self
 
 
