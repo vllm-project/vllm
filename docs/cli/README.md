@@ -77,6 +77,8 @@ vllm complete --quick "The future of AI is"
 
 Run benchmark tests for latency online serving throughput and offline inference throughput.
 
+To use benchmark commands, please install with extra dependencies using `pip install vllm[bench]`.
+
 Available Commands:
 
 ```bash
