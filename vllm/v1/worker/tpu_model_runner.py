@@ -7,21 +7,22 @@ from unittest.mock import patch
 
 import numpy as np
 import torch
-import torch.distributed
 import torch.nn as nn
 # TPU XLA related
 import torch_xla.core.xla_model as xm
+import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.tpu import TPUModelLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     PlaceholderRange)
@@ -98,6 +99,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        original_parallel_config: Optional[ParallelConfig] = None,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -105,6 +107,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
+        self.original_parallel_config = original_parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
@@ -117,6 +120,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         parallel_config = self.parallel_config
         self.device = device
         self.check_recompilation = envs.VLLM_XLA_CHECK_RECOMPILATION
+
+        # SPMD Related
+        self.use_spmd = envs.VLLM_XLA_USE_SPMD
+        if self.use_spmd:
+            num_devices = xr.global_runtime_device_count()
+            mesh_shape = (num_devices, 1)
+            device_ids = np.array(range(num_devices))
+            self.mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
 
         self.enforce_eager = model_config.enforce_eager
 
@@ -171,7 +182,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache_size = encoder_cache_size
 
         # Lazy initialization
-        # self.model: nn.Module  # Set after load_model
+        self.model: nn.Module  # Set after load_model
         self.kv_caches: list[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
@@ -270,6 +281,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 max_num_mm_items = min(max_num_mm_items_encoder_budget,
                                        max_num_mm_items_decoder_budget)
                 self.max_num_mm_items_by_modality[modality] = max_num_mm_items
+
+        if not self.use_spmd:
+            self.sample_from_logits_func = torch.compile(
+                self.sample_from_logits,
+                backend="openxla",
+                fullgraph=True,
+                dynamic=False)
+        else:
+            self.sample_from_logits_func = self.sample_from_logits
 
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
@@ -419,7 +439,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     def get_model(self) -> nn.Module:
-        assert self.model is not None
         return self.model
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
@@ -826,9 +845,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             logits = self.structured_decode(require_struct_decoding,
                                             grammar_bitmask_padded, logits,
                                             arange)
-        selected_token_ids = self.sample_from_logits(logits,
-                                                     tpu_sampling_metadata)
-
+        selected_token_ids = self.sample_from_logits_func(
+            logits, tpu_sampling_metadata)
         # NOTE (NickLucche) Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs. We can't enforce it due
         # to recompilations outside torch.compiled code, so just make sure
@@ -936,7 +954,26 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
-            model = get_model(vllm_config=self.vllm_config)
+            if self.use_spmd:
+                tpu_loader = TPUModelLoader(
+                    load_config=self.vllm_config.load_config)
+                model = tpu_loader.load_model(
+                    vllm_config=self.vllm_config,
+                    model_config=self.vllm_config.model_config,
+                    mesh=self.mesh)
+            else:
+                # model = get_model(vllm_config=self.vllm_config)
+                model_loader = get_model_loader(self.load_config)
+                if not hasattr(self, "model"):
+                    logger.info("Loading model from scratch...")
+                    model = model_loader.load_model(
+                        vllm_config=self.vllm_config,
+                        model_config=self.model_config)
+                else:
+                    logger.info("Model was already initialized. \
+                            Loading weights inplace...")
+                    model_loader.load_weights(self.model,
+                                              model_config=self.model_config)
         if self.lora_config is not None:
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
@@ -947,7 +984,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # loading.
         xm.mark_step()
         xm.wait_device_ops()
-        self.model = model
+        if not hasattr(self, "model"):
+            self.model = model
         self.sampler = TPUSampler()
 
     @torch.no_grad()
@@ -959,31 +997,25 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                         device=self.device)
         else:
             input_ids = torch.zeros((num_tokens),
-                                    dtype=torch.int32,
-                                    device=self.device)
+                                    dtype=torch.int32).to(self.device)
             inputs_embeds = None
         actual_num_reqs = min(num_tokens, self.max_num_reqs)
         position_ids = torch.zeros(num_tokens,
-                                   dtype=torch.int32,
-                                   device=self.device)
+                                   dtype=torch.int32).to(self.device)
         slot_mapping = torch.zeros(num_tokens,
-                                   dtype=torch.int64,
-                                   device=self.device)
+                                   dtype=torch.int64).to(self.device)
         block_tables = torch.zeros(
             (self.max_num_reqs, self.block_table_cpu.shape[1]),
-            dtype=torch.int32,
-            device=self.device)
+            dtype=torch.int32).to(self.device)
         query_lens = [1] * self.max_num_reqs
         query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
                                                     dtype=torch.int32),
                                        dim=0,
                                        dtype=torch.int32).to(self.device)
         context_lens = torch.ones((self.max_num_reqs, ),
-                                  dtype=torch.int32,
-                                  device=self.device)
+                                  dtype=torch.int32).to(self.device)
         num_seqs = torch.tensor([actual_num_reqs],
-                                dtype=torch.int32,
-                                device=self.device)
+                                dtype=torch.int32).to(self.device)
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -1187,7 +1219,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 with self.maybe_select_dummy_loras(
                         self.lora_config, np.array([num_reqs],
                                                    dtype=np.int32)):
-                    self.sample_from_logits(dummy_logits, sampling_metadata)
+                    self.sample_from_logits_func(dummy_logits,
+                                                 sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -1321,14 +1354,22 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
                 num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
+                    if self.use_spmd:
+                        num_kv_heads = kv_cache_spec.num_kv_heads
+                        assert self.original_parallel_config is not None
+                        tp_size = \
+                            self.original_parallel_config.tensor_parallel_size
+                        # TODO: Handle kv cache duplication under SPMD mode.
+                        assert num_kv_heads % tp_size == 0, (
+                            f"num_kv_heads {num_kv_heads} must be divisible by "
+                            f"tp_size {tp_size} under SPMD mode")
                     kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
 
                     tpu_kv_cache = torch.zeros(kv_cache_shape,
-                                               dtype=dtype,
-                                               device=self.device)
+                                               dtype=dtype).to(self.device)
 
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
@@ -1338,6 +1379,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
+        if self.use_spmd:
+            # Shard KV Cache
+            for cache in self.kv_caches:
+                xs.mark_sharding(cache, self.mesh, (None, 'x', None, None))
 
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:
@@ -1359,7 +1405,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                        sample_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.compute_logits(sample_hidden_states, None)
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # TODO: Under SPMD mode, sample_from_logits has correctness issue.
+    #       Re-enable the torch.compile once the issue is fixed in torchxla.
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_logits(
             self, logits: torch.Tensor,
             sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
