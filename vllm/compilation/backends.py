@@ -338,6 +338,8 @@ model_tag: str = "backbone"
 def set_model_tag(tag: str):
     """Context manager to set the model tag."""
     global model_tag
+    assert tag != model_tag, \
+        f"Model tag {tag} is the same as the current tag {model_tag}."
     old_tag = model_tag
     model_tag = tag
     try:
