@@ -998,11 +998,6 @@ class NixlConnectorWorker:
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
-        logger.debug("Rank %s: local_block_descs_ids: %s", self.tp_rank,
-                     local_block_descs_ids)
-        logger.debug("Rank %s: remote_block_descs_ids: %s", self.tp_rank,
-                     remote_block_descs_ids)
-
         # Prepare transfer with Nixl.
         handle = self.nixl_wrapper.make_prepped_xfer(
             "READ",
