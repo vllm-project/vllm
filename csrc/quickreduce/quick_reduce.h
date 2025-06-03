@@ -21,7 +21,7 @@ static_assert(sizeof(void*) == sizeof(fptr_t));
 static constexpr int kOneShotAllreduceMaxElemsWorldSize2 = 8192 * 12;
 static constexpr int kOneShotAllreduceMaxElemsWorldSize4 = 8192 * 8;
 static constexpr int kOneShotAllreduceMaxElemsWorldSize8 = 8192 * 4;
-static constexpr int kOneShotAllreduceMaxSize =
+static constexpr long kOneShotAllreduceMaxSize =
     std::max(kOneShotAllreduceMaxElemsWorldSize2 * 2,
              std::max(kOneShotAllreduceMaxElemsWorldSize4 * 4,
                       kOneShotAllreduceMaxElemsWorldSize8 * 8)) *
@@ -97,8 +97,7 @@ struct DeviceComms {
   static long constexpr kTileSize = 256 * 16 * 8;
 
   // Max problem size is 8GB (in bytes)
-  static long long constexpr kMaxProblemSize =
-      static_cast<long long>(536870912) * 16;
+  static long constexpr kMaxProblemSize = 8589934592;
   static long constexpr kMaxTiles = kMaxProblemSize / kTileSize;
 
   // Max TP-8
@@ -126,9 +125,9 @@ struct DeviceComms {
 
     // Allocate buffer size for worst case: Twoshot FP16 2-stage buffer.
     long flags_buffer_size = 2 * world_size * kMaxTiles * sizeof(int);
-    long long data_buffer_size = max(
-        2 * kMaxProblemSize, static_cast<long long>(kOneShotAllreduceMaxSize));
-    long long total_buffer_size = flags_buffer_size + data_buffer_size;
+    static constexpr long data_buffer_size =
+        std::max(2 * kMaxProblemSize, kOneShotAllreduceMaxSize);
+    long total_buffer_size = flags_buffer_size + data_buffer_size;
     data_offset = flags_buffer_size;
     HIP_CHECK(hipExtMallocWithFlags((void**)&dbuffer, total_buffer_size,
                                     hipDeviceMallocUncached));
