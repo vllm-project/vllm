@@ -109,7 +109,8 @@ def get_forward_context() -> ForwardContext:
 def create_forward_context(attn_metadata: Any,
                            vllm_config: VllmConfig,
                            virtual_engine: int = 0,
-                           num_tokens: int = 0):
+                           num_tokens: Optional[int] = None,
+                           num_tokens_across_dp: Optional[torch.Tensor] = None):
     dp_metadata: Optional[DPMetadata] = None
     if vllm_config.parallel_config.data_parallel_size > 1 and (
             attn_metadata is not None or num_tokens is not None):
@@ -143,7 +144,8 @@ def override_forward_context(forward_context: Optional[ForwardContext]):
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
                         virtual_engine: int = 0,
-                        num_tokens: int = 0):
+                        num_tokens: Optional[int] = None,
+                        num_tokens_across_dp: Optional[torch.Tensor] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -154,7 +156,8 @@ def set_forward_context(attn_metadata: Any,
         forward_start_time = time.perf_counter()
 
     forward_context = create_forward_context(attn_metadata, vllm_config,
-                                             virtual_engine, num_tokens)
+                                             virtual_engine, num_tokens, 
+                                             num_tokens_across_dp)
 
     try:
         with override_forward_context(forward_context):

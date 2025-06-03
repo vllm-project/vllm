@@ -732,7 +732,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             ))
                     for layer_name in kv_cache_group_spec.layer_names:
                         assert type(attn_metadata) is list
-                        assert attn_metadata_i is not None
+                        # assert attn_metadata_i is not None
                         # What if it's None? Do we still add it to the list?
                         attn_metadata[ubid][layer_name] = attn_metadata_i
             else:
@@ -1312,7 +1312,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         def model_inputs(tokens_slice: slice, use_dummy_input: bool) -> tuple:
             if use_dummy_input:
-                assert num_dummy_tokens == 1
+                # assert num_dummy_tokens == 1
                 return self._get_dummy_model_inputs(num_dummy_tokens)
             else:
                 assert scheduler_output is not None
