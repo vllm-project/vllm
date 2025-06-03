@@ -105,8 +105,8 @@ class BatchedMMTensors:
 @pytest.mark.parametrize("N", [128, 256, 512, 1024])
 @pytest.mark.parametrize("dtype",
                          [torch.torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("block_shape", [None])
-@pytest.mark.parametrize("per_act_token_quant", [False])
+@pytest.mark.parametrize("block_shape", [None, [128, 128]])
+@pytest.mark.parametrize("per_act_token_quant", [False, True])
 def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
                     N: int, dtype: torch.dtype,
                     block_shape: Optional[list[int]],
@@ -202,10 +202,6 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
                                                       A_scale, B_scale,
                                                       block_shape)
 
-    ref_output2 = ref_impl(tensors.A, tensors.B, ref_output2,
-                           tensors.num_expert_tokens, A_scale, B_scale,
-                           block_shape[-2:])
-
     rtol, atol = {
         torch.float16: (6e-2, 6e-2),
         torch.bfloat16: (6e-2, 6e-2),
@@ -298,10 +294,14 @@ def test_fused_moe_batched_experts(
             block_shape=block_shape,
         )
 
-    # torch.testing.assert_close(triton_output,
-    #                            baseline_output,
-    #                            atol=2e-2,
-    #                            rtol=6e-2)
+    torch.testing.assert_close(triton_output,
+                               baseline_output,
+                               atol=2e-2,
+                               rtol=2e-2)
+
+    #print(f"TORCH {baseline_output.shape}\n{baseline_output}")
+    #print(f"TRITON {triton_output.shape}\n{triton_output}")
+    #print(f"BATCHED {batched_output.shape}\n{batched_output}")
 
     torch.testing.assert_close(triton_output,
                                baseline_output,

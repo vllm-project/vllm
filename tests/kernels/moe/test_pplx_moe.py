@@ -38,7 +38,6 @@ from vllm.utils import round_up
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 
 from tests.kernels.moe.utils import (
-    native_w8a8_block_matmul,
     torch_moe2,
     naive_batched_moe,
 )
