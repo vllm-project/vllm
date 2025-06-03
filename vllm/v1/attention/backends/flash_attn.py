@@ -307,6 +307,7 @@ class FlashAttentionMetadataBuilder:
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
+        self.aot_schedule = (get_flash_attn_version() == 3)
         self.use_full_cuda_graph = compilation_config.full_cuda_graph
         if self.use_full_cuda_graph:
             assert self.aot_schedule
