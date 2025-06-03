@@ -32,21 +32,22 @@ def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
 
     # Check if the only discovered plugin is the default one
     is_default_group = (group == DEFAULT_PLUGINS_GROUP)
+    # Use INFO for non-default groups and DEBUG for the default group
+    log_level = logger.debug if is_default_group else logger.info
 
-    if not is_default_group:
-        logger.info("Available plugins for group %s:", group)
-        for plugin in discovered_plugins:
-            logger.info("- %s -> %s", plugin.name, plugin.value)
+    log_level("Available plugins for group %s:", group)
+    for plugin in discovered_plugins:
+        log_level("- %s -> %s", plugin.name, plugin.value)
 
-        if allowed_plugins is None:
-            logger.info("All plugins in this group will be loaded. "
-                        "Set `VLLM_PLUGINS` to control which plugins to load.")
+    if allowed_plugins is None and not is_default_group:
+        log_level("All plugins in this group will be loaded. "
+                  "Set `VLLM_PLUGINS` to control which plugins to load.")
 
     plugins = dict[str, Callable[[], Any]]()
     for plugin in discovered_plugins:
         if allowed_plugins is None or plugin.name in allowed_plugins:
             if allowed_plugins is not None:
-                logger.info("Loading plugin %s", plugin.name)
+                log_level("Loading plugin %s", plugin.name)
 
             try:
                 func = plugin.load()
