@@ -25,7 +25,7 @@ build-vllm-image:
 
 vllm-setup:
 	VLLM_USE_PRECOMPILED=1 pip install --editable .
-	pip install "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git"
+	pip install "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git" --force-reinstall
 	pip install flashinfer-python --index-url https://gitlab-master.nvidia.com/api/v4/projects/179694/packages/pypi/simple
 
 run-vllm:
@@ -60,7 +60,9 @@ push-flashinfer-wheel:
 
 vllm-sample:
 	VLLM_ATTENTION_BACKEND=FLASHINFER python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt
- 
+
+bok-sample:
+	VLLM_ATTENTION_BACKEND=BOK python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt 
 
 build-model8b-edgar4:
 	python benchmarks/cpp/prepare_dataset.py --stdout --tokenizer=meta-llama/Llama-3.1-8B token-norm-dist --num-requests=30 --input-mean=2048 --output-mean=128 --input-stdev=0 --output-stdev=0  > ./tmp/synthetic_2048_128.txt
