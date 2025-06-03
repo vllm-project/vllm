@@ -107,6 +107,40 @@ def get_forward_context() -> ForwardContext:
     return _forward_context
 
 
+def create_forward_context(attn_metadata: Any,
+                           vllm_config: VllmConfig,
+                           virtual_engine: int = 0,
+                           num_tokens: Optional[int] = None,
+                           num_tokens_across_dp: Optional[torch.Tensor] = None):
+    dp_metadata: Optional[DPMetadata] = None
+    if vllm_config.parallel_config.data_parallel_size > 1 and (
+            attn_metadata is not None or num_tokens is not None):
+        dp_metadata = DPMetadata.make(vllm_config.parallel_config,
+                                      attn_metadata, num_tokens or 0,
+                                      num_tokens_across_dp)
+
+    return ForwardContext(no_compile_layers=vllm_config.compilation_config.
+                          static_forward_context,
+                          virtual_engine=virtual_engine,
+                          attn_metadata=attn_metadata,
+                          dp_metadata=dp_metadata)
+
+
+@contextmanager
+def override_forward_context(forward_context: Optional[ForwardContext]):
+    """A context manager that overrides the current forward context.
+    This is used to override the forward context for a specific
+    forward pass.
+    """
+    global _forward_context
+    prev_context = _forward_context
+    _forward_context = forward_context
+    try:
+        yield
+    finally:
+        _forward_context = prev_context
+
+
 @contextmanager
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
@@ -121,24 +155,14 @@ def set_forward_context(attn_metadata: Any,
     need_to_track_batchsize = track_batchsize and attn_metadata is not None
     if need_to_track_batchsize:
         forward_start_time = time.perf_counter()
-    dp_metadata: Optional[DPMetadata] = None
-    if vllm_config.parallel_config.data_parallel_size > 1 and (
-            attn_metadata is not None or num_tokens is not None):
-        dp_metadata = DPMetadata.make(vllm_config.parallel_config,
-                                      attn_metadata, num_tokens or 0,
-                                      num_tokens_across_dp)
 
-    global _forward_context
-    prev_context = _forward_context
-    _forward_context = ForwardContext(
-        no_compile_layers=vllm_config.compilation_config.
-        static_forward_context,
-        virtual_engine=virtual_engine,
-        attn_metadata=attn_metadata,
-        dp_metadata=dp_metadata)
+    forward_context = create_forward_context(attn_metadata, vllm_config,
+                                             virtual_engine, num_tokens, 
+                                             num_tokens_across_dp)
 
     try:
-        yield
+        with override_forward_context(forward_context):
+            yield
     finally:
         global last_logging_time, batchsize_logging_interval
         if need_to_track_batchsize:
@@ -175,5 +199,3 @@ def set_forward_context(attn_metadata: Any,
                     logger.info(("Batchsize forward time stats "
                                  "(batchsize, count, median_time(ms)): %s"),
                                 forward_stats)
-
-        _forward_context = prev_context

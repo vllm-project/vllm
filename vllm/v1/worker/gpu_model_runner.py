@@ -3,9 +3,10 @@
 
 import copy
 import gc
+import threading
 import time
 import weakref
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, TypeAlias, Union
 
 import numpy as np
 import torch
@@ -25,7 +26,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import (DPMetadata, get_forward_context,
+from vllm.forward_context import (create_forward_context, get_forward_context,
+                                  override_forward_context, DPMetadata,
                                   set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -37,7 +39,8 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
-                        check_use_alibi, is_pin_memory_available)
+                        check_use_alibi, is_pin_memory_available,
+                        current_stream)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
@@ -58,6 +61,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 from .utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
@@ -71,6 +75,14 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
+
+AttnMetadataDict: TypeAlias = dict[str, FlashAttentionMetadata]
+# list when ubatching is enabled
+PerLayerAttnMetadata: TypeAlias = Union[list[AttnMetadataDict],
+                                        AttnMetadataDict]
+
+UbatchSlice: TypeAlias = tuple[slice, slice]
+UBatchSlices: TypeAlias = list[UbatchSlice]
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -501,6 +513,43 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed or batch_reordered:
             self.input_batch.refresh_sampling_metadata()
 
+    def _ubatch_split(
+            self, query_start_loc_np: torch.Tensor,
+            max_num_scheduled_tokens: int,
+            scheduler_output: "SchedulerOutput") -> Optional[UBatchSlices]:
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        num_reqs = self.input_batch.num_reqs
+
+        if self.parallel_config.enable_microbatching and \
+            total_num_scheduled_tokens >= \
+            self.parallel_config.microbatching_token_threshold \
+            and max_num_scheduled_tokens == 1:
+            # For pure decode we can just create ubatchs by cutting the request
+            # in half
+            b0_reqs_end = num_reqs // 2
+            b0_tokens_end = total_num_scheduled_tokens // 2
+            assert b0_reqs_end < num_reqs and \
+                b0_tokens_end < total_num_scheduled_tokens
+            return [
+                (slice(0, b0_reqs_end), slice(0, b0_tokens_end)),
+                (slice(b0_reqs_end, num_reqs),
+                 slice(b0_tokens_end, total_num_scheduled_tokens)),
+            ]
+
+        if self.parallel_config.enable_microbatching and \
+            self.parallel_config.always_microbatch_if_enabled:
+            # TODO we can do something more advanced here to try to balance,
+            #  i.e. split to the left of `total_num_scheduled_tokens // 2` if it
+            #  is more balanced
+            req_split_id = np.argmax(
+                query_start_loc_np > (total_num_scheduled_tokens // 2))
+            return [(slice(0, req_split_id),
+                     slice(0, query_start_loc_np[req_split_id])),
+                    (slice(req_split_id, num_reqs),
+                     slice(query_start_loc_np[req_split_id],
+                           total_num_scheduled_tokens))]
+        return None
+
     def _get_cumsum_and_arange(
         self,
         num_tokens: np.ndarray,
@@ -522,10 +571,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return cu_num_tokens, arange
 
     def _prepare_inputs(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> tuple[dict[str, FlashAttentionMetadata], torch.Tensor,
-               Optional[SpecDecodeMetadata]]:
+        self, scheduler_output: "SchedulerOutput"
+    ) -> tuple[PerLayerAttnMetadata, torch.Tensor,
+               Optional[SpecDecodeMetadata], Optional[UBatchSlices]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -605,6 +653,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
 
+        ubatch_slices: Optional[UBatchSlices] = self._ubatch_split(
+            self.query_start_loc_np, max_num_scheduled_tokens,
+            scheduler_output)
+
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
@@ -638,7 +690,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc, seq_lens=seq_lens)
 
-        attn_metadata: dict[str, FlashAttentionMetadata] = {}
+        attn_metadata: PerLayerAttnMetadata = {}
+        if ubatch_slices is not None:
+            attn_metadata = [dict() for _ in range(len(ubatch_slices))]
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -655,15 +710,43 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.attn_metadata_builders[kv_cache_group_id],
                 )
 
-            attn_metadata_i = (
-                self.attn_metadata_builders[kv_cache_group_id].build(
-                    num_reqs=num_reqs,
-                    num_actual_tokens=total_num_scheduled_tokens,
-                    max_query_len=max_num_scheduled_tokens,
-                    common_prefix_len=common_prefix_len,
-                    common_attn_metadata=common_attn_metadata))
-            for layer_name in kv_cache_group_spec.layer_names:
-                attn_metadata[layer_name] = attn_metadata_i
+            # Fill unused with -1. Needed for reshape_and_cache in full cuda
+            # graph mode.
+            if self.vllm_config.compilation_config.full_cuda_graph:
+                self.input_batch.block_table[kv_cache_group_id]\
+                    .slot_mapping.fill_(-1)
+
+            if ubatch_slices is not None:
+                for ubid, (req_slice, token_slice) in enumerate(ubatch_slices):
+                    # Run a dummy batch if its a empty ubatch
+                    if token_slice.stop <= token_slice.start:
+                        attn_metadata_i = None
+                    else:
+                        attn_metadata_i = (
+                            self.attn_metadata_builders[kv_cache_group_id].
+                            build_slice(
+                                req_slice=req_slice,
+                                token_slice=token_slice,
+                                max_query_len=max(tokens[req_slice]),
+                                common_prefix_len=common_prefix_len,
+                                common_attn_metadata=common_attn_metadata,
+                            ))
+                    for layer_name in kv_cache_group_spec.layer_names:
+                        assert type(attn_metadata) is list
+                        # assert attn_metadata_i is not None
+                        # What if it's None? Do we still add it to the list?
+                        attn_metadata[ubid][layer_name] = attn_metadata_i
+            else:
+                attn_metadata_i = (
+                    self.attn_metadata_builders[kv_cache_group_id].build(
+                        num_reqs=num_reqs,
+                        num_actual_tokens=total_num_scheduled_tokens,
+                        max_query_len=max_num_scheduled_tokens,
+                        common_prefix_len=common_prefix_len,
+                        common_attn_metadata=common_attn_metadata))
+                for layer_name in kv_cache_group_spec.layer_names:
+                    assert type(attn_metadata) is dict
+                    attn_metadata[layer_name] = attn_metadata_i
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -693,7 +776,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return attn_metadata, logits_indices, spec_decode_metadata
+        return (attn_metadata, logits_indices, spec_decode_metadata,
+                ubatch_slices)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1079,10 +1163,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     def sync_and_slice_intermediate_tensors(
-            self, num_tokens: int, intermediate_tensors: IntermediateTensors,
+            self, tokens_slice: slice,
+            intermediate_tensors: IntermediateTensors,
             sync_self: bool) -> IntermediateTensors:
 
         assert self.intermediate_tensors is not None
+        num_tokens = tokens_slice.stop - tokens_slice.start
 
         tp = self.vllm_config.parallel_config.tensor_parallel_size
         enabled_sp = self.vllm_config.compilation_config.pass_config. \
@@ -1094,21 +1180,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_residual_scattered = tp > 1 and enabled_sp \
             and num_tokens % tp == 0
 
+        def copy_slice(is_scattered: bool) -> slice:
+            if is_scattered:
+                return slice(tokens_slice.start // tp, tokens_slice.stop // tp)
+            else:
+                return tokens_slice
+
         # When sequence parallelism is enabled, the "residual" tensor is sharded
         # across tensor parallel ranks, so each rank only needs its own slice.
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                is_scattered = "residual" and is_residual_scattered
-                copy_len = num_tokens // tp if is_scattered else \
-                    num_tokens
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True)
+                _copy_slice = copy_slice(is_residual_scattered)
+                self.intermediate_tensors[k][_copy_slice].copy_(
+                    v[_copy_slice], non_blocking=True)
 
         return IntermediateTensors({
             k:
-            v[:num_tokens // tp]
-            if k == "residual" and is_residual_scattered else v[:num_tokens]
+            v[copy_slice(k == "residual" and is_residual_scattered)]
             for k, v in self.intermediate_tensors.items()
         })
 
@@ -1137,6 +1226,214 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                 dtype=torch.int32)
         return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
 
+    def _get_dummy_model_inputs(self, num_tokens: int) -> tuple:
+        # Dummy batch. (hopefully we are the last one so we can just
+        # update this to a one token batch and return)
+
+        if self.is_multimodal_model:
+            input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_tokens]
+        else:
+            input_ids = self.input_ids[:num_tokens]
+            inputs_embeds = None
+
+        if self.uses_mrope:
+            positions = self.mrope_positions[:, :num_tokens]
+        else:
+            positions = self.positions[:num_tokens]
+
+        if get_pp_group().is_first_rank:
+            intermediate_tensors = None
+        else:
+            if self.intermediate_tensors is None:
+                self.intermediate_tensors = (
+                    self.model.make_empty_intermediate_tensors(
+                        batch_size=self.max_num_tokens,
+                        dtype=self.model_config.dtype,
+                        device=self.device))
+
+        return input_ids, positions, inputs_embeds, intermediate_tensors
+
+    def _get_model_inputs(self, tokens_slice: slice,
+                          scheduler_output: "SchedulerOutput"):
+        num_tokens = tokens_slice.stop - tokens_slice.start
+        if num_tokens == 0:
+            # Dummy batch. (hopefully we are the last one so we can just
+            # update this to a one token batch and return)
+            tokens_slice = slice(tokens_slice.start, tokens_slice.start + 1)
+            num_tokens = 1
+
+        if (self.use_cuda_graph
+                and num_tokens <= self.cudagraph_batch_sizes[-1]):
+            # Use piecewise CUDA graphs.
+            # Add padding to the batch size.
+            tokens_slice = \
+             slice(tokens_slice.start, tokens_slice.start+
+                   self.vllm_config.pad_for_cudagraph(num_tokens))
+        else:
+            # Eager mode.
+            # Pad tokens to multiple of tensor_parallel_size when
+            # enabled collective fusion for SP
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            if self.vllm_config.compilation_config.pass_config. \
+                enable_sequence_parallelism and tp_size > 1:
+                from vllm.utils import round_up
+                tokens_slice = slice(
+                    tokens_slice.start,
+                    tokens_slice.start + round_up(num_tokens, tp_size))
+
+        # update num tokens for padding
+        num_tokens = tokens_slice.stop - tokens_slice.start
+
+        # _prepare_inputs may reorder the batch, so we must gather multi
+        # modal outputs after that to ensure the correct order
+        if self.is_multimodal_model:
+            # Run the multimodal encoder if any.
+            self._execute_mm_encoder(scheduler_output)
+            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+        else:
+            mm_embeds = []
+
+        if self.is_multimodal_model and get_pp_group().is_first_rank:
+            # NOTE(woosuk): To unify token ids and soft tokens (vision
+            # embeddings), we always use embeddings (rather than token ids)
+            # as input to the multimodal model, even when the input is text.
+            input_ids = self.input_ids[tokens_slice]
+            if mm_embeds:
+                inputs_embeds = self.model.get_input_embeddings(
+                    input_ids, mm_embeds)
+            else:
+                inputs_embeds = self.model.get_input_embeddings(input_ids)
+            # TODO(woosuk): Avoid the copy. Optimize.
+            self.inputs_embeds[tokens_slice].copy_(inputs_embeds)
+            inputs_embeds = self.inputs_embeds[tokens_slice]
+            input_ids = None
+        else:
+            # For text-only models, we use token ids as input.
+            # While it is possible to use embeddings as input just like the
+            # multimodal models, it is not desirable for performance since
+            # then the embedding layer is not included in the CUDA graph.
+            input_ids = self.input_ids[tokens_slice]
+            inputs_embeds = None
+        if self.uses_mrope:
+            positions = self.mrope_positions[:, tokens_slice]
+        else:
+            positions = self.positions[tokens_slice]
+
+        if get_pp_group().is_first_rank:
+            intermediate_tensors = None
+        else:
+            intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                tokens_slice, intermediate_tensors, True)
+        return input_ids, positions, inputs_embeds, intermediate_tensors
+
+    def _run_model(self,
+                   attn_metadata: Optional[PerLayerAttnMetadata],
+                   num_scheduled_tokens: Optional[int],
+                   ubatch_slices: Optional[UBatchSlices] = None,
+                   scheduler_output: Optional["SchedulerOutput"] = None,
+                   is_dummy_run: bool = False,
+                   num_tokens_across_dp: Optional[torch.Tensor] = None):
+
+        num_dummy_tokens = num_scheduled_tokens if is_dummy_run else 1
+
+        def model_inputs(tokens_slice: slice, use_dummy_input: bool) -> tuple:
+            if use_dummy_input:
+                # assert num_dummy_tokens == 1
+                return self._get_dummy_model_inputs(num_dummy_tokens)
+            else:
+                assert scheduler_output is not None
+                return self._get_model_inputs(tokens_slice, scheduler_output)
+
+        def _run(token_slice: slice, context, use_dummy_input: bool = False):
+            input_ids, positions, inputs_embeds, intermediate_tensors = \
+                model_inputs(token_slice, use_dummy_input)
+            with context:
+                model_output = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
+                if isinstance(context, UBatchContext):
+                    # Clone before we leave the ubatch context
+                    model_output = model_output.clone()
+
+            return model_output
+
+        @torch.inference_mode()
+        def _ubatch_thread(ubatch_ctx, token_slice, results, save_results,
+                           use_dummy_input):
+            model_output = _run(token_slice, ubatch_ctx, use_dummy_input)
+
+            if save_results:
+                results.append(model_output)
+
+        def _run_ubatches(ubatch_slices, attn_metadata,
+                          is_dummy_run) -> torch.Tensor:
+            results: list[torch.Tensor] = []
+            assert len(ubatch_slices) == 2, "Only two ubatches has been tested"
+            root_stream = current_stream()
+
+            ubatch_ctxs = make_ubatch_contexts(len(ubatch_slices),
+                                               compute_stream=root_stream,
+                                               device=self.device)
+
+            # Ubatches will manually manage the forward context, so we override
+            # it to None here so we can have it restored correctly later
+            with override_forward_context(None):
+                ubatch_threads = []
+                for i, (_, tokens_slice) in enumerate(ubatch_slices):
+                    is_dummy_ubatch = tokens_slice.stop <= tokens_slice.start
+                    assert not is_dummy_ubatch or i == len(
+                        ubatch_slices) - 1 or is_dummy_run
+
+                    num_tokens = num_dummy_tokens if is_dummy_ubatch or \
+                    is_dummy_run else (tokens_slice.stop - tokens_slice.start)
+                    ubatch_ctxs[i].forward_context = create_forward_context(
+                        attn_metadata[i]
+                        if attn_metadata is not None else None,
+                        self.vllm_config,
+                        num_tokens=num_tokens,
+                        num_tokens_across_dp=num_tokens_across_dp)
+
+                    thread = threading.Thread(target=_ubatch_thread,
+                                              args=(
+                                                  ubatch_ctxs[i],
+                                                  tokens_slice,
+                                                  results,
+                                                  not is_dummy_ubatch
+                                                  or is_dummy_run,
+                                                  is_dummy_ubatch
+                                                  or is_dummy_run,
+                                              ))
+                    ubatch_threads.append(thread)
+                    thread.start()
+                ubatch_ctxs[0].cpu_wait_event.set()
+
+                for thread in ubatch_threads:
+                    thread.join()
+
+            torch.cuda.synchronize()
+            torch.cuda.set_stream(root_stream)
+            return torch.cat(results, dim=0)
+
+        # run micro-batched
+        if ubatch_slices is not None:
+            model_output = _run_ubatches(ubatch_slices, attn_metadata,
+                                         is_dummy_run)
+        # run single batch
+        else:
+            model_output = _run(
+                slice(0, num_scheduled_tokens),
+                set_forward_context(attn_metadata,
+                                    vllm_config=self.vllm_config,
+                                    num_tokens=num_scheduled_tokens or 1,
+                                    num_tokens_across_dp=num_tokens_across_dp),
+                is_dummy_run)
+
+        return model_output
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1153,90 +1450,103 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices, spec_decode_metadata = (
+        attn_metadata, logits_indices, spec_decode_metadata, ubatch_slices = (
             self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if (self.use_cuda_graph
-                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
-            # Use piecewise CUDA graphs.
-            # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
-        else:
-            # Eager mode.
-            # Pad tokens to multiple of tensor_parallel_size when
-            # enabled collective fusion for SP
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            if self.vllm_config.compilation_config.pass_config. \
-                enable_sequence_parallelism and tp_size > 1:
-                from vllm.utils import round_up
-                num_input_tokens = round_up(num_scheduled_tokens, tp_size)
-            else:
-                num_input_tokens = num_scheduled_tokens
-
-        # Padding for DP
-        num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
-        num_input_tokens += num_pad
-
-        # _prepare_inputs may reorder the batch, so we must gather multi
-        # modal outputs after that to ensure the correct order
-        if self.is_multimodal_model:
-            # Run the multimodal encoder if any.
-            self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
-        else:
-            mm_embeds = []
-
-        if self.is_multimodal_model and get_pp_group().is_first_rank:
-            # NOTE(woosuk): To unify token ids and soft tokens (vision
-            # embeddings), we always use embeddings (rather than token ids)
-            # as input to the multimodal model, even when the input is text.
-            input_ids = self.input_ids[:num_scheduled_tokens]
-            if mm_embeds:
-                inputs_embeds = self.model.get_input_embeddings(
-                    input_ids, mm_embeds)
-            else:
-                inputs_embeds = self.model.get_input_embeddings(input_ids)
-            # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
-            input_ids = None
-        else:
-            # For text-only models, we use token ids as input.
-            # While it is possible to use embeddings as input just like the
-            # multimodal models, it is not desirable for performance since
-            # then the embedding layer is not included in the CUDA graph.
-            input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = None
-        if self.uses_mrope:
-            positions = self.mrope_positions[:, :num_input_tokens]
-        else:
-            positions = self.positions[:num_input_tokens]
-
-        if get_pp_group().is_first_rank:
-            intermediate_tensors = None
-        else:
-            intermediate_tensors = self.sync_and_slice_intermediate_tensors(
-                num_input_tokens, intermediate_tensors, True)
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens,
-                                 num_tokens_across_dp=num_tokens_across_dp):
-            self.maybe_setup_kv_connector(scheduler_output)
+        self.maybe_setup_kv_connector(scheduler_output)
+        model_output = self._run_model(
+            attn_metadata,
+            num_scheduled_tokens,
+            ubatch_slices,
+            scheduler_output,
+        )
+        self.maybe_wait_for_kv_save()
+        finished_sending, finished_recving = (
+            self.get_finished_kv_transfers(scheduler_output))
+        # if (self.use_cuda_graph
+        #         and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
+        #     # Use piecewise CUDA graphs.
+        #     # Add padding to the batch size.
+        #     num_input_tokens = self.vllm_config.pad_for_cudagraph(
+        #         num_scheduled_tokens)
+        # else:
+        #     # Eager mode.
+        #     # Pad tokens to multiple of tensor_parallel_size when
+        #     # enabled collective fusion for SP
+        #     tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        #     if self.vllm_config.compilation_config.pass_config. \
+        #         enable_sequence_parallelism and tp_size > 1:
+        #         from vllm.utils import round_up
+        #         num_input_tokens = round_up(num_scheduled_tokens, tp_size)
+        #     else:
+        #         num_input_tokens = num_scheduled_tokens
 
-            model_output = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-            )
+        # # Padding for DP
+        # num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
+        # num_input_tokens += num_pad
 
-            self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (
-                self.get_finished_kv_transfers(scheduler_output))
+        # # _prepare_inputs may reorder the batch, so we must gather multi
+        # # modal outputs after that to ensure the correct order
+        # if self.is_multimodal_model:
+        #     # Run the multimodal encoder if any.
+        #     self._execute_mm_encoder(scheduler_output)
+        #     mm_embeds = self._gather_mm_embeddings(scheduler_output)
+        # else:
+        #     mm_embeds = []
+
+        # if self.is_multimodal_model and get_pp_group().is_first_rank:
+        #     # NOTE(woosuk): To unify token ids and soft tokens (vision
+        #     # embeddings), we always use embeddings (rather than token ids)
+        #     # as input to the multimodal model, even when the input is text.
+        #     input_ids = self.input_ids[:num_scheduled_tokens]
+        #     if mm_embeds:
+        #         inputs_embeds = self.model.get_input_embeddings(
+        #             input_ids, mm_embeds)
+        #     else:
+        #         inputs_embeds = self.model.get_input_embeddings(input_ids)
+        #     # TODO(woosuk): Avoid the copy. Optimize.
+        #     self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+        #     inputs_embeds = self.inputs_embeds[:num_input_tokens]
+        #     input_ids = None
+        # else:
+        #     # For text-only models, we use token ids as input.
+        #     # While it is possible to use embeddings as input just like the
+        #     # multimodal models, it is not desirable for performance since
+        #     # then the embedding layer is not included in the CUDA graph.
+        #     input_ids = self.input_ids[:num_input_tokens]
+        #     inputs_embeds = None
+        # if self.uses_mrope:
+        #     positions = self.mrope_positions[:, :num_input_tokens]
+        # else:
+        #     positions = self.positions[:num_input_tokens]
+
+        # if get_pp_group().is_first_rank:
+        #     intermediate_tensors = None
+        # else:
+        #     intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+        #         num_input_tokens, intermediate_tensors, True)
+
+        # # Run the decoder.
+        # # Use persistent buffers for CUDA graphs.
+        # with set_forward_context(attn_metadata,
+        #                          self.vllm_config,
+        #                          num_tokens=num_input_tokens,
+        #                          num_tokens_across_dp=num_tokens_across_dp):
+        #     self.maybe_setup_kv_connector(scheduler_output)
+
+        #     model_output = self.model(
+        #         input_ids=input_ids,
+        #         positions=positions,
+        #         intermediate_tensors=intermediate_tensors,
+        #         inputs_embeds=inputs_embeds,
+        #     )
+
+        #     self.maybe_wait_for_kv_save()
+        #     finished_sending, finished_recving = (
+        #         self.get_finished_kv_transfers(scheduler_output))
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1414,7 +1724,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if spec_decode_metadata is None:
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
-                target_positions = positions[:num_scheduled_tokens]
+                #TODO(sage) make sure this works with mrope
+                target_positions = self.positions[:num_scheduled_tokens]
                 if self.use_aux_hidden_state_outputs:
                     target_hidden_states = torch.cat(
                         [h[:num_scheduled_tokens] for h in aux_hidden_states],
@@ -1442,7 +1753,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens,
                 )
                 target_token_ids = self.input_ids[token_indices]
-                target_positions = positions[token_indices]
+                #TODO(sage) make sure this works with mrope
+                target_positions = self.positions[token_indices]
                 if self.use_aux_hidden_state_outputs:
                     target_hidden_states = torch.cat(
                         [h[token_indices] for h in aux_hidden_states], dim=-1)
@@ -1479,6 +1791,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def kv_connector_no_forward(
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
+
         # KV send/recv even if no work to do.
         with set_forward_context(None, self.vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
@@ -1705,6 +2018,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
         skip_attn: bool = True,
+        # For profiling runs we dont want microbatching but for
+        # dp dummy runs we do.
+        allow_microbatching: bool = False,
     ) -> torch.Tensor:
 
         # Padding for DP
@@ -1748,44 +2064,58 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for layer_name in kv_cache_group_spec.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 
+        should_microbatch = (
+            allow_microbatching
+            and self.vllm_config.parallel_config.enable_microbatching
+            and self.vllm_config.parallel_config.always_microbatch_if_enabled)
+        dummy_microbatches = [(slice(0, 0), slice(0, 0)),
+                              (slice(0, 0), slice(0, 0))]
+
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
-            model = self.model
-            if self.is_multimodal_model:
-                input_ids = None
-                inputs_embeds = self.inputs_embeds[:num_tokens]
-            else:
-                input_ids = self.input_ids[:num_tokens]
-                inputs_embeds = None
-            if self.uses_mrope:
-                positions = self.mrope_positions[:, :num_tokens]
-            else:
-                positions = self.positions[:num_tokens]
+            outputs = self._run_model(
+                attn_metadata,
+                num_tokens,
+                ubatch_slices=None
+                if not should_microbatch else dummy_microbatches,
+                is_dummy_run=True,
+            )
+            # model = self.model
+            # if self.is_multimodal_model:
+            #     input_ids = None
+            #     inputs_embeds = self.inputs_embeds[:num_tokens]
+            # else:
+            #     input_ids = self.input_ids[:num_tokens]
+            #     inputs_embeds = None
+            # if self.uses_mrope:
+            #     positions = self.mrope_positions[:, :num_tokens]
+            # else:
+            #     positions = self.positions[:num_tokens]
 
-            if get_pp_group().is_first_rank:
-                intermediate_tensors = None
-            else:
-                if self.intermediate_tensors is None:
-                    self.intermediate_tensors = (
-                        self.model.make_empty_intermediate_tensors(
-                            batch_size=self.max_num_tokens,
-                            dtype=self.model_config.dtype,
-                            device=self.device))
+            # if get_pp_group().is_first_rank:
+            #     intermediate_tensors = None
+            # else:
+            #     if self.intermediate_tensors is None:
+            #         self.intermediate_tensors = (
+            #             self.model.make_empty_intermediate_tensors(
+            #                 batch_size=self.max_num_tokens,
+            #                 dtype=self.model_config.dtype,
+            #                 device=self.device))
 
-                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
-                    num_tokens, None, False)
+            #     intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+            #         num_tokens, None, False)
 
-            with set_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens,
-                    num_tokens_across_dp=num_tokens_across_dp):
-                outputs = model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                )
+            # with set_forward_context(
+            #         attn_metadata,
+            #         self.vllm_config,
+            #         num_tokens=num_tokens,
+            #         num_tokens_across_dp=num_tokens_across_dp):
+            #     outputs = model(
+            #         input_ids=input_ids,
+            #         positions=positions,
+            #         intermediate_tensors=intermediate_tensors,
+            #         inputs_embeds=inputs_embeds,
+            #     )
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
