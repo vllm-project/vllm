@@ -196,22 +196,10 @@ def test_null_publisher():
 
 def test_data_parallel_rank_tagging(publisher_config):
     """Test that events are properly tagged with their data parallel rank"""
-    from vllm.config import ParallelConfig
-    from vllm.distributed.kv_events import get_kv_event_publisher
 
-    # Create mock parallel configs for different DP ranks
-    parallel_config_0 = ParallelConfig(data_parallel_size=2,
-                                       data_parallel_rank=0,
-                                       tensor_parallel_size=1,
-                                       pipeline_parallel_size=1)
-
-    parallel_config_1 = ParallelConfig(data_parallel_size=2,
-                                       data_parallel_rank=1,
-                                       tensor_parallel_size=1,
-                                       pipeline_parallel_size=1)
-
-    pub_0 = get_kv_event_publisher(parallel_config_0, publisher_config)
-    pub_1 = get_kv_event_publisher(parallel_config_1, publisher_config)
+    publisher_config.topic = "foo"
+    pub_0 = EventPublisherFactory.create(publisher_config, DP_RANK)
+    pub_1 = EventPublisherFactory.create(publisher_config, DP_RANK + 1)
 
     # Hardcode the expected endpoints based on port offsetting behavior
     # Both ranks get offsets according to _offset_endpoint_port function
@@ -223,7 +211,7 @@ def test_data_parallel_rank_tagging(publisher_config):
             ":5557", ":5558")  # rank 1 gets port + 1
     else:
         # For inproc endpoints: inproc://test -> inproc://test_dp0, inproc://test_dp1
-        expected_endpoint_0 = base_endpoint + "_dp0"  # rank 0 gets _dp0
+        expected_endpoint_0 = base_endpoint  # rank 0 gets base
         expected_endpoint_1 = base_endpoint + "_dp1"  # rank 1 gets _dp1
 
     from .conftest import MockSubscriber

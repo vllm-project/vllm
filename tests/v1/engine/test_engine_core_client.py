@@ -13,7 +13,7 @@ from transformers import AutoTokenizer
 
 from vllm import SamplingParams
 from vllm.distributed.kv_events import (BlockStored, KVEventBatch,
-                                        _offset_endpoint_port)
+                                        ZmqEventPublisher)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
@@ -405,7 +405,8 @@ async def test_kv_cache_events_dp(
         base_endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
         endpoints = []
         for i in range(dp_size):
-            offset_endpoint = _offset_endpoint_port(base_endpoint, i)
+            offset_endpoint = ZmqEventPublisher.offset_endpoint_port(
+                base_endpoint, i)
             endpoints.append(offset_endpoint)
 
         subscriber = MockSubscriber(endpoints,
