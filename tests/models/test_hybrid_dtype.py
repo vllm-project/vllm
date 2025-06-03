@@ -29,7 +29,7 @@ def test_dtype(vllm_runner, dtype: DTypeInfo):
                      max_model_len=None,
                      attn_dtype=dtype.attn_dtype) as vllm_model:
         model_config = vllm_model.model.llm_engine.model_config
-        if dtype.dtype == "auto": # hybrid dtype
+        if dtype.dtype == "auto":  # hybrid dtype
             assert model_config.dtype == torch.float32
             assert model_config.attn_dtype == torch.float16
         elif dtype.attn_dtype == "auto":

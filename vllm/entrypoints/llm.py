@@ -14,8 +14,7 @@ from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.config import (CompilationConfig, DType, TokenizerMode,
-                         is_init_field)
+from vllm.config import CompilationConfig, DType, TokenizerMode, is_init_field
 from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
                                    TaskOption)
 from vllm.engine.llm_engine import LLMEngine
