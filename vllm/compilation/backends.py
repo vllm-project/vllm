@@ -66,7 +66,10 @@ class CompilerManager:
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
 
-    def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
+    def initialize_cache(self,
+                         cache_dir: str,
+                         disable_cache: bool = False,
+                         prefix: str = ""):
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
@@ -80,7 +83,8 @@ class CompilerManager:
                 self.cache = ast.literal_eval(f.read())
 
         self.compiler.initialize_cache(cache_dir=cache_dir,
-                                       disable_cache=disable_cache)
+                                       disable_cache=disable_cache,
+                                       prefix=prefix)
 
     def save_to_file(self):
         if self.disable_cache or not self.is_cache_updated:
@@ -486,7 +490,8 @@ class VllmBackend:
             logger.info("Using cache directory: %s for vLLM's torch.compile",
                         local_cache_dir)
 
-        self.compiler_manager.initialize_cache(local_cache_dir, disable_cache)
+        self.compiler_manager.initialize_cache(local_cache_dir, disable_cache,
+                                               self.prefix)
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
