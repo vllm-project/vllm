@@ -750,6 +750,7 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder)
+@support_torch_compile
 class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
                                   SupportsPP, SupportsMultiModal):
     embedding_padding_modules = ["lm_head"]
@@ -790,6 +791,10 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
 
     @property
     def hf_to_vllm_mapper(self):
+        # Backwards compatibility for prev released models
+        # State dicts back then had different formats
+        # and cannot be loaded with `AutoModel` mapping
+        # as is
         prefix_mapper = {
             "language_model.model": "model.language_model",
             "text_model.model": "model.text_model",
