@@ -427,9 +427,7 @@ class NixlConnectorWorker:
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
-        # NOTE(rob): we need each tp_rank to have a unique port.
-        # This is a hack to keep us moving. We will switch when
-        # we switch to HTTP-based NIXL metadata exchange.
+        # NOTE(rob): We will switch to HTTP-based NIXL metadata exchange.
         path = make_zmq_path("tcp", host, port)
         logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
