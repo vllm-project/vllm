@@ -5,6 +5,7 @@ from typing import Literal, Union
 
 import pytest
 
+from vllm.compilation.backends import VllmBackend
 from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
                          config, get_field)
 from vllm.model_executor.layers.pooler import PoolingType
@@ -41,6 +42,18 @@ class TestConfig4:
 def test_config(test_config, expected_error):
     with pytest.raises(Exception, match=expected_error):
         config(test_config)
+
+
+def test_compile_config_repr_succeeds():
+    # setup: VllmBackend mutates the config object
+    config = VllmConfig()
+    backend = VllmBackend(config)
+    backend.configure_post_pass()
+
+    # test that repr(config) succeeds
+    val = repr(config)
+    assert 'VllmConfig' in val
+    assert 'inductor_passes' in val
 
 
 def test_get_field():
