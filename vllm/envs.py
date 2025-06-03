@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_QUICK_ALLREDUCE_LEVEL: int = 2
 
 
 def get_default_cache_root():
@@ -604,6 +605,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # and trust the driver's peer-to-peer capability report.
     "VLLM_SKIP_P2P_CHECK":
     lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
+
+    # quick allreduce level. 0 means closed,
+    # 1 for 2stage f16, 2 for 2stage fp8, 3 for 2stage Q8,
+    # 4 for 2stage Q6, 5 for 2stage Q4.
+    "VLLM_QUICK_ALLREDUCE_LEVEL":
+    lambda: int(os.getenv("VLLM_QUICK_ALLREDUCE_LEVEL", "2")),
+
 
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
