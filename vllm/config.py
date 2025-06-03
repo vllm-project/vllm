@@ -683,28 +683,14 @@ class ModelConfig:
 
     def _init_dtype(self):
         is_pooling_model = self.runner_type == "pooling"
-
-        if not is_pooling_model:
-            if self.attn_dtype != "auto" or self.dtype == "hybrid":
-                raise ValueError("Only pooling models support hybrid dtype.")
-
-            self.dtype = _get_and_verify_dtype(
-                self.model,
-                self.hf_config,
-                self.dtype,
-                is_pooling_model=is_pooling_model,
-                revision=self.revision,
-            )
-            self.attn_dtype = self.dtype
-            return
-
-        # For pooling models
         config_dtype = _find_dtype(self.model,
                                    self.hf_config,
                                    revision=self.revision)
 
+        # For pooling models
         # If config_dtype is float32, use hybrid dtype by default.
-        if config_dtype == torch.float32 and self.dtype == "auto":
+        if (is_pooling_model and config_dtype == torch.float32
+                and self.dtype == "auto"):
             self.dtype = "hybrid"
 
         if self.dtype == "hybrid":
@@ -712,29 +698,31 @@ class ModelConfig:
             self.attn_dtype = _get_and_verify_dtype(
                 self.model,
                 self.hf_config,
-                config_dtype,
+                dtype="auto",
                 is_pooling_model=is_pooling_model,
                 revision=self.revision,
             )
-            return
-
-        self.dtype = _get_and_verify_dtype(
-            self.model,
-            self.hf_config,
-            self.dtype,
-            is_pooling_model=is_pooling_model,
-            revision=self.revision,
-        )
-        if self.attn_dtype == "auto":
-            self.attn_dtype = self.dtype
         else:
-            self.attn_dtype = _get_and_verify_dtype(
-                self.model,
-                self.hf_config,
-                self.attn_dtype,
-                is_pooling_model=is_pooling_model,
-                revision=self.revision,
-            )
+            self.dtype = _get_and_verify_dtype(
+                    self.model,
+                    self.hf_config,
+                    self.dtype,
+                    is_pooling_model=is_pooling_model,
+                    revision=self.revision,
+                )
+            if self.attn_dtype == "auto":
+                self.attn_dtype = self.dtype
+            else:
+                self.attn_dtype = _get_and_verify_dtype(
+                    self.model,
+                    self.hf_config,
+                    self.attn_dtype,
+                    is_pooling_model=is_pooling_model,
+                    revision=self.revision,
+                )
+
+        if not is_pooling_model and self.attn_dtype != self.dtype:
+            raise ValueError("Only pooling models support hybrid dtype.")
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self.registry.is_multimodal_model(self.architectures):
