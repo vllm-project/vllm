@@ -72,7 +72,6 @@ def test_tpu_compilation():
     for i, compiled_fn in enumerate(compiled_fns):
         print("{} file: {}".format(i + 1, compiled_fn))
 
-    breakpoint()
     # The first compilation should not have any kv_caches
     with open(compiled_fns[0]) as f:
         content = f.read()
