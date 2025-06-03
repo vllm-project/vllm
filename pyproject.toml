@@ -1,7 +1,7 @@
 [build-system]
 # Should be mirrored in requirements/build.txt
 requires = [
-    "cmake>=3.26",
+    "cmake>=3.26.1",
     "ninja",
     "packaging>=24.2",
     "setuptools>=77.0.3,<80.0.0",
