@@ -180,7 +180,7 @@ class TestTensors:
 def make_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
                         max_tokens_per_rank: int, dp_size: int,
                         hidden_size: int, global_num_experts: int,
-                        use_fp8_dispatch: int, q_dtype: Optional[torch.dtype],
+                        use_fp8_dispatch: bool, q_dtype: Optional[torch.dtype],
                         block_shape: list[int]) -> FusedMoEModularKernel:
 
     a2a: DeepEPLLPrepareAndFinalize = make_deepep_a2a(
