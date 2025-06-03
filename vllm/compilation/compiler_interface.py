@@ -155,7 +155,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
     This is not on by default yet, but we plan to turn it on by default for
     PyTorch 2.8.
 
-    Use VLLM_TEST_STANDALONE_COMPILE to toggle this on or off.
+    Use VLLM_USE_STANDALONE_COMPILE to toggle this on or off.
     """
     name = "inductor_standalone"
 
@@ -415,8 +415,14 @@ class InductorAdaptor(CompilerInterface):
         # compilation cache. So turn off the checks if we disable the
         # compilation cache.
         if not envs.VLLM_DISABLE_COMPILE_CACHE:
-            assert hash_str is not None, (
-                "failed to get the hash of the compiled graph")
+            if hash_str is None:
+                raise RuntimeError(
+                    "vLLM failed to compile the model. The most "
+                    "likely reason for this is that a previous compilation "
+                    "failed, leading to a corrupted compilation artifact. "
+                    "We recommend trying to "
+                    "remove ~/.cache/vllm/torch_compile_cache and try again "
+                    "to see the real issue. ")
             assert file_path is not None, (
                 "failed to get the file path of the compiled graph")
         return compiled_graph, (hash_str, file_path)

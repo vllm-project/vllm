@@ -39,7 +39,7 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
-                        GiB_bytes, is_in_ray_actor)
+                        GiB_bytes, get_ip, is_in_ray_actor)
 
 # yapf: enable
 
@@ -224,7 +224,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
             # Special case for large integers
-            if name in {"max_model_len"}:
+            if name in {"max_model_len", "max_num_batched_tokens"}:
                 kwargs[name]["type"] = human_readable_int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
@@ -292,6 +292,7 @@ class EngineArgs:
     data_parallel_size_local: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
+    data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
@@ -422,6 +423,9 @@ class EngineArgs:
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
+
+    enable_multimodal_encoder_data_parallel: bool = \
+        ParallelConfig.enable_multimodal_encoder_data_parallel
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -621,6 +625,12 @@ class EngineArgs:
                                     type=int,
                                     help='Port for data parallel RPC '
                                     'communication.')
+        parallel_group.add_argument('--data-parallel-backend',
+                                    '-dpb',
+                                    type=str,
+                                    default='mp',
+                                    help='Backend for data parallel, either '
+                                    '"mp" or "ray".')
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
@@ -637,6 +647,9 @@ class EngineArgs:
                                     **parallel_kwargs["worker_cls"])
         parallel_group.add_argument("--worker-extension-cls",
                                     **parallel_kwargs["worker_extension_cls"])
+        parallel_group.add_argument(
+            "--enable-multimodal-encoder-data-parallel",
+            **parallel_kwargs["enable_multimodal_encoder_data_parallel"])
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -1053,15 +1066,28 @@ class EngineArgs:
 
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
-        data_parallel_address = self.data_parallel_address if (
-            self.data_parallel_address
-            is not None) else ParallelConfig.data_parallel_master_ip
+        if self.data_parallel_address is None:
+            if self.data_parallel_backend == "ray":
+                host_ip = get_ip()
+                logger.info(
+                    "Using host IP %s as ray-based data parallel address",
+                    host_ip)
+                data_parallel_address = host_ip
+            else:
+                assert self.data_parallel_backend == "mp", (
+                    "data_parallel_backend can only be ray or mp, got %s",
+                    self.data_parallel_backend)
+                data_parallel_address = ParallelConfig.data_parallel_master_ip
+        else:
+            data_parallel_address = self.data_parallel_address
 
         # This port is only used when there are remote data parallel engines,
         # otherwise the local IPC transport is used.
         data_parallel_rpc_port = self.data_parallel_rpc_port if (
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
+
+        data_parallel_backend = self.data_parallel_backend
 
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
@@ -1070,6 +1096,7 @@ class EngineArgs:
             data_parallel_size_local=data_parallel_size_local,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
+            data_parallel_backend=data_parallel_backend,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
@@ -1078,6 +1105,8 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
+            enable_multimodal_encoder_data_parallel=self.
+            enable_multimodal_encoder_data_parallel,
         )
 
         speculative_config = self.create_speculative_config(
@@ -1380,7 +1409,8 @@ class EngineArgs:
 
         if (self.pipeline_parallel_size > 1
                 and self.distributed_executor_backend
-                not in ("ray", "mp", "external_launcher")):
+                not in (ParallelConfig.distributed_executor_backend, "ray",
+                        "mp", "external_launcher")):
             name = "Pipeline Parallelism without Ray distributed executor " \
                     "or multiprocessing executor or external launcher"
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
