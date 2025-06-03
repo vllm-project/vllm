@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import contextlib
 import functools
 import gc
@@ -40,6 +41,8 @@ except ImportError:
     EncryptionParams = tensorizer.placeholder_attr("EncryptionParams")
 
 EXAMPLES_PATH = VLLM_PATH / "examples"
+
+pytest_plugins = "pytest_asyncio",
 
 prompts = [
     "Hello, my name is",
@@ -420,7 +423,8 @@ def test_assert_stream_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
         combined_output = out + err
         assert ("ValueError: Only binary modes (\"rb\", \"wb\", \"wb+\", etc.) are valid when opening local file streams.") in combined_output
 
-def test_serialize_and_serve_entrypoints(tmp_path):
+@pytest.mark.asyncio
+async def test_serialize_and_serve_entrypoints(tmp_path):
     model_ref = "facebook/opt-125m"
 
     suffix = "test"
@@ -457,19 +461,27 @@ def test_serialize_and_serve_entrypoints(tmp_path):
         }
     }
 
-    try:
-        result = subprocess.run([
-            sys.executable,
-            "-m", "vllm.entrypoints.cli.serve", model_ref, "--model-loader-extra-config",
-            json.dumps(model_loader_extra_config),
-        ],
-                                check=True,
-                                capture_output=True,
-                                text=True)
-    except subprocess.CalledProcessError as e:
-        print("Model serving failed.")
-        print("STDOUT:\n", e.stdout)
-        print("STDERR:\n", e.stderr)
-        raise
+    cmd = ["-m", "vllm.entrypoints.cli.main", "serve", "--host", "localhost", "--load-format", "tensorizer", model_ref, "--model-loader-extra-config", json.dumps(model_loader_extra_config, indent=2)]
 
-    print("vLLM Serving STDOUT:\n", result.stdout)
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+
+    try:
+        async with asyncio.timeout(180):
+            await proc.stdout.readuntil(b"Application startup complete.")
+
+    except asyncio.TimeoutError:
+        pytest.fail("Server did not start successfully")
+
+
+    proc.terminate()
+    await proc.communicate()
+
+
+
+
