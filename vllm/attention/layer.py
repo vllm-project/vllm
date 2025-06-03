@@ -58,7 +58,6 @@ class Attention(nn.Module):
         `self.kv_cache`.
         """
         super().__init__()
-
         if per_layer_sliding_window is not None:
             # per-layer sliding window
             sliding_window = per_layer_sliding_window

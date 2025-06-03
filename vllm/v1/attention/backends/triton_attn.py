@@ -176,13 +176,16 @@ class TritonAttentionImpl(AttentionImpl):
                                    or not num_q_is_pow2)
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        if use_prefill_decode_attn:
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size)
+        else:
+            key_cache, value_cache = kv_cache.unbind(0)
+
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             if use_prefill_decode_attn:
-                key_cache, value_cache = PagedAttention.split_kv_cache(
-                    kv_cache, self.num_kv_heads, self.head_size)
-
                 PagedAttention.write_to_paged_cache(
                     key,
                     value,
@@ -194,7 +197,6 @@ class TritonAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
             else:
-                key_cache, value_cache = kv_cache.unbind(0)
                 torch.ops._C_cache_ops.reshape_and_cache_flash(
                     key,
                     value,
