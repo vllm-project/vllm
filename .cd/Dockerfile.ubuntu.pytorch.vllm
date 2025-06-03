@@ -4,10 +4,11 @@ ARG VERSION=1.21.0
 ARG BASE_NAME=ubuntu22.04
 ARG PT_VERSION=2.6.0
 ARG REVISION=latest
+ARG REPO_TYPE=habanalabs
 # Parameterize commit/branch for vllm-fork checkout
 ARG VLLM_FORK_COMMIT=v0.7.2+Gaudi-1.21.0
 
-FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/habanalabs/pytorch-installer-${PT_VERSION}:${REVISION}
+FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-installer-${PT_VERSION}:${REVISION}
 
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
