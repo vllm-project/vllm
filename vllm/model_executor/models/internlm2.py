@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Iterable
 from functools import partial
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -81,7 +82,7 @@ class InternLM2Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -225,7 +226,7 @@ class InternLMDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -252,7 +253,7 @@ class InternLM2Model(nn.Module):
             *,
             vllm_config: VllmConfig,
             prefix: str = "",
-            layer_type: Type[InternLMDecoderLayer] = InternLMDecoderLayer):
+            layer_type: type[InternLMDecoderLayer] = InternLMDecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -316,7 +317,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 model_type: Type[InternLM2Model] = InternLM2Model):
+                 model_type: type[InternLM2Model] = InternLM2Model):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -361,15 +362,15 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w1", 0),
             ("gate_up_proj", "w3", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -407,7 +408,7 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        model_type: Type[InternLM2Model] = InternLM2Model,
+        model_type: type[InternLM2Model] = InternLM2Model,
     ):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,

@@ -77,6 +77,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor suffix_output,"
       "    Tensor suffix_lse) -> ()");
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
+
+  ops.def(
+      "convert_vertical_slash_indexes("
+      "   Tensor! block_count, Tensor! block_offset, "
+      "   Tensor! column_count, Tensor! column_index, "
+      "   Tensor q_seqlens, Tensor q_seqlens, "
+      "   Tensor vertical_indexes, Tensor slash_indexes, "
+      "   int context_size, int block_size_M, int block_size_N, "
+      "   bool causal) -> ()");
+  ops.impl("convert_vertical_slash_indexes", torch::kCUDA,
+           &convert_vertical_slash_indexes);
+
+  ops.def(
+      "convert_vertical_slash_indexes_mergehead("
+      "   Tensor! block_count, Tensor! block_offset, "
+      "   Tensor! column_count, Tensor! column_index, "
+      "   Tensor q_seqlens, Tensor q_seqlens, "
+      "   Tensor vertical_indexes, Tensor slash_indexes, "
+      "   Tensor vertical_indices_count, Tensor slash_indices_count, "
+      "   int context_size, int block_size_M, int block_size_N, "
+      "   bool causal) -> ()");
+  ops.impl("convert_vertical_slash_indexes_mergehead", torch::kCUDA,
+           &convert_vertical_slash_indexes_mergehead);
 #endif
 
   // Activation ops
@@ -292,8 +315,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
-      "Tensor b_scales, Tensor? b_zeros_or_none, Tensor? g_idx_or_none, "
-      "Tensor? perm_or_none, Tensor workspace, int b_q_type, "
+      "Tensor b_scales, Tensor? global_scale, Tensor? b_zeros_or_none, Tensor? "
+      "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_q_type, "
       "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
       "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor",
       {stride_tag});
@@ -362,6 +385,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                      Tensor alpha) -> ()",
       {stride_tag});
   ops.impl("cutlass_scaled_fp4_mm", torch::kCUDA, &cutlass_scaled_fp4_mm);
+
+  // cutlass nvfp4 block scaled group GEMM
+  ops.def(
+      "cutlass_fp4_group_mm(Tensor! out, Tensor a, Tensor b,"
+      " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
+      " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()",
+      {stride_tag});
+  ops.impl("cutlass_fp4_group_mm", torch::kCUDA, &cutlass_fp4_group_mm);
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
@@ -451,46 +482,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                   Tensor page_table, float scale) -> ()");
   ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
 
-  // Mamba selective scan kernel
-  ops.def(
-      "selective_scan_fwd(Tensor! u, Tensor! delta,"
-      "Tensor! A, Tensor! B, Tensor! C,"
-      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
-      "bool delta_softplus,"
-      "Tensor? query_start_loc,"
-      "Tensor? cache_indices,"
-      "Tensor? has_initial_state,"
-      "Tensor! ssm_states,"
-      "int pad_slot_id) -> ()");
-  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
-
-  ops.def(
-      "causal_conv1d_update(Tensor! x,"
-      "Tensor! conv_state,"
-      "Tensor! weight,"
-      "Tensor? bias_,"
-      "bool silu_activation,"
-      "Tensor? cache_seqlens_,"
-      "Tensor? conv_state_indices,"
-      "int pad_slot_id) -> ()");
-  ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
-
-  ops.def(
-      "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
-      "Tensor? bias_,"
-      "Tensor!? conv_states,"
-      "Tensor? query_start_loc,"
-      "Tensor? cache_indices,"
-      "Tensor? has_initial_state,"
-      "bool silu_activation,"
-      "int pad_slot_id) -> ()");
-  ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
-
   // Compute NVFP4 block quantized tensor.
   ops.def(
       "scaled_fp4_quant(Tensor! output, Tensor input,"
       "                 Tensor! output_scale, Tensor input_scale) -> ()");
   ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant);
+
+  // Compute NVFP4 experts quantization.
+  ops.def(
+      "scaled_fp4_experts_quant(Tensor! output, Tensor! output_scale,"
+      "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts) -> ()");
+  ops.impl("scaled_fp4_experts_quant", torch::kCUDA, &scaled_fp4_experts_quant);
 
   // Check if cutlass_scaled_mm_fp4 is supported for CUDA devices
   // of the given capability
@@ -545,6 +548,41 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
+
+  // Mamba selective scan kernel
+  ops.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "Tensor! ssm_states,"
+      "int pad_slot_id) -> ()");
+  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
+
+  ops.def(
+      "causal_conv1d_update(Tensor! x,"
+      "Tensor! conv_state,"
+      "Tensor! weight,"
+      "Tensor? bias_,"
+      "bool silu_activation,"
+      "Tensor? cache_seqlens_,"
+      "Tensor? conv_state_indices,"
+      "int pad_slot_id) -> ()");
+  ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
+
+  ops.def(
+      "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
+      "Tensor? bias_,"
+      "Tensor!? conv_states,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "bool silu_activation,"
+      "int pad_slot_id) -> ()");
+  ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 
 #ifndef USE_ROCM
   // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel

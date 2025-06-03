@@ -44,7 +44,8 @@ inline __device__ void apply_rotary_embedding(
                                    // head_size]
     const scalar_t* cache_ptr, const int head_size, const int num_heads,
     const int num_kv_heads, const int rot_dim, const int token_idx,
-    const int64_t query_stride, const int64_t key_stride) {
+    const int64_t query_stride, const int64_t key_stride,
+    const int64_t head_stride) {
   const int embed_dim = rot_dim / 2;
   const scalar_t* cos_ptr = cache_ptr;
   const scalar_t* sin_ptr = cache_ptr + embed_dim;
@@ -52,7 +53,8 @@ inline __device__ void apply_rotary_embedding(
   const int nq = num_heads * embed_dim;
   for (int i = threadIdx.x; i < nq; i += blockDim.x) {
     const int head_idx = i / embed_dim;
-    const int64_t token_head = token_idx * query_stride + head_idx * head_size;
+    const int64_t token_head =
+        token_idx * query_stride + head_idx * head_stride;
     const int rot_offset = i % embed_dim;
     apply_token_rotary_embedding<scalar_t, IS_NEOX>(
         query + token_head, cos_ptr, sin_ptr, rot_offset, embed_dim);
@@ -62,7 +64,8 @@ inline __device__ void apply_rotary_embedding(
     const int nk = num_kv_heads * embed_dim;
     for (int i = threadIdx.x; i < nk; i += blockDim.x) {
       const int head_idx = i / embed_dim;
-      const int64_t token_head = token_idx * key_stride + head_idx * head_size;
+      const int64_t token_head =
+          token_idx * key_stride + head_idx * head_stride;
       const int rot_offset = i % embed_dim;
       apply_token_rotary_embedding<scalar_t, IS_NEOX>(
           key + token_head, cos_ptr, sin_ptr, rot_offset, embed_dim);
@@ -84,7 +87,8 @@ __global__ void rotary_embedding_kernel(
     const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
                                                  // 2]
     const int rot_dim, const int64_t query_stride, const int64_t key_stride,
-    const int num_heads, const int num_kv_heads, const int head_size) {
+    const int64_t head_stride, const int num_heads, const int num_kv_heads,
+    const int head_size) {
   // Each thread block is responsible for one token.
   const int token_idx = blockIdx.x;
   int64_t pos = positions[token_idx];
@@ -92,7 +96,7 @@ __global__ void rotary_embedding_kernel(
 
   apply_rotary_embedding<scalar_t, IS_NEOX>(
       query, key, cache_ptr, head_size, num_heads, num_kv_heads, rot_dim,
-      token_idx, query_stride, key_stride);
+      token_idx, query_stride, key_stride, head_stride);
 }
 
 template <typename scalar_t, bool IS_NEOX>
@@ -109,9 +113,9 @@ __global__ void batched_rotary_embedding_kernel(
     const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
                                                  // 2]
     const int64_t* __restrict__ cos_sin_cache_offsets,  // [batch_size, seq_len]
-                                                        // or [num_tokens]
     const int rot_dim, const int64_t query_stride, const int64_t key_stride,
-    const int num_heads, const int num_kv_heads, const int head_size) {
+    const int64_t head_stride, const int num_heads, const int num_kv_heads,
+    const int head_size) {
   // Each thread block is responsible for one token.
   const int token_idx = blockIdx.x;
   int64_t pos = positions[token_idx];
@@ -121,7 +125,7 @@ __global__ void batched_rotary_embedding_kernel(
 
   apply_rotary_embedding<scalar_t, IS_NEOX>(
       query, key, cache_ptr, head_size, num_heads, num_kv_heads, rot_dim,
-      token_idx, query_stride, key_stride);
+      token_idx, query_stride, key_stride, head_stride);
 }
 
 }  // namespace vllm
@@ -179,6 +183,12 @@ void rotary_embedding(
   int seq_dim_idx = positions_ndim - 1;
   int64_t query_stride = query.stride(seq_dim_idx);
   int64_t key_stride = key.has_value() ? key->stride(seq_dim_idx) : 0;
+  // Determine head stride: for [*, heads, head_size] use stride of last dim;
+  // for flat [*, heads*head_size], heads blocks are contiguous of size
+  // head_size
+  int query_ndim = query.dim();
+  int64_t head_stride =
+      (query_ndim == positions_ndim + 2) ? query.stride(-2) : head_size;
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
@@ -190,14 +200,14 @@ void rotary_embedding(
           positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
           key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
           cos_sin_cache.data_ptr<scalar_t>(), rot_dim, query_stride, key_stride,
-          num_heads, num_kv_heads, head_size);
+          head_stride, num_heads, num_kv_heads, head_size);
     } else {
       vllm::rotary_embedding_kernel<scalar_t, false>
           <<<grid, block, 0, stream>>>(
               positions.data_ptr<int64_t>(), query.data_ptr<scalar_t>(),
               key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
               cos_sin_cache.data_ptr<scalar_t>(), rot_dim, query_stride,
-              key_stride, num_heads, num_kv_heads, head_size);
+              key_stride, head_stride, num_heads, num_kv_heads, head_size);
     }
   });
 }
@@ -263,6 +273,12 @@ void batched_rotary_embedding(
   int seq_dim_idx = positions_ndim - 1;
   int64_t query_stride = query.stride(seq_dim_idx);
   int64_t key_stride = key.has_value() ? key->stride(seq_dim_idx) : 0;
+  // Determine head stride: for [*, heads, head_size] use stride of last dim;
+  // for flat [*, heads*head_size], heads blocks are contiguous of size
+  // head_size
+  int query_ndim = query.dim();
+  int64_t head_stride =
+      (query_ndim == positions_ndim + 2) ? query.stride(-2) : head_size;
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
@@ -276,7 +292,7 @@ void batched_rotary_embedding(
               key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
               cos_sin_cache.data_ptr<scalar_t>(),
               cos_sin_cache_offsets.data_ptr<int64_t>(), rot_dim, query_stride,
-              key_stride, num_heads, num_kv_heads, head_size);
+              key_stride, head_stride, num_heads, num_kv_heads, head_size);
     } else {
       vllm::batched_rotary_embedding_kernel<scalar_t, false>
           <<<grid, block, 0, stream>>>(
@@ -284,7 +300,7 @@ void batched_rotary_embedding(
               key.has_value() ? key->data_ptr<scalar_t>() : nullptr,
               cos_sin_cache.data_ptr<scalar_t>(),
               cos_sin_cache_offsets.data_ptr<int64_t>(), rot_dim, query_stride,
-              key_stride, num_heads, num_kv_heads, head_size);
+              key_stride, head_stride, num_heads, num_kv_heads, head_size);
     }
   });
 }

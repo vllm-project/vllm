@@ -50,87 +50,93 @@ model_name = "mistralai/Mistral-7B-Instruct-v0.3"
 # or any other mistral model with function calling ability
 
 sampling_params = SamplingParams(max_tokens=8192, temperature=0.0)
-llm = LLM(model=model_name,
-          tokenizer_mode="mistral",
-          config_format="mistral",
-          load_format="mistral")
+llm = LLM(
+    model=model_name,
+    tokenizer_mode="mistral",
+    config_format="mistral",
+    load_format="mistral",
+)
 
 
 def generate_random_id(length=9):
     characters = string.ascii_letters + string.digits
-    random_id = ''.join(random.choice(characters) for _ in range(length))
+    random_id = "".join(random.choice(characters) for _ in range(length))
     return random_id
 
 
 # simulate an API that can be called
-def get_current_weather(city: str, state: str, unit: 'str'):
-    return (f"The weather in {city}, {state} is 85 degrees {unit}. It is "
-            "partly cloudly, with highs in the 90's.")
+def get_current_weather(city: str, state: str, unit: "str"):
+    return (
+        f"The weather in {city}, {state} is 85 degrees {unit}. It is "
+        "partly cloudly, with highs in the 90's."
+    )
 
 
-tool_funtions = {"get_current_weather": get_current_weather}
+tool_functions = {"get_current_weather": get_current_weather}
 
-tools = [{
-    "type": "function",
-    "function": {
-        "name": "get_current_weather",
-        "description": "Get the current weather in a given location",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "city": {
-                    "type":
-                    "string",
-                    "description":
-                    "The city to find the weather for, e.g. 'San Francisco'"
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "The city to find the weather for, e.g. 'San Francisco'",
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "the two-letter abbreviation for the state that the city is"
+                        " in, e.g. 'CA' which would mean 'California'",
+                    },
+                    "unit": {
+                        "type": "string",
+                        "description": "The unit to fetch the temperature in",
+                        "enum": ["celsius", "fahrenheit"],
+                    },
                 },
-                "state": {
-                    "type":
-                    "string",
-                    "description":
-                    "the two-letter abbreviation for the state that the city is"
-                    " in, e.g. 'CA' which would mean 'California'"
-                },
-                "unit": {
-                    "type": "string",
-                    "description": "The unit to fetch the temperature in",
-                    "enum": ["celsius", "fahrenheit"]
-                }
+                "required": ["city", "state", "unit"],
             },
-            "required": ["city", "state", "unit"]
-        }
+        },
     }
-}]
+]
 
-messages = [{
-    "role":
-    "user",
-    "content":
-    "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
-}]
+messages = [
+    {
+        "role": "user",
+        "content": "Can you tell me what the temperate will be in Dallas, in fahrenheit?",
+    }
+]
 
 outputs = llm.chat(messages, sampling_params=sampling_params, tools=tools)
 output = outputs[0].outputs[0].text.strip()
 
 # append the assistant message
-messages.append({
-    "role": "assistant",
-    "content": output,
-})
+messages.append(
+    {
+        "role": "assistant",
+        "content": output,
+    }
+)
 
 # let's now actually parse and execute the model's output simulating an API call by using the
 # above defined function
 tool_calls = json.loads(output)
 tool_answers = [
-    tool_funtions[call['name']](**call['arguments']) for call in tool_calls
+    tool_functions[call["name"]](**call["arguments"]) for call in tool_calls
 ]
 
 # append the answer as a tool message and let the LLM give you an answer
-messages.append({
-    "role": "tool",
-    "content": "\n\n".join(tool_answers),
-    "tool_call_id": generate_random_id(),
-})
+messages.append(
+    {
+        "role": "tool",
+        "content": "\n\n".join(tool_answers),
+        "tool_call_id": generate_random_id(),
+    }
+)
 
 outputs = llm.chat(messages, sampling_params, tools=tools)
 

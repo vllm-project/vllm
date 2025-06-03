@@ -9,7 +9,7 @@ at::Tensor as_g_workspace;
 
 torch::Tensor allspark_w8a16_gemm(
     torch::Tensor const& a, torch::Tensor const& b_qweight,
-    torch::Tensor const& b_scales, c10::optional<torch::Tensor> const& b_qzeros,
+    torch::Tensor const& b_scales, std::optional<torch::Tensor> const& b_qzeros,
     int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
     int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) {
   TORCH_CHECK_NOT_IMPLEMENTED(
@@ -918,7 +918,7 @@ void allspark_qgemm_w8a16_perc_ampere(
 
 torch::Tensor allspark_w8a16_gemm(
     torch::Tensor const& a, torch::Tensor const& b_qweight,
-    torch::Tensor const& b_scales, c10::optional<torch::Tensor> const& b_qzeros,
+    torch::Tensor const& b_scales, std::optional<torch::Tensor> const& b_qzeros,
     int64_t n, int64_t group_size, int64_t sm_count, int64_t sm_version,
     int64_t CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) {
   // Verify device and strides

@@ -16,6 +16,8 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 
 logger = init_logger(__name__)
 
@@ -52,14 +54,14 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
-    def __init__(self, runner):
-        super().__init__(runner)
+    def __init__(self, runner, kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
+        super().__init__(runner, kv_cache_spec, block_table)
 
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
-    def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor,
+    def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
             get_mla_metadata(
@@ -69,8 +71,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         )
 
         return FlashMLADecodeMetadata(
-            input_positions=input_positions,
-            block_table=block_table,
+            block_table=block_table_tensor,
             seq_lens=seq_lens,
             tile_scheduler_metadata=tile_scheduler_metadata,
             num_splits=num_splits,
