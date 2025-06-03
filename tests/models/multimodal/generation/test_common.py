@@ -338,7 +338,8 @@ VLM_TEST_SETTINGS = {
         models=[
             "OpenGVLab/InternVL2-1B",
             "OpenGVLab/InternVL2-2B",
-            "OpenGVLab/Mono-InternVL-2B",
+            # FIXME: Config cannot be loaded in transformers 4.52
+            # "OpenGVLab/Mono-InternVL-2B",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
