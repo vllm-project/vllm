@@ -7,6 +7,7 @@ import json
 import numpy as np
 from tqdm import tqdm
 from vllm import LLM, SamplingParams
+from vllm.attention.selector import global_force_attn_backend_context_manager, _Backend
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark VLLM model with multiple prompts")
@@ -92,7 +93,7 @@ def main():
     
     # Output JSON results if specified
     if args.output_json:
-        results = {
+        results_data = { # Renamed to avoid conflict with 'results' from process_prompts
             "model": args.model,
             "num_prompts": len(prompts),
             "batch_size": args.batch_size,
@@ -103,8 +104,29 @@ def main():
             "percentiles": dict(zip(percentages, percentiles.tolist())),
         }
         with open(args.output_json, "w") as f:
-            json.dump(results, f, indent=4)
+            json.dump(results_data, f, indent=4)
         print(f"Results saved to {args.output_json}")
+
+    # Example of a single forward pass with a forced backend
+    if True:
+        if hasattr(_Backend, "FLASHINFER"):
+            print("\nPerforming an extra forward pass with FLASHINFER backend...")
+            with global_force_attn_backend_context_manager(_Backend.FLASHINFER):
+                del llm
+                    # Initialize model
+                llm = LLM(
+                    model=args.model,
+                    enforce_eager=args.enforce_eager,
+                    trust_remote_code=True,
+                )
+                start_time_extra = time.perf_counter()
+                extra_outputs = process_prompts()
+                end_time_extra = time.perf_counter()
+                latency_extra = end_time_extra - start_time_extra
+                print(f"Extra forward pass with FLASHINFER took: {latency_extra:.4f} seconds")
+                # Optionally, do something with extra_outputs
+        else:
+            print("\nFLASHINFER backend not available, skipping extra forward pass.")
 
 if __name__ == "__main__":
     main()
