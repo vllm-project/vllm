@@ -142,7 +142,7 @@ class MultiConnector(KVConnectorBase_V1):
                 request, num_computed_tokens)
             # The first connector that has new matched tokens will be assigned
             # to this request.
-            if not to_return and toks > 0:
+            if to_return[0] == 0 and toks > 0:
                 self._requests_to_connector[request.request_id] = i
                 to_return = toks, load_async
         return to_return
