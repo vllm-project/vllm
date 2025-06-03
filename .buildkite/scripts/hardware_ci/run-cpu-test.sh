@@ -35,13 +35,11 @@ function cpu_tests() {
   # offline inference
   docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
     set -e
-    export VLLM_USE_V1=1
     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
 
   # Run basic model test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
-    export VLLM_USE_V1=1
     pytest -v -s tests/kernels/attention/test_cache.py -m cpu_model
     pytest -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
     pytest -v -s tests/models/language/generation -m cpu_model
@@ -51,7 +49,6 @@ function cpu_tests() {
   # Run compressed-tensor test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
-    export VLLM_USE_V1=1
     pytest -s -v \
     tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_static_setup \
     tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynamic_per_token"
@@ -65,7 +62,6 @@ function cpu_tests() {
   # Run chunked-prefill and prefix-cache test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
-    export VLLM_USE_V1=1
     pytest -s -v -k cpu_model \
     tests/basic_correctness/test_chunked_prefill.py"  
 
@@ -74,7 +70,6 @@ function cpu_tests() {
     set -e
     export VLLM_CPU_KVCACHE_SPACE=10 
     export VLLM_CPU_OMP_THREADS_BIND=$1
-    export VLLM_USE_V1=1
     python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m --dtype half & 
     timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
     python3 benchmarks/benchmark_serving.py \
