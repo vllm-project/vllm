@@ -982,7 +982,16 @@ class DPAsyncMPClient(AsyncMPClient):
         resources.stats_update_task = asyncio.create_task(
             run_engine_stats_update_task())
 
-    def get_core_engine_for_request(self) -> CoreEngine:
+    def get_core_engine_for_request(self,
+                                    dp_rank: Optional[int] = None
+                                    ) -> CoreEngine:
+        if dp_rank is not None:
+            # engines are already in rank order
+            if dp_rank < 0 or dp_rank >= len(self.core_engines):
+                raise ValueError(f"Requested DP rank {dp_rank} is out of "
+                                 f"range [0, {len(self.core_engines)})")
+            return self.core_engines[dp_rank]
+
         if not self.lb_engines:
             return self.core_engines[0]
         # TODO use P2C alg for larger DP sizes
@@ -1018,7 +1027,8 @@ class DPAsyncMPClient(AsyncMPClient):
         request.current_wave = self.current_wave
         request.client_index = self.client_index
 
-        chosen_engine = self.get_core_engine_for_request()
+        chosen_engine = self.get_core_engine_for_request(
+            request.data_parallel_rank)
         self.reqs_in_flight[request.request_id] = chosen_engine
 
         to_await = self._send_input(EngineCoreRequestType.ADD, request,
