@@ -131,9 +131,10 @@ void moe_unpermute(
 }
 
 template <typename T>
-__global__ void shuffleInputRowsKernel(
-    const T* input, const int32_t* dst2src_map, T* output,
-    int64_t num_src_rows, int64_t num_dst_rows, int64_t num_cols) {
+__global__ void shuffleInputRowsKernel(const T* input,
+                                       const int32_t* dst2src_map, T* output,
+                                       int64_t num_src_rows,
+                                       int64_t num_dst_rows, int64_t num_cols) {
   int64_t dest_row_idx = blockIdx.x;
   int64_t const source_row_idx = dst2src_map[dest_row_idx];
 
@@ -159,10 +160,9 @@ __global__ void shuffleInputRowsKernel(
   }
 }
 
-void shuffle_rows(
-    const torch::Tensor& input_tensor,
-    const torch::Tensor& dst2src_map,
-    torch::Tensor& output_tensor) {
+void shuffle_rows(const torch::Tensor& input_tensor,
+                  const torch::Tensor& dst2src_map,
+                  torch::Tensor& output_tensor) {
   TORCH_CHECK(input_tensor.scalar_type() == output_tensor.scalar_type(),
               "Input and output tensors must have the same data type");
 
@@ -174,17 +174,16 @@ void shuffle_rows(
   int64_t const num_cols = input_tensor.size(1);
 
   TORCH_CHECK(!(num_cols % (128 / sizeof(input_tensor.scalar_type()) / 8)),
-              "num_cols must be divisible by 128 / sizeof(input_tensor.scalar_type()) / 8");
+              "num_cols must be divisible by 128 / "
+              "sizeof(input_tensor.scalar_type()) / 8");
 
   MOE_DISPATCH(input_tensor.scalar_type(), [&] {
-        shuffleInputRowsKernel<scalar_t><<<blocks, threads, 0, stream>>>(
-            reinterpret_cast<scalar_t*>(input_tensor.data_ptr()),
-            dst2src_map.data_ptr<int32_t>(),
-            reinterpret_cast<scalar_t*>(output_tensor.data_ptr()),
-            num_src_rows,
-            num_dest_rows,
-            num_cols);
-      });
+    shuffleInputRowsKernel<scalar_t><<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<scalar_t*>(input_tensor.data_ptr()),
+        dst2src_map.data_ptr<int32_t>(),
+        reinterpret_cast<scalar_t*>(output_tensor.data_ptr()), num_src_rows,
+        num_dest_rows, num_cols);
+  });
 }
 
 #else

@@ -32,7 +32,6 @@ torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
 
 bool moe_permute_unpermute_supported();
 
-void shuffle_rows(
-    const torch::Tensor& input_tensor,
-    const torch::Tensor& dst2src_map,
-    torch::Tensor& output_tensor);
+void shuffle_rows(const torch::Tensor& input_tensor,
+                  const torch::Tensor& dst2src_map,
+                  torch::Tensor& output_tensor);

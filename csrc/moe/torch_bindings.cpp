@@ -83,7 +83,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   // Row shuffle for MoE
   m.def(
-      "shuffle_rows(Tensor input_tensor, Tensor dst2src_map, Tensor! output_tensor) -> ()");
+      "shuffle_rows(Tensor input_tensor, Tensor dst2src_map, Tensor! "
+      "output_tensor) -> ()");
   m.impl("shuffle_rows", torch::kCUDA, &shuffle_rows);
 
 #endif

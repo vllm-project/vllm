@@ -806,11 +806,16 @@ def cutlass_scaled_sparse_mm(
     return out
 
 
-def get_cutlass_moe_mm_data(
-        topk_ids: torch.Tensor, expert_offsets: torch.Tensor,
-        problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor,
-        input_permutation: torch.Tensor, output_permutation: torch.Tensor,
-        num_experts: int, n: int, k: int, blockscale_offsets: Optional[torch.Tensor] = None):
+def get_cutlass_moe_mm_data(topk_ids: torch.Tensor,
+                            expert_offsets: torch.Tensor,
+                            problem_sizes1: torch.Tensor,
+                            problem_sizes2: torch.Tensor,
+                            input_permutation: torch.Tensor,
+                            output_permutation: torch.Tensor,
+                            num_experts: int,
+                            n: int,
+                            k: int,
+                            blockscale_offsets: Optional[torch.Tensor] = None):
     """
     Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
@@ -838,22 +843,22 @@ def get_cutlass_moe_mm_data(
                                                 problem_sizes1, problem_sizes2,
                                                 input_permutation,
                                                 output_permutation,
-                                                num_experts, n, k, blockscale_offsets)
+                                                num_experts, n, k,
+                                                blockscale_offsets)
 
 
-def shuffle_rows(
-        input_tensor: torch.Tensor, dst2src_map: torch.Tensor
-):
+def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
     """
     Shuffle and expand the input tensor according to the dst2src_map and store the result in output_tensor.
     This is used in MoE to permute the input tensor before performing grouped matrix multiplications.
     """
     num_tokens_permuted = dst2src_map.shape[0]
     output_tensor = torch.empty((num_tokens_permuted, input_tensor.shape[1]),
-                                      device=input_tensor.device,
-                                      dtype=input_tensor.dtype)
+                                device=input_tensor.device,
+                                dtype=input_tensor.dtype)
     torch.ops._moe_C.shuffle_rows(input_tensor, dst2src_map, output_tensor)
     return output_tensor
+
 
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                    b_tensors: torch.Tensor, a_scales: torch.Tensor,
@@ -1124,7 +1129,8 @@ def scaled_fp4_experts_quant(
         f'input.ndim needs to be == 2, but got {input_tensor.ndim}.')
 
     MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
-    input_tensor = shuffle_rows(input_tensor, shuffle_map) if shuffle_map is not None else input_tensor
+    input_tensor = shuffle_rows(
+        input_tensor, shuffle_map) if shuffle_map is not None else input_tensor
     m_numtopk, k = input_tensor.shape
 
     assert (m_numtopk <= MAX_TOKENS_PER_EXPERT * topk), (
