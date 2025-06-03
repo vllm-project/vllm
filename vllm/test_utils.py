@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 MODELS_ON_S3 = [
     "adept/fuyu-8b",
     "ai21labs/AI21-Jamba-1.5-Mini",

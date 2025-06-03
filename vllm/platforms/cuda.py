@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Code inside this file can safely assume cuda platform, e.g. importing
 pynvml. However, it should not initialize cuda context.
 """
@@ -152,6 +153,21 @@ class CudaPlatformBase(Platform):
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
+
+        if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+                and parallel_config.data_parallel_size > 1
+                and vllm_config.compilation_config.use_cudagraph):
+            logger.info(
+                "Data Parallel: Forcing enforce eager to be True since DP "
+                "with DeepEP high-throughput kernels are not CUDA Graph "
+                "compatible. The DeepEP low-latency kernels are CUDA Graph "
+                "compatible. Set the all_to_all backend to deepep_low_latency "
+                "to use those kernels instead.")
+            vllm_config.compilation_config.use_cudagraph = False
+            vllm_config.model_config.enforce_eager = True
+            # TODO (varun): Turning this ON gives incorrect results for the
+            # Deepseek-V2-lite model.
+            vllm_config.compilation_config.use_inductor = False
 
     @classmethod
     def get_current_memory_usage(cls,
