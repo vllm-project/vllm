@@ -271,7 +271,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                     computed_blocks[j].append(cached_block[j])
             else:
                 break
-        if use_eagle and len(computed_blocks) > 0:
+        if use_eagle and len(computed_blocks[0]) > 0:
             for j in range(len(kv_cache_group_ids)):
                 computed_blocks[j].pop()
         return computed_blocks
@@ -357,7 +357,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
             for j in range(len(kv_cache_group_ids)):
                 del computed_blocks[j][num_contiguous_blocks:]
-        if use_eagle and len(computed_blocks) > 0:
+        if use_eagle and len(computed_blocks[0]) > 0:
             for j in range(len(kv_cache_group_ids)):
                 computed_blocks[j].pop()
         return computed_blocks

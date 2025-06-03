@@ -19,7 +19,7 @@ from vllm.v1.core.kv_cache_utils import (NONE_HASH, BlockHash,
                                          hash_request_tokens,
                                          unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheNewTensor,
+                                        KVCacheGroupSpec, KVCacheTensor,
                                         SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
@@ -379,10 +379,10 @@ def test_unify_kv_cache_configs():
     same_kv_cache_config = [
         KVCacheConfig(
             num_blocks=10,
-            tensors={
-                "layer1": KVCacheNewTensor(100),
-                "layer2": KVCacheNewTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
                 KVCacheGroupSpec(["layer2"],
@@ -391,10 +391,10 @@ def test_unify_kv_cache_configs():
         ),
         KVCacheConfig(
             num_blocks=20,
-            tensors={
-                "layer1": KVCacheNewTensor(100),
-                "layer2": KVCacheNewTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
                 KVCacheGroupSpec(["layer2"],
@@ -409,10 +409,10 @@ def test_unify_kv_cache_configs():
     need_sort_kv_cache_config = [
         KVCacheConfig(
             num_blocks=10,
-            tensors={
-                "layer1": KVCacheNewTensor(100),
-                "layer2": KVCacheNewTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
                 KVCacheGroupSpec(["layer2"],
@@ -421,10 +421,10 @@ def test_unify_kv_cache_configs():
         ),
         KVCacheConfig(
             num_blocks=20,
-            tensors={
-                "layer1": KVCacheNewTensor(100),
-                "layer2": KVCacheNewTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer2"],
                                  new_kv_cache_spec(num_kv_heads=4)),
@@ -440,10 +440,10 @@ def test_unify_kv_cache_configs():
     diff_kv_cache_config = [
         KVCacheConfig(
             num_blocks=10,
-            tensors={
-                "layer1": KVCacheNewTensor(100),
-                "layer2": KVCacheNewTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
                 KVCacheGroupSpec(["layer2"],
@@ -452,10 +452,10 @@ def test_unify_kv_cache_configs():
         ),
         KVCacheConfig(
             num_blocks=20,
-            tensors={
-                "layer1": KVCacheNewTensor(100),
-                "layer2": KVCacheNewTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
                 KVCacheGroupSpec(["layer2"],
@@ -576,9 +576,9 @@ def test_allocate_with_lookahead():
     block_size = 4
     config = KVCacheConfig(
         num_blocks=10,
-        tensors={
-            "layer1": KVCacheNewTensor(100),
-        },
+        kv_cache_tensors=[
+            KVCacheTensor(size=100, shared_by=["layer1"]),
+        ],
         kv_cache_groups=[
             KVCacheGroupSpec(["layer1"],
                              new_kv_cache_spec(block_size=block_size)),

@@ -96,7 +96,7 @@ def create_scheduler(
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
-        tensors={},
+        kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(block_size, 1, 1, torch.float32,
@@ -818,7 +818,7 @@ def _assert_right_kv_cache_manager(
         assert (scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                 num_cached_block[req_id] == EXPECTED_TOTAL_BLOCKS)
         assert len(blocks) == EXPECTED_TOTAL_BLOCKS
-        assert len(hashes[block_size]) == EXPECTED_TOTAL_BLOCKS
+        assert len(hashes) == EXPECTED_TOTAL_BLOCKS
 
     # Make sure we actually touched all the blocks.
     BLOCKS_PER_REQ = num_tokens / block_size
