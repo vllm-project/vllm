@@ -1200,6 +1200,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for k, v in self.intermediate_tensors.items()
         })
 
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+
+        # For DP: Don't pad when setting enforce_eager.
+        # This lets us set enforce_eager on the prefiller in a P/D setup and
+        # still use CUDA graphs (enabled by this padding) on the decoder.
+        #
+        # TODO(tms) : There are many cases where padding is enabled for
+        # prefills, causing unnecessary and excessive padding of activations.
+
+        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
+            # Early exit.
+            return 0, None
+
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+                                                dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+        return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
+
     def _get_dummy_model_inputs(self, num_tokens: int) -> tuple:
         # Dummy batch. (hopefully we are the last one so we can just
         # update this to a one token batch and return)
@@ -1306,7 +1331,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                    num_scheduled_tokens: Optional[int],
                    ubatch_slices: Optional[UBatchSlices] = None,
                    scheduler_output: Optional["SchedulerOutput"] = None,
-                   is_dummy_run: bool = False):
+                   is_dummy_run: bool = False,
+                   num_tokens_across_dp: Optional[torch.Tensor] = None):
 
         num_dummy_tokens = num_scheduled_tokens if is_dummy_run else 1
 
@@ -1367,7 +1393,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         attn_metadata[i]
                         if attn_metadata is not None else None,
                         self.vllm_config,
-                        num_tokens=num_tokens)
+                        num_tokens=num_tokens,
+                        num_tokens_across_dp=num_tokens_across_dp)
 
                     thread = threading.Thread(target=_ubatch_thread,
                                               args=(
@@ -1400,35 +1427,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slice(0, num_scheduled_tokens),
                 set_forward_context(attn_metadata,
                                     vllm_config=self.vllm_config,
-                                    num_tokens=num_scheduled_tokens or 1),
+                                    num_tokens=num_scheduled_tokens or 1,
+                                    num_tokens_across_dp=num_tokens_across_dp),
                 is_dummy_run)
 
         return model_output
-
-    def get_dp_padding(self,
-                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
-        dp_size = self.vllm_config.parallel_config.data_parallel_size
-        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-
-        # For DP: Don't pad when setting enforce_eager.
-        # This lets us set enforce_eager on the prefiller in a P/D setup and
-        # still use CUDA graphs (enabled by this padding) on the decoder.
-        #
-        # TODO(tms) : There are many cases where padding is enabled for
-        # prefills, causing unnecessary and excessive padding of activations.
-
-        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
-            # Early exit.
-            return 0, None
-
-        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
-            num_tokens, dp_size, dp_rank)
-        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
-        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
-                                                dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-        return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
 
     @torch.inference_mode()
     def execute_model(

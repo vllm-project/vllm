@@ -45,6 +45,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        assert False
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
         ubatch_ctx = get_current_ubatch_context()
@@ -144,6 +145,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> None:
+        assert False
         num_tokens = output.size(0)  # M
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
