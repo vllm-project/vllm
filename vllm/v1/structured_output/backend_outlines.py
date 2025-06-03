@@ -272,7 +272,7 @@ def _check_unsupported(parsed) -> None:
 def validate_regex_is_buildable(pattern: str) -> None:
     """
     Validates that the input regex is not using unsupported features
-    of the `regex-automata` crate (outlines_core regex engine), and has a
+    of the `regex-automata` crate (outlines_core regex engine) and has a
     universal start state.
     definition of universal start state used can be found at:
     https://docs.rs/regex-automata/latest/regex_automata/dfa/trait.Automaton.html#method.universal_start_state
