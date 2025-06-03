@@ -435,9 +435,14 @@ class NixlConnectorWorker:
             while True:
                 identity, _, msg = sock.recv_multipart()
                 # Decode the message which contains (GET_META_MSG, rank)
+<<<<<<< HEAD
                 msg, target_rank = msgspec.msgpack.decode(msg)
                 logger.info("Received message from rank %s", target_rank)
                 if msg != GET_META_MSG:
+=======
+                msg_tuple = msgspec.msgpack.decode(msg)
+                if msg_tuple[0] != GET_META_MSG:
+>>>>>>> 93850c220 (clean logging)
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart(
@@ -627,9 +632,7 @@ class NixlConnectorWorker:
         # Other ranks send their metadata to rank 0
         if self.tp_rank == 0:
             # After KV Caches registered, listen for new connections.
-            logger.info("Rank %s: Starting handshake listener", self.tp_rank)
-            logger.info("Rank %s: Waiting for metadata from other ranks",
-                        self.tp_rank)
+            logger.debug("Rank %s: Starting handshake listener", self.tp_rank)
             combined_metadata = [rank_metadata]
             for i in range(1, self.world_size):
                 combined_metadata.append(self.tp_group.recv_object(src=i))
@@ -639,9 +642,9 @@ class NixlConnectorWorker:
                         "Received metadata from different engine id: %s",
                         remote_metadata.engine_id)
 
-            logger.info("Rank %s: Received metadata from other ranks",
-                        self.tp_rank)
-            
+            logger.debug("Rank %s: Received metadata from other ranks",
+                         self.tp_rank)
+
             ready_event = threading.Event()
             self._nixl_handshake_listener_t = threading.Thread(
                 target=self._nixl_handshake_listener,
@@ -652,7 +655,7 @@ class NixlConnectorWorker:
             ready_event.wait()
         else:
             # Other ranks send their metadata to rank 0
-            logger.info("Rank %s: Sending metadata to rank 0", self.tp_rank)
+            logger.debug("Rank %s: Sending metadata to rank 0", self.tp_rank)
             self.tp_group.send_object(rank_metadata, dst=0)
 
     def add_remote_agent(self,
@@ -995,10 +998,10 @@ class NixlConnectorWorker:
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
-        logger.info("Rank %s: local_block_descs_ids: %s", self.tp_rank,
-                    local_block_descs_ids)
-        logger.info("Rank %s: remote_block_descs_ids: %s", self.tp_rank,
-                    remote_block_descs_ids)
+        logger.debug("Rank %s: local_block_descs_ids: %s", self.tp_rank,
+                     local_block_descs_ids)
+        logger.debug("Rank %s: remote_block_descs_ids: %s", self.tp_rank,
+                     remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
         handle = self.nixl_wrapper.make_prepped_xfer(
