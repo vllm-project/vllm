@@ -79,9 +79,9 @@ class TensorizerLoader(BaseModelLoader):
                 model_class = get_model_architecture(model_config)[0]
 
                 tensorizer_config = copy.copy(self.tensorizer_config)
-                tensorizer_config.model_class = model_class
-                tensorizer_config.hf_config = model_config.hf_config
-                tensorizer_config.dtype = model_config.dtype
+                tensorizer_config._model_cls = model_class
+                tensorizer_config._hf_config = model_config.hf_config
+                tensorizer_config._model_cls_dtype = model_config.dtype
 
                 model = load_with_tensorizer(tensorizer_config,
                                              vllm_config=vllm_config)

@@ -5,7 +5,6 @@ import atexit
 import contextlib
 import contextvars
 import dataclasses
-import io
 import json
 import os
 import shutil
@@ -17,17 +16,15 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, BinaryIO, Optional, Union
-import weakref
-from transformers import (
-    PreTrainedTokenizer, PreTrainedTokenizerFast,
-    AutoTokenizer,
-)
+from typing import Any, Optional, Union
 
 import regex as re
 import torch
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
+from transformers import (
+    AutoTokenizer,
+)
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -35,9 +32,8 @@ from vllm.config import ModelConfig, ParallelConfig, set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
-from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.transformers_utils.tokenizer_base import TokenizerBase
+    VocabParallelEmbedding
+)
 from vllm.utils import FlexibleArgumentParser, PlaceholderModule
 
 try:
@@ -214,23 +210,28 @@ class TensorizerConfig:
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
     s3_endpoint: Optional[str] = None
-    model_class: Optional[type[torch.nn.Module]] = None
-    hf_config: Optional[PretrainedConfig] = None
-    dtype: Optional[Union[str, torch.dtype]] = None
     lora_dir: Optional[str] = None
-    extra_serialization_attrs: Optional[dict[str, Any]] = None
+    _extra_serialization_attrs: Optional[dict[str, Any]] = None
+    _model_cls: Optional[type[torch.nn.Module]] = None
+    _hf_config: Optional[PretrainedConfig] = None
+    _model_cls_dtype: Optional[Union[str, torch.dtype]] = None
     _is_sharded: bool = False
-    """
-    TODO: Update this, this is incorrect now that it's for TensorizerConfig
-    
-    Args for the TensorizerAgent class. These are used to configure the behavior 
-    of the TensorDeserializer when loading tensors from a serialized model.
+    """    
+    Args for the TensorizerConfig class. These are used to configure the 
+    behavior of model serialization and deserialization using Tensorizer.
     
     Args:
       tensorizer_uri: Path to serialized model tensors. Can be a local file 
           path or a S3 URI. This is a required field unless lora_dir is 
           provided and the config is meant to be used for the
-          `tensorize_lora_adapter` function.
+          `tensorize_lora_adapter` function. Unless a `tensorizer_dir` or 
+          `lora_dir` is passed to this object's initializer, this is a required 
+          argument.
+      tensorizer_dir: Path to a directory containing serialized model tensors,
+          and all other potential model artifacts to load the model, such as 
+          configs and tokenizer files. Can be passed instead of `tensorizer_uri`
+          where the `model.tensors` file will be assumed to be in this 
+          directory.
       vllm_tensorized: If True, indicates that the serialized model is a 
           vLLM model. This is used to determine the behavior of the 
           TensorDeserializer when loading tensors from a serialized model.
@@ -255,6 +256,10 @@ class TensorizerConfig:
           be set via the S3_SECRET_ACCESS_KEY environment variable.
       s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
           S3_ENDPOINT_URL environment variable.
+      lora_dir: Path to a directory containing LoRA adapter artifacts for 
+          serialization or deserialization. When serializing LoRA adapters 
+          this is the only necessary parameter to pass to this object's 
+          initializer.
   """
 
     def __post_init__(self):
@@ -285,9 +290,9 @@ class TensorizerConfig:
         self.lora_dir = self.tensorizer_dir
 
         self._extra_serialization_metadata: Union[ExtraSerializationMetadata, None] = None
-        if self.extra_serialization_attrs:
+        if self._extra_serialization_attrs:
             self._extra_serialization_metadata = ExtraSerializationMetadata(
-                **self.extra_serialization_attrs
+                **self._extra_serialization_attrs
             )
 
     @classmethod
@@ -461,14 +466,14 @@ class TensorizerAgent:
         self.model = self._init_model()
 
     def _init_model(self):
-        assert self.tensorizer_config.hf_config is not None
-        model_args = self.tensorizer_config.hf_config
-        model_args.torch_dtype = self.tensorizer_config.dtype
-        assert self.tensorizer_config.model_class is not None
+        assert self.tensorizer_config._hf_config is not None
+        model_args = self.tensorizer_config._hf_config
+        model_args.torch_dtype = self.tensorizer_config._model_cls_dtype
+        assert self.tensorizer_config._model_cls is not None
         # TODO: Do we need to consider old-style model class?
         with meta_tensor_mode(), set_current_vllm_config(self.vllm_config,
                                                          check_compile=True):
-            return self.tensorizer_config.model_class(
+            return self.tensorizer_config._model_cls(
                 vllm_config=self.vllm_config)
 
     def _resize_lora_embeddings(self):
@@ -517,7 +522,7 @@ class TensorizerAgent:
                 **self.tensorizer_args.stream_params
         ) as stream, TensorDeserializer(
                 stream,
-                dtype=self.tensorizer_config.dtype,
+                dtype=self.tensorizer_config._model_cls_dtype,
                 device=f'cuda:{torch.cuda.current_device()}',
                 **self.tensorizer_args.deserializer_params) as deserializer:
             deserializer.load_into_module(self.model)
