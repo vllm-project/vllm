@@ -623,7 +623,8 @@ class NixlConnectorWorker:
             device_id=cache_device_id)
 
 
-        # Only rank 0 starts the handshake listener
+        # Only rank 0 starts the handshake listener and send it to remote models
+        # Other ranks send their metadata to rank 0
         if self.tp_rank == 0:
             # After KV Caches registered, listen for new connections.
             logger.info("Rank %s: Starting handshake listener", self.tp_rank)
