@@ -47,7 +47,7 @@ struct sm100_fp8_config_M64 {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
-  using TileShape = Shape<_128, _64, _64>;
+  using TileShape = Shape<_64, _64, _256>;
   using ClusterShape = Shape<_1, _8, _1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm_sm100<InType, OutType, Epilogue, TileShape, ClusterShape,
