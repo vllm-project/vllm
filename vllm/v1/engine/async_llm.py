@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
@@ -27,7 +28,8 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core_client import AsyncMPClient, DPAsyncMPClient
+from vllm.v1.engine.core_client import (AsyncMPClient, DPAsyncMPClient,
+                                        RayDPClient)
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.output_processor import (OutputProcessor,
                                              RequestOutputCollector)
@@ -119,9 +121,13 @@ class AsyncLLM(EngineClient):
                                                 log_stats=self.log_stats)
 
         # EngineCore (starts the engine in background process).
-        core_client_class = AsyncMPClient if (
-            vllm_config.parallel_config.data_parallel_size
-            == 1) else DPAsyncMPClient
+        core_client_class: type[AsyncMPClient]
+        if vllm_config.parallel_config.data_parallel_size == 1:
+            core_client_class = AsyncMPClient
+        elif vllm_config.parallel_config.data_parallel_backend == "ray":
+            core_client_class = RayDPClient
+        else:
+            core_client_class = DPAsyncMPClient
 
         self.engine_core = core_client_class(
             vllm_config=vllm_config,

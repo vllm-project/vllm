@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import torch
@@ -23,6 +24,12 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         self.block_shape = block_shape
         self.quant_dtype = quant_dtype
 
+    def max_num_tokens_per_rank(self) -> Optional[int]:
+        return None
+
+    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+        return None
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -33,7 +40,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool = False,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
+               Optional[torch.Tensor], Optional[torch.Tensor]]:
+
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
@@ -46,7 +55,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
                                                    self.per_channel_quant,
                                                    self.block_shape)
 
-        return a1q, a1q_scale, None
+        return a1q, a1q_scale, None, None, None
 
     def finalize(
         self,
