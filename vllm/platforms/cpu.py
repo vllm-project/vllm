@@ -132,7 +132,8 @@ class CpuPlatform(Platform):
                 f" {kv_cache_space}, expect a positive integer value.")
 
         parallel_config = vllm_config.parallel_config
-        if (parallel_config.distributed_executor_backend is not None
+        if (parallel_config.world_size > 1
+                and parallel_config.distributed_executor_backend is not None
                 and parallel_config.distributed_executor_backend != "mp"):
             logger.warning(("%s is not supported on CPU, fallback to mp "
                             "distributed executor backend."),
@@ -157,7 +158,8 @@ class CpuPlatform(Platform):
         vllm_config.compilation_config.cudagraph_capture_sizes = []
 
         compilation_config = vllm_config.compilation_config
-        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
+        if (envs.VLLM_USE_V1 and vllm_config.compilation_config.level
+                == CompilationLevel.PIECEWISE):
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
             compilation_config.backend = "eager"
             compilation_config.custom_ops += ["none"]
