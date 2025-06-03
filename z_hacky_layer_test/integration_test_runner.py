@@ -14,8 +14,8 @@ def run_cache_layer(backend: str) -> str:
     print(f"\nRunning cache_layer with backend: {backend}")
     try:
         result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        # print("stdout:\n", result.stdout)
-        # print("stderr:\n", result.stderr)
+        print("stdout:\n", result.stdout)
+        print("stderr:\n", result.stderr)
     except subprocess.CalledProcessError as e:
         print(f"Error running cache_layer with backend {backend}:")
         print("stdout:\n", e.stdout)
@@ -80,6 +80,9 @@ def compare_tensors(tensor1: Any, tensor2: Any, name: str) -> bool:
         
     is_close = torch.allclose(tensor1.float(), tensor2.float(), atol=1e-5, rtol=1e-4) # Added rtol for float comparison
     
+    if not is_close:
+        print(f"\n\n{name} abs(tensor1 - tensor2): {torch.abs(tensor1 - tensor2)} max {torch.abs(tensor1 - tensor2).max()}")
+    
     # Debugging for a specific tensor if needed
     if name == "kv_cache_post" and False:
         print("shape", tensor1.shape)
@@ -122,8 +125,8 @@ def compare_outputs(dir1: str, dir2: str):
 
 def main():
     # Run with two different backends
-    backend1 = "FLASH_ATTN"
-    backend2 = "FLASH_ATTN_VLLM_V1"
+    backend1 = "GARBAGE"
+    backend2 = "GARBAGE2"
     
     output_dir1 = run_cache_layer(backend1)
     output_dir2 = run_cache_layer(backend2)

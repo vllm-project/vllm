@@ -13,7 +13,7 @@ def main():
     parser.add_argument("--trust-remote-code", action="store_true", 
                         help="Whether to trust remote code")
     parser.add_argument("--backend", type=str, 
-                        choices=["FLASH_ATTN", "FLASH_ATTN_VLLM_V1", "FLASHINFER", "BOK"],
+                        choices=["FLASH_ATTN", "FLASH_ATTN_VLLM_V1", "FLASHINFER", "BOK", "GARBAGE", "GARBAGE2"],
                         default="FLASHINFER",
                         help="vLLM attention backend to use")
     args = parser.parse_args()
@@ -35,12 +35,12 @@ def main():
     prompts = ["Hello, how are you?"]
     
     def attach_hook(self):
-        print("self.model_runner.model.model.__class__", self.model_runner.model.model.__class__)
-        print("self.model_runner.model.model.layers", self.model_runner.model.model.layers)
+        # print("self.model_runner.model.model.__class__", self.model_runner.model.model.__class__)
+        # print("self.model_runner.model.model.layers", self.model_runner.model.model.layers)
         layer = self.model_runner.model.model.layers[0]
-        print("layer:", layer)
-        print("layer.self_attn:", layer.self_attn)
-        print("layer.self_attn.attn:", layer.self_attn.attn)
+        # print("layer:", layer)
+        # print("layer.self_attn:", layer.self_attn)
+        # print("layer.self_attn.attn:", layer.self_attn.attn)
         
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
@@ -152,9 +152,9 @@ def main():
     
     # Generate output with the model to trigger the hook
     sampling_params = SamplingParams(
-        temperature=1.0,
-        top_p=1.0,
-        max_tokens=1,
+        max_tokens=2,
+        temperature=0.0,
+        top_k=1,
     )
     output = llm.generate(prompts, sampling_params)
     print("Output:", output, flush=True)
