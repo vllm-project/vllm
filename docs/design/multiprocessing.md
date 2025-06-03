@@ -22,13 +22,13 @@ This document describes how vLLM deals with these challenges.
 
 [Python multiprocessing methods](https://docs.python.org/3/library/multiprocessing.html#contexts-and-start-methods) include:
 
-- `spawn` - spawn a new Python process. This will be the default as of Python
-  3.14. In macOS, this is already the default.
+- `spawn` - spawn a new Python process. The default on Windows and macOS.
 
-- `fork` - Use `os.fork()` to fork the Python interpreter. This is the default
-  in Python versions prior to 3.14.
+- `fork` - Use `os.fork()` to fork the Python interpreter. The default on
+  Linux for Python versions prior to 3.14.
 
 - `forkserver` - Spawn a server process that will fork a new process on request.
+  The default on Linux for Python version 3.14 and newer.
 
 ### Tradeoffs
 
