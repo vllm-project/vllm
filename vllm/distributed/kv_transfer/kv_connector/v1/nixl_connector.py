@@ -417,7 +417,6 @@ class NixlConnectorWorker:
                 identity, _, msg = sock.recv_multipart()
                 # Decode the message which contains (GET_META_MSG, rank)
                 msg_tuple = msgspec.msgpack.decode(msg)
-                logger.info("Received message from rank %s", msg_tuple[1])
                 if msg_tuple[0] != GET_META_MSG:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
@@ -435,9 +434,6 @@ class NixlConnectorWorker:
         logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
-            logger.info("Sending get metadata message from rank %s",
-                        self.tp_rank)
-            # Encode the tuple as bytes using msgpack
             msg = msgspec.msgpack.encode((GET_META_MSG, self.tp_rank))
             sock.send(msg)
             metadata_bytes = sock.recv()
@@ -445,16 +441,14 @@ class NixlConnectorWorker:
             metadata = decoder.decode(metadata_bytes)
             got_metadata_time = time.perf_counter()
 
-            logger.info("Received metadata from rank %s", self.tp_rank)
-
             # Register Remote agent.
             self.add_remote_agent(metadata)
             setup_agent_time = time.perf_counter()
 
-            logger.info("NIXL handshake: get metadata took: %s",
-                        got_metadata_time - start_time)
-            logger.info("NIXL handshake: add agent took: %s",
-                        setup_agent_time - got_metadata_time)
+            logger.debug("NIXL handshake: get metadata took: %s",
+                         got_metadata_time - start_time)
+            logger.debug("NIXL handshake: add agent took: %s",
+                         setup_agent_time - got_metadata_time)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -548,9 +542,7 @@ class NixlConnectorWorker:
         # Other ranks send their metadata to rank 0
         if self.tp_rank == 0:
             # After KV Caches registered, listen for new connections.
-            logger.info("Rank %s: Starting handshake listener", self.tp_rank)
-            logger.info("Rank %s: Waiting for metadata from other ranks",
-                        self.tp_rank)
+            logger.debug("Rank %s: Starting handshake listener", self.tp_rank)
             combined_metadata = [rank_metadata]
             for i in range(1, self.world_size):
                 combined_metadata.append(self.tp_group.recv_object(src=i))
@@ -560,8 +552,8 @@ class NixlConnectorWorker:
                         "Received metadata from different engine id: %s",
                         remote_metadata.engine_id)
 
-            logger.info("Rank %s: Received metadata from other ranks",
-                        self.tp_rank)
+            logger.debug("Rank %s: Received metadata from other ranks",
+                         self.tp_rank)
 
             ready_event = threading.Event()
             self._nixl_handshake_listener_t = threading.Thread(
@@ -573,12 +565,10 @@ class NixlConnectorWorker:
             ready_event.wait()
         else:
             # Other ranks send their metadata to rank 0
-            logger.info("Rank %s: Sending metadata to rank 0", self.tp_rank)
+            logger.debug("Rank %s: Sending metadata to rank 0", self.tp_rank)
             self.tp_group.send_object(rank_metadata, dst=0)
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
-        logger.info("Rank %s: Adding remote agent %s", self.tp_rank,
-                    nixl_agent_meta.engine_id)
         engine_id = nixl_agent_meta.engine_id
         assert engine_id != self.engine_id, "Conflict engine id found!"
         if engine_id in self._remote_agents:
@@ -597,8 +587,8 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 blocks_data.append((base_addr + block_offset, self.block_len,
                                     self.cache_device_index))
-        logger.info("Created %s blocks for src engine %s and tp_rank %s",
-                    len(blocks_data), self.engine_id, self.tp_rank)
+        logger.debug("Created %s blocks for src engine %s and tp_rank %s",
+                     len(blocks_data), self.engine_id, self.tp_rank)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
@@ -614,8 +604,8 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 blocks_data.append((base_addr + block_offset, self.block_len,
                                     self.cache_device_index))
-        logger.info("Created %s blocks for dst engine %s and tp_rank %s",
-                    len(blocks_data), engine_id, self.tp_rank)
+        logger.debug("Created %s blocks for dst engine %s and tp_rank %s",
+                     len(blocks_data), engine_id, self.tp_rank)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
@@ -824,10 +814,10 @@ class NixlConnectorWorker:
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
-        logger.info("Rank %s: local_block_descs_ids: %s", self.tp_rank,
-                    local_block_descs_ids)
-        logger.info("Rank %s: remote_block_descs_ids: %s", self.tp_rank,
-                    remote_block_descs_ids)
+        logger.debug("Rank %s: local_block_descs_ids: %s", self.tp_rank,
+                     local_block_descs_ids)
+        logger.debug("Rank %s: remote_block_descs_ids: %s", self.tp_rank,
+                     remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
         handle = self.nixl_wrapper.make_prepped_xfer(
