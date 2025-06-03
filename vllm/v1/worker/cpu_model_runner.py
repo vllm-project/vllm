@@ -52,6 +52,11 @@ class CPUModelRunner(GPUModelRunner):
         logger.info("Starting to load model %s...", self.model_config.model)
         self.model = get_model(vllm_config=self.vllm_config)
 
+        if self.lora_config:
+            self.model = self.load_lora_model(self.model, self.model_config,
+                                              self.scheduler_config,
+                                              self.lora_config, self.device)
+
     def warming_up_model(self) -> None:
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
