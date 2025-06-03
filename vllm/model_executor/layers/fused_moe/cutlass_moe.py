@@ -375,6 +375,8 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
                                 w2_alphas, problem_sizes2, expert_offsets[:-1],
                                 blockscale_offsets[:-1], out_dtype, device)
     del int_fp4, int_blockscale
-    out = (c2[c_map].view(m, num_topk, k) *
+
+    c2 = ops.shuffle_rows(c2, c_map)
+    out = (c2.view(m, num_topk, k) *
            topk_weights.view(m, num_topk, 1).half()).sum(dim=1)
     return out.to(dtype=out_dtype)
