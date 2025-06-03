@@ -7,29 +7,60 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
+from vllm.utils import cdiv, round_up
+
+
+def pplx_hidden_dim_scale_bytes(
+    hidden_dim: int,
+    in_dtype: torch.dtype,
+    quant_dtype: Optional[torch.dtype],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]],
+):
+    # For blocked per token: set to
+    #   ceil_div(hidden_dim, block_size) * sizeof(float32)
+    # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
+    if quant_dtype is not None and quant_dtype.itemsize == 1:
+        block_size = block_shape[0] if block_shape is not None else 128
+        hidden_dim_bytes = hidden_dim * quant_dtype.itemsize
+        if per_act_token_quant:
+            hidden_scale_bytes = 4 * torch.float32.itemsize  #?
+        else:
+            hidden_scale_bytes = round_up(
+                (cdiv(hidden_dim, block_size) * torch.float32.itemsize), 16)
+    else:
+        hidden_dim_bytes = hidden_dim * in_dtype.itemsize
+        hidden_scale_bytes = 0
+
+    return hidden_dim_bytes, hidden_scale_bytes
 
 
 # The max_num_tokens, world_size and dp_size must be the same
 # as the ones used to create the AllToAll.
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
-    def __init__(self,
-                 a2a: pplx.AllToAll,
-                 max_num_tokens: int,
-                 world_size: int,
-                 rank: int,
-                 dp_size: int,
-                 quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None):
-        super().__init__()
+    def __init__(
+        self,
+        a2a: pplx.AllToAll,
+        max_num_tokens: int,
+        world_size: int,
+        rank: int,
+        dp_size: int,
+        quant_dtype: Optional[torch.dtype] = None,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+    ):
+        super().__init__(
+            quant_dtype,
+            per_act_token_quant,
+            block_shape,
+        )
         assert max_num_tokens > 0
         self.a2a = a2a
-        self.block_shape = block_shape
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.rank = rank
         self.dp_size = dp_size
-        self.quant_dtype = quant_dtype
 
     def prepare(
         self,
@@ -58,13 +89,27 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
 
-        a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
-                                                   self.quant_dtype,
-                                                   per_act_token,
-                                                   self.block_shape)
+        repeat_cols = 4
+        repeat_rows = 1 if self.per_act_token_quant else a1.shape[0]
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1, (None if self.per_act_token_quant else a1_scale), self.quant_dtype,
+            self.per_act_token_quant, self.block_shape)
+
+        if a1q_scale is not None:
+            a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
+
+        # per_act_token_quant = a1_scale.numel() != 1 if a1_scale is not None else (
+        #     a2_scale.numel() != 1 if a2_scale is not None else False)
+
+        # a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
+        #                                            self.quant_dtype,
+        #                                            per_act_token,
+        #                                            self.block_shape)
+
+        if a1q_scale is not None and a1q_scale.dim() == 1:
+            assert a1q_scale.numel() == 1
+            a1q_scale = a1q_scale.view(1, 1)
 
         # rem_experts need to be 0 for pplx to work properly.
         rem_experts = num_experts % self.world_size
@@ -90,15 +135,22 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             float32_size = torch.float32.itemsize
             block_size = (self.block_shape[0] if self.block_shape is not None
                           else 1) * float32_size
-            expert_x_scale = torch.empty(
-                (
-                    num_experts,
-                    expert_x.size(1),
-                    (expert_x.size(2) + block_size - 1) // block_size,
-                ),
-                dtype=torch.float32,
-                device=device,
+
+            expert_x_scale_shape = (
+                num_local_experts,
+                expert_x.size(1),
+                (expert_x.size(2) + block_size - 1) // block_size,
             )
+
+            #print(f"XXXXXXXXXX {block_size} {expert_x_scale_shape}")
+
+            expert_x_scale = torch.zeros(
+                expert_x_scale_shape,
+                dtype=torch.float32,
+                device=expert_x.device,
+            )
+
+            #print(f"YYYYYYYYYYYYYYY {expert_x.shape}")
 
         # This argument is optional, defaults to indices.size(0)
         # There's not much point setting this unless it is != indices.size(0)
@@ -113,6 +165,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=rank_topk_ids,
             bound_m=bound_m,
         )
+
+        #print(f"ZZZZZZZZZZZZZZ")
+        if expert_x_scale is not None:
+            expert_x_scale = expert_x_scale[:, :, 0:1]
 
         return expert_x, expert_x_scale, expert_num_tokens
 
@@ -138,6 +194,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # Set weights to 1 if we did them in dispatch. This is hacky.
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
+
+        #print("CCCCCCCCCCCCCCCCCCCC")
 
         self.a2a.combine(out_tokens=output,
                          indices=topk_ids,

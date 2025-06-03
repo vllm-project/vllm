@@ -72,8 +72,7 @@ def _valid_deep_gemm(hidden_states: torch.Tensor,
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self):
-        super().__init__()
-        self.block_shape = deep_gemm_block_shape()
+        super().__init__(torch.float8_e4m3fn, False, deep_gemm_block_shape())
 
     def workspace_shapes(
         self,
@@ -206,6 +205,7 @@ def deep_gemm_moe_fp8(
     """
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(quant_dtype=torch.float8_e4m3fn,
+                                  per_act_token_quant=False,
                                   block_shape=deep_gemm_block_shape()),
         DeepGemmExperts(),
     )

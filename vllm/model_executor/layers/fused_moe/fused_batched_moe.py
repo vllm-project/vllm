@@ -8,8 +8,9 @@ import triton.language as tl
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    get_config_dtype_str, try_get_optimal_moe_config)
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+    get_config_dtype_str, get_config_quant_dtype, try_get_optimal_moe_config)
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache, moe_kernel_quantize_input)
 
 
 @triton.jit
@@ -26,8 +27,9 @@ def moe_mmk(
         # (A has M rows).
         stride_ak,
         stride_bk,
-        stride_asm,
+        stride_ase,
         stride_ask,
+        stride_asm,
         stride_bse,
         stride_bsk,
         stride_bsn,
@@ -44,7 +46,9 @@ def moe_mmk(
         BLOCK_K: tl.constexpr,
         compute_type: tl.constexpr,
         use_w8a8: tl.constexpr,
-        use_w8a16: tl.constexpr):
+        use_w8a16: tl.constexpr,
+        per_channel_quant: tl.constexpr,
+):
 
     offs_k = tl.arange(0, BLOCK_K)
 
@@ -56,13 +60,25 @@ def moe_mmk(
     if use_w8a8:
         # block-wise
         if group_k > 0 and group_n > 0:
-            a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
+            # + (expert_id * stride_ase) ??
+            a_scale_ptrs = a_scale_ptr + (offs_m * stride_asm)
             offs_bsn = offs_n // group_n
             b_scale_ptrs = (b_scale_ptr + expert_id * stride_bse +
                             offs_bsn * stride_bsn)
+
+        # channel-wise
+        elif per_channel_quant:
+            # TODO: probably not correct
+            b_scale_ptrs = b_scale_ptr + expert_id * stride_bse + offs_bsn[None, :] * stride_bsn
+            b_scale = tl.load(b_scale_ptrs)
+            # Load per-token scale for activations
+            # + (expert_id * stride_ase)??
+            a_scale_ptrs = a_scale_ptr + offs_m * stride_asm
+            a_scale = tl.load(a_scale_ptrs, mask=mask_m, other=0.0)[:,None]
+
         # tensor-wise
         else:
-            a_scale = tl.load(a_scale_ptr)
+            a_scale = tl.load(a_scale_ptr) #+ expert_id * stride_ase ?
             b_scale = tl.load(b_scale_ptr + expert_id)
 
     # -----------------------------------------------------------
@@ -139,8 +155,9 @@ def expert_triton_kernel(
         stride_bn,
         stride_cm,
         stride_cn,
-        stride_asm,
+        stride_ase,
         stride_ask,
+        stride_asm,
         stride_bse,
         stride_bsk,
         stride_bsn,
@@ -150,10 +167,12 @@ def expert_triton_kernel(
         # Quantization schemes
         use_fp8_w8a8: tl.constexpr,
         use_int8_w8a16: tl.constexpr,
+        per_channel_quant: tl.constexpr,
         # Kernel config
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
-        BLOCK_K: tl.constexpr):
+        BLOCK_K: tl.constexpr,
+):
 
     offs_m = tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N) % N
@@ -176,8 +195,9 @@ def expert_triton_kernel(
         # (A has M rows).
         stride_ak,
         stride_bk,
-        stride_asm,
+        stride_ase,
         stride_ask,
+        stride_asm,
         stride_bse,
         stride_bsk,
         stride_bsn,
@@ -194,7 +214,8 @@ def expert_triton_kernel(
         BLOCK_K,
         compute_type,
         use_fp8_w8a8,
-        use_int8_w8a16)
+        use_int8_w8a16,
+        per_channel_quant)
 
     # store in C
     offs_cn = tl.arange(0, BLOCK_N)
@@ -231,8 +252,9 @@ def batched_triton_kernel(
         stride_ce,
         stride_cm,
         stride_cn,
-        stride_asm,
+        stride_ase,
         stride_ask,
+        stride_asm,
         stride_bse,
         stride_bsk,
         stride_bsn,
@@ -242,6 +264,7 @@ def batched_triton_kernel(
         # Quantization schemes
         use_fp8_w8a8: tl.constexpr,
         use_int8_w8a16: tl.constexpr,
+        per_channel_quant: tl.constexpr,
         # Kernel config
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
@@ -272,6 +295,14 @@ def batched_triton_kernel(
     c_ptr = (c_ptr + expert_id * stride_ce + cta_m_start * stride_cm +
              cta_n_start * stride_cn)
 
+    if use_fp8_w8a8:
+        # block-wise
+        if group_k > 0 and group_n > 0:
+            a_scale_ptr = a_scale_ptr + expert_id * stride_ase + cta_m_start * stride_asm
+        # channel-wise
+        elif per_channel_quant:
+            a_scale_ptr = a_scale_ptr + (expert_id * stride_ase)
+
     expert_triton_kernel(
         a_ptr,
         b_ptr,
@@ -291,8 +322,9 @@ def batched_triton_kernel(
         stride_bn,
         stride_cm,
         stride_cn,
-        stride_asm,
+        stride_ase,
         stride_ask,
+        stride_asm,
         stride_bse,
         stride_bsk,
         stride_bsn,
@@ -302,6 +334,7 @@ def batched_triton_kernel(
         # Quantization schemes
         use_fp8_w8a8,
         use_int8_w8a16,
+        per_channel_quant,
         # Kernel config
         BLOCK_M,
         BLOCK_N,
@@ -315,14 +348,15 @@ def invoke_moe_batched_triton_kernel(
         expert_num_tokens: torch.Tensor,  # [E]
         compute_type: tl.dtype,
         # Quantization data
-        A_scale: torch.Tensor,
-        B_scale: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        B_scale: Optional[torch.Tensor],
         B_zp: torch.Tensor,
         # Quantization schemes
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
         use_int4_w4a16: bool,
         config: dict[str, int],
+        per_act_token_quant: bool,
         block_shape: Optional[list[int]] = None):
 
     assert not use_int4_w4a16
@@ -333,9 +367,13 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config['BLOCK_SIZE_M']
     BLOCK_N = config['BLOCK_SIZE_N']
     BLOCK_K = config['BLOCK_SIZE_K']
+    #BLOCK_M = 16
+    #BLOCK_N = 512
+    #BLOCK_K = 64
+    #print(f"BLOCK {config}")
     assert (torch.compiler.is_compiling()
             or torch.cuda.is_current_stream_capturing()
-            or max_num_tokens % BLOCK_M == 0)
+            or max_num_tokens % BLOCK_M == 0), f"{max_num_tokens} {BLOCK_M}"
 
     grid = (expert_num_tokens.size(0), triton.cdiv(max_num_tokens, BLOCK_M) *
             triton.cdiv(B.size(1), BLOCK_N))
@@ -364,17 +402,22 @@ def invoke_moe_batched_triton_kernel(
         C.stride(0),
         C.stride(1),
         C.stride(2),
-        A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
-        A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
-        B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+
+        A_scale.stride(0) if A_scale is not None and A_scale.ndim >= 2 else 0,  #E
+        A_scale.stride(2) if A_scale is not None and A_scale.ndim == 3 else 0,  #K
+        A_scale.stride(1) if A_scale is not None and A_scale.ndim >= 2 else 0,  #M
+
+        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,  #E
+        B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,  #K
+        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,  #N
+
         # Blockwise quantization data
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
         # Quantization schemes
         use_fp8_w8a8,
         use_int8_w8a16,
+        per_act_token_quant,
         # Kernel config
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
@@ -388,9 +431,19 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     that the PPLX dispatch/combine kernels use.
     """
 
-    def __init__(self, max_num_tokens: Optional[int], world_size: int,
-                 dp_size: int, rank: int):
-        super().__init__()
+    def __init__(
+        self,
+        max_num_tokens: int,
+        world_size: int,
+        dp_size: int,
+        rank: int,
+        quant_dtype: Optional[torch.dtype] = None,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+    ):
+        super().__init__(quant_dtype=quant_dtype,
+                         per_act_token_quant=per_act_token_quant,
+                         block_shape=block_shape)
         self.world_size = world_size
         self.dp_size = dp_size
         self.rank = rank
@@ -421,14 +474,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_tokens, hidden_dim = a1.size()
         topk = topk_ids.size(1)
 
-        if self.max_num_tokens is None:
-            tokens_per_expert = torch.bincount(topk_ids.view(-1),
-                                               minlength=num_experts)
-            self.max_num_tokens = int(tokens_per_expert.max().item())
-        else:
-            tokens_per_expert = torch.zeros(num_experts,
-                                            dtype=torch.int,
-                                            device=a1.device)
+        tokens_per_expert = torch.zeros(num_experts,
+                                        dtype=torch.int,
+                                        device=a1.device)
 
         assert num_experts % self.world_size == 0
 
@@ -436,8 +484,28 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         b_a1 = torch.zeros(
             (num_local_experts, self.max_num_tokens, hidden_dim),
-            dtype=a1.dtype,
+            dtype=self.quant_dtype
+            if self.quant_dtype is not None else a1.dtype,
             device=a1.device)
+
+        if self.quant_dtype is not None:
+            if self.block_shape is not None:
+                _, block_k = self.block_shape
+                k_tiles = (hidden_dim + block_k - 1) // block_k
+                scale_shape = (num_local_experts, self.max_num_tokens, k_tiles)
+            else:
+                num = self.max_num_tokens if self.per_act_token_quant else 1
+                scale_shape = (num_local_experts, num, 1)
+
+            #print(f"SCALE_SHAPE {self.block_shape} {b_a1.shape} {scale_shape}")
+
+            b_a1_scale = torch.zeros(
+                scale_shape,
+                dtype=torch.float32,
+                device=a1.device)
+        else:
+            assert a1_scale is None
+            b_a1_scale = None
 
         first_expert = num_local_experts * self.rank
         last_expert = first_expert + num_local_experts
@@ -445,11 +513,37 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         for expert_id in range(first_expert, last_expert):
             topks = torch.any(topk_ids == expert_id, dim=1).flatten()
             rows = torch.count_nonzero(topks.flatten())
-            b_a1[expert_id -
-                 first_expert, :rows, :] = a1[:topks.numel()][topks]
-            tokens_per_expert[expert_id - first_expert] = rows
+            rhs = a1[:topks.numel()][topks]
+            idx = expert_id - first_expert
+            if self.quant_dtype is not None:
+                if a1_scale is not None:
+                    assert False, "NYI"
+                    rhs_a1_scale = a1_scale[:topks.numel()][topks]
+                else:
+                    rhs_a1_scale = None
+                b_a1[idx, :rows, :], b_s = (
+                    moe_kernel_quantize_input(
+                        rhs,
+                        rhs_a1_scale,
+                        self.quant_dtype,
+                        self.per_act_token_quant,
+                        self.block_shape,
+                    ))
+                if self.block_shape is None and not self.per_act_token_quant:
+                    b_a1_scale[idx] = b_s
+                else:
+                    #print(f"XXXXX rhs={rhs.shape} b_s={b_s.shape}")
+                    assert rows == b_s.shape[0] and b_a1_scale.shape[-1] == b_s.shape[-1]
+                    b_a1_scale[idx, :rows] = b_s
+            else:
+                b_a1[idx, :rows, :] = rhs
 
-        return b_a1, a1_scale, tokens_per_expert
+            tokens_per_expert[idx] = rows
+
+        #b_a1_scale.fill_(0.0001)
+        #print(f"b_a1_scale.stride = {b_a1_scale.stride()}")
+
+        return b_a1, b_a1_scale, tokens_per_expert
 
     def finalize(
         self,
@@ -479,7 +573,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             output[topks] = output[topks] + rhs
 
 
-class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
+# XXXX BatchedNaiveExperts
+class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     """
     A reference MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the pplx
@@ -490,21 +585,31 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         world_size: int,
         dp_size: int,
-        max_num_tokens: Optional[int] = None,
+        max_num_tokens: int,
         use_fp8_w8a8: bool = False,
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
         block_shape: Optional[list[int]] = None,
+        per_act_token_quant: bool = False,
         block_m: Optional[int] = None,
     ):
-        super().__init__()
-        assert block_shape is None
-        assert block_m is None
         assert not use_fp8_w8a8, "NYI"
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
+        quant_dtype = get_config_quant_dtype(
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16,
+        )
+        super().__init__(
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        )
+        assert block_m is None
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.dp_size = dp_size
@@ -522,7 +627,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_dp = self.world_size // self.dp_size
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
-        #print(f"WORKSPACE {max_num_tokens} {num_dp}")
         workspace13 = num_experts * max_num_tokens * num_dp * K
         workspace2 = max_num_tokens * num_dp * N
         return (workspace13, workspace2, a.dtype)
@@ -586,6 +690,64 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return out
 
 
+def batched_moe_kernel_quantize_input(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    num_tokens: int,
+    E: int,
+    N: int,
+    expert_num_tokens: torch.Tensor,
+    qtype: Optional[torch.dtype],
+    per_channel_quant: bool,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    if (True or torch.compiler.is_compiling()
+            or torch.cuda.is_current_stream_capturing()):
+        # Note: this does a bunch of extra work because expert_num_tokens is
+        # ignored but it does support torch.compile + cudagraphs.
+        hidden_dim = A.size(-1)
+        assert A_scale is None or A_scale.ndim <= 2
+        A_q, A_q_scale = moe_kernel_quantize_input(A.view(-1,
+                                                          hidden_dim), A_scale,
+                                                   qtype, per_channel_quant,
+                                                   block_shape)
+        A_q = A_q.view(E, -1, hidden_dim)
+        if A_q_scale is not None:
+            if A_q_scale.numel() == 1:
+                A_q_scale = A_q_scale.view(1)
+                A_q_scale = torch.repeat_interleave(A_q_scale, E, dim=0).view(E, 1, 1)
+            else:
+                A_q_scale = A_q_scale.view(E, -1, A_q_scale.size(-1))
+
+        #print(f"A2Q_SCALE {A_q_scale.shape}")
+        #A_q_scale.fill_(0.0001)
+        #print(f"A_q_scale.stride = {A_q_scale.stride()}")
+
+        return A_q, A_q_scale
+
+    if qtype is not None:
+        assert block_shape is not None
+        A_q = torch.empty_like(A, dtype=qtype)
+        block_n, block_k = block_shape
+        n_tiles = ((N // 2) + block_n - 1) // block_n
+        scale_shape = (E, num_tokens, n_tiles)
+        A_q_scale = torch.empty(scale_shape,
+                                dtype=torch.float32,
+                                device=A.device)
+        for e in range(E):
+            num_tokens = expert_num_tokens[e]
+            if num_tokens > 0:
+                A_q[e, :num_tokens, :], tmp_scale = moe_kernel_quantize_input(
+                    A[e, :num_tokens],
+                    A_scale[e, :num_tokens] if A_scale else None, qtype,
+                    per_channel_quant, block_shape)
+                A_q_scale[e, :tmp_scale.shape[0]] = tmp_scale
+
+        return A_q, A_q_scale
+    else:
+        return A, A_scale
+
+
 class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     """
     A Triton based MoE expert class that operates on expert batched format,
@@ -595,26 +757,36 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        max_num_tokens: Optional[int] = None,
+        max_num_tokens: int,
+        world_size: int = 1,
+        dp_size: int = 1,
         use_fp8_w8a8: bool = False,
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
+        per_act_token_quant: bool = False,
         block_shape: Optional[list[int]] = None,
-        world_size: int = 1,
-        dp_size: int = 1,
     ):
-        super().__init__()
+        quant_dtype = get_config_quant_dtype(
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16,
+        )
+        super().__init__(
+            quant_dtype,
+            per_act_token_quant,
+            block_shape,
+        )
+        assert not use_int8_w8a8, "NYI"
+        assert not use_int4_w4a16, "NYI"
         self.use_fp8_w8a8 = use_fp8_w8a8
         self.use_int8_w8a8 = use_int8_w8a8
         self.use_int4_w4a16 = use_int4_w4a16
         self.use_int8_w8a16 = use_int8_w8a16
-        self.block_shape = block_shape
-        self.max_num_tokens = max_num_tokens
-        assert not use_int8_w8a8, "NYI"
-        assert not use_int4_w4a16, "NYI"
         self.world_size = world_size
         self.dp_size = dp_size
+        self.max_num_tokens = max_num_tokens
 
     def workspace_shapes(
         self,
@@ -627,10 +799,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> tuple[int, int, torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
-        max_num_tokens = a.size(
-            0) if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = num_experts * max_num_tokens * num_dp * max(K, N)
-        workspace2 = num_experts * max_num_tokens * num_dp * (N // 2)
+        workspace13 = num_experts * self.max_num_tokens * num_dp * max(K, N)
+        workspace2 = num_experts * self.max_num_tokens * num_dp * (N // 2)
         return (workspace13, workspace2, a.dtype)
 
     def apply(
@@ -702,7 +872,6 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             raise ValueError(
                 f"Unsupported compute_type: {hidden_states.dtype}")
 
-        #print(f"shape: E={E}, M={num_tokens}, N={N}, K={K}, top_k={top_k_num}")
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
         intermediate_cache1 = _resize_cache(workspace13, (E, num_tokens, N))
@@ -723,6 +892,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                          use_int8_w8a16=self.use_int8_w8a16,
                                          use_int4_w4a16=self.use_int4_w4a16,
                                          config=config,
+                                         per_act_token_quant=self.per_act_token_quant,
                                          block_shape=self.block_shape)
 
         # TODO: would be nice to use expert_num_tokens here to reduce
@@ -730,15 +900,11 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.activation(activation, intermediate_cache2.view(-1, N // 2),
                         intermediate_cache1.view(-1, N))
 
-        #qintermediate_cache2 = intermediate_cache2
-        a2q_scale = a2_scale
-        # TODO (varun) : support w8a8
-        assert not self.use_fp8_w8a8
-        #if self.use_fp8_w8a8:
-        #    qintermediate_cache2, a2q_scale = _fp8_quantize(
-        #        intermediate_cache2, a2_scale, self.block_shape)
+        qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
+            intermediate_cache2, a2_scale, num_tokens, E, N, expert_num_tokens,
+            self.quant_dtype, self.per_act_token_quant, self.block_shape)
 
-        invoke_moe_batched_triton_kernel(A=intermediate_cache2,
+        invoke_moe_batched_triton_kernel(A=qintermediate_cache2,
                                          B=w2,
                                          C=intermediate_cache3,
                                          expert_num_tokens=expert_num_tokens,
@@ -750,6 +916,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                          use_int8_w8a16=self.use_int8_w8a16,
                                          use_int4_w4a16=self.use_int4_w4a16,
                                          config=config,
+                                         per_act_token_quant=self.per_act_token_quant,
                                          block_shape=self.block_shape)
 
         return intermediate_cache3
