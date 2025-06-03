@@ -38,7 +38,7 @@ class InputContext:
     ) -> _C:
         """
         Get the HuggingFace configuration
-        ({class}`transformers.PretrainedConfig`) of the model,
+        (`transformers.PretrainedConfig`) of the model,
         additionally checking its type.
 
         Raises:
@@ -79,7 +79,7 @@ class InputContext:
     ) -> _P:
         """
         Get the HuggingFace processor
-        ({class}`transformers.ProcessorMixin`) of the model,
+        (`transformers.ProcessorMixin`) of the model,
         additionally checking its type.
 
         Raises:

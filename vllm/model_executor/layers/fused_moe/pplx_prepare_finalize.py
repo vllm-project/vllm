@@ -12,7 +12,6 @@ from vllm.v1.worker.ubatching import (
     yield_and_switch_from_compute_to_comm_impl)
 
 
-# Note use: layer.get_all_to_all() to get an AllToAll instance
 # The max_num_tokens, world_size and dp_size must be the same
 # as the ones used to create the AllToAll.
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):

@@ -27,6 +27,7 @@ Multi-node:
                     --master-addr=10.99.48.128 \
                     --master-port=13345
 """
+
 import os
 from time import sleep
 
@@ -87,10 +88,14 @@ def main(args, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
     # with DP, each rank should process different prompts.
     # usually all the DP ranks process a full dataset,
     # and each rank processes a different part of the dataset.
-    promts_per_rank = len(prompts) // dp_size
-    start = global_dp_rank * promts_per_rank
-    end = start + promts_per_rank
-    prompts = prompts[start:end]
+    floor = len(prompts) // dp_size
+    remainder = len(prompts) % dp_size
+
+    # Distribute prompts into even groups.
+    def start(rank):
+        return rank * floor + min(rank, remainder)
+
+    prompts = prompts[start(global_dp_rank) : start(global_dp_rank + 1)]
     if len(prompts) == 0:
         # if any rank has no prompts to process,
         # we need to set a placeholder prompt
@@ -101,9 +106,9 @@ def main(args, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
     # since we are doing data parallel, every rank can have different
     # sampling params. here we set different max_tokens for different
     # ranks for demonstration.
-    sampling_params = SamplingParams(temperature=0.8,
-                                     top_p=0.95,
-                                     max_tokens=[16, 20][global_dp_rank % 2])
+    sampling_params = SamplingParams(
+        temperature=0.8, top_p=0.95, max_tokens=[16, 20][global_dp_rank % 2]
+    )
 
     # Fixed params
     args.pop("tensor_parallel_size")
@@ -123,8 +128,10 @@ def main(args, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
             break
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"DP rank {global_dp_rank}, Prompt: {prompt!r}, "
-              f"Generated text: {generated_text!r}")
+        print(
+            f"DP rank {global_dp_rank}, Prompt: {prompt!r}, "
+            f"Generated text: {generated_text!r}"
+        )
 
     # Give engines time to pause their processing loops before exiting.
     sleep(1)
@@ -172,8 +179,7 @@ if __name__ == "__main__":
     for proc in procs:
         proc.join(timeout=300)
         if proc.exitcode is None:
-            print(f"Killing process {proc.pid} that "
-                  f"didn't stop within 5 minutes.")
+            print(f"Killing process {proc.pid} that didn't stop within 5 minutes.")
             proc.kill()
             exit_code = 1
         elif proc.exitcode:
