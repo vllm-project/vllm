@@ -178,7 +178,6 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes = 1024 * 1024 * 1024
             num_qps_per_rank = self.num_sms // 2
         else:
-            assert self.intranode
             num_rdma_bytes = 0
             num_qps_per_rank = 1
 
@@ -243,7 +242,6 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         if self.internode:
             num_rdma_bytes = 1024 * 1024 * 1024
         else:
-            assert self.intranode
             num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
                 num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
                 hidden=token_hidden_size,
