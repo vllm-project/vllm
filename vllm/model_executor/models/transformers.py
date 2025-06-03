@@ -311,7 +311,7 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         """
         if return_mm_hashes:
             raise ValueError(
-                "TransformersMultimodalLM doesn't support mm hashing yet! "
+                "TransformersForMultimodalLM doesn't support mm hashing yet! "
                 "Probably you didn't set `disable_mm_preprocessor_cache=True`")
 
         mm_items = self._to_mm_items(mm_data)
