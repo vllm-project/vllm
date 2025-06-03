@@ -63,6 +63,7 @@ class BlockPool:
         # The ref_cnt of null_block is not maintained, needs special care to
         # avoid freeing it.
         self.null_block = self.free_block_queue.popleft()
+        self.null_block.is_null = True
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
@@ -252,7 +253,7 @@ class BlockPool:
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
-            if block.ref_cnt == 0 and block != self.null_block:
+            if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
             block.incr_ref()
 
@@ -267,7 +268,7 @@ class BlockPool:
         for block in ordered_blocks:
             block.decr_ref()
             # null_block should not be added to the free list.
-            if block.ref_cnt == 0 and block != self.null_block:
+            if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.append(block)
 
     def reset_prefix_cache(self) -> bool:
