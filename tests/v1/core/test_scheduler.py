@@ -1206,11 +1206,10 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert num_free_blocks == (
         scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
 
-    # TODO(Chen): find a way to test no leak on ref_cnt.
     # NOTE(rob): just the ref count on blocks will be 0. The hash
     # value, etc will remain since we lazily evict for prefix cache.
-    # for block in scheduler.kv_cache_manager.block_pool.blocks:
-    #     assert block.ref_cnt == 0
+    for block in scheduler.kv_cache_manager.block_pool.blocks:
+        assert block.ref_cnt == 0
     #     assert block._block_hash is None
     # assert (
     #     len(scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
