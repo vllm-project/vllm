@@ -11,8 +11,10 @@ from tests.kernels.utils import opcheck
 from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HIDDEN_SIZES = [1, 2, 1024, 1025, 1026, 8192, 8193]  # Arbitrary values
-NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values
+HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,
+                8193]  # Arbitrary values for testing
+HIDDEN_SIZES += list(range(1024, 1033))  # vectorized conversion edge cases
+NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SCALE_UBS = [True, False]
 SEEDS = [0]
 
@@ -60,9 +62,7 @@ def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
 
     torch.testing.assert_close(ref_scales, ops_scales)
     torch.testing.assert_close(ref_out.to(dtype=torch.float32),
-                               ops_out.to(dtype=torch.float32),
-                               atol=0.1,
-                               rtol=0.15)
+                               ops_out.to(dtype=torch.float32))
 
     opcheck_fp8_quant(ops_out,
                       x,
@@ -87,9 +87,7 @@ def test_dynamic_per_tensor_fp8_quant(num_tokens: int, hidden_size: int,
 
     torch.testing.assert_close(ref_scale, ops_scale)
     torch.testing.assert_close(ref_out.to(dtype=torch.float32),
-                               ops_out.to(dtype=torch.float32),
-                               atol=0.1,
-                               rtol=0.15)
+                               ops_out.to(dtype=torch.float32))
 
     opcheck_fp8_quant(ops_out, x)
 
