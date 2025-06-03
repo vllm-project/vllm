@@ -275,12 +275,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
-        # Records layer pairings for cross-layer KV sharing.
-        # If an Attention layer does not allocate its own KV cache and instead
-        # reuses the shared KV cache allocated by another (earlier) Attention
-        # layer, then its fully-qualified name (FQN) will be a key in the dict.
-        # Its corresponding value will be the FQN of the Attention layer that
-        # originally allocates the KV cache and writes new KV activations to it.
+        # Layer pairings for cross-layer KV sharing.
+        # If an Attention layer `layer_name` is in the keys of this dict, it
+        # means this layer will perform attention using the keys and values
+        # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
@@ -2056,6 +2054,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.initialize_attn_backend(kv_cache_config)
 
         kv_caches: dict[str, torch.Tensor] = {}
+
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
@@ -2142,13 +2141,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for layer_name, attn_module in layers.items():
             if (kv_tgt_layer :=
                     attn_module.kv_sharing_target_layer_name) is not None:
-                # If an attention module has kv_sharing_target_layer_name, it
-                # will not allocate its own KV cache and will share it with
-                # the target layer. In this case, we skip creating a
-                # KVCacheSpec and assume the layer doesn't exist for purposes
-                # of KV cache initialization. This also means we can allocate
-                # more KV blocks overall given same available memory, such that
-                # longer max_model_len can be supported when using KV sharing.
+                # The layer doesn't need its own KV cache and will use that of
+                # the target layer. We skip creating a KVCacheSpec for it, so
+                # that KV cache management logic will act as this layer does
+                # not exist, and doesn't allocate KV cache for the layer. This
+                # enables the memory saving of cross-layer kv sharing.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
 

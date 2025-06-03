@@ -238,12 +238,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
 
-        # Records layer pairings for cross-layer KV sharing.
-        # If an Attention layer does not allocate its own KV cache and instead
-        # reuses the shared KV cache allocated by another (earlier) Attention
-        # layer, then its fully-qualified name (FQN) will be a key in the dict.
-        # Its corresponding value will be the FQN of the Attention layer that
-        # originally allocates the KV cache and writes new KV activations to it.
+        # Layer pairings for cross-layer KV sharing.
+        # If an Attention layer `layer_name` is in the keys of this dict, it
+        # means this layer will perform attention using the keys and values
+        # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
         # tensors for structured decoding
@@ -1361,7 +1359,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         kv_caches: dict[str, torch.Tensor] = {}
 
-        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
                 tensor_config = kv_cache_config.tensors[layer_name]
