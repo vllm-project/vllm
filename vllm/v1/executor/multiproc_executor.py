@@ -15,7 +15,7 @@ from functools import partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from threading import Thread
-from typing import Any, Callable, Optional, Union, cast
+from typing import Any, Dict, List, Callable, Optional, Union, cast
 
 import cloudpickle
 
@@ -82,9 +82,7 @@ class MultiprocExecutor(Executor):
                 unready_workers.append(
                     WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
-                        local_rank=rank,
                         rank=rank,
-                        distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                     ))
 
@@ -99,6 +97,20 @@ class MultiprocExecutor(Executor):
                 w.worker_response_mq.wait_until_ready()
 
             self.start_worker_monitor()
+
+            all_kwargs = []
+            for rank in range(self.world_size):
+                kwargs = dict(
+                    vllm_config=self.vllm_config,
+                    local_rank=rank,
+                    rank=rank,
+                    distributed_init_method=distributed_init_method,
+                    is_driver_worker=(rank % self.parallel_config.tensor_parallel_size == 0),
+                )
+                all_kwargs.append(kwargs)
+            self.collective_rpc("init_worker", args=(all_kwargs, ))
+            self.collective_rpc("init_device")
+            self.collective_rpc("load_model")
             success = True
         finally:
             if not success:
@@ -319,27 +331,11 @@ class WorkerProc:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        local_rank: int,
         rank: int,
-        distributed_init_method: str,
         input_shm_handle: Handle,
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
-        # TODO: move `init_worker` to executor level as a collective rpc call
-        all_kwargs: list[dict] = [
-            {} for _ in range(vllm_config.parallel_config.world_size)
-        ]
-        is_driver_worker = (
-            rank % vllm_config.parallel_config.tensor_parallel_size == 0)
-        all_kwargs[rank] = {
-            "vllm_config": vllm_config,
-            "local_rank": local_rank,
-            "rank": rank,
-            "distributed_init_method": distributed_init_method,
-            "is_driver_worker": is_driver_worker,
-        }
-        wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
         pid = os.getpid()
@@ -348,21 +344,15 @@ class WorkerProc:
 
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-            input_shm_handle, self.worker.rank)
+            input_shm_handle, self.worker.rpc_rank)
 
         # Initializes a message queue for sending the model output
         self.worker_response_mq = MessageQueue(1, 1)
 
-        # Initialize device and loads weights
-        self.worker.init_device()
-        self.worker.load_model()
-
     @staticmethod
     def make_worker_process(
             vllm_config: VllmConfig,
-            local_rank: int,
             rank: int,
-            distributed_init_method: str,
             input_shm_handle,  # Receive SchedulerOutput
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
@@ -371,9 +361,7 @@ class WorkerProc:
 
         process_kwargs = {
             "vllm_config": vllm_config,
-            "local_rank": local_rank,
             "rank": rank,
-            "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
             "ready_pipe": (reader, writer),
         }
