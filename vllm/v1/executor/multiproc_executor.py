@@ -15,7 +15,7 @@ from functools import partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from threading import Thread
-from typing import Any, Dict, List, Callable, Optional, Union, cast
+from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
 
@@ -105,7 +105,8 @@ class MultiprocExecutor(Executor):
                     local_rank=rank,
                     rank=rank,
                     distributed_init_method=distributed_init_method,
-                    is_driver_worker=(rank % self.parallel_config.tensor_parallel_size == 0),
+                    is_driver_worker=(
+                        rank % self.parallel_config.tensor_parallel_size == 0),
                 )
                 all_kwargs.append(kwargs)
             self.collective_rpc("init_worker", args=(all_kwargs, ))
