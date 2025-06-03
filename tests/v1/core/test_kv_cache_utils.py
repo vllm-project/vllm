@@ -75,7 +75,14 @@ def test_kv_cache_block():
     # Test KVCacheBlock initialization
     block = KVCacheBlock(block_id=0)
     assert block.block_id == 0
+    assert block.ref_cnt == 0
     assert block.block_hash is None
+
+    # Test reference count manipulation
+    block.incr_ref()
+    assert block.ref_cnt == 1
+    block.decr_ref()
+    assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
     block_hash = BlockHash(hash_value=123, token_ids=(1, 2, 3))

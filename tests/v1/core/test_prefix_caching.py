@@ -59,9 +59,8 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
 
 @pytest.mark.parametrize("hash_algo", ["sha256", "hash"])
 def test_prefill(hash_algo):
-    block_size = 16
     manager = KVCacheManager(
-        make_kv_cache_config(block_size, 11),
+        make_kv_cache_config(16, 11),
         max_model_len=8192,
         enable_caching=True,
         caching_hash_algo=hash_algo,
@@ -95,14 +94,13 @@ def test_prefill(hash_algo):
                                        block_tokens)
         assert manager.block_pool.blocks[
             block_id].block_hash.block_hash == block_hash
+        assert manager.block_pool.blocks[block_id].ref_cnt == 1
         parent_block_hash = block_hash.hash_value
 
     # Check partial block metadata
     for block_id in (4, ):
         assert manager.block_pool.blocks[block_id].block_hash is None
-
-    for block in blocks.blocks[0]:
-        assert block.ref_cnt == 1
+        assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
     # Cache hit in the common prefix when the original block is still in use.
     # Incomplete 1 block (5 tokens)
@@ -155,6 +153,10 @@ def test_prefill(hash_algo):
     # Although we only have 6 free blocks, we have 8 blocks in
     # the free block queue due to lazy removal.
     assert manager.block_pool.free_block_queue.num_free_blocks == 6
+    assert all([
+        b.ref_cnt == 0
+        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ])
     assert len([
         b for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ]) == 6
@@ -183,9 +185,8 @@ def test_prefill_plp():
     2. Schedule non-plp request and validate blocks
     3. Schedule plp request; no hit should occur; validate blocks
     '''
-    block_size = 16
     manager = KVCacheManager(
-        make_kv_cache_config(block_size, 11),
+        make_kv_cache_config(16, 11),
         max_model_len=8192,
         enable_caching=True,
     )
@@ -219,14 +220,13 @@ def test_prefill_plp():
                                        block_tokens)
         assert manager.block_pool.blocks[
             block_id].block_hash.block_hash == block_hash
+        assert manager.block_pool.blocks[block_id].ref_cnt == 1
         parent_block_hash = block_hash.hash_value
 
     # Check partial block metadata
     for block_id in (4, ):
         assert manager.block_pool.blocks[block_id].block_hash is None
-
-    for block in blocks.blocks[0]:
-        assert block.ref_cnt == 1
+        assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
     # Request #1 is a non-prompt-logprobs request:
     # Cache hit in the common prefix when the original block is still in use.
@@ -283,8 +283,8 @@ def test_prefill_plp():
 
     # Request #2 block hashes are valid since request #0 hashes are.
     # Check block reference counts.
-    for block in blocks.blocks[0]:
-        assert block.ref_cnt == 1
+    for block_id in block_ids[0]:
+        assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
     manager.free(req2)
 
