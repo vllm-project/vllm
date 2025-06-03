@@ -266,7 +266,7 @@ class ModelConfig:
     - "auto" will use FP16 precision for FP32 and FP16 models, and BF16
     precision for BF16 models.\n
     - "hybrid" will use FP32 for weights and activation 
-    and float16 for attention.\n
+    and FP16/BF16 for attention.\n
     - "half" for FP16. Recommended for AWQ quantization.\n
     - "float16" is the same as "half".\n
     - "bfloat16" for a balance between precision and range.\n
@@ -709,10 +709,13 @@ class ModelConfig:
 
         if self.dtype == "hybrid":
             self.dtype = torch.float32
-            if config_dtype == torch.bfloat16:
-                self.attn_dtype = torch.bfloat16
-            else:
-                self.attn_dtype = torch.float16
+            self.attn_dtype = _get_and_verify_dtype(
+                self.model,
+                self.hf_config,
+                config_dtype,
+                is_pooling_model=is_pooling_model,
+                revision=self.revision,
+            )
             return
 
         self.dtype = _get_and_verify_dtype(

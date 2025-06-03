@@ -109,14 +109,11 @@ def mteb_test_embed_models(hf_runner,
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
         vllm_dtype = vllm_model.model.llm_engine.model_config.dtype
-        model_dtype = getattr(
-            vllm_model.model.llm_engine.model_config.hf_config, "torch_dtype",
-            vllm_dtype)
 
-    with set_default_torch_dtype(model_dtype):
+    with set_default_torch_dtype(vllm_dtype):
         with hf_runner(model_info.name,
                        is_sentence_transformer=True,
-                       dtype=model_dtype) as hf_model:
+                       dtype=vllm_dtype) as hf_model:
 
             if hf_model_callback is not None:
                 hf_model_callback(hf_model)
@@ -125,7 +122,7 @@ def mteb_test_embed_models(hf_runner,
             st_dtype = next(hf_model.model.parameters()).dtype
 
     print("VLLM:", vllm_dtype, vllm_main_score)
-    print("SentenceTransformers:", model_dtype, st_dtype, st_main_score)
+    print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
     assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_EMBED_TOL)

@@ -328,7 +328,7 @@ def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
     return tensor
 
 
-class Dtype(NamedTuple):
+class DTypeInfo(NamedTuple):
     dtype: ModelDType
     attn_dtype: AttnDType = "auto"
 
@@ -338,5 +338,5 @@ class EmbedModelInfo(NamedTuple):
     is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
-    dtype: Union[str, Dtype] = "auto"
+    dtype: Union[str, DTypeInfo] = "auto"
     enable_test: bool = True
