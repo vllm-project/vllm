@@ -1164,7 +1164,7 @@ def fused_experts(hidden_states: torch.Tensor,
     # permute/unpermute ops are available.
     N = w1.shape[1]
     if (allow_deep_gemm and use_fp8_w8a8 and N > 512
-            and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
+            and _valid_deep_gemm(hidden_states, w1, w2)):
         assert apply_router_weight_on_input is False
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
