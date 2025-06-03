@@ -23,7 +23,6 @@ from io import BytesIO
 from typing import Any, Callable, Optional, Union
 
 import numpy as np
-import pandas as pd
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
@@ -32,6 +31,18 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
+from vllm.utils import PlaceholderModule
+
+try:
+    from datasets import load_dataset
+except ImportError:
+    datasets = PlaceholderModule("datasets")
+    load_dataset = datasets.placeholder_attr("load_dataset")
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 logger = logging.getLogger(__name__)
 
@@ -716,13 +727,6 @@ class HuggingFaceDataset(BenchmarkDataset):
 
     def load_data(self) -> None:
         """Load data from HuggingFace datasets."""
-        try:
-            from datasets import load_dataset
-        except ImportError as e:
-            raise ImportError(
-                "Hugging Face datasets library is required for this dataset. "
-                "Please install it using `pip install datasets`.") from e
-
         self.data = load_dataset(
             self.dataset_path,
             name=self.dataset_subset,
