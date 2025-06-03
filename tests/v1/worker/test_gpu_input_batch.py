@@ -27,9 +27,9 @@ MAX_NUM_PROMPT_TOKENS = 64
 def get_kv_cache_config() -> KVCacheConfig:
     return KVCacheConfig(
         num_blocks=10,
-        tensors={
-            "layer.0": KVCacheTensor(size=1024),
-        },
+        kv_cache_tensors=[
+            KVCacheTensor(size=1024, shared_by=["layer.0"]),
+        ],
         kv_cache_groups=[
             KVCacheGroupSpec(
                 layer_names=["layer.0"],

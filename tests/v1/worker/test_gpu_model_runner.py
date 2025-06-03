@@ -20,9 +20,9 @@ def initialize_kv_cache(runner: GPUModelRunner):
     """
     kv_cache_config = KVCacheConfig(
         num_blocks=10,
-        tensors={
-            "layer.0": KVCacheTensor(size=1024),
-        },
+        kv_cache_tensors=[
+            KVCacheTensor(size=1024, shared_by=["layer.0"]),
+        ],
         kv_cache_groups=[
             KVCacheGroupSpec(
                 layer_names=["layer.0"],
