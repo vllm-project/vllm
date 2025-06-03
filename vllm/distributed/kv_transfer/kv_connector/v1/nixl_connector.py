@@ -739,7 +739,8 @@ class NixlConnectorWorker:
         # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
-            self.nixl_wrapper.send_notif(dst_engine_id,
+            agent_name = self._remote_agents[dst_engine_id]
+            self.nixl_wrapper.send_notif(agent_name,
                                          notif_msg=request_id.encode("utf-8"))
             return
 
