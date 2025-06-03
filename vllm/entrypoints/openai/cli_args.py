@@ -11,6 +11,7 @@ import ssl
 from collections.abc import Sequence
 from typing import Optional, Union, get_args
 
+import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
@@ -242,6 +243,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "Special the tool parser plugin write to parse the model-generated tool"
         " into OpenAI API format, the name register in this plugin can be used "
         "in ``--tool-call-parser``.")
+
+    parser.add_argument(
+        "--log-config-file",
+        type=str,
+        default=envs.VLLM_LOGGING_CONFIG_PATH,
+        help="Path to logging config JSON file for both vllm and uvicorn",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 

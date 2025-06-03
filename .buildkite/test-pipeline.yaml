@@ -199,8 +199,9 @@ steps:
   - tests/test_sequence
   - tests/test_config
   - tests/test_logger
+  - tests/test_vllm_port
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
@@ -286,7 +287,7 @@ steps:
     - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -617,9 +618,11 @@ steps:
   - vllm/worker/model_runner.py
   - entrypoints/llm/test_collective_rpc.py
   - tests/v1/test_async_llm_dp.py
+  - tests/v1/entrypoints/openai/test_multi_api_servers.py
   - vllm/v1/engine/
   commands:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/test_async_llm_dp.py
+  - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
