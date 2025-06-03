@@ -80,36 +80,19 @@ def run_cutlass_moe_fp8(
     local_E = w1.shape[0]
 
     if expert_num_tokens is not None:
-        non_zero_mask = expert_num_tokens[:] != 0
-        masked_local_E = int(non_zero_mask.sum().item())
-        non_zero_expert_idxs = torch.nonzero(non_zero_mask).flatten()
-
-        if masked_local_E == 0:
-            return torch.zeros((local_E, padded_M, K),
-                               device=device,
-                               dtype=out_dtype)
-
-        expert_offsets = torch.empty((masked_local_E + 1),
+        expert_offsets = torch.empty((local_E),
                                      dtype=torch.int32,
                                      device=device)
-        problem_sizes1 = torch.empty((masked_local_E, 3),
+        problem_sizes1 = torch.empty((local_E, 3),
                                      dtype=torch.int32,
                                      device=device)
-        problem_sizes2 = torch.empty((masked_local_E, 3),
+        problem_sizes2 = torch.empty((local_E, 3),
                                      dtype=torch.int32,
                                      device=device)
 
         ops.get_cutlass_pplx_moe_mm_data(expert_offsets, problem_sizes1,
                                          problem_sizes2, expert_num_tokens,
-                                         non_zero_expert_idxs, masked_local_E,
-                                         padded_M, N, K)
-
-        # Filter out problem sizes with 0 tokens
-        if masked_local_E != local_E:
-            w1 = w1[non_zero_mask]
-            w2 = w2[non_zero_mask]
-            w1_scale = w1_scale[non_zero_mask]
-            w2_scale = w2_scale[non_zero_mask]
+                                         local_E, padded_M, N, K)
 
         w1_scale = w1_scale.reshape(w1_scale.shape[0], -1)
         w2_scale = w2_scale.reshape(w2_scale.shape[0], -1)
@@ -149,6 +132,7 @@ def run_cutlass_moe_fp8(
 
         a1q = _fp8_perm(a1q, a_map)
         a1q_scale = a1q_scale[a_map] if per_act_token else a1q_scale
+        expert_offsets = expert_offsets[:-1]
 
     ab_strides1 = torch.full((w1.shape[0], ),
                              K,
@@ -176,7 +160,7 @@ def run_cutlass_moe_fp8(
         c2 = _resize_cache(workspace2, (local_E * padded_M, N))
         c3 = _resize_cache(workspace13, (local_E * padded_M, K))
 
-    ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale, w1_scale, expert_offsets[:-1],
+    ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale, w1_scale, expert_offsets,
                        problem_sizes1, ab_strides1, ab_strides1, c_strides1,
                        per_act_token, per_out_ch)
 
@@ -188,7 +172,7 @@ def run_cutlass_moe_fp8(
     if expert_map is not None:
         c3.fill_(0)
 
-    ops.cutlass_moe_mm(c3, a2q, w2, a2q_scale, w2_scale, expert_offsets[:-1],
+    ops.cutlass_moe_mm(c3, a2q, w2, a2q_scale, w2_scale, expert_offsets,
                        problem_sizes2, ab_strides2, ab_strides2, c_strides2,
                        per_act_token, per_out_ch)
 

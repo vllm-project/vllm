@@ -57,11 +57,13 @@ void get_cutlass_moe_mm_data_caller(
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k);
 
-void get_cutlass_pplx_moe_mm_data_caller(
-    torch::Tensor& expert_offsets, torch::Tensor& problem_sizes1,
-    torch::Tensor& problem_sizes2, const torch::Tensor& expert_num_tokens,
-    const torch::Tensor& non_zero_expert_idxs, const int64_t num_local_experts,
-    const int64_t padded_m, const int64_t n, const int64_t k);
+void get_cutlass_pplx_moe_mm_data_caller(torch::Tensor& expert_offsets,
+                                         torch::Tensor& problem_sizes1,
+                                         torch::Tensor& problem_sizes2,
+                                         const torch::Tensor& expert_num_tokens,
+                                         const int64_t num_local_experts,
+                                         const int64_t padded_m,
+                                         const int64_t n, const int64_t k);
 #endif
 
 void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
@@ -250,18 +252,20 @@ void get_cutlass_moe_mm_data(
       version_num, ". Required capability: 90");
 }
 
-void get_cutlass_pplx_moe_mm_data(
-    torch::Tensor& expert_offsets, torch::Tensor& problem_sizes1,
-    torch::Tensor& problem_sizes2, const torch::Tensor& expert_num_tokens,
-    const torch::Tensor& non_zero_expert_idxs, const int64_t num_local_experts,
-    const int64_t padded_m, const int64_t n, const int64_t k) {
+void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
+                                  torch::Tensor& problem_sizes1,
+                                  torch::Tensor& problem_sizes2,
+                                  const torch::Tensor& expert_num_tokens,
+                                  const int64_t num_local_experts,
+                                  const int64_t padded_m, const int64_t n,
+                                  const int64_t k) {
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
 #if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
-  get_cutlass_pplx_moe_mm_data_caller(
-      expert_offsets, problem_sizes1, problem_sizes2, expert_num_tokens,
-      non_zero_expert_idxs, num_local_experts, padded_m, n, k);
+  get_cutlass_pplx_moe_mm_data_caller(expert_offsets, problem_sizes1,
+                                      problem_sizes2, expert_num_tokens,
+                                      num_local_experts, padded_m, n, k);
   return;
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(

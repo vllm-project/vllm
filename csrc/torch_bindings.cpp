@@ -458,7 +458,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                             Tensor! problem_sizes1, "
       "                             Tensor! problem_sizes2, "
       "                             Tensor expert_num_tokens, "
-      "                             Tensor non_zero_expert_idxs, "
       "                             int num_local_experts, int padded_m, "
       "                             int n, int k) -> ()",
       {stride_tag});

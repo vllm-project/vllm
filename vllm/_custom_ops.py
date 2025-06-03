@@ -835,11 +835,12 @@ def get_cutlass_moe_mm_data(
                                                 num_experts, n, k)
 
 
-def get_cutlass_pplx_moe_mm_data(
-        expert_offsets: torch.Tensor, problem_sizes1: torch.Tensor,
-        problem_sizes2: torch.Tensor, expert_num_tokens: torch.Tensor,
-        non_zero_expert_idxs: torch.Tensor, num_local_experts: int,
-        padded_m: int, n: int, k: int):
+def get_cutlass_pplx_moe_mm_data(expert_offsets: torch.Tensor,
+                                 problem_sizes1: torch.Tensor,
+                                 problem_sizes2: torch.Tensor,
+                                 expert_num_tokens: torch.Tensor,
+                                 num_local_experts: int, padded_m: int, n: int,
+                                 k: int):
     """
     Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
@@ -855,7 +856,7 @@ def get_cutlass_pplx_moe_mm_data(
     """
     return torch.ops._C.get_cutlass_pplx_moe_mm_data(
         expert_offsets, problem_sizes1, problem_sizes2, expert_num_tokens,
-        non_zero_expert_idxs, num_local_experts, padded_m, n, k)
+        num_local_experts, padded_m, n, k)
 
 
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
