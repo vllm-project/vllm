@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
+import socket
 
 import msgspec
 import torch
@@ -53,6 +54,17 @@ class NixlAgentMetadata(
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
     num_blocks: int
+
+class NixlConnectorWorkerMetadata(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):
+    host: str
+    port: int
+    # parallelism ranks for this worker,
+    # [FIXME] should have DP etc as well
+    tp_rank: int
 
 
 @dataclass
@@ -172,17 +184,58 @@ class NixlConnectorScheduler:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
+        # [gluo FIXME] side_channel_host / port should be replaced by 'remote_metadata'
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
             vllm_config.parallel_config.data_parallel_rank_local *
             vllm_config.parallel_config.tensor_parallel_size)
+        self.remote_metadata = []
         logger.info("Initializing NIXL Scheduler %s", engine_id)
+        # Background thread for establishing new connections.
+        self._nixl_metadata_listener_t: Optional[threading.Thread] = None
 
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+
+        # Use port that is beyond the value that may be reserved for worker to
+        # listen for NIXL handshake.
+        # [gluo FIXME] Need to sort out DP case, different DP ranks have their own
+        # scheduler, what is the relationship between schedulers and workers in such
+        # a case? Are they being grouped?
+        port_offset = vllm_config.parallel_config.data_parallel_size *
+            vllm_config.parallel_config.tensor_parallel_size
+        ready_event = threading.Event()
+        self._nixl_metadata_listener_t = threading.Thread(
+            target=self._nixl_metadata_listener,
+            args=(self, ready_event, envs.VLLM_NIXL_SIDE_CHANNEL_PORT + port_offset),
+            daemon=True,
+            name="nixl_metadata_listener")
+        self._nixl_metadata_listener_t.start()
+        # Note: here has the assumption that the connector scheduler is always
+        # created before any connector worker.
+        ready_event.wait()
+
+    @staticmethod
+    def _nixl_metadata_listener(scheduler: NixlConnectorScheduler, ready_event: threading.Event, base_port: int):
+        """Background thread for getting new NIXL metadata."""
+
+        # Listen for new requests with metadata, directly use localhost
+        # here for listener because in multi-node setup,
+        # envs.VLLM_NIXL_SIDE_CHANNEL_HOST is set to the leader node address
+        # and copied to worker nodes.
+        path = make_zmq_path("tcp", "localhost", base_port)
+        logger.debug("Starting listening on path: %s", path)
+        with zmq_ctx(zmq.ROUTER, path) as sock:
+            ready_event.set()
+            while True:
+                metadata_bytes = sock.recv()
+                decoder = msgspec.msgpack.Decoder(NixlConnectorWorkerMetadata)
+                metadata = decoder.decode(metadata_bytes)
+                scheduler.remote_metadata.append(metadata)
+                
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -315,8 +368,7 @@ class NixlConnectorScheduler:
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
-            remote_host=self.side_channel_host,
-            remote_port=self.side_channel_port,
+            remote_metadata=self.remote_metadata,
         )
 
 
@@ -394,6 +446,39 @@ class NixlConnectorWorker:
         # List of block window sizes for each layer for local attention
         self.block_window_per_layer: list[Optional[int]] = []
 
+        # send connection info to the metadata listener
+        port_offset = vllm_config.parallel_config.data_parallel_size *
+            vllm_config.parallel_config.tensor_parallel_size
+        self._send_nixl_metadata(envs.VLLM_NIXL_SIDE_CHANNEL_PORT + port_offset)
+        
+
+    def _send_nixl_metadata(self, port: int):
+        """
+        Send NIXL metadata of this worker to the scheduler which listens
+        to VLLM_NIXL_SIDE_CHANNEL_HOST.
+        """
+        # Prepare the NixlConnectorWorkerMetadata of this worker.
+        # port is the calibrated port for this worker.
+        # [gluo FIXME] is there a better way to get the name of local host?
+        metadata = NixlConnectorWorkerMetadata(
+            host= socket.gethostname(),
+            port=self.side_channel_port + self.tp_rank,
+            tp_rank=self.tp_rank,
+        )
+
+        encoder = msgspec.msgpack.Encoder()
+        encoded_data = encoder.encode(metadata)
+        size_in_bytes = len(encoded_data)
+        logger.debug("Size of encoded NixlConnectorWorkerMetadata: %s bytes",
+                     str(size_in_bytes))
+
+        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        path = make_zmq_path("tcp", host, port)
+        logger.debug("Sending NixlConnectorWorkerMetadata on path: %s", path)
+        with zmq_ctx(zmq.REQ, path) as sock:
+            # Send metadata for the request.
+            sock.send(encoded_data)
+
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
                                  ready_event: threading.Event, base_port: int,
@@ -408,9 +493,11 @@ class NixlConnectorWorker:
         logger.debug("Size of encoded NixlAgentMetadata: %s bytes",
                      str(size_in_bytes))
 
-        # Listen for new requests for metadata.
-        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        path = make_zmq_path("tcp", host, base_port + tp_rank)
+        # Listen for new requests for metadata, directly use localhost
+        # here for listener because in multi-node setup,
+        # envs.VLLM_NIXL_SIDE_CHANNEL_HOST is set to the leader node address
+        # and copied to worker nodes.
+        path = make_zmq_path("tcp", "localhost", base_port + tp_rank)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
@@ -421,14 +508,24 @@ class NixlConnectorWorker:
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
 
-    def _nixl_handshake(self, host: str, port: int):
+    def _nixl_handshake(self, remote_metadata: list[NixlConnectorWorkerMetadata]):
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
         # NOTE(rob): we need each tp_rank to have a unique port.
         # This is a hack to keep us moving. We will switch when
         # we switch to HTTP-based NIXL metadata exchange.
-        path = make_zmq_path("tcp", host, port + self.tp_rank)
+        path = None
+        for metadata in remote_metadata:
+            # find the remote worker(s) to establish the connection with,
+            # base on the parallelism config between current worker
+            # and remote worker. Currently we only check TP.
+            if self.tp_rank == metadata.tp_rank:
+                path = make_zmq_path("tcp", metadata.host, metadata.port)
+        # [gluo FIXME] This really should be an error, needs better error handling here
+        if path is None:
+            logger.warning(
+                        f"NixlConnectorWorker at tp rank {self.tp_rank} can not find corresponding remote worker")
         logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
@@ -707,22 +804,20 @@ class NixlConnectorWorker:
                 dst_engine_id=meta.remote_engine_id,
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,
-                remote_host=meta.remote_host,
-                remote_port=meta.remote_port,
+                remote_metadata=meta.remote_metadata,
             )
 
     def _read_blocks(
         self,
         local_block_ids: list[int],
         remote_block_ids: list[int],
-        remote_host: str,
-        remote_port: int,
+        remote_metadata: list[NixlConnectorWorkerMetadata],
         dst_engine_id: str,
         request_id: str,
     ):
         # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
         if dst_engine_id not in self._remote_agents:
-            self._nixl_handshake(remote_host, remote_port)
+            self._nixl_handshake(remote_metadata)
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
