@@ -40,6 +40,13 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
                 "num_hidden_layers": 1,
             })
 
+        # e.g.: ibm-granite/granite-speech-3.3-2b
+        if hasattr(hf_config, "encoder_config"):
+            hf_config.encoder_config.update({
+                "num_layers": 1,
+                "num_hidden_layers": 1,
+            })
+
         return hf_config
 
     # Avoid calling model.forward()
