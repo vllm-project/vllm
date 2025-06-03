@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import heapq
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -63,8 +64,8 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_scheduled_tokens = \
-            self.scheduler_config.max_num_batched_tokens
+        self.max_num_scheduled_tokens = (
+            self.scheduler_config.max_num_batched_tokens)
         self.max_model_len = self.scheduler_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -88,8 +89,12 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+        # Scheduling policy
+        self.policy = self.scheduler_config.policy
         # Priority queues for requests.
-        self.waiting: deque[Request] = deque()
+        self.waiting: Union[list[tuple[int, float, Request]],
+                            deque[Request]] = ([] if self.policy == "priority"
+                                               else deque())
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -104,8 +109,8 @@ class Scheduler(SchedulerInterface):
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         # Request id -> deque of CachedRequestData
-        self._cached_reqs_data: dict[
-            str, deque[CachedRequestData]] = defaultdict(deque)
+        self._cached_reqs_data: dict[str, deque[CachedRequestData]] = (
+            defaultdict(deque))
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -209,10 +214,16 @@ class Scheduler(SchedulerInterface):
             encoder_inputs_to_schedule = None
             new_encoder_budget = encoder_budget
             if request.has_encoder_inputs:
-                (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_budget) = self._try_schedule_encoder_inputs(
-                     request, request.num_computed_tokens, num_new_tokens,
-                     encoder_budget)
+                (
+                    encoder_inputs_to_schedule,
+                    num_new_tokens,
+                    new_encoder_budget,
+                ) = self._try_schedule_encoder_inputs(
+                    request,
+                    request.num_computed_tokens,
+                    num_new_tokens,
+                    encoder_budget,
+                )
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -230,18 +241,33 @@ class Scheduler(SchedulerInterface):
 
             num_draft_tokens = max(
                 num_new_tokens + request.num_computed_tokens -
-                request.num_tokens, 0)
+                request.num_tokens,
+                0,
+            )
 
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
                     num_draft_tokens=num_draft_tokens,
-                    num_lookahead_tokens=self.num_lookahead_tokens)
+                    num_lookahead_tokens=self.num_lookahead_tokens,
+                )
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    preempted_req = self.running.pop()
+                    if not self.running:
+                        # No request to preempt.
+                        can_schedule = False
+                        break
+                    if self.policy == "priority":
+                        preempted_req = min(
+                            self.running,
+                            key=lambda r: (r.priority, r.arrival_time),
+                        )
+                        self.running.remove(preempted_req)
+                    else:
+                        preempted_req = self.running.pop()
+
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
@@ -249,7 +275,19 @@ class Scheduler(SchedulerInterface):
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
 
-                    self.waiting.appendleft(preempted_req)
+                    if self.policy == "priority":
+                        heapq.heappush(
+                            cast(list[tuple[int, float, Request]],
+                                 self.waiting),
+                            (
+                                preempted_req.priority,
+                                preempted_req.arrival_time,
+                                preempted_req,
+                            ),
+                        )
+                    else:
+                        cast(deque[Request],
+                             self.waiting).appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt.
@@ -307,7 +345,10 @@ class Scheduler(SchedulerInterface):
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        skipped_waiting_requests: deque[Request] = deque()
+        skipped_waiting_requests: Union[list[tuple[int, float, Request]],
+                                        deque[Request]] = ([] if self.policy
+                                                           == "priority" else
+                                                           deque())
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -315,7 +356,14 @@ class Scheduler(SchedulerInterface):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                request = self.waiting[0]
+                if self.policy == "priority":
+                    if (not self.waiting
+                        ):  # Should not happen due to outer loop condition
+                        break
+                    priority_val, arrival_time_val, request = heapq.heappop(
+                        cast(list[tuple[int, float, Request]], self.waiting))
+                else:
+                    request = cast(deque[Request], self.waiting).popleft()
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -325,9 +373,18 @@ class Scheduler(SchedulerInterface):
                     else:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request.request_id)
-                        self.waiting.popleft()
-                        skipped_waiting_requests.appendleft(request)
+                            request.request_id,
+                        )
+                        if self.policy == "priority":
+                            waiting_queue = cast(
+                                list[tuple[int, float, Request]],
+                                skipped_waiting_requests)
+                            heapq.heappush(
+                                waiting_queue,
+                                (priority_val, arrival_time_val, request))
+                        else:
+                            cast(deque[Request],
+                                 skipped_waiting_requests).appendleft(request)
                         continue
 
                 # Skip request if the structured output request is still waiting
@@ -337,19 +394,33 @@ class Scheduler(SchedulerInterface):
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
-                        self.waiting.popleft()
-                        skipped_waiting_requests.appendleft(request)
+                        if self.policy == "priority":
+                            waiting_queue = cast(
+                                list[tuple[int, float, Request]],
+                                skipped_waiting_requests)
+                            heapq.heappush(
+                                waiting_queue,
+                                (priority_val, arrival_time_val, request))
+                        else:
+                            cast(deque[Request],
+                                 skipped_waiting_requests).appendleft(request)
                         continue
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
-                if self.lora_config and request.lora_request and (
-                        len(scheduled_loras) == self.lora_config.max_loras
-                        and request.lora_request.lora_int_id
-                        not in scheduled_loras):
+                if (self.lora_config and request.lora_request and
+                    (len(scheduled_loras) == self.lora_config.max_loras and
+                     request.lora_request.lora_int_id not in scheduled_loras)):
                     # Scheduling would exceed max_loras, skip.
-                    self.waiting.popleft()
-                    skipped_waiting_requests.appendleft(request)
+                    if self.policy == "priority":
+                        waiting_queue = cast(list[tuple[int, float, Request]],
+                                             skipped_waiting_requests)
+                        heapq.heappush(
+                            waiting_queue,
+                            (priority_val, arrival_time_val, request))
+                    else:
+                        cast(deque[Request],
+                             skipped_waiting_requests).appendleft(request)
                     continue
 
                 num_external_computed_tokens = 0
@@ -358,9 +429,8 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = \
-                        self.kv_cache_manager.get_computed_blocks(
-                            request)
+                    new_computed_blocks, num_new_local_computed_tokens = (
+                        self.kv_cache_manager.get_computed_blocks(request))
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -400,11 +470,16 @@ class Scheduler(SchedulerInterface):
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
-                        (encoder_inputs_to_schedule, num_new_tokens,
-                         new_encoder_budget
-                         ) = self._try_schedule_encoder_inputs(
-                             request, num_computed_tokens, num_new_tokens,
-                             encoder_budget)
+                        (
+                            encoder_inputs_to_schedule,
+                            num_new_tokens,
+                            new_encoder_budget,
+                        ) = self._try_schedule_encoder_inputs(
+                            request,
+                            num_computed_tokens,
+                            num_new_tokens,
+                            encoder_budget,
+                        )
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
@@ -419,6 +494,15 @@ class Scheduler(SchedulerInterface):
                 )
                 if new_blocks is None:
                     # The request cannot be scheduled.
+                    if self.policy == "priority":
+                        waiting_queue = cast(list[tuple[int, float, Request]],
+                                             skipped_waiting_requests)
+                        heapq.heappush(
+                            waiting_queue,
+                            (priority_val, arrival_time_val, request))
+                    else:
+                        # For FCFS, push back to the front of the deque.
+                        cast(deque[Request], self.waiting).appendleft(request)
                     break
 
                 # KVConnector: update internal state after allocation.
@@ -432,17 +516,27 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens,
                     )
 
-                self.waiting.popleft()
+                # Request was already popped from self.waiting
+                # (either via heapq.heappop or self.waiting.popleft())
+                # unless it was re-added above due to new_blocks being None.
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
-                    skipped_waiting_requests.appendleft(request)
+                    if self.policy == "priority":
+                        waiting_queue = cast(list[tuple[int, float, Request]],
+                                             skipped_waiting_requests)
+                        heapq.heappush(
+                            waiting_queue,
+                            (priority_val, arrival_time_val, request))
+                    else:
+                        cast(deque[Request],
+                             skipped_waiting_requests).appendleft(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
                 if request.use_structured_output:
-                    structured_output_request_ids[
-                        request.request_id] = req_index
+                    structured_output_request_ids[request.request_id] = (
+                        req_index)
                 req_index += 1
                 self.running.append(request)
                 if self.log_stats:
@@ -478,7 +572,17 @@ class Scheduler(SchedulerInterface):
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
-            self.waiting.extendleft(skipped_waiting_requests)
+            if self.policy == "priority":
+                waiting_queue = cast(list[tuple[int, float, Request]],
+                                     self.waiting)
+                skipped_queue = cast(list[tuple[int, float, Request]],
+                                     skipped_waiting_requests)
+                for item in skipped_queue:
+                    heapq.heappush(waiting_queue, item)
+            else:  # FCFS
+                waiting_deque = cast(deque[Request], self.waiting)
+                skipped_deque = cast(deque[Request], skipped_waiting_requests)
+                waiting_deque.extendleft(skipped_deque)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -488,8 +592,8 @@ class Scheduler(SchedulerInterface):
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
-        assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
-                len(scheduled_running_reqs) <= len(self.running))
+        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
+            scheduled_running_reqs) <= len(self.running)
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
@@ -734,7 +838,8 @@ class Scheduler(SchedulerInterface):
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=len(scheduled_spec_token_ids),
-                    num_accepted_tokens=len(generated_token_ids) - 1)
+                    num_accepted_tokens=len(generated_token_ids) - 1,
+                )
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
@@ -862,7 +967,13 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
-        self.waiting.append(request)
+        if self.policy == "priority":
+            heapq.heappush(
+                cast(list[tuple[int, float, Request]], self.waiting),
+                (request.priority, request.arrival_time, request),
+            )
+        else:
+            cast(deque[Request], self.waiting).append(request)
         self.requests[request.request_id] = request
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
@@ -892,7 +1003,7 @@ class Scheduler(SchedulerInterface):
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
             else:
-                self.waiting.remove(request)
+                cast(deque[Request], self.waiting).remove(request)
             request.status = finished_status
             self._free_request(request)
 
@@ -921,7 +1032,7 @@ class Scheduler(SchedulerInterface):
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
-        return len(self.waiting) + len(self.running)
+        return len(cast(deque[Request], self.waiting)) + len(self.running)
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
@@ -939,7 +1050,7 @@ class Scheduler(SchedulerInterface):
         assert prefix_cache_stats is not None
         return SchedulerStats(
             num_running_reqs=len(self.running),
-            num_waiting_reqs=len(self.waiting),
+            num_waiting_reqs=len(cast(deque[Request], self.waiting)),
             gpu_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
@@ -957,7 +1068,8 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens,
-            num_accepted_tokens=num_accepted_tokens)
+            num_accepted_tokens=num_accepted_tokens,
+        )
         return spec_decoding_stats
 
     def shutdown(self) -> None:
@@ -981,8 +1093,8 @@ class Scheduler(SchedulerInterface):
         """
         if self.connector is None:
             return False, None
-        assert len(self.kv_cache_config.kv_cache_groups
-                   ) == 1, "KV connector only supports one KV cache group now"
+        assert (len(self.kv_cache_config.kv_cache_groups) == 1
+                ), "KV connector only supports one KV cache group now"
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
         return self.connector.request_finished(request, block_ids)
 
@@ -1000,8 +1112,8 @@ class Scheduler(SchedulerInterface):
         """
         if request.request_id not in self.finished_recving_kv_req_ids:
             return False
-        assert len(self.kv_cache_config.kv_cache_groups
-                   ) == 1, "KV connector only supports one KV cache group now"
+        assert (len(self.kv_cache_config.kv_cache_groups) == 1
+                ), "KV connector only supports one KV cache group now"
         # Now that the blocks are ready, actually cache them.
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
         num_computed_tokens = len(block_ids) * self.block_size
@@ -1032,9 +1144,9 @@ class Scheduler(SchedulerInterface):
             scheduler the request during the next step.
         """
         # P/D: update recv and send status from last step.
-        for req_id in (model_runner_output.finished_recving or ()):
+        for req_id in model_runner_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_kv_req_ids.add(req_id)
-        for req_id in (model_runner_output.finished_sending or ()):
+        for req_id in model_runner_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
