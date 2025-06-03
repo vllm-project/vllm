@@ -39,7 +39,7 @@ def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
     for plugin in discovered_plugins:
         log_level("- %s -> %s", plugin.name, plugin.value)
 
-    if allowed_plugins is None and not is_default_group:
+    if allowed_plugins is None:
         log_level("All plugins in this group will be loaded. "
                   "Set `VLLM_PLUGINS` to control which plugins to load.")
 
