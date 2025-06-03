@@ -261,7 +261,11 @@ class ModelConfig:
     and tokenizer."""
     dtype: Union[DType, torch.dtype] = "auto"
     """Data type for model weights and activations:\n
-    - "auto" will use FP16 precision for FP32 and FP16 models, and BF16
+    - "auto" 
+        - for generative models will use FP16 precision for FP32 and FP16 models, 
+    and BF16 precision for BF16 models.\n
+        - for pooling models will use FP32 precision for FP32 models to avoid 
+    precision degradation. will use FP16 precision for FP16 models, BF16
     precision for BF16 models.\n
     - "half" for FP16. Recommended for AWQ quantization.\n
     - "float16" is the same as "half".\n
