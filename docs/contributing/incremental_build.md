@@ -12,7 +12,7 @@ Before setting up the incremental build:
    VLLM_USE_PRECOMPILED=1 uv pip install -U -e . --torch-backend=auto
    ```
 
-2. **CUDA Toolkit:** Verify that the NVIDIA CUDA Toolkit is correctly installed and `nvcc` is accessible in your `PATH`. CMake relies on `nvcc` to compile CUDA code. If you encounter issues, refer to the [official CUDA Toolkit installation guides](https://developer.nvidia.com/cuda-toolkit-archive) and vLLM's main [GPU installation documentation](../getting_started/installation/gpu/cuda.inc.md#troubleshooting) for troubleshooting. The `CMAKE_CUDA_COMPILER` variable in your `CMakeUserPresets.json` should also point to your `nvcc` binary.
+2. **CUDA Toolkit:** Verify that the NVIDIA CUDA Toolkit is correctly installed and `nvcc` is accessible in your `PATH`. CMake relies on `nvcc` to compile CUDA code. You can typically find `nvcc` in `$CUDA_HOME/bin/nvcc` or by running `which nvcc`. If you encounter issues, refer to the [official CUDA Toolkit installation guides](https://developer.nvidia.com/cuda-toolkit-archive) and vLLM's main [GPU installation documentation](../getting_started/installation/gpu/cuda.inc.md#troubleshooting) for troubleshooting. The `CMAKE_CUDA_COMPILER` variable in your `CMakeUserPresets.json` should also point to your `nvcc` binary.
 
 3. **Build Tools:** Ensure the dependencies for building are installed and available, like `cmake` and `ninja`. These are installable through the `requirements/build.txt`, or can be installed by your package manager.
 
@@ -81,7 +81,7 @@ Here is an example configuration. Create a file named `CMakeUserPresets.json` in
 
 **Key configurations in `CMakeUserPresets.json`:**
 - `CMAKE_C_COMPILER_LAUNCHER`, `CMAKE_CXX_COMPILER_LAUNCHER`, `CMAKE_CUDA_COMPILER_LAUNCHER`: Setting these to `ccache` (or `sccache`) significantly speeds up rebuilds by caching compilation results. Ensure `ccache` is installed (e.g., `sudo apt install ccache` or `conda install ccache`).
-- `VLLM_PYTHON_EXECUTABLE`: Path to the Python executable in your vLLM development environment.
+- `VLLM_PYTHON_EXECUTABLE`: Path to the Python executable in your vLLM development environment. After activating your virtual environment, you can usually find this path by running `which python` (or `which python3`).
 - `CMAKE_JOB_POOLS` and `jobs` in build presets: Control the parallelism of the build. Adjust `compile=64` and `jobs: 64` based on your system's resources to optimize build times without overloading your machine.
 - `binaryDir`: Specifies where the build artifacts will be stored (e.g., `cmake-build-release`).
 
