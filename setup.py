@@ -69,6 +69,10 @@ def is_ninja_available() -> bool:
     return which("ninja") is not None
 
 
+def is_cmake_available() -> bool:
+    return which("cmake") is not None
+
+
 def is_url_available(url: str) -> bool:
     from urllib.request import urlopen
 
@@ -681,11 +685,18 @@ else:
         repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
     }
 
+setup_requires = []
+if not is_cmake_available():
+    setup_requires += ["cmake>=3.26"]
+if not is_ninja_available():
+    setup_requires += ["ninja"]
+
 setup(
     # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
     ext_modules=ext_modules,
     install_requires=get_requirements(),
+    setup_requires=setup_requires,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
