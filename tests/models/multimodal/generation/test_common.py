@@ -282,10 +282,10 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt="<start_of_image><start_of_image>Describe the two images in detail.",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        dtype="bfloat16",
         auto_cls=AutoModelForImageTextToText,
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
+        num_logprobs=10,
     ),
     "glm4v": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
