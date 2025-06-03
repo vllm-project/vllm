@@ -8,8 +8,8 @@ the failure?
 
 - If your failure **is already listed**, it's likely unrelated to your PR.  
   Help fixing it is always welcome!  
-  - Leave comments with links to additional instances of the failure.  
-  - React with a 👍 to signal how many are affected.
+    - Leave comments with links to additional instances of the failure.  
+    - React with a 👍 to signal how many are affected.
 
 - If your failure **is not listed**, you should **file an issue**.
 
@@ -34,7 +34,7 @@ the failure?
   
     ```
     FAILED failing/test.py:failing_test1 - Failure description  
- FAILED failing/test.py:failing_test2 - Failure description  
+     FAILED failing/test.py:failing_test2 - Failure description  
     https://github.com/orgs/vllm-project/projects/20  
     https://github.com/vllm-project/vllm/issues/new?template=400-bug-report.yml  
     FAILED failing/test.py:failing_test3 - Failure description  
