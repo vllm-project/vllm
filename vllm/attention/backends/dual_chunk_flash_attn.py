@@ -1218,9 +1218,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                                       device=query_states.device),
             max_seqlen_k=max_seqlen_k,
             causal=causal,
-            # Since the key_states and value_states are directly retrieved from the KV cache
-            # through the block_table, 
-            # setting `block_table` here is both wrong and unnecessary.
             return_softmax_lse=True,
         )
         softmax_lse = softmax_lse.view(q_len, q_heads, 1).transpose(0,
