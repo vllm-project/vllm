@@ -10,6 +10,8 @@ static __global__ void mul_mat_vec_q(const void * __restrict__ vx, const void * 
 
     const int blocks_per_row = ncols / qk;
     const int blocks_per_warp = vdr * WARP_SIZE / qi;
+    const int nrows_y = (ncols + 512 - 1) / 512 * 512;
+
 
     // partial sum for each thread
     float tmp = 0.0f;
@@ -20,7 +22,7 @@ static __global__ void mul_mat_vec_q(const void * __restrict__ vx, const void * 
     for (auto i = threadIdx.x / (qi/vdr); i < blocks_per_row; i += blocks_per_warp) {
         const int ibx = row*blocks_per_row + i; // x block index
 
-        const int iby = vec*blocks_per_row + i * (qk/QK8_1); // y block index that aligns with ibx
+        const int iby = vec*(nrows_y/QK8_1) + i * (qk/QK8_1); // y block index that aligns with ibx
 
         const int iqs  = vdr * (threadIdx.x % (qi/vdr)); // x block quant index when casting the quants to int
 
