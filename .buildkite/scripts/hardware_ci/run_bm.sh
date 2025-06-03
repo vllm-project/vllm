@@ -84,6 +84,6 @@ python benchmarks/benchmark_serving.py \
 echo "complelted..."
 echo
 
-through_put=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
-echo "through put: $through_put"
+throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
+echo "throughput: $throughput"
 echo

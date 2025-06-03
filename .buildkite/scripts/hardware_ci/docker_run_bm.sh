@@ -78,8 +78,8 @@ TABLE_FILE="./$TEST_NAME"_table.txt
 docker cp "$CONTAINER_NAME:/workspace/vllm_log.txt" "$VLLM_LOG" 
 docker cp "$CONTAINER_NAME:/workspace/bm_log.txt" "$BM_LOG"
 
-through_put=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
-echo "through put for $TEST_NAME at $BUILDKITE_COMMIT: $through_put"
+throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')
+echo "throughput for $TEST_NAME at $BUILDKITE_COMMIT: $throughput"
 
 if [ "$BUILDKITE" = "true" ]; then
   echo "Running inside Buildkite"
@@ -90,15 +90,15 @@ else
 fi
 
 #
-# compare the through_put with EXPECTED_THROUGHPUT 
+# compare the throughput with EXPECTED_THROUGHPUT 
 # and assert meeting the expectation
 # 
-if [[ -z "$through_put" || ! "$through_put" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-  echo "faieled to get the through_put"
+if [[ -z "$throughput" || ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "faieled to get the throughput"
   exit 1
 fi
 
-if (( $(echo "$through_put < $EXPECTED_THROUGHPUT" | bc -l) )); then
-  echo "Error: through_put($through_put) is less than expected($EXPECTED_THROUGHPUT)"
+if (( $(echo "$throughput < $EXPECTED_THROUGHPUT" | bc -l) )); then
+  echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT)"
   exit 1
 fi
