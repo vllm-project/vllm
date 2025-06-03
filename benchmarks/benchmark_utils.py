@@ -66,4 +66,9 @@ class InfEncoder(json.JSONEncoder):
 
 def write_to_json(filename: str, records: list) -> None:
     with open(filename, "w") as f:
-        json.dump(records, f, cls=InfEncoder)
+        json.dump(
+            records,
+            f,
+            cls=InfEncoder,
+            default=lambda non_serializable: "<Object is not JSON serializable>",
+        )
