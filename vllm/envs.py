@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
+    VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -119,6 +120,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
+    VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
 
 
 def get_default_cache_root():
@@ -159,17 +161,13 @@ def get_vllm_port() -> Optional[int]:
         return int(port)
     except ValueError as err:
         from urllib.parse import urlparse
-        try:
-            parsed = urlparse(port)
-            if parsed.scheme:
-                raise ValueError(
-                    f"VLLM_PORT '{port}' appears to be a URI. "
-                    "This may be caused by a Kubernetes service discovery issue"
-                    "check the warning in: https://docs.vllm.ai/en/stable/usage/env_vars.html"
-                )
-        except Exception:
-            pass
-
+        parsed = urlparse(port)
+        if parsed.scheme:
+            raise ValueError(
+                f"VLLM_PORT '{port}' appears to be a URI. "
+                "This may be caused by a Kubernetes service discovery issue,"
+                "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+            ) from None
         raise ValueError(
             f"VLLM_PORT '{port}' must be a valid integer") from err
 
@@ -516,6 +514,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, assert on XLA recompilation after each execution step.
     "VLLM_XLA_CHECK_RECOMPILATION":
     lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION", "0"))),
+
+    # Enable SPMD mode for TPU backend.
+    "VLLM_XLA_USE_SPMD":
+    lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
@@ -832,6 +834,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is used to prevent the kernel from running out of memory.
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
+
+    # Regex timeout for use by the vLLM tool parsing plugins.
+    "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
+    lambda: int(os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")),
 }
 
 # --8<-- [end:env-vars-definition]
