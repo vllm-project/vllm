@@ -1600,12 +1600,18 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if global_num_experts == -1:
             global_num_experts = E
 
+        # We execute the fused_moe kernel in chunks to circumvent this issue:
+        # https://github.com/vllm-project/vllm/issues/5938
+        CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+        M = min(num_tokens, CHUNK_SIZE)
+
         config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
                                             use_int8_w8a16=self.use_int8_w8a16,
                                             use_int4_w4a16=self.use_int4_w4a16,
                                             dtype=hidden_states.dtype)
 
-        config = try_get_optimal_moe_config(
+        get_config_func = functools.partial(
+            try_get_optimal_moe_config,
             w1.shape,
             w2.shape,
             top_k_num,
@@ -1613,6 +1619,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             num_tokens,
             block_shape=self.block_shape,
         )
+
+        config = get_config_func(M)
 
         if hidden_states.dtype == torch.bfloat16:
             compute_type = tl.bfloat16
@@ -1628,67 +1636,87 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
-        intermediate_cache1 = _resize_cache(workspace13,
-                                            (num_tokens, top_k_num, N))
+        intermediate_cache1 = _resize_cache(workspace13, (M, top_k_num, N))
         intermediate_cache2 = _resize_cache(workspace2,
-                                            (num_tokens * top_k_num, N // 2))
-        intermediate_cache3 = _resize_cache(workspace13,
-                                            (num_tokens, top_k_num, K))
+                                            (M * top_k_num, N // 2))
+        intermediate_cache3 = _resize_cache(workspace13, (M, top_k_num, K))
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
-                                 global_num_experts, expert_map))
+        for chunk in range((num_tokens // CHUNK_SIZE) + 1):
+            begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
+                                              min((chunk + 1) * CHUNK_SIZE,
+                                                  num_tokens))
+            curr_hidden_states = hidden_states[begin_chunk_idx:end_chunk_idx]
+            curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
+            tokens_in_chunk, _ = curr_hidden_states.shape
 
-        invoke_fused_moe_kernel(hidden_states,
-                                w1,
-                                intermediate_cache1,
-                                a1q_scale,
-                                w1_scale,
-                                w1_zp,
-                                None,
-                                sorted_token_ids,
-                                expert_ids,
-                                num_tokens_post_padded,
-                                False,
-                                top_k_num,
-                                config,
-                                compute_type=compute_type,
-                                use_fp8_w8a8=self.use_fp8_w8a8,
-                                use_int8_w8a8=self.use_int8_w8a8,
-                                use_int8_w8a16=self.use_int8_w8a16,
-                                use_int4_w4a16=self.use_int4_w4a16,
-                                per_channel_quant=self.per_channel_quant,
-                                block_shape=self.block_shape)
+            if tokens_in_chunk == 0:
+                break
 
-        self.activation(activation, intermediate_cache2,
-                        intermediate_cache1.view(-1, N))
+            if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
+                # Adjust the intermediate cache size and config for the last
+                # chunk. Note that in most cases we only have one chunk
+                # so the cache size and config are already set correctly and
+                # do not need to be adjusted.
+                intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
+                intermediate_cache2 = intermediate_cache2[:tokens_in_chunk *
+                                                          topk_ids.shape[1]]
+                intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
+                config = get_config_func(tokens_in_chunk)
 
-        a2q_scale: Optional[torch.Tensor] = None
+            sorted_token_ids, expert_ids, num_tokens_post_padded = (
+                moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
+                                     global_num_experts, expert_map))
 
-        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
-            intermediate_cache2, a2_scale, self.qtype, self.per_channel_quant,
-            self.block_shape)
+            invoke_fused_moe_kernel(curr_hidden_states,
+                                    w1,
+                                    intermediate_cache1,
+                                    a1q_scale,
+                                    w1_scale,
+                                    w1_zp,
+                                    None,
+                                    sorted_token_ids,
+                                    expert_ids,
+                                    num_tokens_post_padded,
+                                    False,
+                                    top_k_num,
+                                    config,
+                                    compute_type=compute_type,
+                                    use_fp8_w8a8=self.use_fp8_w8a8,
+                                    use_int8_w8a8=self.use_int8_w8a8,
+                                    use_int8_w8a16=self.use_int8_w8a16,
+                                    use_int4_w4a16=self.use_int4_w4a16,
+                                    per_channel_quant=self.per_channel_quant,
+                                    block_shape=self.block_shape)
 
-        invoke_fused_moe_kernel(qintermediate_cache2,
-                                w2,
-                                intermediate_cache3,
-                                a2q_scale,
-                                w2_scale,
-                                w2_zp,
-                                None,
-                                sorted_token_ids,
-                                expert_ids,
-                                num_tokens_post_padded,
-                                False,
-                                1,
-                                config,
-                                compute_type=compute_type,
-                                use_fp8_w8a8=self.use_fp8_w8a8,
-                                use_int8_w8a8=self.use_int8_w8a8,
-                                use_int8_w8a16=self.use_int8_w8a16,
-                                use_int4_w4a16=self.use_int4_w4a16,
-                                per_channel_quant=self.per_channel_quant,
-                                block_shape=self.block_shape)
+            self.activation(activation, intermediate_cache2,
+                            intermediate_cache1.view(-1, N))
+
+            a2q_scale: Optional[torch.Tensor] = None
+
+            qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
+                intermediate_cache2, a2_scale, self.qtype,
+                self.per_channel_quant, self.block_shape)
+
+            invoke_fused_moe_kernel(qintermediate_cache2,
+                                    w2,
+                                    intermediate_cache3,
+                                    a2q_scale,
+                                    w2_scale,
+                                    w2_zp,
+                                    None,
+                                    sorted_token_ids,
+                                    expert_ids,
+                                    num_tokens_post_padded,
+                                    False,
+                                    1,
+                                    config,
+                                    compute_type=compute_type,
+                                    use_fp8_w8a8=self.use_fp8_w8a8,
+                                    use_int8_w8a8=self.use_int8_w8a8,
+                                    use_int8_w8a16=self.use_int8_w8a16,
+                                    use_int4_w4a16=self.use_int4_w4a16,
+                                    per_channel_quant=self.per_channel_quant,
+                                    block_shape=self.block_shape)
 
         return intermediate_cache3
 
