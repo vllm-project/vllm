@@ -221,13 +221,13 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using Triton backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "triton_attn.TritonAttentionBackend")
-            if cls.get_device_capability() == DeviceCapability(10, 0):
-                # Prefer FlashInfer on Blackwell GPUs if installed
+            if cls.is_device_capability(100):
+                # Prefer FlashInfer for V1 on Blackwell GPUs if installed
                 try:
                     import flashinfer  # noqa: F401
                     logger.info_once(
                         "Using FlashInfer backend on V1 engine by default for "
-                        "Blackwell GPUs.")
+                        "Blackwell (SM 10.0) GPUs.")
                     return ("vllm.v1.attention.backends."
                             "flashinfer.FlashInferBackend")
                 except Exception:
@@ -254,16 +254,6 @@ class CudaPlatformBase(Platform):
                 f"with use_v1: {use_v1} use_mla: {use_mla}")
 
         target_backend = _Backend.FLASH_ATTN
-        if cls.has_device_capability(100):
-            try:  # Prefer FlashInfer on Blackwell GPUs if installed
-                import flashinfer  # noqa: F401
-                logger.info(
-                    "Using FlashInfer backend by default on Blackwell GPU.")
-                return "vllm.attention.backends.flashinfer.FlashInferBackend"
-            except Exception:
-                logger.info(
-                    "FlashInfer not installed; falling back to Flash Attention."
-                )
         if not cls.has_device_capability(80):
             # Volta and Turing NVIDIA GPUs.
             logger.info(
