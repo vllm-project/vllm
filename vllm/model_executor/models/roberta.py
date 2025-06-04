@@ -3,7 +3,7 @@
 
 import itertools
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -59,35 +59,47 @@ class RobertaEmbedding(nn.Module):
 
         input_shape = input_ids.size()
         inputs_embeds = self.word_embeddings(input_ids)
-        seq_lens = get_forward_context().seq_lens
+        attn_metadata = get_forward_context().attn_metadata
 
-        # Replace position ids because in RoBERTa models
-        # they have to start at padding_idx + 1 and ignore
-        # existing padding tokens
-        # References:
-        # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L133
-        # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L1669
-        pos_list = []
-        token_list = []
-        offset = 0
-        for seq_len in seq_lens:
-            pos_list.append(position_ids[offset:offset + seq_len])
-            token_list.append(input_ids[offset:offset + seq_len])
-            offset += seq_len
+        seq_lens: Optional[torch.Tensor] = None
+        attn_metadata: Any = get_forward_context().attn_metadata
+        if attn_metadata is not None:
+            if isinstance(attn_metadata, dict):
+                attn_metadata = next(iter(attn_metadata.values()))
+                assert hasattr(attn_metadata, "seq_lens")
+                seq_lens = attn_metadata.seq_lens
+            else:
+                assert hasattr(attn_metadata, "seq_lens_tensor")
+                seq_lens = attn_metadata.seq_lens_tensor
 
-        offset = 0
-        for positions, tokens in zip(pos_list, token_list):
-            # Verify assumption that incoming position are
-            # always a sequence from 0 to N.
-            expected_pos = torch.arange(positions.size()[0],
-                                        dtype=torch.long,
-                                        device=inputs_embeds.device)
-            assert torch.equal(positions, expected_pos)
-            new_pos = create_position_ids_from_input_ids(
-                tokens, self.padding_idx)
-            seq_len = new_pos.shape[0]
-            position_ids[offset:offset + seq_len] = new_pos
-            offset += seq_len
+        if seq_lens:
+            # Replace position ids because in RoBERTa models
+            # they have to start at padding_idx + 1 and ignore
+            # existing padding tokens
+            # References:
+            # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L133
+            # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L1669
+            pos_list = []
+            token_list = []
+            offset = 0
+            for seq_len in seq_lens:
+                pos_list.append(position_ids[offset:offset + seq_len])
+                token_list.append(input_ids[offset:offset + seq_len])
+                offset += seq_len
+
+            offset = 0
+            for positions, tokens in zip(pos_list, token_list):
+                # Verify assumption that incoming position are
+                # always a sequence from 0 to N.
+                expected_pos = torch.arange(positions.size()[0],
+                                            dtype=torch.long,
+                                            device=inputs_embeds.device)
+                assert torch.equal(positions, expected_pos)
+                new_pos = create_position_ids_from_input_ids(
+                    tokens, self.padding_idx)
+                seq_len = new_pos.shape[0]
+                position_ids[offset:offset + seq_len] = new_pos
+                offset += seq_len
 
         # Position embeddings.
         position_embeddings = self.position_embeddings(position_ids)
