@@ -5,7 +5,7 @@ import copy
 import gc
 import time
 import weakref
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import torch
@@ -38,7 +38,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
                         check_use_alibi, is_pin_memory_available)
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
@@ -143,7 +142,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_metadata_builders: list[AttentionMetadataBuilder] = []
         self.attn_backends: list[type[AttentionBackend]] = []
         # self.kv_cache_config: KVCacheConfig
-        # self.input_batch: InputBatch # Persistent batch.
 
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
@@ -173,6 +171,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
 
+        # Input Batch
+        # NOTE(Chen): Ideally, we should initialize the input batch inside
+        # `initialize_kv_cache` based on the kv cache config. However, as in
+        # https://github.com/vllm-project/vllm/pull/18298, due to some unknown
+        # reasons, we have to initialize the input batch before `load_model`,
+        # quantization + weight offloading will fail otherwise. As a temporary
+        # solution, we initialize the input batch here, and re-initialize it
+        # in `initialize_kv_cache` if the block_sizes here is different from
+        # the block_sizes in the kv cache config.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -180,7 +187,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            block_size=self.cache_config.block_size,
+            block_sizes=[self.cache_config.block_size],
         )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
@@ -195,8 +202,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # Cache the device properties.
-        self.device_properties = torch.cuda.get_device_properties(self.device)
-        self.num_sms = self.device_properties.multi_processor_count
+        self._init_device_properties()
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = torch.zeros(self.max_num_tokens,
@@ -306,6 +312,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert not self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
         return batch_reordered
+
+    # Note: used for model runner override.
+    def _init_device_properties(self) -> None:
+        """Initialize attributes from torch.cuda.get_device_properties
+        """
+        self.device_properties = torch.cuda.get_device_properties(self.device)
+        self.num_sms = self.device_properties.multi_processor_count
+
+    # Note: used for model runner override.
+    def _sync_device(self) -> None:
+        torch.cuda.synchronize()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -530,8 +547,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[dict[str, FlashAttentionMetadata], torch.Tensor,
-               Optional[SpecDecodeMetadata]]:
+    ) -> tuple[dict[str, Any], torch.Tensor, Optional[SpecDecodeMetadata]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -644,7 +660,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc, seq_lens=seq_lens)
 
-        attn_metadata: dict[str, FlashAttentionMetadata] = {}
+        attn_metadata: dict[str, Any] = {}
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -941,7 +957,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
             batched_mm_inputs = MultiModalKwargs.as_kwargs(
                 batched_mm_inputs,
-                dtype=self.model_config.dtype,
                 device=self.device,
             )
 
@@ -1702,7 +1717,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Must synchronize the non-blocking GPU->CPU transfers.
         if prompt_logprobs_dict:
-            torch.cuda.synchronize()
+            self._sync_device()
 
         return prompt_logprobs_dict
 
@@ -1732,7 +1747,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=np.int32)
 
         if skip_attn:
-            attn_metadata: Optional[dict[str, FlashAttentionMetadata]] = None
+            attn_metadata: Optional[dict[str, Any]] = None
         else:
             query_start_loc = self.query_start_loc[:num_reqs + 1]
             # Make sure max_model_len is used at the graph capture time.
@@ -1940,7 +1955,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 [dummy_mm_kwargs] * max_num_mm_items)
             batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
                 batched_dummy_mm_inputs,
-                dtype=self.model_config.dtype,
                 device=self.device,
             )
 
@@ -1961,7 +1975,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output = self._dummy_sampler_run(hidden_states)
         else:
             sampler_output = None
-        torch.cuda.synchronize()
+        self._sync_device()
         del hidden_states, sampler_output
         self.encoder_cache.clear()
         gc.collect()
@@ -2045,6 +2059,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
 
+    def may_reinitialize_input_batch(self,
+                                     kv_cache_config: KVCacheConfig) -> None:
+        """
+        Re-initialize the input batch if the block sizes are different from
+        `[self.cache_config.block_size]`. This usually happens when there
+        are multiple KV cache groups.
+
+        Args:
+            kv_cache_config: The KV cache configuration.
+        """
+        block_sizes = [
+            kv_cache_group.kv_cache_spec.block_size
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+        ]
+        if block_sizes != [self.cache_config.block_size]:
+            assert self.cache_config.cpu_offload_gb == 0, (
+                "Cannot re-initialize the input batch when CPU weight "
+                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
+                "for more details.")
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=block_sizes,
+            )
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -2052,11 +2095,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        if len(kv_cache_config.kv_cache_groups) > 1:
-            raise NotImplementedError(
-                "Hybrid models with more than one KV cache type are not "
-                "supported yet.")
         self.kv_cache_config = kv_cache_config
+        self.may_reinitialize_input_batch(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
 
         kv_caches: dict[str, torch.Tensor] = {}
