@@ -63,6 +63,12 @@ class Llama3JsonToolParser(ToolParser):
         Only extracts JSON content and ignores any surrounding plain text.
         Supports both single JSON and multiple JSONs separated by semicolons.
         """
+        # Quick check before running regex
+        if not (self.bot_token in model_output or '{' in model_output):
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
+
         # Find JSON object(s) in the text using regex
         match = self.tool_call_regex.search(model_output)
         if not match:
