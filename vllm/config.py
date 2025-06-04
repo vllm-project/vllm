@@ -989,6 +989,14 @@ class ModelConfig:
                 "to eager mode.", self.hf_config.model_type)
             self.enforce_eager = True
 
+        RECOMMENDED_MODEL_SUPPORTS_CUDA_GRAPH = ['phi3samba']
+        if (self.hf_config.model_type in RECOMMENDED_MODEL_SUPPORTS_CUDA_GRAPH
+                and not self.enforce_eager and self.max_seq_len_to_capture < self.max_model_len):
+            logger.warning(
+                "%s model performs best with the CUDA graph explicitly enabled. Set `--max-seq-len-to-capture <#>` "
+                "when starting vLLM.", self.hf_config.model_type)
+            
+
     def _verify_bnb_config(self) -> None:
         """
         The current version of bitsandbytes (0.46.1) with 8-bit models does not

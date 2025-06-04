@@ -75,7 +75,8 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        # return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (2, 2, num_blocks, block_size, num_kv_heads // 2, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -185,6 +186,9 @@ class FlashAttentionMetadata(AttentionMetadata):
     cross_slot_mapping: Optional[torch.Tensor] = None
     cross_block_tables: Optional[torch.Tensor] = None
 
+    # Cross-layer shared attention block tables
+    cross_layer_shared_block_tables: Optional[torch.Tensor] = None
+
     @property
     def is_all_encoder_attn_metadata_set(self):
         '''
@@ -229,7 +233,9 @@ class FlashAttentionMetadata(AttentionMetadata):
                                self.context_lens_tensor[:self.num_prefills])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[:self.num_prefills])
-
+        cross_layer_shared_block_tables = (None if self.cross_layer_shared_block_tables is None else
+                                self.cross_layer_shared_block_tables[:self.num_prefills])
+        
         self._cached_prefill_metadata = FlashAttentionMetadata(
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
@@ -248,6 +254,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
+            cross_layer_shared_block_tables=cross_layer_shared_block_tables,
             use_cuda_graph=False,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
@@ -275,7 +282,8 @@ class FlashAttentionMetadata(AttentionMetadata):
                            self.seq_lens_tensor[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[self.num_prefills:])
-
+        cross_layer_shared_block_tables = (None if self.cross_layer_shared_block_tables is None else
+                                 self.cross_layer_shared_block_tables[self.num_prefills:])
         self._cached_decode_metadata = FlashAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
@@ -299,6 +307,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             if self.seq_start_loc is not None else None,
             context_lens_tensor=None,
             block_tables=block_tables,
+            cross_layer_shared_block_tables=cross_layer_shared_block_tables,
             use_cuda_graph=self.use_cuda_graph,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
@@ -397,6 +406,7 @@ class FlashAttentionMetadataBuilder(
         self.prefill_seq_lens: List[int] = []
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
+        self.cross_layer_shared_block_tables: List[List[int]] = []
         self.curr_seq_lens: List[int] = []
         self.multimodal_placeholder_maps: Dict[
             str,
@@ -457,6 +467,17 @@ class FlashAttentionMetadataBuilder(
                         -curr_sliding_window_block:]
             self.block_tables.append(block_table)
 
+            cross_layer_shared_block_table = []
+            if prefix_cache_hit:
+                cross_layer_shared_block_table = block_tables[seq_id]
+            elif block_tables is not None:
+                if curr_sliding_window_block == 0:
+                    cross_layer_shared_block_table = block_tables[seq_id]
+                else:
+                    cross_layer_shared_block_table = block_tables[seq_id][
+                        -curr_sliding_window_block:]
+            self.cross_layer_shared_block_tables.append(cross_layer_shared_block_table)
+
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
             start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
@@ -468,13 +489,16 @@ class FlashAttentionMetadataBuilder(
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int,
-            block_tables: List[List[int]]) -> torch.Tensor:
+            block_tables: List[List[int]],
+            graph_block_tables) -> torch.Tensor:
         # The shape of graph_block_tables is
         # [max batch size, max context len // block size].
-        max_batch_size, max_blocks = self.runner.graph_block_tables.shape
+        # max_batch_size, max_blocks = self.runner.graph_block_tables.shape
+        max_batch_size, max_blocks = graph_block_tables.shape
         assert max_batch_size >= num_seqs
 
-        graph_block_tables = self.runner.graph_block_tables[:num_seqs]
+        # graph_block_tables = self.runner.graph_block_tables[:num_seqs]
+        graph_block_tables = graph_block_tables[:num_seqs]
         for i, block_table in enumerate(block_tables):
             if block_table:
                 num_blocks = len(block_table)
@@ -529,12 +553,23 @@ class FlashAttentionMetadataBuilder(
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
+
+            self.cross_layer_shared_block_tables.extend([] * cuda_graph_pad_size)
+            
             num_decode_tokens = batch_size - self.num_prefill_tokens
             block_tables = self._get_graph_runner_block_tables(
-                num_seqs, self.block_tables)
+                num_seqs, self.block_tables, self.runner.graph_block_tables)
+            cross_layer_shared_block_tables = self._get_graph_runner_block_tables(
+                num_seqs, self.cross_layer_shared_block_tables, self.runner.cross_layer_shared_graph_block_tables)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
+                pad=0,
+                dtype=torch.int,
+                device=device,
+            )
+            cross_layer_shared_block_tables = make_tensor_with_pad(
+                self.cross_layer_shared_block_tables,
                 pad=0,
                 dtype=torch.int,
                 device=device,
@@ -576,6 +611,7 @@ class FlashAttentionMetadataBuilder(
             seq_start_loc=seq_start_loc_tensor,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
+            cross_layer_shared_block_tables=cross_layer_shared_block_tables,
             use_cuda_graph=use_captured_graph,
         )
 
