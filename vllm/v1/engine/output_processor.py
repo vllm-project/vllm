@@ -368,7 +368,8 @@ class OutputProcessor:
         within the loop below.
         """
 
-        request_outputs: list[Union[RequestOutput, PoolingRequestOutput]] = []
+        request_outputs: Union[list[RequestOutput],
+                               list[PoolingRequestOutput]] = []
         reqs_to_abort: list[str] = []
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
