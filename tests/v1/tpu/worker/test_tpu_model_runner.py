@@ -371,11 +371,14 @@ def test_get_req_paddings():
 
 
 @pytest.mark.skip(reason="Test is broken on TPU when it's added.")
-def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
+def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(
+        model_runner):
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     error_msg = f"{layer_1} must come before the current layer"
-    with pytest.raises(ValueError, match=error_msg):
+    vllm_config = model_runner.vllm_config
+    with pytest.raises(ValueError, match=error_msg), \
+        set_current_vllm_config(vllm_config):
         fwd_context = {
             # initialization below will fail because target layer is invalid;
             # the target layer needs to come before layer 1
@@ -400,12 +403,14 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
 
 
 @pytest.mark.skip(reason="Test is broken on TPU when it's added.")
-def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
+def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(model_runner):
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     invalid_layer = "model.layers.0.cross_attn.attn"
     error_msg = f"{invalid_layer} is not a valid Attention layer in the model"
-    with pytest.raises(ValueError, match=error_msg):
+    vllm_config = model_runner.vllm_config
+    with pytest.raises(ValueError, match=error_msg), \
+        set_current_vllm_config(vllm_config):
         fwd_context = {
             layer_0:
             Attention(
@@ -429,11 +434,13 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
 
 
 @pytest.mark.skip(reason="Test is broken on TPU when it's added.")
-def test_init_kv_cache_with_kv_sharing_target_same_as_current():
+def test_init_kv_cache_with_kv_sharing_target_same_as_current(model_runner):
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     error_msg = f"{layer_1} cannot be the same as the current layer"
-    with pytest.raises(ValueError, match=error_msg):
+    vllm_config = model_runner.vllm_config
+    with pytest.raises(ValueError, match=error_msg), \
+        set_current_vllm_config(vllm_config):
         fwd_context = {
             # initialization below will fail because target layer is invalid;
             # the target layer needs to come before layer 1
@@ -488,7 +495,7 @@ def test_init_kv_cache_without_kv_sharing(model_runner):
     assert len(kv_cache_spec) == 2
     assert len(model_runner.shared_kv_cache_layers) == 0
 
-    available_memory = 20 * GiB_bytes
+    available_memory = 40 * GiB_bytes
     # page size for layer 0's kv_cache_spec is 32KB
     num_expected_blocks = 327680  # 20GB / 32KB / 2 (num layers)
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
@@ -499,7 +506,7 @@ def test_init_kv_cache_without_kv_sharing(model_runner):
     assert kv_cache_config.tensors[layer_1].size == available_memory // 2
 
     max_context_len =\
-        estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
+        estimate_max_model_len(vllm_config, kv_cache_spec, 10 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 1310720
 
@@ -557,7 +564,7 @@ def test_init_kv_cache_with_kv_sharing_valid(model_runner):
     assert layer_0 in kv_cache_spec
     assert model_runner.shared_kv_cache_layers[layer_1] == layer_0
 
-    available_memory = 20 * GiB_bytes
+    available_memory = 40 * GiB_bytes
     # page size for layer 0's kv_cache_spec is 32KB
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
@@ -571,7 +578,7 @@ def test_init_kv_cache_with_kv_sharing_valid(model_runner):
     assert kv_cache_config.tensors[layer_0].size == available_memory
 
     max_context_len =\
-        estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
+        estimate_max_model_len(vllm_config, kv_cache_spec, 10 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 2 * 1310720
 
