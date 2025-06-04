@@ -166,6 +166,39 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [8])
+def test_metric_throughput_gauges(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+) -> None:
+    with vllm_runner(model,
+                     dtype=dtype,
+                     enforce_eager=True,
+                     disable_log_stats=False,
+                     gpu_memory_utilization=0.4) as vllm_model:
+        # Force log interval to be 0 to catch all metrics.
+        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
+        stat_logger.local_interval = 0
+
+        _ = vllm_model.generate_greedy(example_prompts[:1], max_tokens)
+        prompt_tp = (
+            stat_logger.metrics.gauge_prompt_throughput_toks_per_s.labels(
+                **stat_logger.labels)._value.get())
+        generation_tp = (
+            stat_logger.metrics.gauge_generation_throughput_toks_per_s.labels(
+                **stat_logger.labels)._value.get())
+
+    # Since we are logging every iteration as a gauge, the prompt throughput
+    # should be 0 and we should have generation throughput.
+    assert prompt_tp == 0
+    assert generation_tp > 0
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("disable_log_stats", [True, False])
 @pytest.mark.asyncio
