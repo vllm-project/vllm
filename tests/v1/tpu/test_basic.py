@@ -70,6 +70,7 @@ def test_basic(
 @pytest.mark.skip(reason="Temporarily disabled due to timeout")
 @pytest.mark.skipif(not current_platform.is_tpu(),
                     reason="This is a basic test for TPU only")
+<<<<<<< HEAD
 @pytest.mark.parametrize("max_tokens", [8])
 @pytest.mark.parametrize("max_num_seqs", [16])
 def test_phi3(
@@ -90,10 +91,25 @@ def test_phi3(
     ]
     # test head dim = 96
     model = "microsoft/Phi-3-mini-128k-instruct"
+=======
+def test_w8a8_quantization(
+    vllm_runner: type[VllmRunner],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = "neuralmagic/Meta-Llama-3.1-8B-Instruct-quantized.w8a8"
+    max_tokens = 5
+    tensor_parallel_size = 1
+    max_num_seqs = 4
+
+    prompt = "The next numbers of the sequence " + ", ".join(
+        str(i) for i in range(1024)) + " are:"
+    example_prompts = [prompt]
+>>>>>>> 2699b90f5 (add a tests that runs faster. Start using the kernel)
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
+<<<<<<< HEAD
         with vllm_runner(model,
                          max_num_batched_tokens=256,
                          max_num_seqs=max_num_seqs) as vllm_model:
@@ -103,6 +119,20 @@ def test_phi3(
         for output, answer in zip(vllm_outputs, answers):
             generated_text = output[1]
             assert answer in generated_text
+=======
+        with vllm_runner(
+                model,
+                max_num_batched_tokens=64,
+                max_model_len=4096,
+                gpu_memory_utilization=0.7,
+                max_num_seqs=max_num_seqs,
+                tensor_parallel_size=tensor_parallel_size) as vllm_model:
+            vllm_outputs = vllm_model.generate_greedy(example_prompts,
+                                                      max_tokens)
+        output = vllm_outputs[0][1]
+
+        assert "1024" in output or "0, 1" in output
+>>>>>>> 2699b90f5 (add a tests that runs faster. Start using the kernel)
 
 
 TP_SIZE_8 = 8
