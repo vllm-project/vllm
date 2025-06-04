@@ -565,7 +565,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalKwargs.as_kwargs(
                     model_input.multi_modal_kwargs or {},
-                    dtype=self.model_config.dtype,
                     device=self.device,
                 ),
             )

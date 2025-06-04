@@ -718,7 +718,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
             batched_mm_inputs = MultiModalKwargs.as_kwargs(
                 batched_mm_inputs,
-                dtype=self.model_config.dtype,
                 device=self.device,
             )
 
@@ -1560,7 +1559,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                                          batch_size)
         return MultiModalKwargs.as_kwargs(
             batched_dummy_mm_inputs,
-            dtype=self.model_config.dtype,
             device=self.device,
         )
 

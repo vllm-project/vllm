@@ -53,7 +53,6 @@ class CPUPoolingModelRunner(
             model_input.input_positions,
             **MultiModalKwargs.as_kwargs(
                 model_input.multi_modal_kwargs or {},
-                dtype=self.model_config.dtype,
                 device=self.device,
             ),
             **cross_enc_kwargs,
