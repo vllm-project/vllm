@@ -328,7 +328,7 @@ def causal_conv1d_update_triton(
     conv_state: torch.Tensor,
     weight: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
-    activation: Optional[Literal["silu", "swish"]] = None,
+    activation: bool | Literal["silu", "swish"] | None = None,
     cache_seqlens: Optional[torch.Tensor] = None,
     conv_state_indices: Optional[torch.Tensor] = None,
     pad_slot_id: int = PAD_SLOT_ID,
