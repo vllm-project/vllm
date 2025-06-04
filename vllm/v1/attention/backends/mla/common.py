@@ -325,6 +325,13 @@ class MLACommonMetadata(Generic[D]):
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
 
+    @property
+    def cuda_graph_supported(self):
+        """
+        Full CUDA Graphs (including attention) only supported for pure decode.
+        """
+        return self.num_prefills == 0
+
 
 M = TypeVar("M", bound=MLACommonMetadata)
 

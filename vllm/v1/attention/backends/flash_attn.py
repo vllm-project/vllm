@@ -128,6 +128,10 @@ class FlashAttentionMetadata:
 
     local_attn_metadata: Optional[LocalAttentionMetadata] = None
 
+    # Supported for prefill and decode.
+    # Backend (FA2 vs FA3 vs Triton) support checked separately.
+    cuda_graph_supported: bool = True
+
 
 #
 # Take in `query_start_loc_np` and `seq_lens_np` and break the sequences into
