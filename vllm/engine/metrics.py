@@ -223,6 +223,20 @@ class Metrics:
             documentation="Number of emitted tokens.",
             labelnames=labelnames))
 
+        # Tokens metrics
+        self.gauge_prompt_throughput = self._gauge_cls(
+            name="vllm:prompt_token_throughput",
+            documentation="Prompt token throughput (tokens/sec).",
+            labelnames=labelnames,
+            multiprocess_mode="sum"
+        )
+        self.gauge_generation_throughput = self._gauge_cls(
+            name="vllm:generation_token_throughput",
+            documentation="Generation token throughput (tokens/sec).",
+            labelnames=labelnames,
+            multiprocess_mode="sum"
+        )
+
 
 # --8<-- [end:metrics-definitions]
 
@@ -515,6 +529,13 @@ class PrometheusStatLogger(StatLoggerBase):
                         stats.num_waiting_sys)
         self._log_gauge(self.metrics.gauge_gpu_cache_usage,
                         stats.gpu_cache_usage_sys)
+
+        # Prompt/generation tokens throughput
+        prompt_throughput = get_throughput(self.num_prompt_tokens, now=stats.now, last_log=self.last_local_log)
+        generation_throughput = get_throughput(self.num_generation_tokens, now=stats.now, last_log=self.last_local_log)
+        self._log_gauge(self.metrics.gauge_prompt_throughput, prompt_throughput)
+        self._log_gauge(self.metrics.gauge_generation_throughput, generation_throughput)
+
         # Including max-lora in metric, in future this property of lora
         # config maybe extended to be dynamic.
         lora_info = {
