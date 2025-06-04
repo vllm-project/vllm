@@ -338,12 +338,10 @@ class NixlConnectorWorker:
 
         # NIXL handshake port.
         # NOTE(rob): Within a DP group, each DP rank gets its own
-        # base port (which is sent in the KVTransferParams).
-        # Each TP rank listens/queries on the base_port + tp_rank.
+        # port (which is sent in the KVTransferParams).
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
-            vllm_config.parallel_config.data_parallel_rank_local *
-            vllm_config.parallel_config.tensor_parallel_size)
+            vllm_config.parallel_config.data_parallel_rank_local)
 
         # Metadata.
         self.engine_id = engine_id
@@ -396,44 +394,47 @@ class NixlConnectorWorker:
         self.block_window_per_layer: list[Optional[int]] = []
 
     @staticmethod
-    def _nixl_handshake_listener(metadata: NixlAgentMetadata,
-                                 ready_event: threading.Event, base_port: int,
-                                 tp_rank: int):
+    def _nixl_handshake_listener(metadata: list[NixlAgentMetadata],
+                                 ready_event: threading.Event, port: int):
         """Background thread for getting new NIXL handshakes."""
         # NOTE(rob): this is a simple implementation. We will move
         # to a better approach via HTTP endpoint soon.
 
-        encoder = msgspec.msgpack.Encoder()
-        encoded_data = encoder.encode(metadata)
-        size_in_bytes = len(encoded_data)
+        encoded_data = []
+        for rank_metadata in metadata:
+            encoder = msgspec.msgpack.Encoder()
+            encoded_data.append(encoder.encode(rank_metadata))
+        size_in_bytes = sum(len(data) for data in encoded_data)
         logger.debug("Size of encoded NixlAgentMetadata: %s bytes",
                      str(size_in_bytes))
 
         # Listen for new requests for metadata.
         host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        path = make_zmq_path("tcp", host, base_port + tp_rank)
+        path = make_zmq_path("tcp", host, port)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
             while True:
                 identity, _, msg = sock.recv_multipart()
-                if msg != GET_META_MSG:
+                # Decode the message which contains (GET_META_MSG, rank)
+                msg_tuple = msgspec.msgpack.decode(msg)
+                if msg_tuple[0] != GET_META_MSG:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
-                sock.send_multipart((identity, b"", encoded_data))
+                sock.send_multipart(
+                    (identity, b"", encoded_data[msg_tuple[1]]))
 
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
-        # NOTE(rob): we need each tp_rank to have a unique port.
-        # This is a hack to keep us moving. We will switch when
-        # we switch to HTTP-based NIXL metadata exchange.
-        path = make_zmq_path("tcp", host, port + self.tp_rank)
+        # NOTE(rob): We will switch to HTTP-based NIXL metadata exchange.
+        path = make_zmq_path("tcp", host, port)
         logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
-            sock.send(GET_META_MSG)
+            msg = msgspec.msgpack.encode((GET_META_MSG, self.tp_rank))
+            sock.send(msg)
             metadata_bytes = sock.recv()
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
             metadata = decoder.decode(metadata_bytes)
@@ -470,6 +471,7 @@ class NixlConnectorWorker:
         # TODO(tms): self.block_len needs to be per-layer for sliding window,
         # hybrid attn, etc
         self.block_len = kv_elem_size * math.prod(block_shape)
+        self.cache_device_index = first_kv_cache.device.index
 
         logger.debug("Registering KV_Caches. use_mla: %s, shape %s", use_mla,
                      first_kv_cache.shape)
@@ -494,7 +496,7 @@ class NixlConnectorWorker:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
                 caches_data.append(
-                    (base_addr, region_len, cache.device.index, ""))
+                    (base_addr, region_len, self.cache_device_index, ""))
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
@@ -527,21 +529,43 @@ class NixlConnectorWorker:
 
         self._registered_descs.append(descs)
 
-        # After KV Caches registered, listen for new connections.
-        metadata = NixlAgentMetadata(
+        # Create metadata for this rank
+        rank_metadata = NixlAgentMetadata(
             engine_id=self.engine_id,
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
             num_blocks=self.num_blocks,
         )
-        ready_event = threading.Event()
-        self._nixl_handshake_listener_t = threading.Thread(
-            target=self._nixl_handshake_listener,
-            args=(metadata, ready_event, self.side_channel_port, self.tp_rank),
-            daemon=True,
-            name="nixl_handshake_listener")
-        self._nixl_handshake_listener_t.start()
-        ready_event.wait()
+
+        # Only rank 0 starts the handshake listener and send it to remote models
+        # Other ranks send their metadata to rank 0
+        if self.tp_rank == 0:
+            # After KV Caches registered, listen for new connections.
+            logger.debug("Rank %s: Starting handshake listener", self.tp_rank)
+            combined_metadata = [rank_metadata]
+            for i in range(1, self.world_size):
+                combined_metadata.append(self.tp_group.recv_object(src=i))
+            for remote_metadata in combined_metadata:
+                if remote_metadata.engine_id != self.engine_id:
+                    raise RuntimeError(
+                        "Received metadata from different engine id: %s",
+                        remote_metadata.engine_id)
+
+            logger.debug("Rank %s: Received metadata from other ranks",
+                         self.tp_rank)
+
+            ready_event = threading.Event()
+            self._nixl_handshake_listener_t = threading.Thread(
+                target=self._nixl_handshake_listener,
+                args=(combined_metadata, ready_event, self.side_channel_port),
+                daemon=True,
+                name="nixl_handshake_listener")
+            self._nixl_handshake_listener_t.start()
+            ready_event.wait()
+        else:
+            # Other ranks send their metadata to rank 0
+            logger.debug("Rank %s: Sending metadata to rank 0", self.tp_rank)
+            self.tp_group.send_object(rank_metadata, dst=0)
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
         engine_id = nixl_agent_meta.engine_id
@@ -560,8 +584,8 @@ class NixlConnectorWorker:
             for block_id in range(self.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
-                blocks_data.append(
-                    (base_addr + block_offset, self.block_len, self.tp_rank))
+                blocks_data.append((base_addr + block_offset, self.block_len,
+                                    self.cache_device_index))
         logger.debug("Created %s blocks for src engine %s and tp_rank %s",
                      len(blocks_data), self.engine_id, self.tp_rank)
 
@@ -577,8 +601,8 @@ class NixlConnectorWorker:
             for block_id in range(nixl_agent_meta.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
-                blocks_data.append(
-                    (base_addr + block_offset, self.block_len, self.tp_rank))
+                blocks_data.append((base_addr + block_offset, self.block_len,
+                                    self.cache_device_index))
         logger.debug("Created %s blocks for dst engine %s and tp_rank %s",
                      len(blocks_data), engine_id, self.tp_rank)
 
