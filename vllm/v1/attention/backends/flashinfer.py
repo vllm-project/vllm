@@ -3,6 +3,8 @@
 """Attention layer with FlashInfer."""
 from __future__ import annotations
 
+import functools
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -11,12 +13,13 @@ from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 
-from vllm.distributed.kv_transfer.kv_connector.utils import get_kv_connector_cache_layout
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    get_kv_connector_cache_layout)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -29,8 +32,19 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+FLASHINFER_KV_CACHE_LAYOUT: str = os.getenv("FLASHINFER_KV_CACHE_LAYOUT",
+                                            "").upper()
 
 logger = init_logger(__name__)
+
+
+@functools.lru_cache
+def get_flashinfer_kv_cache_layout():
+    # Override with format specified by the user.
+    cache_layout = FLASHINFER_KV_CACHE_LAYOUT
+    if not cache_layout:
+        cache_layout = get_kv_connector_cache_layout()
+    return cache_layout
 
 
 class FlashInferBackend(AttentionBackend):
@@ -65,14 +79,12 @@ class FlashInferBackend(AttentionBackend):
         head_size: int,
     ) -> tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
-    
+
     @staticmethod
     def get_kv_cache_stride_order() -> tuple[int, ...]:
-        # NOTE When running disaggregated PD with NIXL, HND layout is used for
-        # faster transfer. `stride_order` indicates the permutation that gets
-        # us from `get_kv_cache_shape` to the actual memory layout we want.
-        # TODO enable forcing HND layout through env var
-        cache_layout = get_kv_connector_cache_layout()
+        # `stride_order` indicates the permutation that gets us from
+        # `get_kv_cache_shape` to the actual memory layout we want.
+        cache_layout = get_flashinfer_kv_cache_layout()
         if cache_layout == "NHD":
             stride_order = (0, 1, 2, 3, 4)
         elif cache_layout == "HND":
@@ -302,11 +314,10 @@ class FlashInferMetadataBuilder:
                 dtype=torch.uint8,
                 device=self.runner.device)
         return self._workspace_buffer
-    
+
     def get_kv_cache_layout(self):
         if self._kv_cache_layout is None:
-            # TODO enable HND forcing through env var
-            self._kv_cache_layout = get_kv_connector_cache_layout()
+            self._kv_cache_layout = get_flashinfer_kv_cache_layout()
         return self._kv_cache_layout
 
     def _get_prefill_wrapper(self):
@@ -331,9 +342,8 @@ class FlashInferMetadataBuilder:
 
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
-            # TODO test HND with cascade attention
             self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
-                2, self._get_workspace_buffer(), "NHD")
+                2, self._get_workspace_buffer(), self.get_kv_cache_layout())
         return self._cascade_wrapper
 
     def _plan(self, attn_metadata: FlashInferMetadata):

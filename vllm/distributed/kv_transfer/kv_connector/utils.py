@@ -4,6 +4,7 @@
 KV cache helper for store.
 """
 <<<<<<< HEAD
+<<<<<<< HEAD
 
 =======
 <<<<<<< Updated upstream
@@ -12,6 +13,8 @@ KV cache helper for store.
 import functools
 >>>>>>> Stashed changes
 >>>>>>> b6feef56c (wip)
+=======
+>>>>>>> 0236d5e3b (flashinfer hnd)
 import torch
 
 import vllm.envs as envs
@@ -100,9 +103,10 @@ class model_aware_kv_ops_helper:
                 layer.self_attn.attn._v_scale,
             )
 
-# TODO I cant cache in flashinferimpl class cause its recreated
-@functools.lru_cache
+
 def get_kv_connector_cache_layout():
+    # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
+    # used for faster transfer.
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
     if vllm_config.model_config is None:
