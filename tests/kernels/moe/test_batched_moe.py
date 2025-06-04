@@ -184,6 +184,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
             "BLOCK_SIZE_N": 16,
             "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else 32
         },
+        per_act_token_quant=False,
         block_shape=block_shape,
     )
 
