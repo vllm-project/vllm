@@ -87,7 +87,6 @@ AITER_MODEL_LIST = [
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
             "TitanML/tiny-mixtral",  # mixtral
-            marks=[pytest.mark.cpu_model],
         )
     ])
 @pytest.mark.parametrize("max_tokens", [32])
