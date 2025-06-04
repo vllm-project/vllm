@@ -183,6 +183,14 @@ class CudaPlatformBase(Platform):
         if use_mla:
             # TODO(lucas): refactor to  be more concise
             #  we should probably consider factoring out V1 here
+            if selected_backend == _Backend.CUTLASS_MLA_VLLM_V1:
+                if use_v1:
+                    logger.info_once("Using Cutlass MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "cutlass_mla.CutlassMLABackend")
+                else:
+                    logger.warning(
+                        "Cutlass MLA backend is only supported on V1 engine")
             if selected_backend == _Backend.TRITON_MLA or block_size != 64:
                 if use_v1:
                     logger.info_once("Using Triton MLA backend on V1 engine.")
