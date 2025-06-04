@@ -45,7 +45,6 @@ echo
 VLLM_USE_V1=1 vllm serve $MODEL \
  --seed 42 \
  --disable-log-requests \
- --port 8004 \
  --max-num-seqs $MAX_NUM_SEQS \
  --max-num-batched-tokens $MAX_NUM_BATCHED_TOKENS \
  --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
@@ -53,13 +52,17 @@ VLLM_USE_V1=1 vllm serve $MODEL \
  --download_dir $DOWNLOAD_DIR \
  --max-model-len $MAX_MODEL_LEN > "$VLLM_LOG" 2>&1 &
 
-# TODO: find a better way to detect launching error.
+
 echo "wait for 20 minutes.."
 echo
 # sleep 1200
 # wait for 10 minutes...
-for i in {1..120}; do        
-    if grep -Fq "Application startup complete" "$VLLM_LOG"; then
+for i in {1..120}; do
+    # TODO: detect other type of errors.
+    if grep -Fq "raise RuntimeError" "$VLLM_LOG"; then
+        echo "Detected RuntimeError, exiting."
+        exit 1
+    elif grep -Fq "Application startup complete" "$VLLM_LOG"; then
         echo "Application started"
         break
     else

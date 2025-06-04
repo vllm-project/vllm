@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -euo pipefail
-
 if [ ! -f "$1" ]; then
   echo "Error: The env file '$1' does not exist."
   exit 1  # Exit the script with a non-zero status to indicate an error
@@ -63,6 +61,8 @@ docker run \
  -e WORKSPACE=/workspace \
  --name $CONTAINER_NAME \
  -d \
+ --privileged \
+ --network host \
  -v /dev/shm:/dev/shm \
  vllm/vllm-tpu-bm tail -f /dev/null
 
