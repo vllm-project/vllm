@@ -147,13 +147,6 @@ void DeviceComms::allreduce(int profile, hipStream_t stream, T const* A, T* B,
     case QuickReduceProfile::TWOSHOT_Q4:
       TWOSHOT_DISPATCH(TwoshotQ4LineCodec)
       break;
-    case QuickReduceProfile::ONESHOT_F16:
-      using AllReduceKernel = AllReduceOneshot<T>;
-      hipLaunchKernelGGL((allreduce_prototype<AllReduceKernel, T>), dim3(grid),
-                         dim3(kBlock), 0, stream, A, B, N, num_blocks,
-                         world_size, rank, dbuffer_list, data_offset,
-                         flag_color);
-      break;
     default:
       TWOSHOT_DISPATCH(TwoshotF16LineCodec)
       break;
