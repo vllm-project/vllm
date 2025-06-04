@@ -10,7 +10,6 @@ from triton_kernels.testing import assert_close
 
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_moe, )
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.triton_kernels_moe import forward_cuda_triton
 
 

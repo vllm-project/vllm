@@ -39,7 +39,7 @@ if current_platform.is_cuda_alike():
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
                                  FusedMoEPrepareAndFinalize)
-    from .triton_kernels_moe import forward_cuda_triton
+    from .triton_kernels_moe import can_use_triton_moe, forward_cuda_triton
     if has_pplx:
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
     if has_deepep:
@@ -900,6 +900,17 @@ class FusedMoE(torch.nn.Module):
         )
         self.moe_config = moe
         self.quant_config = quant_config
+
+        if envs.VLLM_USE_EXP_TRITON_KERNEL and not can_use_triton_moe(
+            quant_config=self.quant_config,
+            custom_routing_function=self.custom_routing_function,
+            use_grouped_topk=self.use_grouped_topk,
+            scoring_func=self.scoring_func,
+            use_ep=self.use_ep
+        ):
+            raise NotImplementedError(
+                "Some functionality is not supported in new Triton MoE kernel"
+            )
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
