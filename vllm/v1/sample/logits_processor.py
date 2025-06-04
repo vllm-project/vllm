@@ -24,8 +24,6 @@ MovedRequestType = tuple[int, int]
 # Batch indices of any removed requests.
 RemovedRequestType = int
 
-
-@dataclasses.dataclass
 class BatchUpdate:
     # The current number of requests in the batch.
     batch_size: int = 0  # Must be updated
@@ -34,6 +32,24 @@ class BatchUpdate:
     moved: list[MovedRequestType] = []
     swapped: list[SwappedRequestType] = []
     added: list[AddedRequestType] = []
+
+    def __init__(self, 
+                 removed: Optional[list[RemovedRequestType]] = None,
+                 moved: Optional[list[MovedRequestType]] = None,
+                 swapped: Optional[list[SwappedRequestType]] = None,
+                 added: Optional[list[AddedRequestType]] = None,
+                 batch_size: Optional[int] = None) -> None:
+        if removed is not None:
+            self._removed = removed
+        if moved is not None:
+            self.moved = moved
+        if swapped is not None:
+            self.swapped = swapped
+        if added is not None:
+            self.added = added
+        if batch_size is not None:
+            self.batch_size = batch_size
+
 
     def _sort_removed(self) -> None:
         """Sort removed request indices in
@@ -98,7 +114,7 @@ class LogitsProcessor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _commit_state_changes(
+    def _update_state(
         self,
         batch_update: BatchUpdate,
     ) -> None:
@@ -124,9 +140,9 @@ class LogitsProcessor(ABC):
     def register_swap_requests(self, a_index: int, b_index: int) -> None:
         self.batch_update.swapped.append((a_index, b_index))
 
-    def commit_state_changes(self, batch_size: int) -> None:
+    def update_state(self, batch_size: int) -> None:
         self.batch_update.batch_size = batch_size
-        self._commit_state_changes(self.batch_update)
+        self._update_state(self.batch_update)
 
 
 ###### ----- LogitsProcessor impls below here
@@ -158,7 +174,7 @@ class MinPLogitsProcessor(LogitsProcessor):
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
-    def _commit_state_changes(self, batch_update: BatchUpdate):
+    def _update_state(self, batch_update: BatchUpdate):
         if not batch_update:
             return
 
@@ -236,7 +252,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
     def requires_nongreedy(cls) -> bool:
         return False
 
-    def _commit_state_changes(self, batch_update: BatchUpdate):
+    def _update_state(self, batch_update: BatchUpdate):
         if not batch_update:
             return
 
@@ -248,15 +264,26 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
                 needs_update = True
 
         if self.biases:
-            # Process removed and moved requests.
+            # Process removed requests.
             for index in batch_update.removed:
                 if self.biases.pop(index, None):
                     needs_update = True
 
+            # Process moved requests.
             for from_index, to_index in batch_update.moved:
                 if entry := self.biases.pop(from_index, None):
                     self.biases[to_index] = entry
                     needs_update = True
+
+            # Process swapped requests.
+            for a_index, b_index in batch_update.swapped:
+                a_entry = self.biases.pop(a_index, None)
+                b_entry = self.biases.pop(b_index, None)
+                needs_update |= bool(a_entry or b_entry)
+                if a_entry:
+                    self.biases[b_index] = a_entry
+                if b_entry:
+                    self.biases[a_index] = b_entry
 
         # Update tensors if needed.
         if self.biases and needs_update:
@@ -303,7 +330,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     def requires_nongreedy(cls) -> bool:
         return False
 
-    def _commit_state_changes(self, batch_update: BatchUpdate):
+    def _update_state(self, batch_update: BatchUpdate):
         needs_update = False
         if batch_update:
             # Process added requests.
@@ -315,15 +342,26 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                     needs_update = True
 
             if self.min_toks:
-                # Process removed and moved requests.
+                # Process removed requests.
                 for index in batch_update.removed:
                     if self.min_toks.pop(index, None):
                         needs_update = True
 
+                # Process moved requests.
                 for from_index, to_index in batch_update.moved:
                     if entry := self.min_toks.pop(from_index, None):
                         self.min_toks[to_index] = entry
                         needs_update = True
+
+                # Process swapped requests.
+                for a_index, b_index in batch_update.swapped:
+                    a_entry = self.min_toks.pop(a_index, None)
+                    b_entry = self.min_toks.pop(b_index, None)
+                    needs_update |= bool(a_entry or b_entry)
+                    if a_entry:
+                        self.min_toks[b_index] = a_entry
+                    if b_entry:
+                        self.min_toks[a_index] = b_entry
 
         if self.min_toks:
             # Check for any requests that have attained their min tokens.
