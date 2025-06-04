@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 KV cache helper for store.
 """
@@ -44,8 +45,9 @@ class model_aware_kv_ops_helper:
             head_size = model_config.qk_nope_head_dim + \
                 model_config.qk_rope_head_dim
         else:
-            head_size = getattr(model_config, "head_dim",
-                                int(hidden_size // num_attention_heads))
+            head_size = getattr(model_config, "head_dim", None)
+            if head_size is None:
+                head_size = int(hidden_size // num_attention_heads)
 
         return num_heads, head_size
 

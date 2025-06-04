@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 To run this example, you need to start the vLLM server:
 
@@ -12,15 +13,17 @@ from enum import Enum
 from openai import BadRequestError, OpenAI
 from pydantic import BaseModel
 
+openai_api_key = "EMPTY"
+openai_api_base = "http://localhost:8000/v1"
+
 
 # Guided decoding by Choice (list of possible options)
 def guided_choice_completion(client: OpenAI, model: str):
     completion = client.chat.completions.create(
         model=model,
-        messages=[{
-            "role": "user",
-            "content": "Classify this sentiment: vLLM is wonderful!"
-        }],
+        messages=[
+            {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+        ],
         extra_body={"guided_choice": ["positive", "negative"]},
     )
     return completion.choices[0].message.content
@@ -28,20 +31,21 @@ def guided_choice_completion(client: OpenAI, model: str):
 
 # Guided decoding by Regex
 def guided_regex_completion(client: OpenAI, model: str):
-    prompt = ("Generate an email address for Alan Turing, who works in Enigma."
-              "End in .com and new line. Example result:"
-              "alan.turing@enigma.com\n")
+    prompt = (
+        "Generate an email address for Alan Turing, who works in Enigma."
+        "End in .com and new line. Example result:"
+        "alan.turing@enigma.com\n"
+    )
 
     completion = client.chat.completions.create(
         model=model,
-        messages=[{
-            "role": "user",
-            "content": prompt,
-        }],
-        extra_body={
-            "guided_regex": r"\w+@\w+\.com\n",
-            "stop": ["\n"]
-        },
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        extra_body={"guided_regex": r"\w+@\w+\.com\n", "stop": ["\n"]},
     )
     return completion.choices[0].message.content
 
@@ -63,14 +67,18 @@ class CarDescription(BaseModel):
 def guided_json_completion(client: OpenAI, model: str):
     json_schema = CarDescription.model_json_schema()
 
-    prompt = ("Generate a JSON with the brand, model and car_type of"
-              "the most iconic car from the 90's")
+    prompt = (
+        "Generate a JSON with the brand, model and car_type of"
+        "the most iconic car from the 90's"
+    )
     completion = client.chat.completions.create(
         model=model,
-        messages=[{
-            "role": "user",
-            "content": prompt,
-        }],
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
         extra_body={"guided_json": json_schema},
     )
     return completion.choices[0].message.content
@@ -92,14 +100,18 @@ def guided_grammar_completion(client: OpenAI, model: str):
         number ::= "1 " | "2 "
     """
 
-    prompt = ("Generate an SQL query to show the 'username' and 'email'"
-              "from the 'users' table.")
+    prompt = (
+        "Generate an SQL query to show the 'username' and 'email'"
+        "from the 'users' table."
+    )
     completion = client.chat.completions.create(
         model=model,
-        messages=[{
-            "role": "user",
-            "content": prompt,
-        }],
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
         extra_body={"guided_grammar": simplified_sql_grammar},
     )
     return completion.choices[0].message.content
@@ -107,23 +119,26 @@ def guided_grammar_completion(client: OpenAI, model: str):
 
 # Extra backend options
 def extra_backend_options_completion(client: OpenAI, model: str):
-    prompt = ("Generate an email address for Alan Turing, who works in Enigma."
-              "End in .com and new line. Example result:"
-              "alan.turing@enigma.com\n")
+    prompt = (
+        "Generate an email address for Alan Turing, who works in Enigma."
+        "End in .com and new line. Example result:"
+        "alan.turing@enigma.com\n"
+    )
 
     try:
         # The guided_decoding_disable_fallback option forces vLLM to use
         # xgrammar, so when it fails you get a 400 with the reason why
         completion = client.chat.completions.create(
             model=model,
-            messages=[{
-                "role": "user",
-                "content": prompt,
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
             extra_body={
                 "guided_regex": r"\w+@\w+\.com\n",
                 "stop": ["\n"],
-                "guided_decoding_backend": "xgrammar",
                 "guided_decoding_disable_fallback": True,
             },
         )
@@ -134,8 +149,8 @@ def extra_backend_options_completion(client: OpenAI, model: str):
 
 def main():
     client: OpenAI = OpenAI(
-        base_url="http://localhost:8000/v1",
-        api_key="-",
+        base_url=openai_api_base,
+        api_key=openai_api_key,
     )
 
     model = client.models.list().data[0].id

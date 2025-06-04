@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from itertools import accumulate, product
 from typing import Callable, Optional
@@ -70,7 +71,7 @@ def test_rotary_embedding(
     device: str,
     use_key: bool,
     max_position: int = 8192,
-    base: int = 10000,
+    base: float = 10000,
 ) -> None:
     if rotary_dim is None:
         rotary_dim = head_size
@@ -135,7 +136,7 @@ def test_batched_rotary_embedding(
     device: str,
     use_key: bool,
     max_position: int = 8192,
-    base: int = 10000,
+    base: float = 10000,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
@@ -151,6 +152,10 @@ def test_batched_rotary_embedding(
     query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
     query = torch.randn(query_shape, dtype=dtype)
     key = torch.randn_like(query) if use_key else None
+
+    # slice tensor if required, noop otherwise
+    query = query[..., :head_size]
+    key = key[..., :head_size] if use_key else None
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
@@ -199,7 +204,7 @@ def test_batched_rotary_embedding_multi_lora(
     device: str,
     use_key: bool,
     max_position: int = 8192,
-    base: int = 10000,
+    base: float = 10000,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)

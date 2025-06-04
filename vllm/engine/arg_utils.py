@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # yapf: disable
 import argparse
 import dataclasses
 import json
-import re
 import sys
 import threading
 import warnings
@@ -13,7 +13,9 @@ from itertools import permutations
 from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
                     Type, TypeVar, Union, cast, get_args, get_origin)
 
+import regex as re
 import torch
+from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
@@ -38,7 +40,7 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
-                        GiB_bytes, is_in_doc_build, is_in_ray_actor)
+                        GiB_bytes, get_ip, is_in_ray_actor)
 
 # yapf: enable
 
@@ -149,16 +151,29 @@ def is_not_builtin(type_hint: TypeHint) -> bool:
     return type_hint.__module__ != "builtins"
 
 
+def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
+    """Extract type hints from Annotated or Union type hints."""
+    type_hints: set[TypeHint] = set()
+    origin = get_origin(type_hint)
+    args = get_args(type_hint)
+
+    if origin is Annotated:
+        type_hints.update(get_type_hints(args[0]))
+    elif origin is Union:
+        for arg in args:
+            type_hints.update(get_type_hints(arg))
+    else:
+        type_hints.add(type_hint)
+
+    return type_hints
+
+
 def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
     kwargs = {}
     for field in fields(cls):
         # Get the set of possible types for the field
-        type_hints: set[TypeHint] = set()
-        if get_origin(field.type) in {Union, Annotated}:
-            type_hints.update(get_args(field.type))
-        else:
-            type_hints.add(field.type)
+        type_hints: set[TypeHint] = get_type_hints(field.type)
 
         # If the field is a dataclass, we can use the model_validate_json
         generator = (th for th in type_hints if is_dataclass(th))
@@ -168,10 +183,7 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         if field.default is not MISSING:
             default = field.default
         elif field.default_factory is not MISSING:
-            if is_dataclass(field.default_factory) and is_in_doc_build():
-                default = {}
-            else:
-                default = field.default_factory()
+            default = field.default_factory()
 
         # Get the help text for the field
         name = field.name
@@ -183,14 +195,22 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         kwargs[name] = {"default": default, "help": help}
 
         # Set other kwargs based on the type hints
-        json_tip = "\n\nShould be a valid JSON string."
+        json_tip = """\n\nShould either be a valid JSON string or JSON keys
+        passed individually. For example, the following sets of arguments are
+        equivalent:\n\n
+        - `--json-arg '{"key1": "value1", "key2": {"key3": "value2"}}'`\n
+        - `--json-arg.key1 value1 --json-arg.key2.key3 value2`\n\n"""
         if dataclass_cls is not None:
-            dataclass_init = lambda x, f=dataclass_cls: f(**json.loads(x))
-            # Special case for configs with a from_cli method
-            if hasattr(dataclass_cls, "from_cli"):
-                from_cli = dataclass_cls.from_cli
-                dataclass_init = lambda x, f=from_cli: f(x)
-            kwargs[name]["type"] = dataclass_init
+
+            def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
+                try:
+                    if hasattr(cls, "from_cli"):
+                        return cls.from_cli(val)
+                    return TypeAdapter(cls).validate_json(val)
+                except ValidationError as e:
+                    raise argparse.ArgumentTypeError(repr(e)) from e
+
+            kwargs[name]["type"] = parse_dataclass
             kwargs[name]["help"] += json_tip
         elif contains_type(type_hints, bool):
             # Creates --no-<name> and --<name> flags
@@ -217,16 +237,15 @@ def get_kwargs(cls: ConfigType) -> dict[str, Any]:
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
             # Special case for large integers
-            if name in {"max_model_len"}:
+            if name in {"max_model_len", "max_num_batched_tokens"}:
                 kwargs[name]["type"] = human_readable_int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
-        elif contains_type(type_hints,
-                           dict) and (contains_type(type_hints, str) or any(
-                               is_not_builtin(th) for th in type_hints)):
+        elif (contains_type(type_hints, dict)
+              and (contains_type(type_hints, str)
+                   or any(is_not_builtin(th) for th in type_hints))):
             kwargs[name]["type"] = union_dict_and_str
         elif contains_type(type_hints, dict):
-            # Dict arguments will always be optional
             kwargs[name]["type"] = parse_type(json.loads)
             kwargs[name]["help"] += json_tip
         elif (contains_type(type_hints, str)
@@ -286,6 +305,7 @@ class EngineArgs:
     data_parallel_size_local: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
+    data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
@@ -313,8 +333,7 @@ class EngineArgs:
     rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
     rope_theta: Optional[float] = ModelConfig.rope_theta
     hf_token: Optional[Union[bool, str]] = ModelConfig.hf_token
-    hf_overrides: Optional[HfOverrides] = \
-        get_field(ModelConfig, "hf_overrides")
+    hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
@@ -394,7 +413,8 @@ class EngineArgs:
         get_field(ModelConfig, "override_neuron_config")
     override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
         ModelConfig.override_pooler_config
-    compilation_config: Optional[CompilationConfig] = None
+    compilation_config: CompilationConfig = \
+        get_field(VllmConfig, "compilation_config")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -409,12 +429,16 @@ class EngineArgs:
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
-    additional_config: Optional[Dict[str, Any]] = None
+    additional_config: dict[str, Any] = \
+        get_field(VllmConfig, "additional_config")
     enable_reasoning: Optional[bool] = None  # DEPRECATED
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
+
+    enable_multimodal_encoder_data_parallel: bool = \
+        ParallelConfig.enable_multimodal_encoder_data_parallel
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -444,7 +468,7 @@ class EngineArgs:
             title="ModelConfig",
             description=ModelConfig.__doc__,
         )
-        if 'serve' not in sys.argv[1:] and '--help' not in sys.argv[1:]:
+        if not ('serve' in sys.argv[1:] and '--help' in sys.argv[1:]):
             model_group.add_argument("--model", **model_kwargs["model"])
         model_group.add_argument("--task", **model_kwargs["task"])
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
@@ -573,7 +597,7 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             deprecated=True,
             help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
-            "of v0.8.6. Use `--reasoning-parser` to specify the reasoning "
+            "of v0.9.0. Use `--reasoning-parser` to specify the reasoning "
             "parser backend instead. This flag (`--enable-reasoning`) will be "
             "removed in v0.10.0. When `--reasoning-parser` is specified, "
             "reasoning mode is automatically enabled.")
@@ -614,6 +638,12 @@ class EngineArgs:
                                     type=int,
                                     help='Port for data parallel RPC '
                                     'communication.')
+        parallel_group.add_argument('--data-parallel-backend',
+                                    '-dpb',
+                                    type=str,
+                                    default='mp',
+                                    help='Backend for data parallel, either '
+                                    '"mp" or "ray".')
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
@@ -630,6 +660,9 @@ class EngineArgs:
                                     **parallel_kwargs["worker_cls"])
         parallel_group.add_argument("--worker-extension-cls",
                                     **parallel_kwargs["worker_extension_cls"])
+        parallel_group.add_argument(
+            "--enable-multimodal-encoder-data-parallel",
+            **parallel_kwargs["enable_multimodal_encoder_data_parallel"])
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -733,7 +766,9 @@ class EngineArgs:
             title="DeviceConfig",
             description=DeviceConfig.__doc__,
         )
-        device_group.add_argument("--device", **device_kwargs["device"])
+        device_group.add_argument("--device",
+                                  **device_kwargs["device"],
+                                  deprecated=True)
 
         # Speculative arguments
         speculative_group = parser.add_argument_group(
@@ -973,7 +1008,7 @@ class EngineArgs:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
-        device_config = DeviceConfig(device=self.device)
+        device_config = DeviceConfig(device=current_platform.device_type)
         model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
@@ -1044,15 +1079,28 @@ class EngineArgs:
 
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
-        data_parallel_address = self.data_parallel_address if (
-            self.data_parallel_address
-            is not None) else ParallelConfig.data_parallel_master_ip
+        if self.data_parallel_address is None:
+            if self.data_parallel_backend == "ray":
+                host_ip = get_ip()
+                logger.info(
+                    "Using host IP %s as ray-based data parallel address",
+                    host_ip)
+                data_parallel_address = host_ip
+            else:
+                assert self.data_parallel_backend == "mp", (
+                    "data_parallel_backend can only be ray or mp, got %s",
+                    self.data_parallel_backend)
+                data_parallel_address = ParallelConfig.data_parallel_master_ip
+        else:
+            data_parallel_address = self.data_parallel_address
 
         # This port is only used when there are remote data parallel engines,
         # otherwise the local IPC transport is used.
         data_parallel_rpc_port = self.data_parallel_rpc_port if (
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
+
+        data_parallel_backend = self.data_parallel_backend
 
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
@@ -1061,6 +1109,7 @@ class EngineArgs:
             data_parallel_size_local=data_parallel_size_local,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
+            data_parallel_backend=data_parallel_backend,
             enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
@@ -1069,6 +1118,8 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
+            enable_multimodal_encoder_data_parallel=self.
+            enable_multimodal_encoder_data_parallel,
         )
 
         speculative_config = self.create_speculative_config(
@@ -1078,7 +1129,7 @@ class EngineArgs:
             disable_log_stats=self.disable_log_stats,
         )
 
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         if self.num_scheduler_steps > 1:
             if speculative_config is not None:
@@ -1189,8 +1240,7 @@ class EngineArgs:
         #############################################################
         # Unsupported Feature Flags on V1.
 
-        if (self.load_format == LoadFormat.TENSORIZER.value
-                or self.load_format == LoadFormat.SHARDED_STATE.value):
+        if self.load_format == LoadFormat.SHARDED_STATE.value:
             _raise_or_fallback(
                 feature_name=f"--load_format {self.load_format}",
                 recommend_to_remove=False)
@@ -1286,14 +1336,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Some quantization is not compatible with torch.compile.
-        V1_UNSUPPORTED_QUANT = ["gguf"]
-        if model_config.quantization in V1_UNSUPPORTED_QUANT:
-            _raise_or_fallback(
-                feature_name=f"--quantization {model_config.quantization}",
-                recommend_to_remove=False)
-            return False
-
         # No Embedding Models so far.
         if model_config.task not in ["generate"]:
             _raise_or_fallback(feature_name=f"--task {model_config.task}",
@@ -1321,22 +1363,25 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Only Ngram speculative decoding so far.
+        # V1 supports N-gram, Medusa, and Eagle speculative decoding.
         is_ngram_enabled = False
         is_eagle_enabled = False
+        is_medusa_enabled = False
         if self.speculative_config is not None:
             # This is supported but experimental (handled below).
             speculative_method = self.speculative_config.get("method")
             if speculative_method:
                 if speculative_method in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
-                elif speculative_method in ("eagle", "eagle3"):
+                elif speculative_method == "medusa":
+                    is_medusa_enabled = True
+                elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
                     is_eagle_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")
                 if speculative_model in ("ngram", "[ngram]"):
                     is_ngram_enabled = True
-            if not (is_ngram_enabled or is_eagle_enabled):
+            if not (is_ngram_enabled or is_eagle_enabled or is_medusa_enabled):
                 # Other speculative decoding methods are not supported yet.
                 _raise_or_fallback(feature_name="Speculative Decoding",
                                    recommend_to_remove=False)
@@ -1350,10 +1395,12 @@ class EngineArgs:
             "PALLAS_VLLM_V1",
             "TRITON_ATTN_VLLM_V1",
             "TRITON_MLA",
+            "CUTLASS_MLA_VLLM_V1",
             "FLASHMLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
             "ROCM_AITER_MLA",
+            "TORCH_SDPA_VLLM_V1",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
@@ -1376,23 +1423,18 @@ class EngineArgs:
             return False
 
         if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend not in ["ray", "mp"]):
+                and self.distributed_executor_backend
+                not in (ParallelConfig.distributed_executor_backend, "ray",
+                        "mp", "external_launcher")):
             name = "Pipeline Parallelism without Ray distributed executor " \
-                    "or multiprocessing executor"
+                    "or multiprocessing executor or external launcher"
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
-            return False
-
-        # ngram is supported on V1, but off by default for now.
-        if is_ngram_enabled and _warn_or_fallback("ngram"):
-            return False
-
-        # Eagle is under development, so we don't support it yet.
-        if is_eagle_enabled and _warn_or_fallback("Eagle"):
             return False
 
         # Non-[CUDA, TPU] may be supported on V1, but off by default for now.
         v0_hardware = not any(
-            (current_platform.is_cuda(), current_platform.is_tpu()))
+            (current_platform.is_cuda(), current_platform.is_tpu(),
+             current_platform.is_cpu()))
         if v0_hardware and _warn_or_fallback(  # noqa: SIM103
                 current_platform.device_name):
             return False

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/Skywork/Skywork-R1V-38B/blob/main/modeling_skywork_chat.py
 # --------------------------------------------------------
@@ -24,6 +25,7 @@ from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
@@ -78,7 +80,7 @@ SkyworkR1VImageInputs = Union[SkyworkR1VImagePixelInputs,
 def build_transform(input_size: int):
     MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
     return T.Compose([
-        T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
+        T.Lambda(lambda img: convert_image_mode(img, 'RGB')),
         T.Resize((input_size, input_size),
                  interpolation=T.InterpolationMode.BICUBIC),
         T.ToTensor(),

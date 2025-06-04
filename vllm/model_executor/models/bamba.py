@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Bamba model."""
 # Added by the IBM Team, 2024
 from collections.abc import Iterable
