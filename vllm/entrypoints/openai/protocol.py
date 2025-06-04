@@ -227,6 +227,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     model: Optional[str] = None
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[dict[str, float]] = None
+    allowed_token_ids: Optional[list[int]] = None
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = 0
     # TODO(#9845): remove max_tokens when field is removed from OpenAI API
@@ -549,6 +550,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
+            allowed_token_ids=self.allowed_token_ids,
             extra_args=({"kv_transfer_params": self.kv_transfer_params}
                         if self.kv_transfer_params else None))
 
