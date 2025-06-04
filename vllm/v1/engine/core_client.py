@@ -68,17 +68,30 @@ class EngineCoreClient(ABC):
                 "is not currently supported.")
 
         if multiprocess_mode and asyncio_mode:
-            if vllm_config.parallel_config.data_parallel_size > 1:
-                if vllm_config.parallel_config.data_parallel_backend == "ray":
-                    return RayDPClient(vllm_config, executor_class, log_stats)
-                return DPAsyncMPClient(vllm_config, executor_class, log_stats)
-
-            return AsyncMPClient(vllm_config, executor_class, log_stats)
+            return EngineCoreClient.make_async_mp_client(
+                vllm_config, executor_class, log_stats)
 
         if multiprocess_mode and not asyncio_mode:
             return SyncMPClient(vllm_config, executor_class, log_stats)
 
         return InprocClient(vllm_config, executor_class, log_stats)
+
+    @staticmethod
+    def make_async_mp_client(
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+        client_addresses: Optional[dict[str, str]] = None,
+        client_index: int = 0,
+    ) -> "MPClient":
+        if vllm_config.parallel_config.data_parallel_size > 1:
+            if vllm_config.parallel_config.data_parallel_backend == "ray":
+                return RayDPClient(vllm_config, executor_class, log_stats,
+                                   client_addresses, client_index)
+            return DPAsyncMPClient(vllm_config, executor_class, log_stats,
+                                   client_addresses, client_index)
+        return AsyncMPClient(vllm_config, executor_class, log_stats,
+                             client_addresses, client_index)
 
     @abstractmethod
     def shutdown(self):
