@@ -1399,6 +1399,7 @@ class EngineArgs:
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
             "ROCM_AITER_MLA",
+            "TORCH_SDPA_VLLM_V1",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
@@ -1431,7 +1432,8 @@ class EngineArgs:
 
         # Non-[CUDA, TPU] may be supported on V1, but off by default for now.
         v0_hardware = not any(
-            (current_platform.is_cuda(), current_platform.is_tpu()))
+            (current_platform.is_cuda(), current_platform.is_tpu(),
+             current_platform.is_cpu()))
         if v0_hardware and _warn_or_fallback(  # noqa: SIM103
                 current_platform.device_name):
             return False
