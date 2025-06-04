@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
-Transfer = tuple[int, float]
+Transfer = tuple[int, float]  # (xfer_handle, start_time)
 GET_META_MSG = b"get_meta_msg"
 
 logger = init_logger(__name__)
@@ -382,8 +382,7 @@ class NixlConnectorWorker:
 
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers: defaultdict[
-            str, list[Transfer]] = defaultdict(list)
+        self._recving_transfers = defaultdict[str, list[Transfer]](list)
 
         # Complete transfer tracker. Used by the rank 0 to track finished
         # transactions on ranks 1 to N-1.
@@ -407,8 +406,7 @@ class NixlConnectorWorker:
         self._tp_size: dict[str, int] = {self.engine_id: self.world_size}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
-        self.consumer_notification_counts_by_req: dict[str,
-                                                       int] = defaultdict(int)
+        self.consumer_notification_counts_by_req = defaultdict[str, int](int)
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
@@ -472,8 +470,8 @@ class NixlConnectorWorker:
 
         # Handshake only with the other TP remote the current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
-        tp_rate = self._tp_size[self.engine_id] // metadata.tp_size
-        p_remote_rank = self.tp_rank // tp_rate
+        tp_ratio = self._tp_size[self.engine_id] // metadata.tp_size
+        p_remote_rank = self.tp_rank // tp_ratio
         if p_remote_rank > 0:
             path = make_zmq_path("tcp", host, port + p_remote_rank)
             logger.debug("Querying metadata on path: %s at remote rank %s",
@@ -608,19 +606,19 @@ class NixlConnectorWorker:
 
     def add_remote_agent(self,
                          nixl_agent_meta: NixlAgentMetadata,
-                         remote_rank: int = 0):
+                         remote_tp_rank: int = 0):
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
 
-        In particular, handle both homogeneous and heterogeneous TP. The latter
+        In particular, handle both homogeneous and heterogeneous TP. The former
         requires local rank_i to read from remote rank_i. 
-        The former, assuming D.world_size > P.world_size, requires that two or 
+        The latter, assuming D.world_size > P.world_size, requires that two or 
         more local TP worker share the xfer from a single TP worker.
 
         Here's an example:
 
-        rank_offset     p_remote_rank
+        rank_offset     p_remote_tp_rank
         (kv split no)    
         --------------------------------
             0                 0      Worker0  ---- 1st half of KV ----> Worker0  [ KV Cache ]
@@ -649,15 +647,15 @@ class NixlConnectorWorker:
         """ # noqa: E501
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
-        if (engine_id in self._remote_agents and \
-            remote_rank in self._remote_agents[engine_id]):
+        if remote_tp_rank in self._remote_agents.get(engine_id, ()):
             return
 
         if engine_id in self._tp_size:
             assert self._tp_size[engine_id] == nixl_agent_meta.tp_size
-        self._tp_size[engine_id] = nixl_agent_meta.tp_size
+        else:
+            self._tp_size[engine_id] = nixl_agent_meta.tp_size
         self._remote_agents[engine_id][
-            remote_rank] = self.nixl_wrapper.add_remote_agent(
+            remote_tp_rank] = self.nixl_wrapper.add_remote_agent(
                 nixl_agent_meta.agent_metadata)
 
         # Number of D TP workers reading from a single P TP worker. This is
@@ -688,17 +686,17 @@ class NixlConnectorWorker:
         # Create dst descs and xfer side handles. TP workers have same #blocks.
         if engine_id in self.dst_num_blocks:
             assert self.dst_num_blocks[engine_id] == nixl_agent_meta.num_blocks
-
-        self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
+        else:
+            self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
 
         blocks_data = []
         # With homogeneous TP, D pulls the whole kv cache from corresponding
         # rank. With heterogeneous TP, prepare the descriptors by splitting the
         # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
-        p_remote_rank = self.tp_rank // tp_ratio
+        p_remote_tp_rank = self.tp_rank // tp_ratio
         # Only register the remote's descriptors if current rank pulls from it.
-        if p_remote_rank == remote_rank:
+        if p_remote_tp_rank == remote_tp_rank:
             self.kv_caches_base_addr[
                 engine_id] = nixl_agent_meta.kv_caches_base_addr
             rank_offset = self.tp_rank % tp_ratio * self.block_len \
@@ -712,17 +710,17 @@ class NixlConnectorWorker:
                     # self.block_len == remote_block_len//tp_ratio bytes.
                     addr = base_addr + block_offset + rank_offset
                     # (addr, len, device id)
-                    blocks_data.append((addr, self.block_len, remote_rank))
+                    blocks_data.append((addr, self.block_len, remote_tp_rank))
             logger.debug(
                 "Created %s blocks for dst engine %s with remote rank %s and " \
                 "local rank %s",
-                len(blocks_data), engine_id, remote_rank, self.tp_rank)
+                len(blocks_data), engine_id, remote_tp_rank, self.tp_rank)
 
             # Register with NIXL.
             descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
             self.dst_xfer_side_handles[
                 engine_id] = self.nixl_wrapper.prep_xfer_dlist(
-                    self._remote_agents[engine_id][remote_rank], descs)
+                    self._remote_agents[engine_id][remote_tp_rank], descs)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
