@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
+import vllm.envs as envs
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
 from vllm.model_executor.models.constant_size_cache import ConstantSizeCache
@@ -35,9 +36,7 @@ class MambaCacheManager(ConstantSizeCache):
         # Initialize parent class
         super().__init__(max_batch_size)
 
-        import os
-        path = os.environ.get("VLLM_USE_TRITON_CONV1D", None)
-        if path is not None:
+        if envs.VLLM_USE_TRITON_CONV1D:
             # assume conv_state = (dim, state_len)
             assert conv_state_shape[0] > conv_state_shape[1]
             conv_state = torch.empty(
