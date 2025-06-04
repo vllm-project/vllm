@@ -13,7 +13,7 @@
     {%- endif %}
 {%- endfor %}
 
-{# --- Append tool descriptions if tools are defined --- #}
+{#- Adapted from https://github.com/sgl-project/sglang/blob/main/examples/chat_template/tool_chat_template_deepseekr1.jinja #}
 {% if tools is defined and tools is not none %}
     {% set tool_ns = namespace(text='You are a helpful assistant with tool calling capabilities. '
         'When a tool call is needed, you MUST use the following format to issue the call:\n'
