@@ -72,7 +72,7 @@ class RobertaEmbedding(nn.Module):
                 assert hasattr(attn_metadata, "seq_lens_tensor")
                 seq_lens = attn_metadata.seq_lens_tensor
 
-        if seq_lens:
+        if seq_lens is not None:
             # Replace position ids because in RoBERTa models
             # they have to start at padding_idx + 1 and ignore
             # existing padding tokens
