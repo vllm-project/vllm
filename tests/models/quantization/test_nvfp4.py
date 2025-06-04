@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # flake8: noqa
 """Tests Model Optimizer nvfp4 models against ground truth generation
 Note: these tests will only pass on B200
