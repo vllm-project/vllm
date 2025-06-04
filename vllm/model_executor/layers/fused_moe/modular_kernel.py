@@ -77,9 +77,6 @@ def _moe_problem_size(
 
     return E, M, N, K, topk
 
-@dataclass
-class RoutingData(ABC):
-    ...
 
 class FusedMoEPrepareAndFinalize(ABC):
     """
@@ -216,7 +213,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        routing_data: RoutingData,
+        topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
@@ -229,8 +226,6 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
-        apply_router_weight_on_output: bool,
     ) -> torch.Tensor:
         """
         This function computes the intermediate result of a Mixture of Experts
@@ -353,7 +348,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        routing_data: RoutingData,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         inplace: bool = False,
         activation: str = "silu",
         global_num_experts: int = -1,
@@ -403,7 +399,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         """
 
         a1 = hidden_states
-        E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, routing_data.topk_ids)
+        E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
 
         if global_num_experts == -1:
             global_num_experts = E
@@ -423,14 +419,14 @@ class FusedMoEModularKernel(torch.nn.Module):
                         _expert_topk_weights)
 
         a1q, a1q_scale, expert_num_tokens = self.prepare_finalize.prepare(
-            a1, a1_scale, a2_scale, routing_data.topk_weights, routing_data.topk_ids, global_num_experts,
+            a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
             expert_map, apply_router_weight_on_input)
 
         fused_out = self.fused_experts.apply(
             a1q,
             w1,
             w2,
-            routing_data,
+            topk_ids,
             activation=activation,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
@@ -445,7 +441,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             expert_num_tokens=expert_num_tokens,
         )
 
-        self.prepare_finalize.finalize(output, fused_out, routing_data.topk_weights,
-                                       routing_data.topk_ids, apply_router_weight_on_input)
+        self.prepare_finalize.finalize(output, fused_out, topk_weights,
+                                       topk_ids, apply_router_weight_on_input)
 
         return output

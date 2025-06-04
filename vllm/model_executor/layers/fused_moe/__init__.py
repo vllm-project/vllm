@@ -42,14 +42,13 @@ if HAS_TRITON:
         TritonExperts, fused_experts, fused_moe, fused_topk,
         get_config_file_name, grouped_topk)
     from vllm.model_executor.layers.fused_moe.triton_kernels_moe import (
-        forward_cuda_triton, modular_triton_moe_kernels_forward)
+        forward_cuda_triton)
 
     __all__ += [
         "fused_moe",
         "fused_topk",
         "fused_experts",
         "forward_cuda_triton"
-        "modular_triton_moe_kernels_forward",
         "get_config_file_name",
         "grouped_topk",
         "cutlass_moe_fp8",

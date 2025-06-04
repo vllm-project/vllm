@@ -10,39 +10,7 @@ from triton_kernels.testing import assert_close
 
 from vllm.model_executor.layers.fused_moe.fused_moe import ( fused_moe, )
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.triton_kernels_moe import modular_triton_moe_kernels_forward, forward_cuda_triton
-
-def forward_modular_triton(
-    x, w1, w2,
-    use_grouped_topk: bool,
-    top_k: int,
-    router_logits: torch.Tensor,
-    renormalize: bool,
-    topk_group: Optional[int] = None,
-    num_expert_group: Optional[int] = None,
-    global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    # custom_routing_function: Optional[Callable] = None,
-    scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None,
-    apply_router_weight_on_input: bool = False,
-    activation: str = "silu"
-):
-    routing_data = FusedMoE.select_experts(None, router_logits, top_k, False, renormalize)
-
-    return modular_triton_moe_kernels_forward(
-        x,
-        w1=w1,
-        w2=w2,
-        # custom routing
-        routing_data=routing_data,
-        use_fp8_w8a8=False,
-        use_int8_w8a8=False,
-        use_int8_w8a16=False,
-        use_int4_w4a16=False,
-        per_channel_quant=False,
-    )
-    
+from vllm.model_executor.layers.fused_moe.triton_kernels_moe import forward_cuda_triton
 
 @dataclass
 class Case:
@@ -62,7 +30,9 @@ class Case:
         ]
     ],
 )
-def test_equiv(num_token, inter_size, K, num_expts_tot, num_expts_act, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("renormalize", [False, True])
+@pytest.mark.parametrize("apply_router_weight_on_input", [False, True])
+def test_equiv(num_token, inter_size, K, num_expts_tot, num_expts_act, renormalize, apply_router_weight_on_input):
 
     # triton way to generate logits to break ties between experts
     randbits = [torch.randperm(num_expts_tot) for _ in range(num_token)]
@@ -78,14 +48,26 @@ def test_equiv(num_token, inter_size, K, num_expts_tot, num_expts_act, monkeypat
     x_tri = x.clone()
     w1_tri = w1.clone()
     w2_tri = w2.clone()
+
+    # triton moe kernel use transposed shape for matmul
     w1_tri = w1_tri.transpose(-2, -1).contiguous()
     w2_tri = w2_tri.transpose(-2, -1).contiguous()
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_EXP_MOE", "1")
-        out_triton_monolithic = forward_cuda_triton(x_tri, w1_tri, w2_tri, False, num_expts_act, exp_data_tri, True)
-        out_triton = forward_modular_triton(x_tri, w1_tri, w2_tri, False, num_expts_act, exp_data_tri, True)
-        out_ref = fused_moe(x, w1, w2, exp_data, num_expts_act, True)
-        assert_close(ref=out_ref, tri=out_triton)
-        assert_close(ref=out_ref, tri=out_triton_monolithic)
+    out_triton_monolithic = forward_cuda_triton(
+        hidden_states=x_tri, 
+        w1=w1_tri, 
+        w2=w2_tri,
+        gating_output=exp_data_tri, 
+        topk=num_expts_act,
+        renormalize=renormalize,
+        apply_router_weight_on_input=apply_router_weight_on_input)
+    out_ref = fused_moe(
+        hidden_states=x, 
+        w1=w1, 
+        w2=w2, 
+        gating_output=exp_data, 
+        topk=num_expts_act, 
+        renormalize=renormalize,
+        apply_router_weight_on_input=apply_router_weight_on_input)
+    assert_close(ref=out_ref, tri=out_triton_monolithic)
         

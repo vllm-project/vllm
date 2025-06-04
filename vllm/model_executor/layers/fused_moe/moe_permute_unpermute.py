@@ -64,10 +64,7 @@ def _moe_unpermute_and_reduce(
     Unpermute the final result and apply topk_weights, then perform the final
     reduction on the hidden states.
     """
-    if topk_weight:
-        M, topk = topk_weight.size()
-    else:
-        M, topk = curr_hidden.shape[:2]
+    M, topk = topk_weight.size()
     K = curr_hidden.size(-1)
     if inv_perm is not None:
         curr_hidden = curr_hidden[inv_perm, ...]
