@@ -232,9 +232,8 @@ class SingleTypeKVCacheManager(ABC):
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
         """
-        Remove the blocks that are no longer needed from `blocks`. The removed 
-        blocks should be replaced by null_block. Return the removed blocks in 
-        eviction order, where the first returned block should be evicted first.
+        Remove the blocks that are no longer needed from `blocks` and free the 
+        blocks. The removed blocks should be replaced by null_block.
         Need to be customized for each attention type.
 
         Args:
@@ -328,8 +327,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             sliding_window_contiguous_blocks += 1
 
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(len(block_hashes)) to
-        # O(len(block_hashes) / sliding_window_contiguous_blocks +
+        # optimize the time complexity from O(max_num_blocks) to
+        # O(max_num_blocks / sliding_window_contiguous_blocks +
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size

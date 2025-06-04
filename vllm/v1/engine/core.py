@@ -163,8 +163,6 @@ class EngineCore:
         num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
         scheduler_kv_cache_config = kv_cache_configs[0]
-        # TODO in this PR: remove this debug print
-        print("kv_cache_config", scheduler_kv_cache_config)
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)

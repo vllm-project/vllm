@@ -272,8 +272,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self.full_attention_block_size = self.full_attention_spec.block_size
         self.other_block_size = self.other_spec.block_size
         assert self.other_block_size % self.full_attention_block_size == 0, (
-            "KVCacheCoordinator assumes the block_size of the full "
-            "attention layer is divisible by other layers now.")
+            "KVCacheCoordinator assumes the block_size of full attention "
+            "layers is divisible by other layers now.")
 
     def find_longest_cache_hit(
         self,
@@ -320,10 +320,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         # NOTE: the prefix cache hit length must be a multiply of block_size as
         # we don't support partial block cache hit yet. The cache hit length
-        # of other attention is ensured to be a multiple of the block size of
+        # of other attention is ensured to be a multiply of the block size of
         # full attention layers in current implementation, because hit_length is
-        # a multiple of other attention's block size, and other attention's
-        # block size is a multiple of full attention's block size (verified in
+        # a multiply of other attention's block size, and other attention's
+        # block size is a multiply of full attention's block size (verified in
         # `verify_and_split_kv_cache_groups`).
         assert hit_length % self.full_attention_block_size == 0
 

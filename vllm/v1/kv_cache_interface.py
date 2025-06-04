@@ -157,7 +157,7 @@ class SlidingWindowSpec(AttentionSpec):
 @dataclass
 class KVCacheTensor:
     """
-    A class for specifying the KV cache tensor.
+    A class for specifying how the workers should initialize the KV cache.
     """
     size: int  # size of the KV cache tensor in bytes
     shared_by: list[str]  # layer names that share the same KV cache tensor

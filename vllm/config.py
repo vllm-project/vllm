@@ -4472,7 +4472,7 @@ class VllmConfig:
         if (envs.VLLM_USE_V1
                 and not self.scheduler_config.disable_hybrid_kv_cache_manager):
             # logger should only print warning message for hybrid models. As we
-            # can't know whether the model is hybrid or not now, we don't log
+            # can't know whether the model is hybrid or not now, so we don't log
             # warning message here and will log it later.
             if not (current_platform.is_cuda() or current_platform.is_rocm()):
                 # Hybrid KV cache manager is not supported on non-GPU platforms.

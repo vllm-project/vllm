@@ -26,7 +26,6 @@ class BlockHash(NamedTuple):
     hash collisions when the hash value is the same. By using SHA256 however,
     hash collisions are practically impossible.
     """
-
     # Hash value of the block in an integer.
     hash_value: int
     # Token IDs in the block.
@@ -165,10 +164,10 @@ class KVCacheBlock:
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
         # on KVCacheBlock object recursively.
-        prev_block_id = self.prev_free_block.block_id \
-                         if self.prev_free_block else None
-        next_block_id = self.next_free_block.block_id \
-                         if self.next_free_block else None
+        prev_block_id = (self.prev_free_block.block_id
+                         if self.prev_free_block else None)
+        next_block_id = (self.next_free_block.block_id
+                         if self.next_free_block else None)
         return (f"KVCacheBlock(block_id={self.block_id}, "
                 f"ref_cnt={self.ref_cnt}, "
                 f"_block_hash={self._block_hash}, "
@@ -620,7 +619,7 @@ def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
         True if all layers have the same type, False otherwise.
     """
 
-    layer_keys = {layer.type_id for layer in kv_cache_spec.values()}
+    layer_keys = set(layer.type_id for layer in kv_cache_spec.values())
     return len(layer_keys) == 1
 
 
@@ -652,7 +651,6 @@ def get_num_blocks(vllm_config: VllmConfig, num_layers: int,
         num_layers: The number of layers
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
-
     """
     num_blocks = int(available_memory // page_size // num_layers)
     num_blocks = max(num_blocks, 0)
@@ -693,13 +691,6 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     page_size = get_uniform_page_size(kv_cache_spec)
     num_blocks = get_num_blocks(vllm_config, len(kv_cache_spec),
                                 available_memory, page_size)
-
-    if vllm_config.cache_config.num_gpu_blocks_override is not None:
-        num_gpu_blocks_override = \
-            vllm_config.cache_config.num_gpu_blocks_override
-        logger.info(
-            "Overriding num_gpu_blocks=%d with "
-            "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
 
     per_layer_size = page_size * num_blocks
     # All layers have the same KV cache spec, so we create one kv cache group
@@ -878,14 +869,10 @@ def _get_kv_cache_config_uniform_page_size(
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
-    # TODO in this PR: Now just copy from the uniform type implementation.
-    # Update after https://github.com/vllm-project/vllm/pull/19029
-    max_concurrency = num_tokens / vllm_config.model_config.max_model_len
-    logger.info(
-        "Maximum concurrency for %s tokens per request: %.2fx",
-        max_model_len_str,
-        max_concurrency,
-    )
+    max_concurrency = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config)
+    logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                max_model_len_str, max_concurrency)
     return kv_cache_config
 
 
