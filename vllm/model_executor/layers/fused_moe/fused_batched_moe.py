@@ -62,10 +62,9 @@ def moe_mmk(
         # block-wise
         if group_k > 0 and group_n > 0:
             # + (expert_id * stride_ase) ??
-            a_scale_ptrs = a_scale_ptr + (offs_m * stride_asm)
+            a_scale_ptrs = a_scale_ptr + (offs_m * stride_asm) #+ (expert_id * stride_ase)
             offs_bsn = offs_n // group_n
-            b_scale_ptrs = (b_scale_ptr + expert_id * stride_bse +
-                            offs_bsn * stride_bsn)
+            b_scale_ptrs = (b_scale_ptr + offs_bsn * stride_bsn) + expert_id * stride_bse
 
         # channel-wise
         elif per_channel_quant:
@@ -79,8 +78,8 @@ def moe_mmk(
 
         # tensor-wise
         else:
-            a_scale = tl.load(a_scale_ptr) #+ expert_id * stride_ase ?
-            b_scale = tl.load(b_scale_ptr + expert_id)
+            a_scale = tl.load(a_scale_ptr)# + (expert_id * stride_ase)
+            b_scale = tl.load(b_scale_ptr + expert_id * stride_bse)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -300,9 +299,11 @@ def batched_triton_kernel(
         # block-wise
         if group_k > 0 and group_n > 0:
             a_scale_ptr = a_scale_ptr + (expert_id * stride_ase) + cta_m_start * stride_asm
+            #b_scale_ptr = b_scale_ptr + (expert_id * stride_bse) # + cta_n_start * stride_bsn?
         # channel-wise
         elif per_channel_quant:
             a_scale_ptr = a_scale_ptr + (expert_id * stride_ase)
+            #b_scale_ptr = b_scale_ptr + (expert_id * stride_bse)
 
     expert_triton_kernel(
         a_ptr,

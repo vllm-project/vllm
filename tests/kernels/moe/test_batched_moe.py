@@ -97,9 +97,12 @@ def ref_impl(
     num_expert_tokens_cpu = num_expert_tokens_cpu.to(device="cpu")
     num_experts = num_expert_tokens.size(0)
 
+    f32 = torch.float32
+    bf16 = torch.bfloat16
+
     for e in range(num_experts):
         num_tokens = num_expert_tokens_cpu[e]
-        if A.dtype == torch.torch.float8_e4m3fn and block_shape is not None:
+        if A.dtype.itemsize == 1 and block_shape is not None:
             tmp = native_w8a8_block_matmul(A[e],
                                            B[e],
                                            A_scale[e],
@@ -107,9 +110,11 @@ def ref_impl(
                                            block_shape,
                                            C.dtype)
             C[e, :num_tokens, :] = tmp[:num_tokens, :]
-        elif A.dtype == torch.torch.float8_e4m3fn and block_shape is None:
-            C[e, :num_tokens, :] = ((A[e, :num_tokens, :].to(torch.float32) * A_scale[e]) @
-                                    (B[e].transpose(0, 1).to(torch.float32) * B_scale[e]))
+        elif A.dtype.itemsize == 1 and block_shape is None:
+            C[e, :num_tokens, :] = (
+                (A[e, :num_tokens, :].to(f32) * A_scale[e]).to(bf16) @
+                (B[e].transpose(0, 1).to(f32) * B_scale[e]).to(bf16)
+            )
         else:
             assert A_scale is None
             assert B_scale is None
@@ -224,19 +229,14 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         block_shape=block_shape,
     )
 
-    #print(A.dtype)
-    #print(A_scale.shape)
-    #print(B_scale.shape)
-    #print(B.dtype)
-    #print(ref_output.dtype)
     ref_output = ref_impl(
         A,
         B,
         ref_output,
         num_expert_tokens,
-        None, #A_scale,
-        None, #B_scale,
-        None, #block_shape
+        None,
+        None,
+        None,
     )
 
     q_ref_output = ref_impl(
@@ -255,8 +255,13 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         torch.float32: (1e-2, 1e-2),
     }[test_output.dtype]
 
+    torch.set_printoptions(profile="full")
+    #print(f"REF {q_ref_output.shape}\n{q_ref_output}")
+    #print(f"TRI {test_output.shape}\n{test_output}")
+
     torch.testing.assert_close(ref_output, q_ref_output, atol=atol, rtol=rtol)
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
+
 
 # Move to utils
 def per_block_cast_to_fp8(
