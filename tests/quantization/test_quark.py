@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test model set-up and weight loading for quark-quantized models.
 
 Run `pytest tests/quantization/test_quark.py`.

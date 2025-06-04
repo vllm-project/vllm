@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 LM eval harness on model to compare vs HF baseline computed offline.
 Configs are found in configs/$MODEL.yaml

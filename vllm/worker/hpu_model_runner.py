@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company

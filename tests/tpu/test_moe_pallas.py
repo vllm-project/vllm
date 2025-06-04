@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the Pallas MOE implementation.
 
 Run `pytest tests/kernels/moe/test_moe_pallas.py`.

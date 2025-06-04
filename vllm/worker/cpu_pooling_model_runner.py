@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
@@ -52,7 +53,6 @@ class CPUPoolingModelRunner(
             model_input.input_positions,
             **MultiModalKwargs.as_kwargs(
                 model_input.multi_modal_kwargs or {},
-                dtype=self.model_config.dtype,
                 device=self.device,
             ),
             **cross_enc_kwargs,

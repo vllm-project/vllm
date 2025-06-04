@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Tests gguf models against unquantized models generations
 Note: To pass the test, quantization higher than Q4 should be used

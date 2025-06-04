@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
 from .embed_utils import EmbedModelInfo, correctness_test_embed_models

@@ -119,7 +119,7 @@ typename T::Fmha::Arguments args_from_options(
       {static_cast<ElementOut*>(out.data_ptr()), stride_O,
        static_cast<ElementAcc*>(nullptr), stride_LSE},
       hw_info,
-      -1,       // split_kv
+      1,        // split_kv
       nullptr,  // is_var_split_kv
   };
   // TODO(kaixih@nvidia): When split_kv=-1 and is_var_split_kv=false, we compute

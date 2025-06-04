@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .interfaces import (HasInnerState, SupportsLoRA, SupportsMultiModal,
                          SupportsPP, SupportsV0Only, has_inner_state,

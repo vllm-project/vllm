@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""

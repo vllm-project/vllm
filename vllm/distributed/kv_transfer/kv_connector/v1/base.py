@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 KVConnectorBase_V1 Class for Distributed KV Cache & Hidden State
 communication in vLLM v1

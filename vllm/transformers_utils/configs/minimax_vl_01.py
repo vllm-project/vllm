@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMaxVL01 model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the latency of processing a single batch of requests."""
 
 import argparse
@@ -78,7 +79,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
-    print(args)
     if args.profile and not envs.VLLM_TORCH_PROFILER_DIR:
         raise OSError(
             "The environment variable 'VLLM_TORCH_PROFILER_DIR' is not set. "
@@ -101,7 +101,6 @@ def main(args: argparse.Namespace):
         max_tokens=args.output_len,
         detokenize=not args.disable_detokenize,
     )
-    print(sampling_params)
     dummy_prompt_token_ids = np.random.randint(10000,
                                                size=(args.batch_size,
                                                      args.input_len))

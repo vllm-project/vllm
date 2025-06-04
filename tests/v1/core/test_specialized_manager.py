@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
@@ -32,7 +33,7 @@ def test_sliding_window_possible_cached_prefix():
 
     def run_one_case(block_is_cached, expect_length):
         block_hash_list = [
-            BlockHashType(i, ()) for i in range(len(block_is_cached))
+            BlockHash(i, ()) for i in range(len(block_is_cached))
         ]
 
         block_pool.cached_block_hash_to_block.clear()
@@ -143,3 +144,26 @@ def test_sliding_window_remove_skipped_blocks():
     # of removed blocks should be [1003, 1002].
     manager.remove_skipped_blocks("test", 11)
     assert_block_id(block_table, [null_block_id] * 4 + original_block_ids[4:])
+
+
+def test_get_num_blocks_to_allocate():
+    block_size = 2
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=4,  # Placeholder value, not related to test result
+        use_mla=False,
+    )
+
+    block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+    cached_blocks_1 = [KVCacheBlock(i + 1) for i in range(10)]
+    cached_blocks_2 = [block_pool.null_block for _ in range(5)
+                       ] + [KVCacheBlock(i + 1) for i in range(5)]
+
+    assert manager.get_num_blocks_to_allocate("1", 20 * block_size,
+                                              cached_blocks_1) == 20
+    assert manager.get_num_blocks_to_allocate("2", 20 * block_size,
+                                              cached_blocks_2) == 15

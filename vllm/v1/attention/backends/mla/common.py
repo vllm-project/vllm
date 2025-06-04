@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 # MLA Common Components
 
@@ -349,7 +350,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         self.num_heads = model_config.get_num_attention_heads(
             runner.parallel_config)
         self.mla_dims = get_mla_dims(model_config)
-        self.aot_schedule = is_vllm_fa and (get_flash_attn_version() == 3)
+        self.aot_schedule = current_platform.is_cuda()
         self.kv_cache_spec = kv_cache_spec
 
         # Dont try to access the runner on AMD
@@ -585,6 +586,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         blocksparse_params: Optional[dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
         # MLA Specific Arguments
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
@@ -594,6 +596,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported for MLA")
+
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

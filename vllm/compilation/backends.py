@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
 import dataclasses
@@ -31,13 +32,13 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     if compilation_config.use_inductor:
         if envs.VLLM_USE_STANDALONE_COMPILE and is_torch_equal_or_newer(
                 "2.8.0"):
-            logger.info("Using InductorStandaloneAdaptor")
+            logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor()
         else:
-            logger.info("Using InductorAdaptor")
+            logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
     else:
-        logger.info("Using EagerAdaptor")
+        logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
 
 

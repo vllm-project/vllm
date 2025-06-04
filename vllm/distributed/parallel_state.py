@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2023 The vLLM team.
 # Adapted from
@@ -1203,7 +1204,8 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     if empty_cache is not None:
         empty_cache()
     try:
-        torch._C._host_emptyCache()
+        if not current_platform.is_cpu():
+            torch._C._host_emptyCache()
     except AttributeError:
         logger.warning(
             "torch._C._host_emptyCache() only available in Pytorch >=2.5")

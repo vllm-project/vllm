@@ -104,7 +104,7 @@ class KVCacheBlock:
     block_id: int
     # The block hash (will be assigned when the block is full,
     # and will be reset when the block is evicted).
-    block_hash: BlockHashType
+    block_hash: BlockHash
     # The number of requests using this block now.
     ref_cnt: int
 

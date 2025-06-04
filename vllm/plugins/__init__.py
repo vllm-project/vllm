@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
 import os
@@ -9,6 +10,8 @@ import torch
 import vllm.envs as envs
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PLUGINS_GROUP = 'vllm.general_plugins'
 
 # make sure one process only loads plugins once
 plugins_loaded = False
@@ -28,19 +31,24 @@ def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
         logger.debug("No plugins for group %s found.", group)
         return {}
 
-    logger.info("Available plugins for group %s:", group)
+    # Check if the only discovered plugin is the default one
+    is_default_group = (group == DEFAULT_PLUGINS_GROUP)
+    # Use INFO for non-default groups and DEBUG for the default group
+    log_level = logger.debug if is_default_group else logger.info
+
+    log_level("Available plugins for group %s:", group)
     for plugin in discovered_plugins:
-        logger.info("- %s -> %s", plugin.name, plugin.value)
+        log_level("- %s -> %s", plugin.name, plugin.value)
 
     if allowed_plugins is None:
-        logger.info("All plugins in this group will be loaded. "
-                    "Set `VLLM_PLUGINS` to control which plugins to load.")
+        log_level("All plugins in this group will be loaded. "
+                  "Set `VLLM_PLUGINS` to control which plugins to load.")
 
     plugins = dict[str, Callable[[], Any]]()
     for plugin in discovered_plugins:
         if allowed_plugins is None or plugin.name in allowed_plugins:
             if allowed_plugins is not None:
-                logger.info("Loading plugin %s", plugin.name)
+                log_level("Loading plugin %s", plugin.name)
 
             try:
                 func = plugin.load()
@@ -80,7 +88,7 @@ def load_general_plugins():
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html # noqa: E501
             os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
 
-    plugins = load_plugins_by_group(group='vllm.general_plugins')
+    plugins = load_plugins_by_group(group=DEFAULT_PLUGINS_GROUP)
     # general plugins, we only need to execute the loaded functions
     for func in plugins.values():
         func()

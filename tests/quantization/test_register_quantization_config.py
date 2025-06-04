@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests register custom quantization config.
 
 See https://github.com/vllm-project/vllm/issues/11926 for more details.

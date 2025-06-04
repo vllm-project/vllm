@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import requests
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This test file includes some cases where it is inappropriate to
 only get the `eos_token_id` from the tokenizer as defined by

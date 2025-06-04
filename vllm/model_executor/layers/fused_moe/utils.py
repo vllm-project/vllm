@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from math import prod
 from typing import Optional
 
@@ -17,8 +18,8 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     Shrink the given tensor and apply the given view to it.  This is
     used to resize the intermediate fused_moe caches.
     """
-    assert prod(
-        v) <= x.numel(), f"{prod(v)} <= {x.numel()}"  # CUDAGRAPH unfriendly?
+    assert prod(v) <= x.numel(
+    ), f"{v} ({prod(v)}) <= {x.shape} ({x.numel()})"  # CUDAGRAPH unfriendly?
     return x.flatten()[:prod(v)].view(*v)
 
 

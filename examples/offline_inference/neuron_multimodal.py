@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import requests
 import torch
 from neuronx_distributed_inference.models.mllama.utils import add_instruct

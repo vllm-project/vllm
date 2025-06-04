@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 An example shows how to generate structured outputs from reasoning models
 like DeepSeekR1. The thinking process will not be guided by the JSON

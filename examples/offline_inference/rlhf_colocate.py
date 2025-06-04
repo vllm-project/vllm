@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 a simple demonstration to show how to co-locate
 vLLM worker with training actors on the same GPUs,

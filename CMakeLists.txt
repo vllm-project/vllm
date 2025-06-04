@@ -182,16 +182,12 @@ include(FetchContent)
 file(MAKE_DIRECTORY ${FETCHCONTENT_BASE_DIR}) # Ensure the directory exists
 message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
-#
-# Set rocm version dev int.
-#
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # Overriding the default -O set up by cmake, adding ggdb3 for the most verbose devug info
   #
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG "${CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG} -O0 -ggdb3")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb3")
-
 
   #
   # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
@@ -246,6 +242,7 @@ set(VLLM_EXT_SRC
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
   "csrc/layernorm_quant_kernels.cu"
+  "csrc/sampler.cu"
   "csrc/cuda_view.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
