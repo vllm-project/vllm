@@ -83,8 +83,9 @@ class SingleTypeKVCacheManager(ABC):
         # free queue and ref_cnt == 0), it will be changed from a free block
         # to a computed block when the request is allocated, so we also count
         # it as needed to be allocated.
-        num_evictable_computed_blocks = sum(blk.ref_cnt == 0
-                                            for blk in new_computed_blocks)
+        num_evictable_computed_blocks = sum(
+            blk.ref_cnt == 0 and not blk.is_null
+            for blk in new_computed_blocks)
         return ((num_new_blocks + num_evictable_computed_blocks) *
                 self.num_kv_cache_groups)
 

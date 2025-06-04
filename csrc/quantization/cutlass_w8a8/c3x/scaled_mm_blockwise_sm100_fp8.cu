@@ -9,10 +9,6 @@ void cutlass_scaled_mm_blockwise_sm100_fp8(torch::Tensor& out,
                                            torch::Tensor const& b,
                                            torch::Tensor const& a_scales,
                                            torch::Tensor const& b_scales) {
-  TORCH_CHECK(
-      a.size(0) % 4 == 0,
-      "Input tensor must have a number of rows that is a multiple of 4. ",
-      "but got: ", a.size(0), " rows.");
   if (out.dtype() == torch::kBFloat16) {
     cutlass_gemm_blockwise_sm100_fp8_dispatch<cutlass::bfloat16_t>(
         out, a, b, a_scales, b_scales);
