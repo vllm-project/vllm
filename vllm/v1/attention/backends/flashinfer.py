@@ -11,6 +11,7 @@ from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 
+from vllm.distributed.kv_transfer.kv_connector.utils import get_kv_connector_cache_layout
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
@@ -64,6 +65,21 @@ class FlashInferBackend(AttentionBackend):
         head_size: int,
     ) -> tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
+    
+    @staticmethod
+    def get_kv_cache_stride_order() -> tuple[int, ...]:
+        # NOTE When running disaggregated PD with NIXL, HND layout is used for
+        # faster transfer. `stride_order` indicates the permutation that gets
+        # us from `get_kv_cache_shape` to the actual memory layout we want.
+        # TODO enable forcing HND layout through env var
+        cache_layout = get_kv_connector_cache_layout()
+        if cache_layout == "NHD":
+            stride_order = (0, 1, 2, 3, 4)
+        elif cache_layout == "HND":
+            stride_order = (0, 1, 3, 2, 4)
+        else:
+            raise ValueError("Unknown cache layout format %s.", cache_layout)
+        return stride_order
 
 
 @dataclass
@@ -275,6 +291,7 @@ class FlashInferMetadataBuilder:
         self._num_prefills = num_prefills
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
+        self._kv_cache_layout = None
 
         return modified_batch
 
@@ -285,11 +302,17 @@ class FlashInferMetadataBuilder:
                 dtype=torch.uint8,
                 device=self.runner.device)
         return self._workspace_buffer
+    
+    def get_kv_cache_layout(self):
+        if self._kv_cache_layout is None:
+            # TODO enable HND forcing through env var
+            self._kv_cache_layout = get_kv_connector_cache_layout()
+        return self._kv_cache_layout
 
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), "NHD")
+                self._get_workspace_buffer(), self.get_kv_cache_layout())
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self):
@@ -302,12 +325,13 @@ class FlashInferMetadataBuilder:
                 num_qo_heads // num_kv_heads > 4)
             self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
-                "NHD",
+                self.get_kv_cache_layout(),
                 use_tensor_cores=use_tensor_cores)
         return self._decode_wrapper
 
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
+            # TODO test HND with cascade attention
             self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
                 2, self._get_workspace_buffer(), "NHD")
         return self._cascade_wrapper
@@ -526,6 +550,7 @@ class FlashInferImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.stride_order = FlashInferBackend.get_kv_cache_stride_order()
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
@@ -621,7 +646,7 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper._sm_scale == self.scale
             prefill_wrapper.run(
                 prefill_query,
-                kv_cache,
+                kv_cache.permute(*self.stride_order),
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
                 out=output[num_decode_tokens:],
@@ -637,7 +662,7 @@ class FlashInferImpl(AttentionImpl):
             assert decode_wrapper._sm_scale == self.scale
             decode_wrapper.run(
                 decode_query,
-                kv_cache,
+                kv_cache.permute(*self.stride_order),
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
                 out=output[:num_decode_tokens],

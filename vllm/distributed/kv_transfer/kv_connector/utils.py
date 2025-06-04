@@ -3,7 +3,15 @@
 """
 KV cache helper for store.
 """
+<<<<<<< HEAD
 
+=======
+<<<<<<< Updated upstream
+=======
+
+import functools
+>>>>>>> Stashed changes
+>>>>>>> b6feef56c (wip)
 import torch
 
 import vllm.envs as envs
@@ -92,7 +100,8 @@ class model_aware_kv_ops_helper:
                 layer.self_attn.attn._v_scale,
             )
 
-
+# TODO I cant cache in flashinferimpl class cause its recreated
+@functools.lru_cache
 def get_kv_connector_cache_layout():
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
