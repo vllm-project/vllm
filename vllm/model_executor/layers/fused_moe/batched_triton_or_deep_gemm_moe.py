@@ -61,7 +61,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             max_num_tokens=self.max_num_tokens,
             world_size=self.world_size,
             dp_size=self.dp_size,
-            block_shape=self.block_shape,
+            block_shape=self.block_shape,  # type: ignore[arg-type]
         ) if (self.allow_deep_gemm and is_fp8_128_block_quantized) else None
 
     def workspace_shapes(
@@ -80,6 +80,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             return self.batched_deep_gemm_experts.workspace_shapes(
                 a, M, N, K, topk, num_experts)
         else:
+            assert self.batched_triton_experts is not None
             return self.batched_triton_experts.workspace_shapes(
                 a, M, N, K, topk, num_experts)
 
@@ -108,6 +109,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         experts = (self.batched_deep_gemm_experts
                    if use_batched_deep_gemm_experts else
                    self.batched_triton_experts)
+        assert experts is not None
         return experts.apply(hidden_states, w1, w2, topk_ids, activation,
                              global_num_experts, expert_map, w1_scale,
                              w2_scale, w1_zp, w2_zp, a1q_scale, a2_scale,

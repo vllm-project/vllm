@@ -82,6 +82,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             x_fp8, x_scales = x
             x = dequant_fp8(x_fp8, x_scales).to(dtype=a1_dtype)
 
+        assert isinstance(x, torch.Tensor)
+
         # Check if there is a block_shape / or if we can infer the quantization
         # schemes from the scales.
         per_token_quant = None
@@ -106,6 +108,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         x = x.view((num_experts, -1, hidden_dim))
 
         if per_token_quant:
+            assert x_scales is not None
             x_scales = x_scales.view(num_experts, max_tokens, -1)
 
         return x, x_scales
