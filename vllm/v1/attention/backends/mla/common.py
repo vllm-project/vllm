@@ -350,7 +350,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         self.num_heads = model_config.get_num_attention_heads(
             runner.parallel_config)
         self.mla_dims = get_mla_dims(model_config)
-        self.aot_schedule = is_vllm_fa and (get_flash_attn_version() == 3)
+        self.aot_schedule = current_platform.is_cuda()
         self.kv_cache_spec = kv_cache_spec
 
         # Dont try to access the runner on AMD

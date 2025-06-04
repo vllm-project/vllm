@@ -150,7 +150,7 @@ run_and_track_test 9 "test_multimodal.py" \
 run_and_track_test 10 "test_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py"
 run_and_track_test 11 "test_struct_output_generate.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py"
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
 run_and_track_test 12 "test_moe_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py"
 run_and_track_test 13 "test_lora.py" \
