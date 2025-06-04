@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import pplx_kernels as pplx
@@ -33,6 +34,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.quant_dtype = quant_dtype
         self.per_act_token = per_act_token
 
+    def max_num_tokens_per_rank(self) -> Optional[int]:
+        return self.max_num_tokens
+
+    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+        return torch.uint32
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -43,7 +50,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
+               Optional[torch.Tensor], Optional[torch.Tensor]]:
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
 
@@ -119,7 +127,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, 0:1]
 
-        return expert_x, expert_x_scale, expert_num_tokens
+        return expert_x, expert_x_scale, expert_num_tokens, None, None
 
     def finalize(
         self,

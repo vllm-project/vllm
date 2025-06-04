@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import weakref
@@ -629,7 +630,6 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
         if model_input.multi_modal_kwargs is not None:
             multimodal_kwargs = MultiModalKwargs.as_kwargs(
                 model_input.multi_modal_kwargs,
-                dtype=self.model_config.dtype,
                 device=self.device,
             )
         execute_model_kwargs = {}
