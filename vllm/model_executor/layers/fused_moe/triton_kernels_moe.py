@@ -13,7 +13,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 
 from triton_kernels.matmul_ogs import matmul_ogs
-from triton_kernels.routing import (routing, RoutingData, GatherIndx, ScatterIndx)
+from triton_kernels.routing import (routing, RoutingData, GatherIndx,
+                                    ScatterIndx)
+
 
 def forward_cuda_triton(
     hidden_states: torch.Tensor,
@@ -44,7 +46,7 @@ def forward_cuda_triton(
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
-    
+
     # feature check, TODO: move outside of the func
     # assert use_grouped_topk == False, "use_grouped_topk is not supported in new triton MoE kernel"
     # assert topk_group is None, "topk_group is not supported in new triton MoE kernel"
@@ -52,9 +54,10 @@ def forward_cuda_triton(
     # assert scoring_func == "softmax", "scoring_func is not supported in new triton MoE kernel"
     # assert e_score_correction_bias is None, "e_score_correction_bias is not supported in new triton MoE kernel"
 
-    if not renormalize: 
+    if not renormalize:
         gating_output = torch.softmax(gating_output, dim=-1)
-    routing_data, gather_idx, scatter_idx = routing(gating_output, topk, renormalize)
+    routing_data, gather_idx, scatter_idx = routing(gating_output, topk,
+                                                    renormalize)
 
     return fused_experts_triton_exp(
         hidden_states,
@@ -74,30 +77,30 @@ def forward_cuda_triton(
         w2_scale=w2_scale,
         a1_scale=a1_scale,
         a2_scale=a2_scale,
-        block_shape=block_shape
-    )
+        block_shape=block_shape)
+
 
 # This is a triton implementation of the fused_experts function
 def fused_experts_triton_exp(hidden_states: torch.Tensor,
-                  w1: torch.Tensor,
-                  w2: torch.Tensor,
-                  routing_data: RoutingData,
-                  gather_indx: GatherIndx,
-                  scatter_indx: ScatterIndx,
-                  inplace: bool = False,
-                  activation: str = "silu",
-                  apply_router_weight_on_input: bool = False,
-                  use_fp8_w8a8: bool = False,
-                  per_channel_quant: bool = False,
-                  global_num_experts: int = -1,
-                  expert_map: Optional[torch.Tensor] = None,
-                  w1_scale: Optional[torch.Tensor] = None,
-                  w2_scale: Optional[torch.Tensor] = None,
-                  a1_scale: Optional[torch.Tensor] = None,
-                  a2_scale: Optional[torch.Tensor] = None,
-                  block_shape: Optional[List[int]] = None,
-                  allow_deep_gemm: bool = False )-> torch.Tensor:
-    
+                             w1: torch.Tensor,
+                             w2: torch.Tensor,
+                             routing_data: RoutingData,
+                             gather_indx: GatherIndx,
+                             scatter_indx: ScatterIndx,
+                             inplace: bool = False,
+                             activation: str = "silu",
+                             apply_router_weight_on_input: bool = False,
+                             use_fp8_w8a8: bool = False,
+                             per_channel_quant: bool = False,
+                             global_num_experts: int = -1,
+                             expert_map: Optional[torch.Tensor] = None,
+                             w1_scale: Optional[torch.Tensor] = None,
+                             w2_scale: Optional[torch.Tensor] = None,
+                             a1_scale: Optional[torch.Tensor] = None,
+                             a2_scale: Optional[torch.Tensor] = None,
+                             block_shape: Optional[List[int]] = None,
+                             allow_deep_gemm: bool = False) -> torch.Tensor:
+
     # type check
     assert hidden_states.dtype == torch.bfloat16, "hidden_states must be bfloat16"
     assert w1.dtype == torch.bfloat16, "w1 must be bfloat16"
@@ -105,8 +108,10 @@ def fused_experts_triton_exp(hidden_states: torch.Tensor,
 
     # Shape check
     assert hidden_states.ndim == 2, "hidden_states must be 2D"
-    assert hidden_states.shape[-1] == w1.shape[-2], "hidden_states shape[-1] must be equal to w1 shape[-2]"
-    assert w2.shape[-1] == w1.shape[1], "w2 shape[-1] must be equal to w1 shape[1]"
+    assert hidden_states.shape[-1] == w1.shape[
+        -2], "hidden_states shape[-1] must be equal to w1 shape[-2]"
+    assert w2.shape[-1] == w1.shape[
+        1], "w2 shape[-1] must be equal to w1 shape[1]"
 
     # feature check
     # assert inplace == False, "Inplace is not supported in new triton MoE kernel"
@@ -131,24 +136,37 @@ def fused_experts_triton_exp(hidden_states: torch.Tensor,
     n_expts_tot = routing_data.n_expts_tot
     n_expts_act = routing_data.n_expts_act
     dtype = hidden_states.dtype
-    
+
     # consistent with default implementation
     intermediate_cache2 = torch.empty((M * n_expts_act, N // 2),
                                       device="cuda",
-                                      dtype=dtype)    
-    
-    intermediate_cache1 = matmul_ogs(hidden_states, w1, None, routing_data, gather_indx=gather_indx, gammas=routing_data.gate_scal if apply_router_weight_on_input else None)
-    
+                                      dtype=dtype)
+
+    intermediate_cache1 = matmul_ogs(hidden_states,
+                                     w1,
+                                     None,
+                                     routing_data,
+                                     gather_indx=gather_indx,
+                                     gammas=routing_data.gate_scal
+                                     if apply_router_weight_on_input else None)
+
     if activation == "silu":
         torch.ops._C.silu_and_mul(intermediate_cache2,
-                                    intermediate_cache1.view(-1, N))
+                                  intermediate_cache1.view(-1, N))
     elif activation == "gelu":
         torch.ops._C.gelu_and_mul(intermediate_cache2,
-                                    intermediate_cache1.view(-1, N))
+                                  intermediate_cache1.view(-1, N))
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
-    intermediate_cache3 = matmul_ogs(intermediate_cache2, w2, None, routing_data, scatter_indx=scatter_indx, gammas=None if apply_router_weight_on_input else routing_data.gate_scal)
+    intermediate_cache3 = matmul_ogs(
+        intermediate_cache2,
+        w2,
+        None,
+        routing_data,
+        scatter_indx=scatter_indx,
+        gammas=None
+        if apply_router_weight_on_input else routing_data.gate_scal)
 
     return intermediate_cache3
 
@@ -184,6 +202,7 @@ def forward_cuda_triton_fake(
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
+
 direct_register_custom_op(
     op_name="forward_cuda_triton",
     op_func=forward_cuda_triton,
@@ -191,4 +210,3 @@ direct_register_custom_op(
     fake_impl=forward_cuda_triton_fake,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
- 

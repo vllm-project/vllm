@@ -1136,6 +1136,7 @@ def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
         return torch_vllm_inplace_fused_experts
     return torch_vllm_outplace_fused_experts
 
+
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
                   w2: torch.Tensor,
@@ -1493,7 +1494,7 @@ def fused_moe(
     else:
         topk_weights, topk_ids = custom_routing_function(
             hidden_states, gating_output, topk, renormalize)
-        
+
     return fused_experts(hidden_states,
                          w1,
                          w2,
@@ -1516,6 +1517,7 @@ def fused_moe(
                          a1_scale=a1_scale,
                          a2_scale=a2_scale,
                          block_shape=block_shape)
+
 
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
@@ -1592,7 +1594,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert hidden_states.dtype in [
             torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn
         ]
-        
+
         E, num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
 
