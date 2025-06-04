@@ -105,10 +105,11 @@ class MultiGroupBlockTable:
 
     def __init__(self, max_num_reqs: int, max_model_len: int,
                  max_num_batched_tokens: int, pin_memory: bool,
-                 device: torch.device, block_size: int) -> None:
+                 device: torch.device, block_sizes: list[int]) -> None:
         self.block_tables = [
             BlockTable(max_num_reqs, cdiv(max_model_len, block_size),
                        max_num_batched_tokens, pin_memory, device)
+            for block_size in block_sizes
         ]
 
     def append_row(self, block_ids: list[list[int]], row_idx: int) -> None:

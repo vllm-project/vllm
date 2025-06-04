@@ -300,7 +300,6 @@ class CPUEncoderDecoderModelRunner(
             model_input.encoder_input_positions,
             **MultiModalKwargs.as_kwargs(
                 model_input.multi_modal_kwargs or {},
-                dtype=self.model_config.dtype,
                 device=self.device,
             ),
             "intermediate_tensors":

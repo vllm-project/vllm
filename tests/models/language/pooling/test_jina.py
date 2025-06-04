@@ -32,8 +32,7 @@ TEXTS_2 = [
 EMBEDDING_MODELS = [
     EmbedModelInfo("jinaai/jina-embeddings-v3",
                    architecture="XLMRobertaModel",
-                   is_matryoshka=True,
-                   dtype="float32")
+                   is_matryoshka=True)
 ]
 
 
