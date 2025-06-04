@@ -65,20 +65,21 @@ def dump_engine_exception(config: VllmConfig,
 def _dump_engine_exception(config: VllmConfig,
                            scheduler_output: SchedulerOutput,
                            scheduler_stats: Optional[SchedulerStats]):
-    logger.error("Dumping input data")
+    pass
+    # logger.error("Dumping input data")
 
-    logger.error(
-        "V1 LLM engine (v%s) with config: %s, ",
-        VLLM_VERSION,
-        config,
-    )
+    # logger.error(
+    #     "V1 LLM engine (v%s) with config: %s, ",
+    #     VLLM_VERSION,
+    #     config,
+    # )
 
-    try:
-        dump_obj = prepare_object_to_dump(scheduler_output)
-        logger.error("Dumping scheduler output for model execution:")
-        logger.error(dump_obj)
-        if scheduler_stats:
-            logger.error(scheduler_stats)
-    except BaseException as exception:
-        logger.error("Error preparing object to dump")
-        logger.error(repr(exception))
+    # try:
+    #     dump_obj = prepare_object_to_dump(scheduler_output)
+    #     logger.error("Dumping scheduler output for model execution:")
+    #     logger.error(dump_obj)
+    #     if scheduler_stats:
+    #         logger.error(scheduler_stats)
+    # except BaseException as exception:
+    #     logger.error("Error preparing object to dump")
+    #     logger.error(repr(exception))

@@ -535,18 +535,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                  slice(b0_tokens_end, total_num_scheduled_tokens)),
             ]
 
-        if self.parallel_config.enable_microbatching and \
-            self.parallel_config.always_microbatch_if_enabled:
+        # if self.parallel_config.enable_microbatching and \
+        #     self.parallel_config.always_microbatch_if_enabled:
+            # print(f"PREFIL RUN total_num_scheduled_tokens: {total_num_scheduled_tokens} max_num_scheduled_tokens {max_num_scheduled_tokens}")
             # TODO we can do something more advanced here to try to balance,
             #  i.e. split to the left of `total_num_scheduled_tokens // 2` if it
             #  is more balanced
-            req_split_id = np.argmax(
-                query_start_loc_np > (total_num_scheduled_tokens // 2))
-            return [(slice(0, req_split_id),
-                     slice(0, query_start_loc_np[req_split_id])),
-                    (slice(req_split_id, num_reqs),
-                     slice(query_start_loc_np[req_split_id],
-                           total_num_scheduled_tokens))]
+            # req_split_id = np.argmax(
+            #     query_start_loc_np > (total_num_scheduled_tokens // 2))
+            # return [(slice(0, req_split_id),
+            #          slice(0, query_start_loc_np[req_split_id])),
+            #         (slice(req_split_id, num_reqs),
+            #          slice(query_start_loc_np[req_split_id],
+            #                total_num_scheduled_tokens))]
         return None
 
     def _get_cumsum_and_arange(
@@ -655,6 +656,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ubatch_slices: Optional[UBatchSlices] = self._ubatch_split(
             self.query_start_loc_np, max_num_scheduled_tokens,
             scheduler_output)
+        should_ubatch = self.should_ubatch(True if ubatch_slices else False)
+        # Don't attempt to microbatch unless every other DP worker is also microbatching
+        if not should_ubatch and ubatch_slices:
+            ubatch_slices = None
+
 
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -1212,7 +1218,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # TODO(tms) : There are many cases where padding is enabled for
         # prefills, causing unnecessary and excessive padding of activations.
 
-        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
+        if dp_size == 1:
             # Early exit.
             return 0, None
 
@@ -1224,6 +1230,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                 device="cpu",
                                                 dtype=torch.int32)
         return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
+    
+    def should_ubatch(self, should_ubatch: bool) -> bool:
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        return DPMetadata.should_ubatch_across_dp(should_ubatch, dp_size, dp_rank) 
 
     def _get_dummy_model_inputs(self, num_tokens: int) -> tuple:
         # Dummy batch. (hopefully we are the last one so we can just
@@ -1338,6 +1349,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         def model_inputs(tokens_slice: slice, use_dummy_input: bool) -> tuple:
             if use_dummy_input:
+                # print("MAKING DUMMY BATCH")
                 # assert num_dummy_tokens == 1
                 return self._get_dummy_model_inputs(num_dummy_tokens)
             else:
@@ -1367,12 +1379,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_output = _run(token_slice, ubatch_ctx, use_dummy_input)
 
             if save_results:
-                results.append(model_output)
+                results.append((ubatch_ctx.id, model_output))
             # print(f"Finishing Request on ubatch: {ubatch_ctx.id}", flush=True)
 
         def _run_ubatches(ubatch_slices, attn_metadata,
-                          is_dummy_run) -> torch.Tensor:
-            results: list[torch.Tensor] = []
+                          is_dummy_run, num_tokens_across_dp) -> torch.Tensor:
+            results: list[tuple[int, torch.Tensor]] = []
             assert len(ubatch_slices) == 2, "Only two ubatches has been tested"
             root_stream = current_stream()
 
@@ -1417,14 +1429,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             torch.cuda.synchronize()
             torch.cuda.set_stream(root_stream)
-            return torch.cat(results, dim=0)
+            sorted_results = [value for position, value in sorted(results)]
+            return torch.cat(sorted_results, dim=0)
 
         # run micro-batched
         if ubatch_slices is not None:
+            # num_tokens = ubatch_slices[1][1].stop
+            # print(f"RUNNING UBATCH {num_tokens} is_dummy_run: {is_dummy_run} num_tokens_across_dp{num_tokens_across_dp}")
             model_output = _run_ubatches(ubatch_slices, attn_metadata,
-                                         is_dummy_run)
+                                         is_dummy_run, num_tokens_across_dp=num_tokens_across_dp)
         # run single batch
         else:
+            # print("RUN NORMAL")
             model_output = _run(
                 slice(0, num_scheduled_tokens),
                 set_forward_context(attn_metadata,
@@ -2025,8 +2041,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> torch.Tensor:
 
         # Padding for DP
-        num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
-        num_tokens += num_pad
+        # num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
+        # num_tokens += num_pad
+        num_tokens_across_dp = None
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -2065,58 +2082,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for layer_name in kv_cache_group_spec.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 
-        should_microbatch = (
-            allow_microbatching
-            and self.vllm_config.parallel_config.enable_microbatching
-            and self.vllm_config.parallel_config.always_microbatch_if_enabled)
-        dummy_microbatches = [(slice(0, 0), slice(0, 0)),
-                              (slice(0, 0), slice(0, 0))]
+        # should_microbatch = (
+        #     allow_microbatching
+        #     and self.vllm_config.parallel_config.enable_microbatching
+        #     and self.vllm_config.parallel_config.always_microbatch_if_enabled)
+        # dummy_microbatches = [(slice(0, 0), slice(0, 0)),
+        #                       (slice(0, 0), slice(0, 0))]
+        should_microbatch = False
+        # _dummy_run doesn't go through _prepare_inputs so 
+        # we synchronize with other DP ranks here
+        self.should_ubatch(should_microbatch)
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             outputs = self._run_model(
                 attn_metadata,
                 num_tokens,
-                ubatch_slices=None
-                if not should_microbatch else dummy_microbatches,
+                ubatch_slices=None,
                 is_dummy_run=True,
+                num_tokens_across_dp=num_tokens_across_dp
             )
-            # model = self.model
-            # if self.is_multimodal_model:
-            #     input_ids = None
-            #     inputs_embeds = self.inputs_embeds[:num_tokens]
-            # else:
-            #     input_ids = self.input_ids[:num_tokens]
-            #     inputs_embeds = None
-            # if self.uses_mrope:
-            #     positions = self.mrope_positions[:, :num_tokens]
-            # else:
-            #     positions = self.positions[:num_tokens]
-
-            # if get_pp_group().is_first_rank:
-            #     intermediate_tensors = None
-            # else:
-            #     if self.intermediate_tensors is None:
-            #         self.intermediate_tensors = (
-            #             self.model.make_empty_intermediate_tensors(
-            #                 batch_size=self.max_num_tokens,
-            #                 dtype=self.model_config.dtype,
-            #                 device=self.device))
-
-            #     intermediate_tensors = self.sync_and_slice_intermediate_tensors(
-            #         num_tokens, None, False)
-
-            # with set_forward_context(
-            #         attn_metadata,
-            #         self.vllm_config,
-            #         num_tokens=num_tokens,
-            #         num_tokens_across_dp=num_tokens_across_dp):
-            #     outputs = model(
-            #         input_ids=input_ids,
-            #         positions=positions,
-            #         intermediate_tensors=intermediate_tensors,
-            #         inputs_embeds=inputs_embeds,
-            #     )
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:

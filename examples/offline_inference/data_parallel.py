@@ -84,6 +84,10 @@ def main(args, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
         "The capital of France is",
         "The future of AI is",
     ] * 100
+    # import random
+    # import string
+    # prompts = [''.join(random.choices(string.ascii_letters, k=128)) for _ in range(2048)]
+
 
     # with DP, each rank should process different prompts.
     # usually all the DP ranks process a full dataset,
@@ -177,7 +181,7 @@ if __name__ == "__main__":
         procs.append(proc)
     exit_code = 0
     for proc in procs:
-        proc.join(timeout=300)
+        proc.join(timeout=1200)
         if proc.exitcode is None:
             print(f"Killing process {proc.pid} that didn't stop within 5 minutes.")
             proc.kill()

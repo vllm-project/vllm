@@ -47,6 +47,18 @@ class DPMetadata:
         return num_tokens_tensor
 
     @staticmethod
+    def should_ubatch_across_dp(should_ubatch: bool, dp_size: int, dp_rank: int) -> bool:
+        should_ubatch_across_dp = [0] * dp_size
+        should_ubatch_across_dp[dp_rank] = 1 if should_ubatch else 0
+        should_ubatch_tensor = torch.tensor(should_ubatch_across_dp,
+                                         device="cpu",
+                                         dtype=torch.int32)
+        from vllm.distributed.parallel_state import get_dp_group
+        dist.all_reduce(should_ubatch_tensor, group=get_dp_group().cpu_group)
+        result: bool = bool(torch.all(should_ubatch_tensor == 1).item())
+        return result
+
+    @staticmethod
     def make(
             parallel_config: ParallelConfig,
             attn_metadata: Any,

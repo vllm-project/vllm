@@ -43,7 +43,7 @@ class UBatchContext:
         global _CURRENT_CONTEXT
         _CURRENT_CONTEXT[threading.get_ident()] = self
 
-        # self.cpu_wait_event.clear()
+        self.cpu_wait_event.clear()
         self.cpu_wait_event.wait()
         self.cpu_wait_event.clear()
         self._restore_context()
