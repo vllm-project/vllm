@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Common tests for testing .generate() functionality for single / multiple
 image, embedding, and video support for different VLMs in vLLM.
 """
@@ -8,14 +9,14 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from transformers import (AutoModelForImageTextToText,
+from transformers import (AutoModel, AutoModelForImageTextToText,
                           AutoModelForTextToWaveform, AutoModelForVision2Seq)
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
 
-from ....conftest import (IMAGE_ASSETS, HfRunner, ImageTestAssets,
-                          VideoTestAssets, VllmRunner)
+from ....conftest import (IMAGE_ASSETS, AudioTestAssets, HfRunner,
+                          ImageTestAssets, VideoTestAssets, VllmRunner)
 from ....utils import (create_new_process_for_each_test, large_gpu_mark,
                        multi_gpu_marks)
 from ...utils import check_outputs_equal
@@ -158,6 +159,17 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
+    "ultravox": VLMTestInfo(
+        models = ["fixie-ai/ultravox-v0_5-llama-3_2-1b"],
+        test_type=VLMTestType.AUDIO,
+        prompt_formatter=lambda audio_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{audio_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", # noqa: E501
+        audio_idx_to_prompt=lambda idx: "<|audio|>",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModel,
+        hf_output_post_proc=model_utils.ultravox_trunc_hf_output,
+        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+    ),
     #### Extended model tests
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
@@ -214,6 +226,8 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "",
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
+        # FIXME: https://github.com/huggingface/transformers/pull/38510
+        marks=[pytest.mark.skip("Model is broken")],
     ),
     "chameleon": VLMTestInfo(
         models=["facebook/chameleon-7b"],
@@ -269,10 +283,10 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt="<start_of_image><start_of_image>Describe the two images in detail.",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        dtype="bfloat16",
         auto_cls=AutoModelForImageTextToText,
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
+        num_logprobs=10,
     ),
     "glm4v": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
@@ -325,7 +339,8 @@ VLM_TEST_SETTINGS = {
         models=[
             "OpenGVLab/InternVL2-1B",
             "OpenGVLab/InternVL2-2B",
-            "OpenGVLab/Mono-InternVL-2B",
+            # FIXME: Config cannot be loaded in transformers 4.52
+            # "OpenGVLab/Mono-InternVL-2B",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
@@ -335,6 +350,17 @@ VLM_TEST_SETTINGS = {
         }),
         multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
         max_model_len=4096,
+        use_tokenizer_eos=True,
+        patch_hf_runner=model_utils.internvl_patch_hf_runner,
+    ),
+    "intern_vl-video": VLMTestInfo(
+        models=[
+            "OpenGVLab/InternVL3-1B",
+        ],
+        test_type=VLMTestType.VIDEO,
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<video>",
+        max_model_len=8192,
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
     ),
@@ -393,7 +419,6 @@ VLM_TEST_SETTINGS = {
                 formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
             ),
             limit_mm_per_prompt={"video": 4},
-            runner_mm_key="videos",
         )],
     ),
     "llava_next_video": VLMTestInfo(
@@ -546,6 +571,8 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
+        # FIXME: https://github.com/huggingface/transformers/issues/38358
+        marks=[pytest.mark.skip("Model initialization fails")],
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],
@@ -706,6 +733,7 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
 # - multi-image
 # - image embeddings
 # - video
+# - audio
 # - custom inputs
 @pytest.mark.parametrize(
     "model_type,test_case",
@@ -800,6 +828,28 @@ def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
         video_assets=video_assets,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.AUDIO,
+        create_new_process_for_each_test=False,
+    ))
+def test_audio_models(model_type: str, test_case: ExpandableVLMTestArgs,
+                      hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
+                      audio_assets: AudioTestAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
+    model_test_info = VLM_TEST_SETTINGS[model_type]
+    runners.run_audio_test(
+        model_test_info=model_test_info,
+        test_case=test_case,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        audio_assets=audio_assets,
     )
 
 
@@ -927,6 +977,29 @@ def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
         video_assets=video_assets,
+    )
+
+
+@pytest.mark.parametrize(
+    "model_type,test_case",
+    get_parametrized_options(
+        VLM_TEST_SETTINGS,
+        test_type=VLMTestType.AUDIO,
+        create_new_process_for_each_test=True,
+    ))
+def test_audio_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
+                            hf_runner: type[HfRunner],
+                            vllm_runner: type[VllmRunner],
+                            audio_assets: AudioTestAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
+    model_test_info = VLM_TEST_SETTINGS[model_type]
+    runners.run_audio_test(
+        model_test_info=model_test_info,
+        test_case=test_case,
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        audio_assets=audio_assets,
     )
 
 

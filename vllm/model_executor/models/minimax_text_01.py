@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MiniMaxText01 model."""
 import copy
 import math
-import re
 from collections.abc import Iterable
 from typing import Optional, Union
 
+import regex as re
 import torch
 import torch.distributed
 import torch.nn.functional as F
@@ -141,7 +142,7 @@ class MiniMaxText01RotaryEmbedding(CustomOp):
         head_size: int,
         rotary_dim: int,
         max_position: int,
-        base: int,
+        base: float,
         is_neox_style: bool,
         cache_dtype: torch.dtype,
     ) -> None:
@@ -155,10 +156,7 @@ class MiniMaxText01RotaryEmbedding(CustomOp):
         cache = self._compute_cos_sin_cache().to(cache_dtype)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
-    def _compute_inv_freq(
-        self,
-        base: Union[int, float],
-    ) -> torch.Tensor:
+    def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
         inv_freq = 1.0 / (base**(torch.arange(
             0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
@@ -604,8 +602,9 @@ class MiniMaxText01DecoderLayer(nn.Module):
 
         rope_theta = getattr(config, "rope_theta", 10000)
 
-        head_dim = getattr(config, "head_dim",
-                           config.hidden_size // config.num_attention_heads)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // config.num_attention_heads
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
@@ -861,8 +860,9 @@ class MiniMaxText01Model(nn.Module):
                                                  cache_shape=self.cache_shape)
 
         rope_theta = getattr(config, "rope_theta", 10000)
-        head_dim = getattr(config, "head_dim",
-                           config.hidden_size // config.num_attention_heads)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // config.num_attention_heads
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,

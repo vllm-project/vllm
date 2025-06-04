@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
@@ -12,7 +13,6 @@ from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -60,14 +60,14 @@ class CachedRequestState:
 class InputBatch:
 
     def __init__(
-        self,
-        max_num_reqs: int,
-        max_model_len: int,
-        max_num_batched_tokens: int,
-        device: torch.device,
-        pin_memory: bool,
-        vocab_size: int,
-        kv_cache_config: KVCacheConfig,
+            self,
+            max_num_reqs: int,
+            max_model_len: int,
+            max_num_batched_tokens: int,
+            device: torch.device,
+            pin_memory: bool,
+            vocab_size: int,
+            block_sizes: list[int],  # The block_size of each kv cache group
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -111,7 +111,7 @@ class InputBatch:
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
-            kv_cache_config=kv_cache_config,
+            block_sizes=block_sizes,
         )
 
         # Sampling-related.

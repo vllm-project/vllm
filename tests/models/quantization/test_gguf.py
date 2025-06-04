@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Tests gguf models against unquantized models generations
 Note: To pass the test, quantization higher than Q4 should be used
@@ -78,8 +79,12 @@ DOLPHIN_CONFIG = GGUFTestConfig(
 )
 
 MODELS = [
-    LLAMA_CONFIG, QWEN2_CONFIG, PHI3_CONFIG, GPT2_CONFIG, STABLELM_CONFIG,
-    DOLPHIN_CONFIG
+    LLAMA_CONFIG,
+    QWEN2_CONFIG,
+    PHI3_CONFIG,
+    GPT2_CONFIG,
+    # STABLELM_CONFIG,  # enable this when v1 support head_size=80
+    DOLPHIN_CONFIG,
     # STARCODER_CONFIG, # broken
 ]
 

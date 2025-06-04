@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 from argparse import ArgumentError, ArgumentTypeError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 import pytest
 
 from vllm.config import CompilationConfig, config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
-                                   get_type, is_not_builtin, is_type,
-                                   literal_to_kwargs, nullable_kvs,
+                                   get_type, get_type_hints, is_not_builtin,
+                                   is_type, literal_to_kwargs, nullable_kvs,
                                    optional_type, parse_type)
 from vllm.utils import FlexibleArgumentParser
 
@@ -159,6 +160,18 @@ def test_is_not_builtin(type_hint, expected):
     assert is_not_builtin(type_hint) == expected
 
 
+@pytest.mark.parametrize(
+    ("type_hint", "expected"), [
+        (Annotated[int, "annotation"], {int}),
+        (Optional[int], {int, type(None)}),
+        (Annotated[Optional[int], "annotation"], {int, type(None)}),
+        (Optional[Annotated[int, "annotation"]], {int, type(None)}),
+    ],
+    ids=["Annotated", "Optional", "Annotated_Optional", "Optional_Annotated"])
+def test_get_type_hints(type_hint, expected):
+    assert get_type_hints(type_hint) == expected
+
+
 def test_get_kwargs():
     kwargs = get_kwargs(DummyConfig)
     print(kwargs)
@@ -181,8 +194,8 @@ def test_get_kwargs():
     # literals of literals should have merged choices
     assert kwargs["literal_literal"]["choices"] == [1, 2]
     # dict should have json tip in help
-    json_tip = "\n\nShould be a valid JSON string."
-    assert kwargs["json_tip"]["help"].endswith(json_tip)
+    json_tip = "Should either be a valid JSON string or JSON keys"
+    assert json_tip in kwargs["json_tip"]["help"]
     # nested config should should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)
     # from_cli configs should be constructed with the correct method

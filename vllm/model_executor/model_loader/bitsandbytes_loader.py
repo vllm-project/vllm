@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: SIM117
-import copy
 import fnmatch
 import glob
 import itertools
@@ -15,7 +15,7 @@ from huggingface_hub import HfApi
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import LoadConfig, ModelConfig, VllmConfig
+from vllm.config import LoadConfig, ModelConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 # yapf: enable
@@ -29,13 +29,14 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (ParamMapping,
-                                                    initialize_model,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     pt_weights_iterator, safetensors_weights_iterator)
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.models import is_pooling_model
+from vllm.model_executor.utils import (get_packed_modules_mapping,
+                                       set_weight_attrs)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -133,6 +134,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return hf_weights_files, use_safetensors
 
     def _hf_weight_iter(self, hf_weights_files, use_safetensors: bool):
+        def _maybe_pool_model(module_name:str):
+            # For pool model, we need to add the prefix `model.`
+            # for the weight name if possible.
+            if self.is_pool_model and self.target_modules[0]. \
+                startswith("model.") and not module_name.startswith(
+                    "model."):
+                return "model."+module_name
+
+            return module_name
+
         if use_safetensors:
             iterator = safetensors_weights_iterator(
                 hf_weights_files,
@@ -148,6 +159,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # mapping weight names from transformers to vllm while preserving
             # original names.
             mapped_name = self.weight_mapper(org_name)
+            mapped_name=_maybe_pool_model(mapped_name)
+
+
             yield org_name, mapped_name, param
 
     def _get_quantized_weights_iterator(
@@ -394,8 +408,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 ), "vllm currently does not support BNB quantization for"
         f" {type(model).__name__}"
 
-    def _load_weights(self, model_config: ModelConfig,
-                      model: nn.Module) -> None:
+    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         if not hasattr(model, "load_weights"):
             raise AttributeError(
                 "The required method 'load_weights' is not defined in class"
@@ -405,9 +418,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             raise AttributeError(
                 f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet. No 'packed_modules_mapping' found.")
+        self.is_pool_model=is_pooling_model(model)
 
-        self.modules_mapping = ParamMapping(
-            copy.deepcopy(model.packed_modules_mapping))
+        self.modules_mapping = ParamMapping(get_packed_modules_mapping(model))
 
         # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
@@ -554,16 +567,3 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
-
-    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
-        device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
-
-        with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
-
-                model = initialize_model(vllm_config=vllm_config)
-
-                self._load_weights(model_config, model)
-
-        return model.eval()

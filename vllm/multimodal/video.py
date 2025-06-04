@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
 from abc import abstractmethod
@@ -164,7 +165,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
             )
 
             return np.stack([
-                np.array(load_frame(frame_data))
+                np.asarray(load_frame(frame_data))
                 for frame_data in data.split(",")
             ])
 

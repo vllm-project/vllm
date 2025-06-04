@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This module defines a framework for sampling benchmark requests from various
 datasets. Each dataset subclass of BenchmarkDataset must implement sample
@@ -9,9 +10,6 @@ generation. Supported dataset types include:
   - BurstGPT
   - HuggingFace
   - VisionArena
-
-TODO: Implement CustomDataset to parse a JSON file and convert its contents into
-SampleRequest instances, similar to the approach used in ShareGPT.
 """
 
 import base64
@@ -35,6 +33,7 @@ from transformers import PreTrainedTokenizerBase
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal.image import convert_image_mode
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -257,7 +256,7 @@ def process_image(image: Any) -> Mapping[str, Any]:
     if isinstance(image, dict) and "bytes" in image:
         image = Image.open(BytesIO(image["bytes"]))
     if isinstance(image, Image.Image):
-        image = image.convert("RGB")
+        image = convert_image_mode(image, "RGB")
         with io.BytesIO() as image_data:
             image.save(image_data, format="JPEG")
             image_base64 = base64.b64encode(image_data.getvalue()).decode("utf-8")
@@ -439,6 +438,97 @@ class ShareGPTDataset(BenchmarkDataset):
             )
         self.maybe_oversample_requests(samples, num_requests)
         return samples
+
+
+# -----------------------------------------------------------------------------
+# Custom Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class CustomDataset(BenchmarkDataset):
+    """
+    Implements the Custom dataset.  Loads data from a JSONL file and generates
+    sample requests based on conversation turns. E.g.,
+    ```
+    {"prompt": "What is the capital of India?"}
+    {"prompt": "What is the capital of Iran?"}
+    {"prompt": "What is the capital of China?"}
+    ```
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        # self.data will be a list of dictionaries
+        # e.g., [{"prompt": "What is the capital of India?"}, ...]
+        # This will be the standardized format which load_data()
+        # has to convert into depending on the filetype of dataset_path.
+        # sample() will assume this standardized format of self.data
+        self.data = []
+
+        # Load the JSONL file
+        if self.dataset_path.endswith(".jsonl"):
+            jsonl_data = pd.read_json(path_or_buf=self.dataset_path, lines=True)
+
+            # check if the JSONL file has a 'prompt' column
+            if "prompt" not in jsonl_data.columns:
+                raise ValueError("JSONL file must contain a 'prompt' column.")
+
+            # Convert each row to a dictionary and append to self.data
+            # This will convert the DataFrame to a list of dictionaries
+            # where each dictionary corresponds to a row in the DataFrame.
+            # This is the standardized format we want for self.data
+            for _, row in jsonl_data.iterrows():
+                self.data.append(row.to_dict())
+        else:
+            raise NotImplementedError(
+                "Only JSONL format is supported for CustomDataset."
+            )
+
+        random.seed(self.random_seed)
+        random.shuffle(self.data)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        lora_path: Optional[str] = None,
+        max_loras: Optional[int] = None,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        **kwargs,
+    ) -> list:
+        sampled_requests = []
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["prompt"]
+
+            # apply template
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                )
+            )
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+
+        return sampled_requests
 
 
 # -----------------------------------------------------------------------------
@@ -775,7 +865,15 @@ class InstructCoderDataset(HuggingFaceDataset):
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
-            prompt = f"{item['instruction']}:\n{item['input']}"
+            prompt = f"{item['input']}\n\n{item['instruction']} Just output \
+            the code, do not include any explanation."
+
+            # apply template
+            prompt = tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(

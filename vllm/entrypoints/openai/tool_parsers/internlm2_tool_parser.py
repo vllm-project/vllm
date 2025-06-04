@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 from collections.abc import Sequence
@@ -133,7 +134,8 @@ class Internlm2ToolParser(ToolParser):
                     delta = None
                 # first time to get parameters
                 elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments)
+                    cur_arguments_json = json.dumps(cur_arguments,
+                                                    ensure_ascii=False)
 
                     arguments_delta = cur_arguments_json[:cur_arguments_json.
                                                          index(delta_text) +
@@ -148,8 +150,10 @@ class Internlm2ToolParser(ToolParser):
                         self.current_tool_id] += arguments_delta
                 # both prev and cur parameters, send the increase parameters
                 elif cur_arguments and prev_arguments:
-                    cur_args_json = json.dumps(cur_arguments)
-                    prev_args_json = json.dumps(prev_arguments)
+                    cur_args_json = json.dumps(cur_arguments,
+                                               ensure_ascii=False)
+                    prev_args_json = json.dumps(prev_arguments,
+                                                ensure_ascii=False)
 
                     argument_diff = extract_intermediate_diff(
                         cur_args_json, prev_args_json)
@@ -190,7 +194,8 @@ class Internlm2ToolParser(ToolParser):
             action_dict = json.loads(action)
             name, parameters = action_dict['name'], json.dumps(
                 action_dict.get('parameters', action_dict.get('arguments',
-                                                              {})))
+                                                              {})),
+                ensure_ascii=False)
 
             if not tools or name not in [t.function.name for t in tools]:
                 ExtractedToolCallInformation(tools_called=False,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import pplx_kernels as pplx
@@ -9,7 +10,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
 
-# Note use: layer.get_all_to_all() to get an AllToAll instance
 # The max_num_tokens, world_size and dp_size must be the same
 # as the ones used to create the AllToAll.
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -32,6 +32,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.dp_size = dp_size
         self.quant_dtype = quant_dtype
 
+    def max_num_tokens_per_rank(self) -> Optional[int]:
+        return self.max_num_tokens
+
+    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+        return torch.uint32
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -42,7 +48,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
+               Optional[torch.Tensor], Optional[torch.Tensor]]:
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
 
@@ -115,7 +122,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             bound_m=bound_m,
         )
 
-        return expert_x, expert_x_scale, expert_num_tokens
+        return expert_x, expert_x_scale, expert_num_tokens, None, None
 
     def finalize(
         self,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 import torch
@@ -29,5 +30,5 @@ def test_oot_attention_backend(monkeypatch: pytest.MonkeyPatch):
     # ignore the backend env variable if it is set
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, STR_INVALID_VAL)
-        backend = get_attn_backend(16, torch.float16, torch.float16, 16, False)
+        backend = get_attn_backend(16, torch.float16, "auto", 16, False)
         assert backend.get_name() == "Dummy_Backend"
