@@ -129,7 +129,7 @@ $ python setup.py develop
 | vLLM v1 architecture (early release)   | V1 architecture is now available for the HPU backend, and will gradually enable it for every use case we plan to support.   | [Documentation](https://docs.vllm.ai/en/latest/serving/distributed_serving.html) |
 | Guided decode   | vLLM HPU supports a guided decoding backend for generating structured outputs.   | [Documentation](https://docs.vllm.ai/en/latest/features/structured_outputs.html)  |
 | Delayed Sampling  (experimental) | vLLM HPU supports delayed sampling scheduling for asynchronous execution, enabled by `VLLM_DELAYED_SAMPLING=true` environment variable.   | N/A |
-| Exponential bucketing (experimental) | vLLM HPU supports exponential bucketing spacing instead of linear to automate configuration of bucketing mechanism, enabled by `VLLM_EXPONENTIAL_BUCKETING=true` environment variable.   | N/A |
+| Exponential bucketing | vLLM HPU supports exponential bucketing spacing instead of linear to automate configuration of bucketing mechanism, enabled by default. It can be disabled via `VLLM_EXPONENTIAL_BUCKETING=false` environment variable.   | N/A |
 
 > [!NOTE]
 > All specified features are also supported with the `-- enforce-eager` flag.
@@ -375,7 +375,7 @@ INFO 08-02 17:38:43 hpu_executor.py:91] init_cache_engine took 37.92 GiB of devi
 - `VLLM_GRAPH_PROMPT_RATIO`: percentage of reserved graph memory dedicated to prompt graphs. The default is `0.3`.
 - `VLLM_GRAPH_PROMPT_STRATEGY`: strategy determining order of prompt graph capture, `min_tokens` or `max_bs`. The default is `min_tokens`.
 - `VLLM_GRAPH_DECODE_STRATEGY`: strategy determining order of decode graph capture, `min_tokens` or `max_bs`. The default is `max_bs`.
-- `VLLM_EXPONENTIAL_BUCKETING`: if `true`, enables exponential bucket spacing instead of linear (experimental).
+- `VLLM_EXPONENTIAL_BUCKETING`: if `true`, enables exponential bucket spacing instead of linear. The default is `true`.
 - `VLLM_{phase}_{dim}_BUCKET_{param}`: collection of 12 environment variables configuring ranges of bucketing mechanism (linear bucketing only).
   - `{phase}` is either `PROMPT` or `DECODE`
   - `{dim}` is either `BS`, `SEQ` or `BLOCK`
