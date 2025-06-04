@@ -64,9 +64,10 @@ def test_tpu_compilation():
         numbers = [int(part) for part in parts if part.isdigit()]
         return numbers[0]
 
-    # Check all the compilations are as expected
+    # Check all the compilations are as expected. The dump files include the
+    # captured graph for the forward function of the nn.Module.
     compiled_fns = sorted(glob.glob(
-        os.path.join(temp_dir, "__compiled_fn*Captured*.py")),
+        os.path.join(temp_dir, "__compiled_fn*Forward_graph*.py")),
                           key=lambda s: extract_compiled_index(s))
 
     for i, compiled_fn in enumerate(compiled_fns):
