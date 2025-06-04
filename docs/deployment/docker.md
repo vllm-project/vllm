@@ -46,11 +46,11 @@ You can add any other [engine-args][engine-args] you need after the image tag (`
     create a custom Dockerfile on top of the base image with an extra layer that installs them:
 
     ```Dockerfile
-    FROM vllm/vllm-openai:v0.8.3
+    FROM vllm/vllm-openai:v0.9.0
 
     # e.g. install the `audio` optional dependencies
     # NOTE: Make sure the version of vLLM matches the base image!
-    RUN uv pip install --system vllm[audio]==0.8.3
+    RUN uv pip install --system vllm[audio]==0.9.0
     ```
 
 !!! tip
@@ -107,9 +107,20 @@ DOCKER_BUILDKIT=1 docker build . \
   -t vllm/vllm-gh200-openai:latest \
   --build-arg max_jobs=66 \
   --build-arg nvcc_threads=2 \
-  --build-arg torch_cuda_arch_list="9.0+PTX" \
+  --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
   --build-arg vllm_fa_cmake_gpu_arches="90-real"
 ```
+
+!!! note
+    If you are building the `linux/arm64` image on a non-ARM host (e.g., an x86_64 machine), you need to ensure your system is set up for cross-compilation using QEMU. This allows your host machine to emulate ARM64 execution.
+
+    Run the following command on your host machine to register QEMU user static handlers:
+
+    ```console
+    docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+    ```
+
+    After setting up QEMU, you can use the `--platform "linux/arm64"` flag in your `docker build` command.
 
 ## Use the custom-built vLLM Docker image
 

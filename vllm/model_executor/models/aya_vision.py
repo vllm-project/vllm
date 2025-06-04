@@ -1,4 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0 Adapted from
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project Adapted from
 # https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal, Optional, TypedDict, Union, cast
