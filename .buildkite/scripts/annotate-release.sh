@@ -5,6 +5,11 @@ set -ex
 # Get release version and strip leading 'v' if present
 RELEASE_VERSION=$(buildkite-agent meta-data get release-version | sed 's/^v//')
 
+if [ -z "$RELEASE_VERSION" ]; then
+  echo "Error: RELEASE_VERSION is empty. 'release-version' metadata might not be set or is invalid."
+  exit 1
+fi
+
 # Create the annotation using a here document
 buildkite-agent annotate --style 'info' --context 'release-workflow' << EOF
 To download the wheel:
