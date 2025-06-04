@@ -86,12 +86,23 @@ def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
     return chunk_indices, chunk_offsets
 
 
+def is_conv_in_Triton():
+    import os
+    path = os.environ.get("VLLM_USE_TRITON_CONV1D", None)
+    if path is not None:
+        print("mamba_mixer2 - VLLM_USE_TRITON_CONV1D")
+        return True
+    return False
+
+
+conv_in_triton = is_conv_in_Triton()
+
+
 def prepare_mamba2_metadata(
     chunk_size: int,
     attn_metadata: AttentionMetadata,
     mamba2_metadata=None,
 ) -> Mamba2Metadata:
-    # ruff: noqa: E501
 
     # compute number of prefill and decode requests
     # NOTE: in V0 we assume prefills are before decodes
@@ -107,22 +118,23 @@ def prepare_mamba2_metadata(
 
     # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
     if num_prefills > 0:
-        # NOTE: currently it is assumed prefill requests come before decode requests -> we can use ':num_prefills' slicing
-        # TODO: maybe revert back to the original code (below) if above no longer holds
-        # has_initial_states = attn_metadata.context_lens_tensor > 0
-        # zero_init_indices = mamba_cache_params.state_indices_tensor[~has_initial_states]
-        # mamba_cache_params.ssm_state[zero_init_indices] = 0
-        # initial_states = mamba_cache_params.ssm_state[mamba_cache_params.state_indices_tensor]
         if (isinstance(attn_metadata,
                        (FlashAttentionMetadata, XFormersMetadata,
                         PlaceholderAttentionMetadata))
                 and attn_metadata.context_lens_tensor is not None):
-            has_initial_states = \
-                attn_metadata.context_lens_tensor[:num_prefills] > 0  #[batch,]
-            # precompute flag to avoid device syncs in mamba2 layer forwards
-            # prep is only needed for mamba2 ssd prefill processing
-            prep_initial_states = torch.any(has_initial_states).item()
-
+            # keeping flags for both prefill and decode causal_conv1d varlen
+            # [batch,]
+            if conv_in_triton:
+                has_initial_states = attn_metadata.context_lens_tensor > 0
+                prep_initial_states = torch.any(
+                    has_initial_states[:num_prefills]).item()
+            else:
+                has_initial_states = (
+                    attn_metadata.context_lens_tensor[:num_prefills] > 0)
+                # precompute flag to avoid device syncs later in mamba2 layer
+                # forwards
+                # prep is only needed for mamba2 ssd prefill processing
+                prep_initial_states = torch.any(has_initial_states).item()
         query_start_loc = attn_metadata.query_start_loc[:num_prefills + 1]
         seq_idx = torch.repeat_interleave(torch.arange(
             num_prefills, dtype=torch.int32, device=query_start_loc.device),
@@ -146,10 +158,12 @@ def prepare_mamba2_metadata(
         mamba2_metadata.chunk_indices = chunk_indices
         mamba2_metadata.chunk_offsets = chunk_offsets
         # We use 2 reset flags:
-        #  * mamba2_metadata.width is None # update config at first run (never change whole session for a given model)
-        #                                    (become available at first layer, e.g. conv_weights)
-        #  * mamba2_metadata.cu_seqlen is None # update config specific to (each input)
-        #                                    (become available at first layer, e.g. conv_weights)
+        #  * mamba2_metadata.width is None
+        #      update at first run (never change whole session)
+        #      (become available at first layer, e.g. conv_weights)
+        #  * mamba2_metadata.cu_seqlen is None
+        #      update config specific to (each input)
+        #      (become available at first layer, e.g. conv_weights)
         mamba2_metadata.cu_seqlen = None  # suppose to be updated at each input
 
         return mamba2_metadata

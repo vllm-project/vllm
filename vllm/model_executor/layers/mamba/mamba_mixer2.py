@@ -16,7 +16,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.mamba.mamba2_metadata import Mamba2Metadata
+from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
+                                                              conv_in_triton)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_fn_triton, causal_conv1d_update,
     causal_conv1d_update_triton)
@@ -377,21 +378,12 @@ class MambaMixer2(CustomOp):
         self.norm = Mixer2RMSNormGated(intermediate_size,
                                        n_groups,
                                        eps=rms_norm_eps)
-        self.conv_in_triton = self.is_conv_in_Triton()
 
     def forward_cuda(self, *args, **kwargs):
-        if self.conv_in_triton:
+        if conv_in_triton:
             return self.forward_triton(*args, **kwargs)
         else:
             return self.forward_cuda_split(*args, **kwargs)
-
-    def is_conv_in_Triton(self):
-        import os
-        path = os.environ.get("VLLM_USE_TRITON_CONV1D", None)
-        if path is not None:
-            print("mamba_mixer2 - VLLM_USE_TRITON_CONV1D")
-            return True
-        return False
 
     def forward_native(self, hidden_states: torch.Tensor,
                        conv_state: torch.Tensor, ssm_state: torch.Tensor):
@@ -403,7 +395,6 @@ class MambaMixer2(CustomOp):
         mamba_cache_params: MambaCacheParams,
         mamba2_metadata: Mamba2Metadata,
     ):
-        # ruff: noqa: E501
         # mamba2_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
         # modes; they are computed at top-level model forward since they
@@ -447,132 +438,126 @@ class MambaMixer2(CustomOp):
 
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "mamba_cache_params.state_indices_tensor"
-            # print("attn_metadata.query_start_loc=", attn_metadata.query_start_loc)
-            if True:  # self.conv_in_triton:
-                x = hidden_states_B_C.transpose(
-                    0, 1)  # this is the form that causal-conv see
-                if mamba2_metadata.width is None:
-                    # load the conv1d.weight information (which is expected to be the same across layers)
-                    mamba2_metadata.stride_w_dim, mamba2_metadata.stride_w_width = conv_weights.stride(
-                    )
-                    _, width = conv_weights.shape
-                    final_states = mamba_cache_params.conv_state
-                    mamba2_metadata.num_cache_lines = final_states.size(0)
-                    mamba2_metadata.num_cache_lines, mamba2_metadata.dim, state_len = final_states.size(
-                    )
-                    # mamba2_metadata.num_cache_lines, mamba2_metadata.dim, mamba2_metadata.state_len = final_states.size()
-                    # state_len = width - 1
-                    mamba2_metadata.width = width
-                    mamba2_metadata.np2_statelen = triton.next_power_of_2(
-                        state_len)
-                    mamba2_metadata.stride_istate_seq, mamba2_metadata.stride_istate_dim, mamba2_metadata.stride_istate_token = final_states.stride(
-                    )
+            x = hidden_states_B_C.transpose(
+                0, 1)  # this is the form that causal-conv see
+            if mamba2_metadata.width is None:
+                # load the conv1d.weight information
+                # (expected to be the same across layers)
+                mamba2_metadata.stride_w_dim, mamba2_metadata.stride_w_width = (
+                    conv_weights.stride())
+                _, width = conv_weights.shape
+                final_states = mamba_cache_params.conv_state
+                (mamba2_metadata.num_cache_lines, mamba2_metadata.dim,
+                 state_len) = final_states.size()
+                mamba2_metadata.width = width
+                mamba2_metadata.np2_statelen = triton.next_power_of_2(
+                    state_len)
+                (mamba2_metadata.stride_istate_seq,
+                 mamba2_metadata.stride_istate_dim,
+                 mamba2_metadata.stride_istate_token) = final_states.stride()
 
-                if mamba2_metadata.cu_seqlen is None:
-                    dim, cu_seqlen = x.shape
-                    out = torch.zeros_like(x)
-                    # mamba2_metadata.dim = dim
-                    mamba2_metadata.cu_seqlen = cu_seqlen
-                    mamba2_metadata.stride_x_seq = 0
-                    mamba2_metadata.stride_x_dim, mamba2_metadata.stride_x_token = x.stride(
-                    )
-                    mamba2_metadata.out = out
-                    mamba2_metadata.stride_o_dim, mamba2_metadata.stride_o_token = out.stride(
-                    )
-                    query_start_loc = attn_metadata.query_start_loc
-                    seqlens = np.diff(query_start_loc.to('cpu'))
-                    nums_dict = {}  # type: ignore
-                    for BLOCK_M in [8]:  # cover all BLOCK_M values
-                        nums = -(-seqlens // BLOCK_M)
-                        nums_dict[BLOCK_M] = {}
-                        nums_dict[BLOCK_M]['nums'] = nums
-                        nums_dict[BLOCK_M]['tot'] = nums.sum().item()
-                        mlist = torch.from_numpy(
-                            np.repeat(np.arange(len(nums)), nums))
-                        nums_dict[BLOCK_M]['mlist'] = mlist
-                        mlist_len = len(nums_dict[BLOCK_M]['mlist'])
-                        nums_dict[BLOCK_M]['mlist_len'] = mlist_len
-                        # type: ignore
-                        mamba2_metadata.MAX_NUM_PROGRAMS = max(
-                            mamba2_metadata.MAX_NUM_PROGRAMS, mlist_len)
-                        offsetlist = []  # type: ignore
-                        for idx, num in enumerate(nums):
-                            offsetlist.extend(range(num))
-                        offsetlist = torch.tensor(offsetlist,
-                                                  dtype=torch.int32)
-                        nums_dict[BLOCK_M]['offsetlist'] = offsetlist
+            if mamba2_metadata.cu_seqlen is None:
+                dim, cu_seqlen = x.shape
+                out = torch.zeros_like(x)
+                # mamba2_metadata.dim = dim
+                mamba2_metadata.cu_seqlen = cu_seqlen
+                mamba2_metadata.stride_x_seq = 0
+                (mamba2_metadata.stride_x_dim,
+                 mamba2_metadata.stride_x_token) = x.stride()
+                mamba2_metadata.out = out
+                (mamba2_metadata.stride_o_dim,
+                 mamba2_metadata.stride_o_token) = out.stride()
+                query_start_loc = attn_metadata.query_start_loc
+                seqlens = np.diff(query_start_loc.to('cpu'))
+                nums_dict = {}  # type: ignore
+                for BLOCK_M in [8]:  # cover all BLOCK_M values
+                    nums = -(-seqlens // BLOCK_M)
+                    nums_dict[BLOCK_M] = {}
+                    nums_dict[BLOCK_M]['nums'] = nums
+                    nums_dict[BLOCK_M]['tot'] = nums.sum().item()
+                    mlist = torch.from_numpy(
+                        np.repeat(np.arange(len(nums)), nums))
+                    nums_dict[BLOCK_M]['mlist'] = mlist
+                    mlist_len = len(nums_dict[BLOCK_M]['mlist'])
+                    nums_dict[BLOCK_M]['mlist_len'] = mlist_len
+                    # type: ignore
+                    mamba2_metadata.MAX_NUM_PROGRAMS = max(
+                        mamba2_metadata.MAX_NUM_PROGRAMS, mlist_len)
+                    offsetlist = []  # type: ignore
+                    for idx, num in enumerate(nums):
+                        offsetlist.extend(range(num))
+                    offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+                    nums_dict[BLOCK_M]['offsetlist'] = offsetlist
 
-                        if mamba2_metadata.batch_ptr is None:
-                            # Update default value after class definition
-                            PAD_SLOT_ID = -1
-                            mamba2_metadata.MAX_NUM_PROGRAMS *= 2
-                            mamba2_metadata.batch_ptr = torch.full(
-                                (mamba2_metadata.MAX_NUM_PROGRAMS, ),
-                                PAD_SLOT_ID,
-                                dtype=torch.int32,
-                                device='cuda')
-                            mamba2_metadata.token_chunk_offset_ptr = torch.full(
-                                (mamba2_metadata.MAX_NUM_PROGRAMS, ),
-                                PAD_SLOT_ID,
-                                dtype=torch.int32,
-                                device='cuda')
-                        else:
-                            if mamba2_metadata.batch_ptr.nelement(
-                            ) < mamba2_metadata.MAX_NUM_PROGRAMS:
-                                mamba2_metadata.batch_ptr.resize_(
-                                    mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
-                                        PAD_SLOT_ID)  # type: ignore
-                                mamba2_metadata.token_chunk_offset_ptr.resize_(  # type: ignore
-                                    mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
-                                        PAD_SLOT_ID)  # type: ignore
+                    if mamba2_metadata.batch_ptr is None:
+                        # Update default value after class definition
+                        PAD_SLOT_ID = -1
+                        mamba2_metadata.MAX_NUM_PROGRAMS *= 2
+                        mamba2_metadata.batch_ptr = torch.full(
+                            (mamba2_metadata.MAX_NUM_PROGRAMS, ),
+                            PAD_SLOT_ID,
+                            dtype=torch.int32,
+                            device='cuda')
+                        mamba2_metadata.token_chunk_offset_ptr = torch.full(
+                            (mamba2_metadata.MAX_NUM_PROGRAMS, ),
+                            PAD_SLOT_ID,
+                            dtype=torch.int32,
+                            device='cuda')
+                    else:
+                        if mamba2_metadata.batch_ptr.nelement(
+                        ) < mamba2_metadata.MAX_NUM_PROGRAMS:
+                            mamba2_metadata.batch_ptr.resize_(
+                                mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
+                                    PAD_SLOT_ID)  # type: ignore
+                            mamba2_metadata.token_chunk_offset_ptr.resize_(  # type: ignore
+                                mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
+                                    PAD_SLOT_ID)  # type: ignore
 
-                        mamba2_metadata.batch_ptr[0:mlist_len].copy_(mlist)
-                        mamba2_metadata.token_chunk_offset_ptr[  # type: ignore
-                            0:mlist_len].copy_(offsetlist)
-                        nums_dict[BLOCK_M][
-                            'batch_ptr'] = mamba2_metadata.batch_ptr
-                        nums_dict[BLOCK_M][
-                            'token_chunk_offset_ptr'] = mamba2_metadata.token_chunk_offset_ptr  # type: ignore
-                    mamba2_metadata.seqlens = seqlens
-                    mamba2_metadata.padded_batch = query_start_loc.size(0) - 1
-                    mamba2_metadata.nums_dict = nums_dict
-                hidden_states_B_C = causal_conv1d_fn_triton(
-                    x,
-                    conv_weights,
-                    bias=self.conv1d.bias,
-                    activation=self.activation,
-                    conv_states=mamba_cache_params.conv_state,
-                    has_initial_states=mamba2_metadata.has_initial_states,
-                    cache_indices=mamba_cache_params.state_indices_tensor,
-                    metadata=mamba2_metadata,
-                    query_start_loc=attn_metadata.query_start_loc).transpose(
-                        0, 1)[:seq_len]
+                    mamba2_metadata.batch_ptr[0:mlist_len].copy_(mlist)
+                    mamba2_metadata.token_chunk_offset_ptr[  # type: ignore
+                        0:mlist_len].copy_(offsetlist)
+                    nums_dict[BLOCK_M]['batch_ptr'] = mamba2_metadata.batch_ptr
+                    nums_dict[BLOCK_M]['token_chunk_offset_ptr'] = (
+                        mamba2_metadata.token_chunk_offset_ptr)  # type: ignore
+                mamba2_metadata.seqlens = seqlens
+                mamba2_metadata.padded_batch = query_start_loc.size(0) - 1
+                mamba2_metadata.nums_dict = nums_dict
+            hidden_states_B_C = causal_conv1d_fn_triton(
+                x,
+                conv_weights,
+                bias=self.conv1d.bias,
+                activation=self.activation,
+                conv_states=mamba_cache_params.conv_state,
+                has_initial_states=mamba2_metadata.has_initial_states,
+                cache_indices=mamba_cache_params.state_indices_tensor,
+                metadata=mamba2_metadata,
+                query_start_loc=attn_metadata.query_start_loc).transpose(
+                    0, 1)[:seq_len]
 
         else:
-            if True:  #self.conv_in_triton:
-                x = hidden_states_B_C
-                unsqueeze = x.dim() == 2
-                if unsqueeze:
-                    # make it (batch, dim, seqlen) with seqlen == 1
-                    x = x.unsqueeze(-1)
-                if mamba2_metadata.cu_seqlen is None:
-                    # dim, cu_seqlen = x.shape
-                    # mamba2_metadata.dim = dim
-                    #mamba2_metadata.cu_seqlen = cu_seqlen
-                    mamba2_metadata.cu_seqlen = 1
-                    mamba2_metadata.stride_x_seq, mamba2_metadata.stride_x_dim, mamba2_metadata.stride_x_token = x.stride(
-                    )
-                hidden_states_B_C = causal_conv1d_update_triton(
-                    x,
-                    mamba_cache_params.conv_state,
-                    conv_weights,
-                    self.conv1d.bias,
-                    self.activation,
-                    conv_state_indices=mamba_cache_params.state_indices_tensor,
-                    metadata=mamba2_metadata,
-                )
-                if unsqueeze:
-                    hidden_states_B_C = hidden_states_B_C.squeeze(-1)
+            x = hidden_states_B_C
+            unsqueeze = x.dim() == 2
+            if unsqueeze:
+                # make it (batch, dim, seqlen) with seqlen == 1
+                x = x.unsqueeze(-1)
+            if mamba2_metadata.cu_seqlen is None:
+                # dim, cu_seqlen = x.shape
+                # mamba2_metadata.dim = dim
+                #mamba2_metadata.cu_seqlen = cu_seqlen
+                mamba2_metadata.cu_seqlen = 1
+                (mamba2_metadata.stride_x_seq, mamba2_metadata.stride_x_dim,
+                 mamba2_metadata.stride_x_token) = x.stride()
+            hidden_states_B_C = causal_conv1d_update_triton(
+                x,
+                mamba_cache_params.conv_state,
+                conv_weights,
+                self.conv1d.bias,
+                self.activation,
+                conv_state_indices=mamba_cache_params.state_indices_tensor,
+                metadata=mamba2_metadata,
+            )
+            if unsqueeze:
+                hidden_states_B_C = hidden_states_B_C.squeeze(-1)
 
         # - get hidden_states, B and C after depthwise convolution.
         hidden_states, B, C = torch.split(
