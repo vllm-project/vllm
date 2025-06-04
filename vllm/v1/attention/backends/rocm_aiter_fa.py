@@ -129,7 +129,7 @@ if current_platform.is_rocm():
             v=v,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
-            # min_seqlen_q=1,
+            min_seqlen_q=1,
             cu_seqlens_k=cu_seqlens_k,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=softmax_scale,
@@ -196,8 +196,8 @@ class AiterFlashAttentionMetadataBuilder:
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
-        max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        total_tokens = self.runner.seq_lens_np[:num_reqs].sum()
+        max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
+        total_tokens = int(self.runner.seq_lens_np[:num_reqs].sum())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table = self.block_table
@@ -391,9 +391,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
-            self.sliding_window = (-1, -1)
+            self.sliding_window = [-1, -1]
         else:
-            self.sliding_window = (sliding_window - 1, 0)
+            self.sliding_window = [sliding_window - 1, 0]
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -422,6 +422,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "AiterFlashAttention does not support fp8 kv-cache on this "
                 "device.")
+
+        self._PARTITION_SIZE_ROCM = 256
+        self._nbyes_per_qo_elem = None
 
     def forward(
         self,
@@ -514,7 +517,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
             if max_seqlen_q > 1:
                 cu_seq_lens = attn_metadata.cu_seq_lens
                 total_tokens = attn_metadata.total_tokens
-                torch.ops.vllm.flash_attn_varlen_func(
+                # torch.ops.vllm.flash_attn_varlen_func(
+                flash_attn_varlen_func_impl(
                     query[:num_actual_tokens],
                     key_cache,
                     value_cache,
@@ -525,17 +529,18 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     total_tokens=total_tokens,
                     softmax_scale=self.scale,
                     alibi_slopes=self.alibi_slopes,
-                    window_size=list(self.sliding_window),
+                    window_size=self.sliding_window,
                     block_table=block_table,
                     cu_seqlens_k=cu_seq_lens,
                 )
 
             _, num_heads, head_size = query.shape
-            _PARTITION_SIZE_ROCM = 256
             num_seqs = seqused_k.shape[0]
-            nbyes_per_qo_elem = torch.finfo(output.dtype).bits // 8
-            max_num_partitions = (max_seqlen_k + _PARTITION_SIZE_ROCM -
-                                  1) // _PARTITION_SIZE_ROCM
+            if self._nbyes_per_qo_elem is None:
+                self._nbyes_per_qo_elem = torch.finfo(output.dtype).bits // 8
+            nbyes_per_qo_elem = self._nbyes_per_qo_elem
+            max_num_partitions = (max_seqlen_k + self._PARTITION_SIZE_ROCM -
+                                  1) // self._PARTITION_SIZE_ROCM
 
             workspace_buffer = torch.empty(
                 (num_seqs * num_heads * max_num_partitions * head_size) *
@@ -555,7 +560,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 block_table,
                 cu_seqlens_q,
                 seqused_k,
-                int(max_seqlen_k),
+                max_seqlen_k,
                 self.alibi_slopes,
                 self.kv_cache_dtype,
                 "NHD",
@@ -563,7 +568,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
                 None,
-                _PARTITION_SIZE_ROCM,
+                self._PARTITION_SIZE_ROCM,
             )
             return output
         else:
