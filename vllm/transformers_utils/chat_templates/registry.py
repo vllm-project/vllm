@@ -29,6 +29,7 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "fuyu": CHAT_TEMPLATES_DIR / "template_fuyu.jinja",
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "qwen": _get_qwen_chat_template_fallback,
+    "qwen2_audio": CHAT_TEMPLATES_DIR / "template_qwen2_audio.jinja",
 }
 # yapf: enable
 
