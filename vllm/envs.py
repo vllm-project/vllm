@@ -124,6 +124,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_USE_TRITON_CONV1D: bool = False
 
+
 def get_default_cache_root():
     return os.getenv(
         "XDG_CACHE_HOME",
