@@ -398,11 +398,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         """
 
         a1 = hidden_states
-        E, M, N, K, top_k = _moe_problem_size(a1, w1, w2, topk_ids)
-
-        if global_num_experts == -1:
-            global_num_experts = E
-
         output = a1 if inplace else torch.zeros_like(a1)
 
         if global_num_experts == -1:
@@ -417,28 +412,32 @@ class FusedMoEModularKernel(torch.nn.Module):
         topk_weights = (topk_weights if _expert_topk_weights is None else
                         _expert_topk_weights)
 
-        a1q, a1q_scale, expert_num_tokens = self.prepare_finalize.prepare(
-            a1, a1_scale, a2_scale, topk_weights, topk_ids, global_num_experts,
-            expert_map, apply_router_weight_on_input)
-
-        fused_out = self.fused_experts.apply(
-            a1q,
-            w1,
-            w2,
-            topk_ids,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_zp=w1_zp,
-            w2_zp=w2_zp,
-            a1q_scale=a1q_scale,
-            a2_scale=a2_scale,
-            workspace13=workspace13,
-            workspace2=workspace2,
-            expert_num_tokens=expert_num_tokens,
-        )
+        fused_out = None
+        if a1q.numel() == 0:
+            # This happens when none of the tokens from the all2all reach this
+            # EP rank. Also, note that this is only relevant for CUDAGraph
+            # incompatible all2all kernels like the DeepEP high-throughput
+            # kernels. CUDAGraph compatible all2all kernels like the pplx
+            # kernels and the DeepEP low-latency kernels are always batched
+            # and can never run into the tensor.numel() == 0 case.
+            fused_out = torch.empty_like(a1q).to(dtype=a1.dtype)
+        else:
+            fused_out = self._do_fused_experts(
+                a1=a1,
+                a1q=a1q,
+                w1=w1,
+                w2=w2,
+                topk_ids=topk_ids,
+                expert_num_tokens=expert_num_tokens,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                w1_zp=w1_zp,
+                w2_zp=w2_zp,
+                a1q_scale=a1q_scale,
+                a2_scale=a2_scale)
 
         self.prepare_finalize.finalize(output, fused_out, topk_weights,
                                        topk_ids, apply_router_weight_on_input)
