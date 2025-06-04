@@ -117,8 +117,6 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         Update KVConnector state after block allocation.
         """
-        if num_external_tokens == 0:
-            return
         self._lmcache_engine.update_state_after_alloc(request,
                                                       num_external_tokens)
 

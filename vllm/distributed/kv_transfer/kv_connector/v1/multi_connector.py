@@ -137,7 +137,7 @@ class MultiConnector(KVConnectorBase_V1):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
-        to_return = 0, False
+        to_return = (0, False)
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
                 request, num_computed_tokens)
@@ -145,7 +145,7 @@ class MultiConnector(KVConnectorBase_V1):
             # to this request.
             if to_return[0] == 0 and toks > 0:
                 self._requests_to_connector[request.request_id] = i
-                to_return = toks, load_async
+                to_return = (toks, load_async)
         return to_return
 
     def update_state_after_alloc(self, request: "Request",
