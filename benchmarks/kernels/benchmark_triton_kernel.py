@@ -8,7 +8,7 @@ import torch.utils.benchmark as benchmark
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe
-from vllm.model_executor.layers.fused_moe.triton_kernels_moe import forward_cuda_triton
+from vllm.model_executor.layers.fused_moe.triton_kernels_moe import triton_kernel_moe_forward
 from vllm.transformers_utils.config import get_config
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
@@ -123,7 +123,7 @@ def bench_run(
         num_repeats: int
     ):
         for _ in range(num_repeats):
-            forward_cuda_triton(
+            triton_kernel_moe_forward(
                 x,
                 w1,
                 w2,
@@ -143,7 +143,7 @@ def bench_run(
         with set_current_vllm_config(
             VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
         ):
-            forward_cuda_triton(
+            triton_kernel_moe_forward(
                 x,
                 w1,
                 w2,
