@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 import threading
 import time
 import typing
 from collections import deque
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional
 
 import msgpack
@@ -21,6 +23,36 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def set_p2p_nccl_context(num_chennels: str):
+    original_values: dict[str, Any] = {}
+    env_vars = [
+        'NCCL_MAX_NCHANNELS',
+        'NCCL_MIN_NCHANNELS',
+        'NCCL_CUMEM_ENABLE',
+        'NCCL_BUFFSIZE',
+        'NCCL_PROTO',  # LL,LL128,SIMPLE
+        'NCCL_ALGO',  # RING,TREE
+    ]
+
+    for var in env_vars:
+        original_values[var] = os.environ.get(var)
+
+    logger.info("set_p2p_nccl_context, original_values: %s", original_values)
+
+    try:
+        os.environ['NCCL_MAX_NCHANNELS'] = num_chennels
+        os.environ['NCCL_MIN_NCHANNELS'] = num_chennels
+        os.environ['NCCL_CUMEM_ENABLE'] = '1'
+        yield
+    finally:
+        for var in env_vars:
+            if original_values[var] is not None:
+                os.environ[var] = original_values[var]
+            else:
+                os.environ.pop(var, None)
 
 
 class P2pNcclEngine:
@@ -106,6 +138,9 @@ class P2pNcclEngine:
         self.buffer_size = 0
         self.buffer_size_threshold = float(self.config.kv_buffer_size)
 
+        self.nccl_num_chennels = self.config.get_from_extra_config(
+            "nccl_num_chennels", "16")
+
         self._listener_thread = threading.Thread(
             target=self._listen_for_requests, daemon=True)
         self._listener_thread.start()
@@ -119,9 +154,9 @@ class P2pNcclEngine:
         logger.info(
             "💯P2pNcclEngine init, rank:%d, local_rank:%d, http_address:%s, "
             "zmq_address:%s, proxy_address:%s, send_type:%s, buffer_size_"
-            "threshold:%.2f", self.rank, self.local_rank, self.http_address,
-            self.zmq_address, self.proxy_address, self.send_type,
-            self.buffer_size_threshold)
+            "threshold:%.2f, nccl_num_chennels:%s", self.rank, self.local_rank,
+            self.http_address, self.zmq_address, self.proxy_address,
+            self.send_type, self.buffer_size_threshold, self.nccl_num_chennels)
 
     def _create_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
@@ -141,8 +176,9 @@ class P2pNcclEngine:
 
             with torch.cuda.device(self.device):
                 rank = 0
-                comm: ncclComm_t = self.nccl.ncclCommInitRank(
-                    2, unique_id, rank)
+                with set_p2p_nccl_context(self.nccl_num_chennels):
+                    comm: ncclComm_t = self.nccl.ncclCommInitRank(
+                        2, unique_id, rank)
                 self.comms[remote_address] = (comm, rank)
                 logger.info("🤝ncclCommInitRank Success, %s👉%s, MyRank: %s",
                             self.zmq_address, remote_address, rank)
@@ -278,8 +314,9 @@ class P2pNcclEngine:
                         bytes(data["unique_id"]))
                     with torch.cuda.device(self.device):
                         rank = 1
-                        comm: ncclComm_t = self.nccl.ncclCommInitRank(
-                            2, unique_id, rank)
+                        with set_p2p_nccl_context(self.nccl_num_chennels):
+                            comm: ncclComm_t = self.nccl.ncclCommInitRank(
+                                2, unique_id, rank)
                         self.comms[remote_address.decode()] = (comm, rank)
                         logger.info(
                             "🤝ncclCommInitRank Success, %s👈%s, MyRank:%s",
