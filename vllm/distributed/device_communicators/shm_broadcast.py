@@ -29,6 +29,15 @@ logger = init_logger(__name__)
 
 
 class SpinTimer:
+
+    def record_activity(self):
+        pass
+
+    def spin(self):
+        sched_yield()
+
+
+class SpinSleepTimer(SpinTimer):
     """
     In setups which have long inactivity periods it is desirable to reduce
     system power consumption when vllm does nothing. This would lead to more
@@ -266,7 +275,7 @@ class MessageQueue:
         self.local_reader_rank = -1
         # rank does not matter for remote readers
         self._is_remote_reader = False
-        self._read_spin_timer: Optional[SpinTimer] = None
+        self._read_spin_timer = SpinTimer()
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
@@ -306,7 +315,8 @@ class MessageQueue:
 
             self.remote_socket = None
 
-            self._read_spin_timer = SpinTimer()
+            self._read_spin_timer = SpinSleepTimer(
+            ) if envs.VLLM_SLEEP_WHEN_IDLE else SpinTimer()
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -422,7 +432,6 @@ class MessageQueue:
                      timeout: Optional[float] = None,
                      cancel: Optional[Event] = None):
         assert self._is_local_reader, "Only readers can acquire read"
-        assert self._read_spin_timer is not None
         start_time = time.monotonic()
         n_warning = 1
         while True:
