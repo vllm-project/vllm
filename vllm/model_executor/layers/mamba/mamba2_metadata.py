@@ -27,6 +27,9 @@ class Mamba2Metadata:
     chunk_indices: torch.Tensor
     chunk_offsets: torch.Tensor
 
+    # The information here is reused across Mamba layers.
+    # Even stride ops trigger Torch calls,
+    # introducing unnecessary overhead.
     num_cache_lines: Optional[int] = None
     stride_istate_seq: Optional[int] = None
     stride_istate_dim: Optional[int] = None
