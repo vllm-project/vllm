@@ -386,7 +386,7 @@ class MiddleAllReduceFusedRMSNormStaticFP8Pattern(AllReduceRMSNormPattern):
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(
                 mm_1, dim=0, world_size=tp_size, group_name=tp.unique_name)
 
-            rs_result = torch.empty_like(reduce_scatter, dtype=FP8_DTYPE)
+            rs_result = torch.empty_like(reduce_scatter, dtype=result.dtype)
 
             rmsnorm = torch.ops.higher_order.auto_functionalized(
                 torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,
@@ -464,7 +464,7 @@ class LastAllReduceFusedRMSNormStaticFP8Pattern(AllReduceRMSNormPattern):
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(
                 mm_1, dim=0, world_size=tp_size, group_name=tp.unique_name)
 
-            rs_result = torch.empty_like(reduce_scatter, dtype=FP8_DTYPE)
+            rs_result = torch.empty_like(reduce_scatter, dtype=result.dtype)
             rmsnorm = torch.ops.higher_order.auto_functionalized(
                 torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,
                 result=rs_result,
@@ -498,51 +498,59 @@ class EmbeddingAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
             dtype=self.dtype) > 0.5
         full_default = torch.zeros([1, 8, 4], device=self.device, \
             dtype=self.dtype)
-        result = torch.empty([1, 8, 4], device=self.device, dtype=FP8_DTYPE)
+        rmsnorm_result = torch.empty([1, 8, 4],
+                                     device=self.device,
+                                     dtype=self.dtype)
+        quant_result = torch.empty([1, 8, 4],
+                                   device=self.device,
+                                   dtype=FP8_DTYPE)
         weight = torch.empty([4], device=self.device, dtype=self.dtype)
         scale = torch.tensor(1.0, device=self.device, dtype=torch.float32)
-        return [arg2_1, mul_6, unsqueeze, full_default, result, weight, scale]
+        return [
+            arg2_1, mul_6, unsqueeze, full_default, rmsnorm_result,
+            quant_result, weight, scale
+        ]
 
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(
             arg2_1: torch.Tensor,
-            mul_6: torch.Tensor,
+            mul: torch.Tensor,
             unsqueeze: torch.Tensor,
             full_default: torch.Tensor,
-            result: torch.Tensor,
+            rmsnorm_result: torch.Tensor,
+            quant_result: torch.Tensor,
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            embedding = torch.ops.aten.embedding.default(arg2_1, mul_6)
+            embedding = torch.ops.aten.embedding.default(arg2_1, mul)
             where = torch.ops.aten.where.self(unsqueeze, full_default,
                                               embedding)
             all_reduce = tensor_model_parallel_all_reduce(where)
             rmsnorm = torch.ops.higher_order.auto_functionalized(
                 torch.ops._C.rms_norm.default,
+                result=rmsnorm_result,
                 input=all_reduce,
                 weight=weight,
                 epsilon=self.epsilon,
             )
 
-            reshape = torch.ops.aten.reshape.default(
-                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             static_fp8 = torch.ops.higher_order.auto_functionalized(
-                # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
-                result=result,
-                input=reshape,
+                result=quant_result,
+                input=rmsnorm[1],
                 scale=scale,
             )
 
-            return static_fp8, all_reduce
+            return static_fp8[1], all_reduce
 
         def replacement(
             arg2_1: torch.Tensor,
             mul_6: torch.Tensor,
             unsqueeze: torch.Tensor,
             full_default: torch.Tensor,
-            result: torch.Tensor,
+            rmsnorm_result: torch.Tensor,
+            quant_result: torch.Tensor,
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
@@ -555,26 +563,27 @@ class EmbeddingAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(
                 where, dim=0, world_size=tp_size, group_name=tp.unique_name)
 
+            rmsnorm_result = torch.empty_like(reduce_scatter,
+                                              dtype=rmsnorm_result.dtype)
             rmsnorm = torch.ops.higher_order.auto_functionalized(
                 torch.ops._C.rms_norm.default,
+                result=rmsnorm_result,
                 input=reduce_scatter,
                 weight=weight,
                 epsilon=self.epsilon,
             )
 
-            reshape = torch.ops.aten.reshape.default(
-                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
-            quant_result = torch.empty_like(rmsnorm[1], dtype=result.dtype)
+            quant_result = torch.empty_like(rmsnorm[1],
+                                            dtype=quant_result.dtype)
             static_fp8 = torch.ops.higher_order.auto_functionalized(
-                # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=quant_result,
-                input=reshape,
+                input=rmsnorm[1],
                 scale=scale,
             )
 
             all_gather = torch.ops.vllm.all_gather.default(
-                static_fp8,
+                static_fp8[1],
                 dim=0,
                 world_size=tp_size,
                 group_name=tp.unique_name)
@@ -624,17 +633,14 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
                 epsilon=self.epsilon,
             )
 
-            reshape = torch.ops.aten.reshape.default(
-                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             static_fp8 = torch.ops.higher_order.auto_functionalized(
-                # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=result,
-                input=reshape,
+                input=rmsnorm[1],
                 scale=scale,
             )
 
-            return static_fp8, rmsnorm[2]
+            return static_fp8[1], rmsnorm[2]
 
         def replacement(
             result: torch.Tensor,
@@ -657,18 +663,15 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
             )
 
             quant_result = torch.empty_like(rmsnorm[1], dtype=result.dtype)
-            reshape = torch.ops.aten.reshape.default(
-                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             static_fp8 = torch.ops.higher_order.auto_functionalized(
-                # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=quant_result,
-                input=reshape,
+                input=rmsnorm[1],
                 scale=scale,
             )
 
             all_gather = torch.ops.vllm.all_gather.default(
-                static_fp8,
+                static_fp8[1],
                 dim=0,
                 world_size=tp_size,
                 group_name=tp.unique_name)
@@ -717,17 +720,14 @@ class LastAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
                 epsilon=self.epsilon,
             )
 
-            reshape = torch.ops.aten.reshape.default(
-                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             static_fp8 = torch.ops.higher_order.auto_functionalized(
-                # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=result,
-                input=reshape,
+                input=rmsnorm[1],
                 scale=scale,
             )
 
-            return static_fp8
+            return static_fp8[1]
 
         def replacement(
             result: torch.Tensor,
@@ -750,18 +750,15 @@ class LastAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
             )
 
             quant_result = torch.empty_like(rmsnorm[1], dtype=result.dtype)
-            reshape = torch.ops.aten.reshape.default(
-                rmsnorm[1], [-1, rmsnorm[1].shape[-1]])
             static_fp8 = torch.ops.higher_order.auto_functionalized(
-                # torch.ops._C.static_scaled_fp8_quant.default,
                 self.op,
                 result=quant_result,
-                input=reshape,
+                input=rmsnorm[1],
                 scale=scale,
             )
 
             normalized = torch.ops.vllm.all_gather.default(
-                static_fp8,
+                static_fp8[1],
                 dim=0,
                 world_size=tp_size,
                 group_name=tp.unique_name)
@@ -781,15 +778,17 @@ class SequenceParallelismPass(VllmInductorPass):
             pass_name="sequence_parallelism_pass")
 
         for epsilon in [1e-5, 1e-6]:
-            # Normal RMSNorm patterns
-            EmbeddingAllReduceRMSNormPattern(
-                epsilon, self.model_dtype, self.device).register(self.patterns)
-
-            MiddleAllReduceRMSNormPattern(epsilon, self.model_dtype,
-                                          self.device).register(self.patterns)
-
-            LastAllReduceRMSNormPattern(epsilon, self.model_dtype,
-                                        self.device).register(self.patterns)
+            # RMSNorm + Static FP8 quantization patterns
+            fp8_quant_op = torch.ops._C.static_scaled_fp8_quant.default
+            EmbeddingAllReduceRMSNormStaticFP8Pattern(
+                epsilon, self.model_dtype, self.device,
+                fp8_quant_op).register(self.patterns)
+            MiddleAllReduceRMSNormStaticFP8Pattern(
+                epsilon, self.model_dtype, self.device,
+                fp8_quant_op).register(self.patterns)
+            LastAllReduceRMSNormStaticFP8Pattern(
+                epsilon, self.model_dtype, self.device,
+                fp8_quant_op).register(self.patterns)
 
             # Fused RMSNorm + Static FP8 patterns
             EmbeddingAllReduceFusedRMSNormStaticFP8Pattern(
@@ -801,19 +800,15 @@ class SequenceParallelismPass(VllmInductorPass):
             LastAllReduceFusedRMSNormStaticFP8Pattern(
                 epsilon, self.model_dtype, self.device).register(self.patterns)
 
-            # RMSNorm + Static FP8 quantization patterns
-            EmbeddingAllReduceRMSNormStaticFP8Pattern(
-                epsilon, self.model_dtype, self.device,
-                torch.ops._C.static_scaled_fp8_quant.default).register(
-                    self.patterns)
-            MiddleAllReduceRMSNormStaticFP8Pattern(
-                epsilon, self.model_dtype, self.device,
-                torch.ops._C.static_scaled_fp8_quant.default).register(
-                    self.patterns)
-            LastAllReduceRMSNormStaticFP8Pattern(
-                epsilon, self.model_dtype, self.device,
-                torch.ops._C.static_scaled_fp8_quant.default).register(
-                    self.patterns)
+            # Normal RMSNorm patterns
+            EmbeddingAllReduceRMSNormPattern(
+                epsilon, self.model_dtype, self.device).register(self.patterns)
+
+            MiddleAllReduceRMSNormPattern(epsilon, self.model_dtype,
+                                          self.device).register(self.patterns)
+
+            LastAllReduceRMSNormPattern(epsilon, self.model_dtype,
+                                        self.device).register(self.patterns)
 
             # WARNING: This is a hack to clear the pattern matcher cache
             # and allow multiple values of epsilon.
@@ -826,13 +821,11 @@ class SequenceParallelismPass(VllmInductorPass):
     def __call__(self, graph: fx.Graph):
         self.begin()
         # if get_tp_group().rank == 0:
-        # # if dist.get_rank(get_tp_group()) == 0:
         #     print(f"before sp graph {graph}")
         self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_sequence_parallelism_pass")
-        # if get_tp_group().rank == 0:
-        # if dist.get_rank(get_tp_group()) == 0:
-        # print(f"after sp graph {graph}")
+        if get_tp_group().rank == 0:
+            print(f"Replaced {count} patterns, after sp graph {graph}")
         self.end_and_log()
