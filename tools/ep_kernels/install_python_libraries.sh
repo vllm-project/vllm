@@ -47,9 +47,25 @@ export NVSHMEM_IBRC_SUPPORT=1
 # remove MPI dependency
 export NVSHMEM_BUILD_TESTS=0
 export NVSHMEM_BUILD_EXAMPLES=0
-export NVSHMEM_MPI_SUPPORT=0
+export NVSHMEM_MPI_SUPPORT=1
+export NVSHMEM_BUILD_HYDRA_LAUNCHER=1
+export NVSHMEM_BUILD_TXZ_PACKAGE=0
+export CMAKE_CUDA_ARCHITECTURES=90a
 
-cmake -S . -B $WORKSPACE/nvshmem_build/ -DCMAKE_INSTALL_PREFIX=$WORKSPACE/nvshmem_install
+cmake -S . -B $WORKSPACE/nvshmem_build/ \
+-DCMAKE_INSTALL_PREFIX=$WORKSPACE/nvshmem_install \
+-DCMAKE_CUDA_ARCHITECTURES="90a" \
+-DNVSHMEM_MPI_SUPPORT=0            \
+-DNVSHMEM_PMIX_SUPPORT=0           \
+-DNVSHMEM_IBRC_SUPPORT=1           \
+-DNVSHMEM_IBGDA_SUPPORT=1          \
+-DNVSHMEM_IBDEVX_SUPPORT=1         \
+-DNVSHMEM_USE_GDRCOPY=1            \
+-DNVSHMEM_BUILD_TESTS=0            \
+-DNVSHMEM_BUILD_EXAMPLES=0         \
+-DNVSHMEM_LIBFABRIC_SUPPORT=0      \
+-DGDRCOPY_HOME=${GDRCOPY_HOME}    
+
 
 cd $WORKSPACE/nvshmem_build/
 make -j$(nproc)
@@ -65,7 +81,7 @@ git clone https://github.com/ppl-ai/pplx-kernels
 cd pplx-kernels
 # see https://github.com/pypa/pip/issues/9955#issuecomment-838065925
 # PIP_NO_BUILD_ISOLATION=0 disables build isolation
-PIP_NO_BUILD_ISOLATION=0 TORCH_CUDA_ARCH_LIST=9.0a+PTX pip install -vvv -e  .
+PIP_NO_BUILD_ISOLATION=0 TORCH_CUDA_ARCH_LIST=9.0a+PTX uv pip install --no-build-isolation -vvv -e  .
 popd
 
 # build and install deepep, require pytorch installed
@@ -73,5 +89,5 @@ pushd $WORKSPACE
 git clone https://github.com/deepseek-ai/DeepEP
 cd DeepEP
 export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
-PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
+PIP_NO_BUILD_ISOLATION=0 uv pip install --no-build-isolation -vvv -e  .
 popd
