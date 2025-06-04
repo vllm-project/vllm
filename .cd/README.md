@@ -26,10 +26,10 @@ This guide explains how to quickly run vLLM with multi-model support on Gaudi us
 1. **Use the prebuilt vLLM container**
 
    You do **not** need to build the Docker image yourself.  
-   Use the ready-to-use image from Artifactory:
+   Use the ready-to-use image from an image registry:
 
    ```bash
-   docker pull artifactory-kfs.habana-labs.com/docker-local/1.22.0/ubuntu22.04/habanalabs/vllm-installer:1.22.0-341
+   docker pull <path to a docker image>
    ```
 
 2. **Set required environment variables**
@@ -56,7 +56,7 @@ This guide explains how to quickly run vLLM with multi-model support on Gaudi us
      -e HABANA_VISIBLE_DEVICES=all \
      -p 8000:8000 \
      --name vllm-server \
-     artifactory-kfs.habana-labs.com/docker-local/1.22.0/ubuntu22.04/habanalabs/vllm-installer:1.22.0-341
+     <docker image name>
    ```
 
 4. **(Optional) Test the server**
@@ -88,7 +88,7 @@ This guide explains how to quickly run vLLM with multi-model support on Gaudi us
      --ipc=host \
      -p 8000:8000 \
      --name vllm-server \
-     artifactory-kfs.habana-labs.com/docker-local/1.22.0/ubuntu22.04/habanalabs/vllm-installer:1.22.0-341
+     <docker image name>
    ```
 
 6. **Running multiple instances**
@@ -111,7 +111,7 @@ This guide explains how to quickly run vLLM with multi-model support on Gaudi us
      --ipc=host \
      -p 8000:8000 \
      --name vllm-server1 \
-     artifactory-kfs.habana-labs.com/docker-local/1.22.0/ubuntu22.04/habanalabs/vllm-installer:1.22.0-341
+     <docker image name>
 
    # Instance 2 (in another terminal)
    docker run -it --rm \
@@ -125,7 +125,7 @@ This guide explains how to quickly run vLLM with multi-model support on Gaudi us
      --ipc=host \
      -p 9222:8000 \
      --name vllm-server2 \
-     artifactory-kfs.habana-labs.com/docker-local/1.22.0/ubuntu22.04/habanalabs/vllm-installer:1.22.0-341
+     <docker image name>
    ```
 
 7. **Viewing logs**
