@@ -1273,12 +1273,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True)
 
-        # Run the decoder.
+        seq_lens = self.seq_lens[:self.input_batch.num_reqs]
+
+        # Run the model
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens,
-                                 num_tokens_across_dp=num_tokens_across_dp):
+                                 num_tokens_across_dp=num_tokens_across_dp,
+                                 seq_lens=seq_lens):
             self.maybe_setup_kv_connector(scheduler_output)
 
             model_output = self.model(
@@ -1868,6 +1871,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions = self.mrope_positions[:, :num_tokens]
             else:
                 positions = self.positions[:num_tokens]
+
+            offset = 0
+            for seq_len in num_scheduled_tokens_list:
+                positions[offset:offset + seq_len] = torch.arange(
+                    seq_len, dtype=positions.dtype)
+                offset += seq_len
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
