@@ -1835,7 +1835,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             all_random=False,
             top_p=dummy_tensors(0.9),
             top_k=dummy_tensors(logits.size(1) - 1),
-            min_p=None,
             generators={},
             max_num_logprobs=None,
             no_penalties=True,
@@ -1844,10 +1843,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             presence_penalties=dummy_tensors(0.1),
             repetition_penalties=dummy_tensors(0.1),
             output_token_ids=[[] for _ in range(num_reqs)],
-            min_tokens={},
-            logit_bias=[None for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
+            logits_procs=[],
+            nongreedy_logits_procs=[],
         )
         try:
             sampler_output = self.sampler(logits=logits,

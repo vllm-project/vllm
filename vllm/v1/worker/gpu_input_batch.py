@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining an input batch
 
-from collections.abc import Sequence
 from dataclasses import dataclass
-from itertools import chain
 from typing import Optional, cast
 
 import numpy as np
@@ -20,11 +18,7 @@ from vllm.v1.sample.logits_processor import (BatchUpdate,
                                              LogitBiasLogitsProcessor,
                                              LogitsProcessor,
                                              MinPLogitsProcessor,
-                                             MinTokensLogitsProcessor,
-                                             RemovedRequestType,
-                                             AddedRequestType,
-                                             MovedRequestType,
-                                             SwappedRequestType)
+                                             MinTokensLogitsProcessor)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
@@ -226,21 +220,26 @@ class InputBatch:
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
-        # Define logits processors
-        # TODO(andy): logits processor list should be extensible via engine
-        # constructor argument; for now the list is fixed.
-        self.logit_procs: list[LogitsProcessor] = [
-            MinTokensLogitsProcessor(pin_memory=pin_memory, device=device),
-            LogitBiasLogitsProcessor(pin_memory=pin_memory, device=device),
-        ]
-        self.min_p_logitsproc = MinPLogitsProcessor(
-            pin_memory=pin_memory,
-            device=device,
-            # +1 for temporary swap space
-            max_num_reqs=max_num_reqs + 1)
-        self.nongreedy_logits_procs: list[LogitsProcessor] = [
-            self.min_p_logitsproc
-        ]
+        if not is_tpu:
+            # Internal representation of per-step batch state changes.
+            # Should reset each step.
+            self.batch_update = BatchUpdate()
+
+            # Define logits processors
+            # TODO(andy): logits processor list should be extensible via engine
+            # constructor argument; for now the list is fixed.
+            self.logit_procs: list[LogitsProcessor] = [
+                MinTokensLogitsProcessor(pin_memory=pin_memory, device=device),
+                LogitBiasLogitsProcessor(pin_memory=pin_memory, device=device),
+            ]
+            self.min_p_logitsproc = MinPLogitsProcessor(
+                pin_memory=pin_memory,
+                device=device,
+                # +1 for temporary swap space
+                max_num_reqs=max_num_reqs + 1)
+            self.nongreedy_logits_procs: list[LogitsProcessor] = [
+                self.min_p_logitsproc
+            ]
 
         # TODO convert this to LogitsProcessor
         self.has_allowed_token_ids: set[str] = set()
@@ -256,10 +255,6 @@ class InputBatch:
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
-
-        # Internal representation of per-step batch state changes.
-        # Should reset each step.
-        self.batch_update = BatchUpdate()
 
     @property
     def req_ids(self) -> list[str]:
@@ -278,8 +273,8 @@ class InputBatch:
         """Track add-request operations"""
         req_index = self._get_next_add_index()
         assert req_index < self.max_num_reqs
-        self.batch_update.added.append((req_index,request.sampling_params,
-                                        request.output_token_ids))
+        self.batch_update.added.append(
+            (req_index, request.sampling_params, request.output_token_ids))
         return req_index
 
     def has_step_removed_requests(self) -> bool:
@@ -288,8 +283,17 @@ class InputBatch:
     def add_request(
         self,
         request: "CachedRequestState",
+        req_index: Optional[int] = None,
     ) -> int:
-        req_index=self._register_add_request(request)
+        if is_tpu:
+            # TODO(andy): update TPU implementation
+            if req_index is None:
+                req_index = self.num_reqs
+            assert req_index < self.max_num_reqs
+        else:
+            # Ignore req_index argument on GPU
+            req_index = self._register_add_request(request)
+
         req_id = request.req_id
         if req_index == len(self._req_ids):
             self._req_ids.append(req_id)
@@ -407,7 +411,9 @@ class InputBatch:
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
-        self.batch_update.removed.append(req_index)
+        if not is_tpu:
+            # TODO(andy): TPU implementation does not support this path
+            self.batch_update.removed.append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
@@ -442,7 +448,9 @@ class InputBatch:
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
-        self.batch_update.swapped.append((i1,i2))
+        if not is_tpu:
+            # TODO(andy): TPU implementation does not support this path
+            self.batch_update.swapped.append((i1, i2))
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] =\
@@ -499,12 +507,10 @@ class InputBatch:
 
         self.block_table.swap_row(i1, i2)
 
-    def _register_move_request(self,
-                               from_idx: int, 
-                               to_idx: int) -> None:
-        self.batch_update.moved.append((from_idx,to_idx))
+    def _register_move_request(self, from_idx: int, to_idx: int) -> None:
+        self.batch_update.moved.append((from_idx, to_idx))
 
-    def condense(self) -> None:
+    def condense(self, empty_req_indices: Optional[list[int]] = None) -> None:
         """Slide non-empty requests down into empty indices.
 
         Any consecutive empty indices at the very end of the list are not
@@ -517,32 +523,37 @@ class InputBatch:
           swaps: list of (from,to) swap tuples for moved requests
           empty_req_indices: indices not filled by condensation
         """
+        if is_tpu:
+            assert empty_req_indices is not None
+        else:
+            assert empty_req_indices is None
+            empty_req_indices = self.batch_update.removed
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
             self._req_ids.clear()
             self.req_output_token_ids.clear()
-            return [], []
+            return
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
         # is sorted in descending order.
-        last_req_index = num_reqs + self.batch_update.num_removed() - 1
-        while self.batch_update.has_removed():
+        last_req_index = num_reqs + len(empty_req_indices) - 1
+        while empty_req_indices:
             # Find the largest non-empty index.
-            empty_req_indices = self.batch_update.removed
             while last_req_index in empty_req_indices:
                 last_req_index -= 1
 
             # Find the smallest empty index.
-            empty_index = self.batch_update.peek_removed()
+            empty_index = (empty_req_indices.pop()
+                           if is_tpu else self.batch_update.peek_removed())
             if empty_index >= last_req_index:
                 break
 
             # Move active request down into empty request
             # index.
-            self.batch_update.pop_removed_if_can()
-            self.batch_update.moved.append((last_req_index, 
-                                            empty_index))
+            if not is_tpu:
+                self.batch_update.pop_removed_if_can()
+                self.batch_update.moved.append((last_req_index, empty_index))
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
             assert req_id is not None
@@ -603,31 +614,14 @@ class InputBatch:
     def _commit_logit_procs_state_changes(self) -> None:
         """Apply batch add/remove/permute to logits procs' states"""
         for logit_proc in self.logit_procs + self.nongreedy_logits_procs:
-            logit_proc.commit_state_changes(self.num_reqs,self.batch_update)
+            logit_proc.commit_state_changes(self.num_reqs)
         # Clear state change representation to prepare for next step
         self.batch_update.reset()
 
     def refresh(self):
-        self._commit_logit_procs_state_changes()
+        if not is_tpu:
+            self._commit_logit_procs_state_changes()
         self.sampling_metadata = self._make_sampling_metadata()
-
-    def logit_procs_update_states(
-        self,
-        removed: Sequence[int] = (),
-        moved: Sequence[tuple[int, int]] = (),
-        added: Sequence[tuple[int, SamplingParams, list[int]]] = ()
-    ) -> None:
-        """Update logits processor state after batch remove/move/add"""
-
-        # Update states of logits processors
-        for processor in chain(self.logit_procs, self.nongreedy_logits_procs):
-            processor.commit_state_changes(
-                BatchUpdate(
-                    removed=removed,
-                    moved=moved,
-                    added=added,
-                    batch_size=self.num_reqs,
-                ))
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
