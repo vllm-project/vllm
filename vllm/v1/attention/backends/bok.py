@@ -17,10 +17,20 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-import py_bok
+from py_bok import (
+    create_op,
+    forward_inplace,
+    AttentionLayerDimensions,
+    DeviceDataType,
+    RotaryEmbedding,
+    RotaryScalingType,
+    RotaryPositionalEmbeddingType,
+)
 
 
 if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -64,213 +74,62 @@ class BokAttentionBackend(AttentionBackend):
 
 @dataclass
 class BokAttentionMetadata:
-    # NOTE(sang): Definition of context_len, query_len, and seq_len.
-    # |---------- N-1 iteration --------|
-    # |---------------- N iteration ---------------------|
-    # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len ----------|
-    # |-------------------- seq_len ---------------------|
-    #                                   |-- query_len ---|
+    stream = torch.cuda.Stream()
 
-    num_actual_tokens: int  # Number of tokens excluding padding.
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    max_seq_len: int
-    seq_lens: torch.Tensor
-    block_table: torch.Tensor
-    slot_mapping: torch.Tensor
+    # Create basic parameters for a smoke test
 
-    # Optional aot scheduling
-    scheduler_metadata: Optional[torch.Tensor] = None
-    prefix_scheduler_metadata: Optional[torch.Tensor] = None
+    # Model dimensions.
+    num_layers = 1
 
-    # for local attention
-    @dataclass
-    class LocalAttentionMetadata:
-        local_query_start_loc: torch.Tensor
-        local_seqused_k: torch.Tensor
-        local_block_table: torch.Tensor
-        local_max_query_len: int
-        local_max_seq_len: int
-        local_scheduler_metadata: Optional[torch.Tensor]
+    # Attention layer dimensions.
+    num_q_heads = 96
+    num_kv_heads = 8
+    head_dim = 128
+    dims = AttentionLayerDimensions(num_q_heads, num_kv_heads, head_dim)
+    max_attention_window_size = 2048
 
-    local_attn_metadata: Optional[LocalAttentionMetadata] = None
-
-
-#
-# Take in `query_start_loc_np` and `seq_lens_np` and break the sequences into
-# local attention blocks, where each block is passed to the attention kernel
-# as an independent local ("virtual") batch item.
-#
-# For example, if are performing a chunked prefill a batch of 3 sequences:
-#   q_seqlens  = [4, 10, 5]
-#   kv_seqlens = [6, 17, 9]
-# Then normally for regular attention we would compute with an attention mask
-#  for batch idx 0 (q_seqlens = 4, kv_seqlens = 6) like:
-#   batch idx: 0 (q_seqlens = 4, kv_seqlens = 6)
-#        k_toks >   0 1 2 3 4 5
-#        q_toks v  _____________
-#               0 | 1 1 1
-#               1 | 1 1 1 1
-#               2 | 1 1 1 1 1
-#               3 | 1 1 1 1 1 1
-#
-# for local attention (with attn_chunk_size = 4) we would compute with an
-#  attention mask like:
-#   batch idx: 0  (q_seqlens = 4, kv_seqlens = 6, attn_chunk_size = 4)
-#        k_toks >   0 1 2 3 4 5
-#        q_toks v  _____________
-#               0 | 1 1 1
-#               1 | 1 1 1 1
-#               2 |         1
-#               3 |         1 1
-#
-# We can simulate this mask using standard flash-attention by breaking the
-#  sequences into local ("virtual") batches, where each local batch item is a
-#  local attention block, so in this case batch idx 0 would be broken up into:
-#
-#   local-batch idx: 0 (q_seqlens = 2, kv_seqlens = 4)  (batch 0)
-#        k_toks >   0 1 2 3
-#        q_toks v  _____________
-#               0 | 1 1 1
-#               1 | 1 1 1 1
-#   local-batch idx: 1 (q_seqlens = 2, kv_seqlens = 2) (batch 0)
-#        k_toks >   4 5
-#        q_toks v  _____________
-#               2 | 1
-#               3 | 1 1
-#
-# e.g. if we have:
-#   attn_chunk_size = 4
-#   query_start_loc_np = [0, 4, 14, 19] (q_seqlens = [4, 10, 5])
-# Then this function would return:
-#                           __b0__  ______b1______  __b2__ < orig batch indices
-#   q_seqlens_local    = [   2,  2,  1,  4,  4,  1,  4,  1]
-#   cu_seqlens_q_local = [0, 4,  6, 10, 14, 18, 19, 23, 24]
-#   seqlens_k_local    = [   4,  2,  4,  4,  4,  1,  4,  1]
-#   block_table_local  : shape[local_virtual_batches, pages_per_local_batch]
-def make_local_attention_virtual_batches(
-    attn_chunk_size: int,
-    query_start_loc_np: np.ndarray,
-    seq_lens_np: np.ndarray,
-    block_table: torch.Tensor,
-    page_size: int = 0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, torch.Tensor]:
-    q_seqlens = query_start_loc_np[1:] - query_start_loc_np[:-1]
-    actual_batch_size = seq_lens_np.shape[0]
-
-    # Handle if we are starting in the middle of a local attention block,
-    #  we assume q_seqlens > 0 (for all elements), for each batch idx we compute
-    #  the number of tokens that are not in the first local attention block and
-    #  then we can simply use a cdiv for the rest.
-    # For example if we have:
-    #   attn_chunk_size = 4
-    #   q_seqlens = [4, 10, 5]
-    #   k_seqlens = [6, 17, 9]
-    # Then we would get:
-    #   new_tokens_in_first_block = [2, 1, 4]
-    #   local_blocks = [2, 4, 2]
-    q_tokens_in_first_block = np.minimum(
-        attn_chunk_size - ((seq_lens_np - q_seqlens) % attn_chunk_size), q_seqlens
-    ).astype(np.int32)
-    tokens_in_last_block = attn_chunk_size + (seq_lens_np % -attn_chunk_size)
-    local_blocks = 1 + cdiv(q_seqlens - q_tokens_in_first_block, attn_chunk_size)
-
-    # Once we know the number of local blocks we can compute the request spans
-    #  for each batch idx, we can figure out the number of "virtual" requests we
-    #  have to make,
-    # For the above example we would get:
-    #   seqlens_q_local = [2, 2, 1, 4, 4, 1, 4, 1]
-    #
-    # First Get batched arange. (E.g., [2, 4, 2] -> [0, 1, 0, 1, 2, 3, 0, 1])
-    #   (TODO: max a utility to share this code with _prepare_inputs)
-    # arange step 1. [2, 4, 2] -> [2, 6, 8]
-    cu_num_blocks = np.cumsum(local_blocks)
-    virtual_batches = cu_num_blocks[-1]
-    # arange step 2. [2, 6, 8] -> [0, 0, 2, 2, 2, 2, 6, 6]
-    block_offsets = np.repeat(cu_num_blocks - local_blocks, local_blocks)
-    # arange step 3. [0, 1, 0, 1, 2, 3, 0, 1]
-    arange = np.arange(virtual_batches, dtype=np.int32) - block_offsets
-    # also compute reverse arange (i.e. [1, 0, 3, 2, 1, 0, 1, 0])
-    rarange = np.repeat(local_blocks, local_blocks) - arange - 1
-    # Then we can compute the seqlens_q_local, handling the fact that the
-    #  first and last blocks could be partial
-    seqlens_q_local = np.repeat(q_seqlens - q_tokens_in_first_block, local_blocks)
-    # set the first block since this may be a partial block
-    seqlens_q_local[arange == 0] = q_tokens_in_first_block
-    # set the remaining blocks
-    seqlens_q_local[arange > 0] = np.minimum(
-        seqlens_q_local - attn_chunk_size * (arange - 1), attn_chunk_size
-    )[arange > 0]
-
-    # convert from q_seqlens to cu_seqlens_q
-    cu_seqlens_q_local = np.pad(np.cumsum(seqlens_q_local), (1, 0)).astype(np.int32)
-
-    # compute the seqlens_k_local,
-    #  basically a full local attention block for all but the last block in each
-    #  batch
-    # For our example this will be:
-    #   seqlens_k_local = [4, 2, 4, 4, 4, 1, 4, 1]
-    seqlens_k_local = np.full(cu_num_blocks[-1], attn_chunk_size, dtype=np.int32)
-    seqlens_k_local[cu_num_blocks - 1] = tokens_in_last_block
-
-    k_seqstarts_absolute = np.repeat(seq_lens_np, local_blocks) - (
-        rarange * attn_chunk_size + np.repeat(tokens_in_last_block, local_blocks)
+    # Rotary embedding dimensions.
+    rotary_embedding_dim = 128
+    rotary_embedding_base = 10000
+    rotary_embedding_max_positions = 2048
+    rotary_embedding_scale = 0
+    rotary_embedding = RotaryEmbedding(
+        type=RotaryPositionalEmbeddingType.GPT_NEOX,
+        rotaryEmbeddingDim=rotary_embedding_dim,
+        rotaryEmbeddingBase=rotary_embedding_base,
+        rotaryEmbeddingScale=rotary_embedding_scale,
+        rotaryEmbeddingMaxPositions=rotary_embedding_max_positions,
+        rotaryScalingType=RotaryScalingType.NONE,
     )
-    # For the example the local attention blocks start at:
-    #                           _b0_  _____b1_____  _b2_
-    #   k_seqstarts_absolute = [0, 4, 4, 8, 12, 16, 4, 8]
-    block_starts = k_seqstarts_absolute // page_size
-    assert attn_chunk_size % page_size == 0, (
-        f"attn_chunk_size {attn_chunk_size} is not "
-        f"divisible by page_size {page_size}"
-    )
-    pages_per_local_batch = attn_chunk_size // page_size
+    # KV-cache dimensions.
+    num_tokens_per_block = 32
+    max_blocks_per_sequence = 32
 
-    # Create a block_table for the local attention blocks
-    # For out example if we have a block-table like (assuming page_size=2):
-    #   block_table = [
-    #     [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9],  < batch 0
-    #     [10, 11, 12, 13, 14, 15, 16, 17, 18, 19],  < batch 1
-    #     [20, 21, 22, 23, 24, 25, 26, 27, 28, 29],  < batch 2
-    #   ]
-    # Then for the local batches we would want a block-table like
-    #   block_table_local = [
-    #     [  0,  1 ], < local-batch 0, (batch 0, starting from k[0])
-    #     [  2,  3 ], < local-batch 1, (batch 0, starting from k[4])
-    #     [ 12, 13 ], < local-batch 2, (batch 1, starting from k[4])
-    #     [ 14, 15 ], < local-batch 3, (batch 1, starting from k[8])
-    #     [ 16, 17 ], < local-batch 4, (batch 1, starting from k[12])
-    #     [ 18, 19 ], < local-batch 5, (batch 1, starting from k[16])
-    #     [ 22, 23 ], < local-batch 6, (batch 2, starting from k[4])
-    #     [ 24, 25 ], < local-batch 7, (batch 2, starting from k[8])
-    #   ]
-    block_indices = np.broadcast_to(
-        np.arange(pages_per_local_batch, dtype=np.int32),
-        (virtual_batches, pages_per_local_batch),
-    ) + np.expand_dims(block_starts, axis=1)
-    block_indices = block_indices.flatten().clip(max=block_table.shape[1] - 1)
-    batch_indices = np.repeat(
-        np.arange(actual_batch_size, dtype=np.int32),
-        local_blocks * pages_per_local_batch,
+    # Create the attention operation
+    fp8_output_scaling = torch.tensor(
+        [1.0], device=torch.device("cuda"), dtype=torch.float32
     )
-    block_table_local = block_table[batch_indices, block_indices].view(
-        virtual_batches, -1
+    kv_scale_orig_quant = torch.tensor(
+        [1.0], device=torch.device("cuda"), dtype=torch.float32
+    )
+    kv_scale_quant_orig = torch.tensor(
+        [1.0], device=torch.device("cuda"), dtype=torch.float32
+    )
+    op = create_op(
+        inputDataType=DeviceDataType.BF16,
+        outputDataType=DeviceDataType.BF16,
+        attentionLayerDimensions=dims,
+        rotaryEmbedding=rotary_embedding,
+        numTokensPerBlock=num_tokens_per_block,
+        qScaling=1.0,
+        maxAttentionWindowSize=max_attention_window_size,
+        cyclicAttentionWindowSize=max_attention_window_size,
+        maxNumBlocksPerSequence=max_blocks_per_sequence,
+        fp8OutputScaling=fp8_output_scaling,
+        kvScaleOrigQuant=kv_scale_orig_quant,
+        kvScaleQuantOrig=kv_scale_quant_orig,
     )
 
-    return seqlens_q_local, cu_seqlens_q_local, seqlens_k_local, block_table_local
-
-
-def _get_sliding_window_configs(
-    vllm_config: VllmConfig,
-) -> set[Optional[tuple[int, int]]]:
-    """Get the set of all sliding window configs used in the model."""
-    sliding_window_configs: set[Optional[tuple[int, int]]] = set()
-    layers = get_layers_from_vllm_config(vllm_config, Attention)
-    for layer in layers.values():
-        assert isinstance(layer.impl, BokAttentionImpl)
-        sliding_window_configs.add(layer.impl.sliding_window)
-    return sliding_window_configs
 
 
 class BokAttentionMetadataBuilder:
@@ -418,17 +277,125 @@ class BokAttentionImpl(AttentionImpl):
         """
         assert output is not None, "Output tensor must be provided."
 
-        # Print all the ops defined in torch.ops.xqa
-        xqa_ops = dir(torch.ops.xqa)
-        print("Available ops in torch.ops.xqa:", xqa_ops)
+        stream = torch.cuda.Stream()
 
-        # Continue with the original operation
+        # Create basic parameters for a smoke test
 
-        py_bok.fwd_kvcache_xqa(
-            q=query,
-            kcache=kv_cache,
-            vcache=kv_cache,
-            k=key,
-            v=value,
+        # Model dimensions.
+        num_layers = 1
+
+        # Attention layer dimensions.
+        num_q_heads = 96
+        num_kv_heads = 8
+        head_dim = 128
+        dims = AttentionLayerDimensions(num_q_heads, num_kv_heads, head_dim)
+        max_attention_window_size = 2048
+
+        # Rotary embedding dimensions.
+        rotary_embedding_dim = 128
+        rotary_embedding_base = 10000
+        rotary_embedding_max_positions = 2048
+        rotary_embedding_scale = 0
+        rotary_embedding = RotaryEmbedding(
+            type=RotaryPositionalEmbeddingType.GPT_NEOX,
+            rotaryEmbeddingDim=rotary_embedding_dim,
+            rotaryEmbeddingBase=rotary_embedding_base,
+            rotaryEmbeddingScale=rotary_embedding_scale,
+            rotaryEmbeddingMaxPositions=rotary_embedding_max_positions,
+            rotaryScalingType=RotaryScalingType.NONE,
         )
-        return output
+        # KV-cache dimensions.
+        num_tokens_per_block = 32
+        max_blocks_per_sequence = 32
+
+        # Create the attention operation
+        fp8_output_scaling = torch.tensor(
+            [1.0], device=torch.device("cuda"), dtype=torch.float32
+        )
+        kv_scale_orig_quant = torch.tensor(
+            [1.0], device=torch.device("cuda"), dtype=torch.float32
+        )
+        kv_scale_quant_orig = torch.tensor(
+            [1.0], device=torch.device("cuda"), dtype=torch.float32
+        )
+        op = create_op(
+            inputDataType=DeviceDataType.BF16,
+            outputDataType=DeviceDataType.BF16,
+            attentionLayerDimensions=dims,
+            rotaryEmbedding=rotary_embedding,
+            numTokensPerBlock=num_tokens_per_block,
+            qScaling=1.0,
+            maxAttentionWindowSize=max_attention_window_size,
+            cyclicAttentionWindowSize=max_attention_window_size,
+            maxNumBlocksPerSequence=max_blocks_per_sequence,
+            fp8OutputScaling=fp8_output_scaling,
+            kvScaleOrigQuant=kv_scale_orig_quant,
+            kvScaleQuantOrig=kv_scale_quant_orig,
+        )
+
+        # Parameters of the particular op call.
+        batch_size = 1
+        context_length = 32
+        sequence_length = context_length + 1
+        context_lengths_host = torch.tensor([context_length], dtype=torch.uint32)
+        context_lengths_device = context_lengths_host.cuda()
+        sequence_lengths = torch.tensor(
+            [sequence_length], device=torch.device("cuda"), dtype=torch.uint32
+        )
+        past_kv_lengths_host = torch.tensor([context_length], dtype=torch.uint32)
+        kv_cache_block_offsets = torch.zeros(
+            batch_size,
+            max_blocks_per_sequence,
+            2,
+            device=torch.device("cuda"),
+            dtype=torch.uint32,
+        )
+
+        q_size = num_q_heads * head_dim
+        kv_size = num_kv_heads * head_dim
+        qkv_size = q_size + 2 * kv_size
+        input_tensor = torch.randn(batch_size, qkv_size, device=torch.device("cuda"))
+
+        actual_kv_cache_pools = [
+            torch.zeros(
+                num_tokens_per_block * 2 * num_kv_heads * head_dim,
+                device=torch.device("cuda"),
+            )
+            for _ in range(num_layers)
+        ]
+        kv_cache_pool_mapping_host = torch.zeros(num_layers, dtype=torch.uint32)
+        kv_cache_pool_pointers_host = torch.tensor(
+            [t.data_ptr() for t in actual_kv_cache_pools], dtype=torch.int64
+        )
+        host_is_generation_flags = torch.tensor([True], dtype=torch.bool)
+        rotary_cos_sin = torch.zeros(
+            rotary_embedding_max_positions,
+            rotary_embedding_dim,
+            2,
+            device=torch.device("cuda"),
+            dtype=torch.float32,
+        )
+        output_scaling = torch.tensor(
+            [1.0], device=torch.device("cuda"), dtype=torch.float32
+        )
+        output = torch.zeros(batch_size, q_size, device=torch.device("cuda"))
+        workspace = torch.zeros(1 << 30, device=torch.device("cuda"))
+        layer_index = 0
+        forward_inplace(
+            op,
+            input_tensor,  # 2d device tensor of floats with dimensions (*, *)
+            context_lengths_host,  # 1d host tensor of uint32_t's
+            context_lengths_device,  # 1d device tensor of uint32_t's
+            sequence_lengths,  # 1d device tensor of uint32_t's
+            past_kv_lengths_host,  # 1d host tensor of uint32_t's
+            kv_cache_block_offsets,  # 3d device tensor of offsets in the pool of uint32_t's with dimensions (*, *, 2)
+            kv_cache_pool_pointers_host,  # 1d host tensor of pointers as int64_t's
+            kv_cache_pool_mapping_host,  # 1d host tensor of uint32_t's
+            host_is_generation_flags,  # 1d device tensor of bools
+            output_scaling,  # 1d device tensor of floats
+            rotary_cos_sin,  # Device tensor of floats with dimensions (*, * , 2)
+            layer_index,  # int
+            output,  # Any 2d device tensor
+            workspace,  # Any device tensor,
+            stream.cuda_stream,  # The stream to run the kernels on.
+        )
