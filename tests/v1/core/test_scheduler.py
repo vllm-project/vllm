@@ -1212,7 +1212,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # value, etc will remain since we lazily evict for prefix cache.
     for block in scheduler.kv_cache_manager.block_pool.blocks:
         assert block.ref_cnt == 0
-    #     assert block._block_hash is None
+        # assert block._block_hash is None
     # assert (
     #     len(scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
     #           ) == 0)

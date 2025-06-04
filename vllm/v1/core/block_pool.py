@@ -85,8 +85,8 @@ class BlockPool:
         """
         cached_blocks = []
         for group_id in kv_cache_group_ids:
-            cached_blocks_one_group = self.cached_block_hash_to_block[
-                BlockHashWithGroupId(block_hash, group_id)]
+            cached_blocks_one_group = self.cached_block_hash_to_block.get(
+                BlockHashWithGroupId(block_hash, group_id))
             if not cached_blocks_one_group:
                 return None
             first_block_id = next(iter(cached_blocks_one_group))
