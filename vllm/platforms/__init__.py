@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
 import traceback
@@ -217,11 +218,8 @@ def resolve_current_platform_cls_qualname() -> str:
             platform_cls_qualname = func()
             if platform_cls_qualname is not None:
                 activated_plugins.append(name)
-                logger.info("Platform plugin %s loaded.", name)
-            logger.warning(
-                "Platform plugin %s function's return value is None", name)
         except Exception:
-            logger.exception("Failed to load platform plugin %s", name)
+            pass
 
     activated_builtin_plugins = list(
         set(activated_plugins) & set(builtin_platform_plugins.keys()))

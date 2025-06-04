@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests whether PTPC w8a8 FP8 computation is enabled correctly.
 
 Run `pytest tests/quantization/test_ptpc_fp8.py --forked`.

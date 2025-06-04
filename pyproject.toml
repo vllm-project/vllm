@@ -1,14 +1,13 @@
 [build-system]
 # Should be mirrored in requirements/build.txt
 requires = [
-    "cmake>=3.26",
+    "cmake>=3.26.1",
     "ninja",
     "packaging>=24.2",
     "setuptools>=77.0.3,<80.0.0",
     "setuptools-scm>=8.0",
     "torch == 2.7.0",
     "wheel",
-    "regex",
     "jinja2",
 ]
 build-backend = "setuptools.build_meta"
@@ -57,16 +56,12 @@ ignore_patterns = [
     ".buildkite/**",
     "benchmarks/**",
     "build/**",
+    "examples/**",
 ]
 
 [tool.ruff]
 # Allow lines to be as long as 80.
 line-length = 80
-exclude = [
-    # External file, leaving license intact
-    "examples/other/fp8/quantizer/quantize.py",
-    "vllm/vllm_flash_attn/flash_attn_interface.pyi"
-]
 
 [tool.ruff.lint.per-file-ignores]
 "vllm/third_party/**" = ["ALL"]
@@ -114,6 +109,7 @@ ignore = [
 ]
 
 [tool.mypy]
+plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
@@ -149,6 +145,7 @@ skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora
 skip_glob = [
     ".buildkite/*",
     "benchmarks/*",
+    "examples/*",
 ]
 use_parentheses = true
 skip_gitignore = true
@@ -174,7 +171,8 @@ plugins.md033.enabled = false # inline-html
 plugins.md046.enabled = false # code-block-style
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
 
-[tool.ty]
+[tool.ty.src]
+root = "./vllm"
 respect-ignore-files = true
 
 [tool.ty.environment]

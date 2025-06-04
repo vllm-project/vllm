@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests whether gptq models with dynamic quantized can be loaded.
 
 Run `pytest tests/quantization/test_gptq_dynamic.py --forked`.

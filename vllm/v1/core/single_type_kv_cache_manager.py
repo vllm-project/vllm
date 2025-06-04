@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         SlidingWindowSpec)
 from vllm.v1.request import Request
@@ -82,8 +83,9 @@ class SingleTypeKVCacheManager(ABC):
         # free queue and ref_cnt == 0), it will be changed from a free block
         # to a computed block when the request is allocated, so we also count
         # it as needed to be allocated.
-        num_evictable_computed_blocks = sum(blk.ref_cnt == 0
-                                            for blk in new_computed_blocks)
+        num_evictable_computed_blocks = sum(
+            blk.ref_cnt == 0 and not blk.is_null
+            for blk in new_computed_blocks)
         return ((num_new_blocks + num_evictable_computed_blocks) *
                 self.num_kv_cache_groups)
 
@@ -133,7 +135,7 @@ class SingleTypeKVCacheManager(ABC):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request, block_hashes: list[BlockHashType],
+    def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
                      num_tokens: int) -> None:
         """
         Cache the blocks for the request.
@@ -187,7 +189,7 @@ class SingleTypeKVCacheManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
+    def find_longest_cache_hit(self, block_hashes: list[BlockHash],
                                max_length: int) -> list[KVCacheBlock]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than 
@@ -228,7 +230,7 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
 
-    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
+    def find_longest_cache_hit(self, block_hashes: list[BlockHash],
                                max_length: int) -> list[KVCacheBlock]:
         computed_blocks: list[KVCacheBlock] = []
         max_num_blocks = max_length // self.block_size
@@ -280,7 +282,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             self.sliding_window_contiguous_blocks += 1
         self._null_block = block_pool.null_block
 
-    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
+    def find_longest_cache_hit(self, block_hashes: list[BlockHash],
                                max_length: int) -> list[KVCacheBlock]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(max_num_blocks) to

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from sglang quantization/tuning_block_wise_kernel.py
 
 import argparse
@@ -11,12 +12,12 @@ from typing import Any
 
 import torch
 import tqdm
-import triton
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _w8a8_block_fp8_matmul,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils import FlexibleArgumentParser
 
 mp.set_start_method("spawn", force=True)
