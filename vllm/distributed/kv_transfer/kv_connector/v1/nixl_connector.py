@@ -612,6 +612,12 @@ class NixlConnectorWorker:
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
 
+        if self._use_flashinfer:
+            # NOTE (NickLucche) When FlahsInfer is used, 
+            self.num_regions *= 2
+            block_len = self.block_len // 2
+        else:
+            block_len = self.block_len
         # Register local/src descr for NIXL xfer.
         blocks_data = []
         for base_addr in self.kv_caches_base_addr[self.engine_id]:
@@ -624,7 +630,18 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len
                 addr = base_addr + block_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, self.block_len, self.tp_rank))
+                blocks_data.append((addr, block_len, self.tp_rank))
+
+            if self._use_flashinfer:
+                # This way K/V descriptors are interleaved
+                # another pass for Vs
+                # TODO When FlashInfer is used, 
+                for block_id in range(self.num_blocks):
+                    block_offset = block_id * self.block_len
+                    addr = base_addr + block_offset
+                    # (addr, len, device id)
+                    v_addr = addr + self.block_len // 2
+                    blocks_data.append((v_addr, block_len, self.tp_rank))
         logger.debug("Created %s blocks for src engine %s and rank %s",
                      len(blocks_data), self.engine_id, self.tp_rank)
 
@@ -753,7 +770,11 @@ class NixlConnectorWorker:
         # Only register the remote's descriptors if current rank pulls from it.
         self.kv_caches_base_addr[
             engine_id] = nixl_agent_meta.kv_caches_base_addr
-        rank_offset = self.tp_rank % tp_ratio * self.block_len \
+        if self._use_flashinfer:
+            block_len = self.block_len // 2
+        else:
+            block_len = self.block_len
+        rank_offset = self.tp_rank % tp_ratio * block_len \
             if not (self.use_mla or is_kv_replicated) else 0
         # Register all remote blocks, but only the corresponding kv heads.
         for base_addr in nixl_agent_meta.kv_caches_base_addr:
@@ -765,6 +786,17 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset + rank_offset
                 # (addr, len, device id)
                 blocks_data.append((addr, self.block_len, remote_tp_rank))
+            if self._use_flashinfer:
+                # This way K/V descriptors are interleaved
+                # another pass for Vs
+                # TODO When FlashInfer is used, 
+                # TODO just refactor, logic is fine but I am not sure whether I should send to remote block_len or block_len//2 to simplify things
+                for block_id in range(nixl_agent_meta.num_blocks):
+                    block_offset = block_id * nixl_agent_meta.block_len
+                    addr = base_addr + block_offset + rank_offset
+                    # (addr, len, device id)
+                    v_addr = addr + nixl_agent_meta.block_len // 2
+                    blocks_data.append((v_addr, block_len, remote_tp_rank))
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and "
             "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
