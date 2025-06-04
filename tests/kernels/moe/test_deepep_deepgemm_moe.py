@@ -246,23 +246,23 @@ def make_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo, dp_size: int,
     q_dtype = torch.float8_e4m3fn
     test_config = test_tensors.config
 
+    mk: FusedMoEModularKernel
     # Make modular kernel
     if test_config.low_latency:
         max_tokens_per_rank = max(
             64, next_power_of_2(test_tensors.rank_tokens.size(0)))
         hidden_size = test_tensors.rank_tokens.size(-1)
 
-        mk: FusedMoEModularKernel = make_ll_modular_kernel(
-            pg=pg,
-            pgi=pgi,
-            max_tokens_per_rank=max_tokens_per_rank,
-            dp_size=dp_size,
-            hidden_size=hidden_size,
-            q_dtype=q_dtype,
-            test_config=test_config)
+        mk = make_ll_modular_kernel(pg=pg,
+                                    pgi=pgi,
+                                    max_tokens_per_rank=max_tokens_per_rank,
+                                    dp_size=dp_size,
+                                    hidden_size=hidden_size,
+                                    q_dtype=q_dtype,
+                                    test_config=test_config)
     else:
-        mk: FusedMoEModularKernel = make_ht_modular_kernel(
-            pg, pgi, dp_size, num_local_experts, q_dtype, test_config)
+        mk = make_ht_modular_kernel(pg, pgi, dp_size, num_local_experts,
+                                    q_dtype, test_config)
 
     return mk
 
