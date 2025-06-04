@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import dataclasses
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 from torch._prims_common import DeviceLikeType
@@ -65,9 +65,6 @@ class BatchUpdate:
             return self._removed.pop()
         return None
 
-    def append_removed(self,req_index: int) -> None:
-        self._removed.append(req_index)
-
     def reset(self):
         self.batch_size = 0
         self._removed = []
@@ -75,6 +72,10 @@ class BatchUpdate:
         self.moved = []
         self.swapped = []
         self.added = []
+
+    def is_empty(self) -> bool:
+        return not(self._removed or self.added or 
+                   self.moved or self.swapped)
 
 
 class LogitsProcessor(ABC):
@@ -99,37 +100,124 @@ class LogitsProcessor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _commit_state_changes(
-        self,
-        batch_update: BatchUpdate,
-    ) -> None:
-        """Called when there are new output tokens, prior
-        to each forward pass.
+    def _commit_prologue(self) -> dict:
+        """Invoked first when committing state changes.
+        
+        Returns:
+          A dictionary containing any state to pass on
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def _commit_add_requests(self, reqs: list[AddedRequestType], 
+                             state: dict) -> None:
+        """Update logits processor state with added requests.
+        
+        Invoked after prologue when committing state changes.
 
         Args:
-            batch_update is non-None iff there have been
-            changes to the batch makeup.
+          reqs: list of requests ((index, params, output tokens) tuples) to add
+          state: state dictionary which can be modified in-place
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def _commit_remove_requests(self, reqs: list[RemovedRequestType], 
+                                state: dict) -> None:
+        """Update logits processor state with removed requests.
+        
+        Invoked after added requests are processed.
+
+        Args:
+          reqs: list of request indices to remove
+          state: state dictionary which can be modified in-place
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def _commit_move_requests(self, moves: list[MovedRequestType],
+                              state: dict) -> None:
+        """Update logits processor state with moved requests.
+        
+        Invoked after removed requests are processed.
+
+        Args:
+          moves: list of one-way (from_index, to_index) move tuples
+          state: state dictionary which can be modified in-place
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def _commit_swap_requests(self, swaps: list[SwappedRequestType],
+                              state: dict) -> None:
+        """Update logits processor state with swapped requests.
+        
+        Invoked after moved requests are processed.
+
+        Args:
+          swaps: list of bidirectional (a_index, b_index) swap tuples
+          state: state dictionary which can be modified in-place
+        """
+        raise NotImplementedError
+    
+    @abstractmethod
+    def _commit_epilogue(self, state: dict) -> None:
+        """Invoked second-to-last when committing state changes.
+        
+        Returns:
+          state: state dictionary which can be modified in-place
         """
         raise NotImplementedError
 
-    def add_request(self, request_info: AddedRequestType) -> None:
+    @abstractmethod
+    def _commit_finally(self, state: dict) -> None:
+        """Always invoked last .
+        
+        Returns:
+          state: state dictionary
+        """
+        raise NotImplementedError
+
+    def _get_batch_size(self) -> int:
+        return self.batch_update.batch_size
+
+    def register_add_request(self, request_info: AddedRequestType) -> None:
         self.batch_update.added.append(request_info)
 
-    def remove_request(self, 
+    def register_remove_request(self, 
                        request_index: RemovedRequestType) -> None:
         self.batch_update.removed.append(request_index)
 
-    def move_request(self,
+    def register_move_request(self,
                      from_index: int, to_index: int) -> None:
         self.batch_update.moved.append((from_index,to_index))
 
-    def swap_requests(self,
+    def register_swap_requests(self,
                       a_index: int, b_index: int) -> None:
         self.batch_update.swapped.append((a_index,b_index))
 
     def commit_state_changes(self, batch_size: int) -> None:
+        """Called when there are new output tokens, prior
+        to each forward pass.
+
+        Updates logits processor state to reflect batch
+        state changes.
+
+        Args:
+            batch_size: number of batch elements
+        """
+        if self.batch_update.is_empty():
+            return
         self.batch_update.batch_size = batch_size
-        self._commit_state_changes(self.batch_update)
+
+        # Invoke subclass-defined commit pipeline
+        state=self._commit_prologue()
+        self._commit_add_requests(self.batch_update.added,state)
+        self._commit_remove_requests(self.batch_update.removed,
+                                     state)
+        self._commit_move_requests(self.batch_update.moved,state)
+        self._commit_swap_requests(self.batch_update.swapped,state)
+        self._commit_epilogue(state)
 
 ###### ----- LogitsProcessor impls below here
 
@@ -160,36 +248,64 @@ class MinPLogitsProcessor(LogitsProcessor):
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
-    def _commit_state_changes(self, batch_update: BatchUpdate):
-        if not batch_update:
-            return
+    def _commit_prologue(self) -> dict:
+        """Set up commit pipeline"""
+        return {"needs_update": False}
 
-        needs_update = False
-        # Process added requests.
-        for index, sampling_params, _ in batch_update.added:
+    def _commit_add_requests(self, reqs: list[AddedRequestType], 
+                             state: dict) -> None:
+        """Process added requests"""
+        assert "needs_update" in state
+        for index, sampling_params, _ in reqs:
             min_p = sampling_params.min_p
             self.min_p_cpu[index] = min_p
             if min_p:
                 self.min_p_count += 1
-                needs_update = True
+                state["needs_update"] = True
 
-        if self.min_p_count:
-            # Process removed and moved requests.
-            for index in batch_update.removed:
-                if self.min_p_cpu[index]:
-                    self.min_p_count -= 1
-                    needs_update = True
+    def _commit_remove_requests(self, reqs: list[RemovedRequestType], 
+                                state: dict) -> None:
+        """Process removed requests"""
+        if not (self.min_p_count and reqs):
+            return        
+        assert "needs_update" in state
+        for index in reqs:
+            if self.min_p_cpu[index]:
+                self.min_p_count -= 1
+                state["needs_update"] = True
 
-            for from_index, to_index in batch_update.moved:
-                min_p = self.min_p_cpu[from_index]
-                self.min_p_cpu[to_index] = min_p
-                if min_p:
-                    needs_update = True
+    def _commit_move_requests(self, moves: list[MovedRequestType],
+                               state: dict) -> None:
+        """Process moved (i1 -> i2) requests"""
+        if not (self.min_p_count and moves):
+            return
+        assert "needs_update" in state
+        for from_index, to_index in moves:
+            min_p = self.min_p_cpu[from_index]
+            self.min_p_cpu[to_index] = min_p
+            if min_p:
+                state["needs_update"] = True
 
-        # Update tensors if needed.
-        size = batch_update.batch_size
-        if self.min_p_count and (needs_update or self.min_p.shape[0] != size):
+    def _commit_swap_requests(self, swaps: list[SwappedRequestType], 
+                              state: dict) -> None:
+        """Process swapped (i1 <-> i2) requests"""
+        if not (self.min_p_count and swaps):
+            return
+        assert "needs_update" in state
+        for adx, bdx in swaps:
+            min_p_a = self.min_p_cpu[adx]
+            min_p_b = self.min_p_cpu[bdx]
+            if min_p_a or min_p_b:
+                state["needs_update"] = True
+            self.min_p_cpu[adx] = min_p_b
+            self.min_p_cpu[bdx] = min_p_a
 
+    def _commit_epilogue(self, state: dict) -> None:
+        """Update tensors if needed"""
+        assert "needs_update" in state
+        size = self._get_batch_size()
+        if self.min_p_count and (state["needs_update"] or 
+                                 self.min_p.shape[0] != size):
             self.min_p = self.min_p_device[:size]
             self.min_p.copy_(self.min_p_cpu_tensor[:size], non_blocking=True)
             self.min_p.unsqueeze_(1)
@@ -229,30 +345,59 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
     def requires_nongreedy(cls) -> bool:
         return False
 
-    def _commit_state_changes(self, batch_update: BatchUpdate):
-        if not batch_update:
-            return
+    def _commit_prologue(self) -> dict:
+        """Set up commit pipeline"""
+        return {"needs_update": False}
 
-        needs_update = False
-        # Process added requests.
-        for index, sampling_params, _ in batch_update.added:
+    def _commit_add_requests(self, reqs: list[AddedRequestType], 
+                             state: dict) -> None:
+        """Process added requests"""
+        assert "needs_update" in state
+        for index, sampling_params, _ in reqs:
             if lb := sampling_params.logit_bias:
                 self.biases[index] = lb
-                needs_update = True
+                state["needs_update"] = True
 
-        if self.biases:
-            # Process removed and moved requests.
-            for index in batch_update.removed:
-                if self.biases.pop(index, None):
-                    needs_update = True
+    def _commit_remove_requests(self, reqs: list[RemovedRequestType], 
+                                state: dict) -> None:
+        """Process removed requests"""
+        if not (self.biases and reqs):
+            return
+        assert "needs_update" in state
+        for index in reqs:
+            if self.biases.pop(index, None):
+                state["needs_update"] = True
 
-            for from_index, to_index in batch_update.moved:
-                if entry := self.biases.pop(from_index, None):
-                    self.biases[to_index] = entry
-                    needs_update = True
+    def _commit_move_requests(self, moves: list[MovedRequestType],
+                               state: dict) -> None:
+        """Process moved (i1 -> i2) requests"""
+        if not (self.biases and moves):
+            return
+        assert "needs_update" in state
+        for from_index, to_index in moves:
+            if entry := self.biases.pop(from_index, None):
+                self.biases[to_index] = entry
+                state["needs_update"] = True
 
-        # Update tensors if needed.
-        if self.biases and needs_update:
+    def _commit_swap_requests(self, swaps: list[SwappedRequestType], 
+                              state: dict) -> None:
+        """Process swapped (i1 <-> i2) requests"""
+        if not (self.biases and swaps):
+            return
+        assert "needs_update" in state
+        for a_index, b_index in swaps:
+            a_entry = self.biases.pop(a_index, None)
+            b_entry = self.biases.pop(b_index, None)
+            state["needs_update"] = bool(a_entry or b_entry)
+            if a_entry:
+                self.biases[b_index] = a_entry
+            if b_entry:
+                self.biases[a_index] = b_entry
+
+    def _commit_epilogue(self, state: dict) -> None:
+        """Update tensors if needed"""
+        assert "needs_update" in state
+        if self.biases and state["needs_update"]:
             reqs, tok_ids, biases = [], [], []
             for req, lb in self.biases.items():
                 reqs.extend([req] * len(lb))
@@ -295,6 +440,69 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     @classmethod
     def requires_nongreedy(cls) -> bool:
         return False
+
+    def _commit_prologue(self) -> dict:
+        """Set up commit pipeline"""
+        return {"needs_update": False}
+
+    def _commit_add_requests(self, reqs: list[AddedRequestType], 
+                             state: dict) -> None:
+        """Process added requests"""
+        assert "needs_update" in state
+        for index, sampling_params, _ in reqs:
+            if lb := sampling_params.logit_bias:
+                self.biases[index] = lb
+                state["needs_update"] = True
+
+    def _commit_remove_requests(self, reqs: list[RemovedRequestType], 
+                                state: dict) -> None:
+        """Process removed requests"""
+        if not (self.biases and reqs):
+            return
+        assert "needs_update" in state
+        for index in reqs:
+            if self.biases.pop(index, None):
+                state["needs_update"] = True
+
+    def _commit_move_requests(self, moves: list[MovedRequestType],
+                               state: dict) -> None:
+        """Process moved (i1 -> i2) requests"""
+        if not (self.biases and moves):
+            return
+        assert "needs_update" in state
+        for from_index, to_index in moves:
+            if entry := self.biases.pop(from_index, None):
+                self.biases[to_index] = entry
+                state["needs_update"] = True
+
+    def _commit_swap_requests(self, swaps: list[SwappedRequestType], 
+                              state: dict) -> None:
+        """Process swapped (i1 <-> i2) requests"""
+        if not (self.biases and swaps):
+            return
+        assert "needs_update" in state
+        for a_index, b_index in swaps:
+            a_entry = self.biases.pop(a_index, None)
+            b_entry = self.biases.pop(b_index, None)
+            state["needs_update"] = bool(a_entry or b_entry)
+            if a_entry:
+                self.biases[b_index] = a_entry
+            if b_entry:
+                self.biases[a_index] = b_entry
+
+    def _commit_epilogue(self, state: dict) -> None:
+        """Update tensors if needed"""
+        assert "needs_update" in state
+        if self.biases and state["needs_update"]:
+            reqs, tok_ids, biases = [], [], []
+            for req, lb in self.biases.items():
+                reqs.extend([req] * len(lb))
+                tok_ids.extend(lb.keys())
+                biases.extend(lb.values())
+
+            self.bias_tensor = self._device_tensor(biases, torch.float32)
+            self.logits_slice = (self._device_tensor(reqs, torch.int32),
+                                 self._device_tensor(tok_ids, torch.int32))
 
     def _commit_state_changes(self, batch_update: BatchUpdate):
         needs_update = False

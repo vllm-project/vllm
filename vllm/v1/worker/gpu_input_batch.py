@@ -274,12 +274,13 @@ class InputBatch:
         # Append to end
         return self.num_reqs
 
-    def _register_add_request(self, request: "CachedRequestState") -> None:
+    def _register_add_request(self, request: "CachedRequestState") -> int:
         """Track add-request operations"""
         req_index = self._get_next_add_index()
         assert req_index < self.max_num_reqs
         self.batch_update.added.append((req_index,request.sampling_params,
                                         request.output_token_ids))
+        return req_index
 
     def has_step_removed_requests(self) -> bool:
         return self.batch_update.has_removed()
@@ -406,7 +407,7 @@ class InputBatch:
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
-        self.batch_update.append_removed(req_index)
+        self.batch_update.removed.append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
@@ -439,11 +440,6 @@ class InputBatch:
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
         return req_index
-
-    def _register_swap_requests(self, a: int, b: int) -> None:
-        """Track swap operations (exchanges of requests at
-        respective differing indices.)"""
-        self.batch_update.swapped.append((a,b))
 
     def swap_states(self, i1: int, i2: int) -> None:
         self.batch_update.swapped.append((i1,i2))
