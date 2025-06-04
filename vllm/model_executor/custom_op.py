@@ -16,6 +16,22 @@ class CustomOp(nn.Module):
     Dispatches the forward method to the appropriate backend.
     """
 
+    def __new__(cls, *args, **kwargs):
+        try:
+            op_name = cls.name
+        except AttributeError:
+            raise TypeError(
+                f"Cannot instantiate '{cls.__name__}': its 'name' attribute "
+                f"was not set, possibly because it was not decorated with "
+                f"@CustomOp.register, or it's the CustomOp base class itself."
+            ) from None
+
+        if op_name not in cls.op_registry_oot:
+            op_cls_to_instantiate = cls
+        else:
+            op_cls_to_instantiate = cls.op_registry_oot[op_name]
+        return super().__new__(op_cls_to_instantiate)
+
     def __init__(self):
         super().__init__()
         self._forward_method = self.dispatch_forward()
@@ -138,15 +154,22 @@ class CustomOp(nn.Module):
     # - MyOp.enabled()
     # - op_registry["my_op"].enabled()
     op_registry: dict[str, type['CustomOp']] = {}
+    op_registry_oot: dict[str, type['CustomOp']] = {}
 
     # Decorator to register custom ops.
     @classmethod
-    def register(cls, name: str):
+    def register(cls, name: str, custom_op=False):
 
         def decorator(op_cls):
-            assert name not in cls.op_registry, f"Duplicate op name: {name}"
-            op_cls.name = name
-            cls.op_registry[name] = op_cls
+            if custom_op:
+                assert name not in cls.op_registry_oot, \
+                    f"Duplicate op name: {name}"
+                op_cls.name = name
+                cls.op_registry_oot[name] = op_cls
+            else:
+                assert name not in cls.op_registry, f"Duplicate op name: {name}"
+                op_cls.name = name
+                cls.op_registry[name] = op_cls
             return op_cls
 
         return decorator
