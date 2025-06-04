@@ -128,7 +128,6 @@ __device_inline__ static void set_fp16_ovfl(bool const value) {
   } while (0)
 
 enum struct QuickReduceProfile {
-  ONESHOT_F16 = 0,
   TWOSHOT_F16 = 1,
   TWOSHOT_FP8 = 2,
   TWOSHOT_Q8 = 3,
