@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
@@ -42,8 +42,3 @@ class SamplingMetadata:
 
     # req_index -> bad_words_token_ids
     bad_words_token_ids: dict[int, list[list[int]]]
-
-
-@dataclass
-class PoolingMetadata:
-    additional_data: Optional[Any] = None

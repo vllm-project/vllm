@@ -79,17 +79,18 @@ class SimplePooler(nn.Module):
 
     def get_prompt_lens(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> torch.Tensor:
         if isinstance(pooling_metadata, V1PoolingMetadata):
             return pooling_metadata.prompt_lens
+        assert isinstance(hidden_states, torch.Tensor)
         return PoolingTensors.from_pooling_metadata(
             pooling_metadata, hidden_states.device).prompt_lens
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         raise NotImplementedError
@@ -99,7 +100,7 @@ class SimplePooler(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.extract_states(hidden_states, pooling_metadata)
@@ -112,10 +113,18 @@ class CLSPool(SimplePooler):
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
+
+        if isinstance(hidden_states, list):
+            result = []
+            for req_state, prompt_len in zip(hidden_states, prompt_lens):
+                assert prompt_len == req_state.shape[0], \
+                    "partial prefill not supported with CLS pooling"
+                result.append(req_state[0])
+            return result
 
         first_token_flat_indices = torch.zeros_like(prompt_lens)
         first_token_flat_indices[1:] += torch.cumsum(prompt_lens, dim=0)[:-1]
@@ -126,9 +135,12 @@ class LastPool(SimplePooler):
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
+        if isinstance(hidden_states, list):
+            return [h[-1] for h in hidden_states]
+
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
 
         last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1
@@ -139,10 +151,16 @@ class AllPool(SimplePooler):
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
+
+        if isinstance(hidden_states, list):
+            for req_state, prompt_len in zip(hidden_states, prompt_lens):
+                assert prompt_len == req_state.shape[0], \
+                    "partial prefill not supported with ALL pooling"
+            return hidden_states
 
         offset = 0
         pooled_data = list[torch.Tensor]()
@@ -157,10 +175,18 @@ class MeanPool(SimplePooler):
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
+
+        if isinstance(hidden_states, list):
+            result = []
+            for req_state, prompt_len in zip(hidden_states, prompt_lens):
+                assert prompt_len == req_state.shape[0], \
+                    "partial prefill not supported with mean pooling"
+                result.append(torch.mean(req_state, dim=0))
+            return result
 
         cumsum = torch.cumsum(hidden_states, dim=0)
         start_indices = torch.cat([
@@ -203,28 +229,37 @@ class StepPool(SimplePooler):
 
     def extract_states(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
         prompt_token_ids = self.get_prompt_token_ids(pooling_metadata)
 
-        returned_token_ids = self.returned_token_ids
-        if returned_token_ids is not None and len(returned_token_ids) > 0:
-            hidden_states = hidden_states[:, returned_token_ids]
+        pooled_data: list[torch.Tensor] = []
 
+        if isinstance(hidden_states, list):
+            for req_state, prompt_len in zip(hidden_states, prompt_lens):
+                assert prompt_len == req_state.shape[0], \
+                    "partial prefill not supported with mean pooling"
+            pooled_data = hidden_states
+        else:
+            offset = 0
+            for prompt_len in prompt_lens:
+                pooled_data_i = hidden_states[offset:offset + prompt_len]
+                offset += prompt_len
+                pooled_data.append(pooled_data_i)
+
+        pooled_data = []
+        returned_token_ids = self.returned_token_ids
         step_tag_id = self.step_tag_id
 
-        offset = 0
-        pooled_data = list[torch.Tensor]()
-        for i, prompt_len in enumerate(prompt_lens):
-            pooled_data_i = hidden_states[offset:offset + prompt_len]
-            if step_tag_id is not None:
-                pooled_data_i = pooled_data_i[prompt_token_ids[i] ==
-                                              step_tag_id]
+        for data, token_id in zip(pooled_data, prompt_token_ids):
+            if returned_token_ids is not None and len(returned_token_ids) > 0:
+                data = data[:, returned_token_ids]
 
-            offset += prompt_len
-            pooled_data.append(pooled_data_i)
+            if step_tag_id is not None:
+                data = data[token_id == step_tag_id]
+            pooled_data.append(data)
 
         return pooled_data
 
@@ -246,6 +281,7 @@ class PoolerHead(nn.Module):
                 for _, pooling_param in pooling_metadata.seq_groups
             ]
         else:
+            assert isinstance(pooled_data, list)
             dimensions_list = [
                 pooling_param.dimensions
                 for pooling_param in pooling_metadata.pooling_params
@@ -343,26 +379,39 @@ class ClassifierPooler(nn.Module):
 
     def get_prompt_lens(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> torch.Tensor:
         if isinstance(pooling_metadata, V1PoolingMetadata):
             return pooling_metadata.prompt_lens
+        assert isinstance(hidden_states, torch.Tensor)
         return PoolingTensors.from_pooling_metadata(
             pooling_metadata, hidden_states.device).prompt_lens
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         """Pools sentence pair scores from the hidden_states."""
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
 
+        pooled_data = list[torch.Tensor]()
+        if isinstance(hidden_states, list):
+            for req_state, prompt_len in zip(hidden_states, prompt_lens):
+                assert prompt_len == req_state.shape[0], \
+                    "partial prefill not supported with classifier"
+            pooled_data = hidden_states
+        else:
+            offset = 0
+            for prompt_len in prompt_lens:
+                pooled_data_i = hidden_states[offset:offset + prompt_len]
+                offset += prompt_len
+                pooled_data.append(pooled_data_i)
+
         offset = 0
         pooled_data_lst = []
-        for prompt_len in prompt_lens:
-            pooled_data_i = hidden_states[offset:offset + prompt_len]
+        for pooled_data_i in pooled_data:
 
             if self.pooler is not None:
                 final_shape_tensor = self.pooler(pooled_data_i)
@@ -370,7 +419,6 @@ class ClassifierPooler(nn.Module):
                 final_shape_tensor = self.classifier(pooled_data_i)
 
             pooled_data_lst.append(final_shape_tensor)
-            offset += prompt_len
 
         pooled_output = torch.stack(pooled_data_lst)
 

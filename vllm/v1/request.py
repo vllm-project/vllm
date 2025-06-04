@@ -119,7 +119,8 @@ class Request:
             eos_token_id=request.eos_token_id,
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
-                sampling_params=request.sampling_params),
+                sampling_params=request.sampling_params) \
+                    if request.sampling_params else None,
             cache_salt=request.cache_salt,
         )
 

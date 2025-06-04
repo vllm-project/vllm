@@ -60,8 +60,13 @@ class CPUPoolingModelRunner(
             intermediate_tensors,
         }
 
-        with set_forward_context(model_input.attn_metadata, self.vllm_config,
-                                 model_input.virtual_engine):
+        assert model_input.seq_lens is not None
+        seq_lens_tensor = torch.tensor(model_input.seq_lens, dtype=torch.int32)
+
+        with set_forward_context(model_input.attn_metadata,
+                                 self.vllm_config,
+                                 model_input.virtual_engine,
+                                 seq_lens=seq_lens_tensor):
             hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.

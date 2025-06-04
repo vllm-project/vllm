@@ -62,8 +62,8 @@ class StructuredOutputManager:
             return
 
         if TYPE_CHECKING:
-            assert request.sampling_params is not None
-            assert request.sampling_params.guided_decoding is not None
+            assert request.sampling_params is not None and \
+                request.sampling_params.guided_decoding is not None
 
         # Initialize the backend the first time it is needed.
         #

@@ -343,18 +343,12 @@ class BertModel(nn.Module, SupportsQuant):
             hidden_states = inputs_embeds
         else:
             attn_metadata = get_forward_context().attn_metadata
-            seq_lens = None
-            if attn_metadata is not None:  # Can be None during warmup
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = next(iter(attn_metadata.values()))
-                seq_lens = getattr(attn_metadata, "seq_lens_tensor",
-                                   attn_metadata.seq_lens)
-                assert seq_lens is not None
-            hidden_states = self.embeddings(input_ids=input_ids,
-                                            seq_lens=seq_lens,
-                                            position_ids=position_ids,
-                                            token_type_ids=token_type_ids)
-
+            assert hasattr(attn_metadata, "seq_lens_tensor")
+            hidden_states = self.embeddings(
+                input_ids=input_ids,
+                seq_lens=attn_metadata.seq_lens_tensor,
+                position_ids=position_ids,
+                token_type_ids=token_type_ids)
         return self.encoder(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -417,11 +411,13 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        token_type_ids: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids=input_ids,
                                    position_ids=positions,
+                                   token_type_ids=token_type_ids,
                                    inputs_embeds=inputs_embeds,
                                    intermediate_tensors=intermediate_tensors)
 

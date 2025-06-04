@@ -721,7 +721,8 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = sampled_token_ids[req_index]
+            generated_token_ids = sampled_token_ids[
+                req_index] if sampled_token_ids else []
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
@@ -773,8 +774,16 @@ class Scheduler(SchedulerInterface):
                     del new_token_ids[num_new:]  # Trim new tokens if needed.
                     break
 
+            pooler_output = None
+            if pooler_outputs:
+                pooler_output = pooler_outputs[req_index]
+                stopped = check_stop(request, self.max_model_len,
+                                     pooler_output)
+                if stopped:
+                    kv_transfer_params = self._free_request(request)
+
             # Extract sample logprobs if needed.
-            if request.sampling_params \
+            if request.sampling_params is not None \
                 and request.sampling_params.logprobs is not None and logprobs:
                 # NOTE: once we support N tokens per step (spec decode),
                 # the outer lists can be of length > 1.
@@ -800,9 +809,8 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or kv_transfer_params:
-                pooler_output = pooler_outputs[req_index] \
-                    if pooler_outputs else None
+            if new_token_ids or pooler_output is not None \
+                or kv_transfer_params:
 
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(

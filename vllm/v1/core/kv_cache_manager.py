@@ -133,8 +133,7 @@ class KVCacheManager:
         # When the request requires prompt logprobs, we skip prefix caching.
         if (not self.enable_caching
                 or (request.sampling_params is not None
-                    and request.sampling_params.prompt_logprobs is not None)
-                or request.pooling_params is not None):
+                    and request.sampling_params.prompt_logprobs is not None)):
             return KVCacheBlocks.create_empty(), 0
 
         # The block hashes for the request may already be computed
