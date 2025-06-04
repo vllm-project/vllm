@@ -44,6 +44,11 @@ try:
 except ImportError:
     pd = PlaceholderModule("pandas")
 
+try:
+    import librosa
+except ImportError:
+    librosa = PlaceholderModule("librosa")
+
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
@@ -646,13 +651,6 @@ class BurstGPTDataset(BenchmarkDataset):
         if self.dataset_path is None:
             raise ValueError("dataset_path must be provided for loading data.")
 
-        try:
-            import pandas as pd
-        except ImportError as e:
-            raise ImportError(
-                "Pandas is required for BurstGPTDataset. Please install it "
-                "using `pip install pandas`.") from e
-
         df = pd.read_csv(self.dataset_path)
         # Filter to keep only GPT-4 rows.
         gpt4_df = df[df["Model"] == "GPT-4"]
@@ -1138,13 +1136,6 @@ class ASRDataset(HuggingFaceDataset):
         output_len: Optional[int] = None,
         **kwargs,
     ) -> list:
-        try:
-            import librosa
-        except ImportError as e:
-            raise ImportError(
-                "librosa is required for ASRDataset. Please install it "
-                "using `pip install librosa`.") from e
-
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
