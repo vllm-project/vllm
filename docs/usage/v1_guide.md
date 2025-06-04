@@ -55,7 +55,7 @@ This living user guide outlines a few known **important changes and limitations*
 | **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
 | **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
 | **Structured Output Alternative Backends**  | <nobr>🟡 Planned</nobr>                                                           |
-| **Embedding Models**                        | <nobr>🚧 WIP ([PR #18015](https://github.com/vllm-project/vllm/pull/18015))</nobr> |
+| **Embedding Models**                        | <nobr>🚧 WIP ([PR #16188](https://github.com/vllm-project/vllm/pull/16188))</nobr> |
 | **Mamba Models**                            | <nobr>🟡 Planned</nobr>                                                           |
 | **Encoder-Decoder Models**                  | <nobr>🟠 Delayed</nobr>                                                           |
 | **Request-level Structured Output Backend** | <nobr>🔴 Deprecated</nobr>                                                        |
@@ -145,9 +145,9 @@ vLLM V1 currently excludes model architectures with the `SupportsV0Only` protoco
 and the majority fall into the following categories. V1 support for these models will be added eventually.
 
 **Embedding Models**  
-Initially, we will create a [separate model runner](https://github.com/vllm-project/vllm/pull/18015) to provide V1 support without conflicting with other ongoing work.
+The initial support will be provided by [PR #16188](https://github.com/vllm-project/vllm/pull/16188).
 
-Later, we will consider using [hidden states processor](https://github.com/vllm-project/vllm/issues/12249), which is based on [global logits processor](https://github.com/vllm-project/vllm/pull/13360) to enable simultaneous generation and embedding using the same engine instance in V1. [PR #16188](https://github.com/vllm-project/vllm/pull/16188) is the first step towards enabling this.
+Later, we will consider using [hidden states processor](https://github.com/vllm-project/vllm/issues/12249), which is based on [global logits processor](https://github.com/vllm-project/vllm/pull/13360) to enable simultaneous generation and embedding using the same engine instance in V1.
 
 **Mamba Models**  
 Models using selective state-space mechanisms (instead of standard transformer attention)
