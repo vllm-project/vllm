@@ -282,6 +282,45 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def apply_repetition_penalties_torch(
+        logits: torch.Tensor, prompt_mask: torch.Tensor,
+        output_mask: torch.Tensor, repetition_penalties: torch.Tensor) -> None:
+    repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(
+        1, logits.size(1))
+    # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
+    penalties = torch.where(prompt_mask | output_mask, repetition_penalties,
+                            1.0)
+    # If logits are positive, divide by penalty, otherwise multiply by penalty.
+    scaling = torch.where(logits > 0, 1.0 / penalties, penalties)
+    logits *= scaling
+
+
+def apply_repetition_penalties_cuda(
+        logits: torch.Tensor, prompt_mask: torch.Tensor,
+        output_mask: torch.Tensor, repetition_penalties: torch.Tensor) -> None:
+    torch.ops._C.apply_repetition_penalties_(logits, prompt_mask, output_mask,
+                                             repetition_penalties)
+
+
+def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
+                               output_mask: torch.Tensor,
+                               repetition_penalties: torch.Tensor) -> None:
+    """Apply repetition penalties to logits in-place.
+
+    Args:
+        logits: The logits tensor of shape [num_seqs, vocab_size].
+        prompt_mask: A boolean tensor indicating which tokens appear in the prompt.
+        output_mask: A boolean tensor indicating which tokens appear in the output.
+        repetition_penalties: The repetition penalties of shape (num_seqs, ).
+    """
+    if current_platform.is_cuda() and logits.is_contiguous():
+        apply_repetition_penalties_cuda(logits, prompt_mask, output_mask,
+                                        repetition_penalties)
+    else:
+        apply_repetition_penalties_torch(logits, prompt_mask, output_mask,
+                                         repetition_penalties)
+
+
 def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
                            input_tokens: torch.Tensor,
                            sampled_token_ids: torch.Tensor,
