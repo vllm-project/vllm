@@ -515,7 +515,7 @@ class EmbeddingAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
 
         def pattern(
             arg2_1: torch.Tensor,
-            mul: torch.Tensor,
+            mul_6: torch.Tensor,
             unsqueeze: torch.Tensor,
             full_default: torch.Tensor,
             rmsnorm_result: torch.Tensor,
@@ -523,7 +523,7 @@ class EmbeddingAllReduceRMSNormStaticFP8Pattern(AllReduceRMSNormQuantPattern):
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            embedding = torch.ops.aten.embedding.default(arg2_1, mul)
+            embedding = torch.ops.aten.embedding.default(arg2_1, mul_6)
             where = torch.ops.aten.where.self(unsqueeze, full_default,
                                               embedding)
             all_reduce = tensor_model_parallel_all_reduce(where)
@@ -820,12 +820,8 @@ class SequenceParallelismPass(VllmInductorPass):
 
     def __call__(self, graph: fx.Graph):
         self.begin()
-        # if get_tp_group().rank == 0:
-        #     print(f"before sp graph {graph}")
         self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_sequence_parallelism_pass")
-        if get_tp_group().rank == 0:
-            print(f"Replaced {count} patterns, after sp graph {graph}")
         self.end_and_log()

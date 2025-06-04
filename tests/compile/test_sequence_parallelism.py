@@ -148,7 +148,7 @@ class TestQuantModel(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"],
                     reason="Only test on CUDA")
-def test_sequence_parallelism_pass(test_model: torch.nn.Module,
+def test_sequence_parallelism_pass(test_model: type[torch.nn.Module],
                                    batch_size: int, seq_len: int,
                                    hidden_size: int, dtype: torch.dtype):
     num_processes = 2
@@ -166,7 +166,7 @@ def test_sequence_parallelism_pass(test_model: torch.nn.Module,
 
 
 def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
-                                            test_model: torch.nn.Module,
+                                            test_model: type[torch.nn.Module],
                                             batch_size: int, seq_len: int,
                                             hidden_size: int,
                                             dtype: torch.dtype):
