@@ -1750,6 +1750,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata: Optional[dict[str, Any]] = None
         else:
             query_start_loc = self.query_start_loc[:num_reqs + 1]
+            # Make sure max_model_len is used at the graph capture time.
+            self.seq_lens_np[:num_reqs] = self.max_model_len
+            self.seq_lens_np[num_reqs:] = 0
+            self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
+                                           non_blocking=True)
             seq_lens = self.seq_lens[:num_reqs]
 
             common_attn_metadata = CommonAttentionMetadata(
