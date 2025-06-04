@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV-Cache Utilities."""
 
 import os
 from collections import defaultdict, deque
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, sha256
+from vllm.utils import GiB_bytes, cdiv, sha256
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
@@ -137,6 +138,9 @@ class KVCacheBlock:
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
     prev_free_block: Optional["KVCacheBlock"] = None
     next_free_block: Optional["KVCacheBlock"] = None
+
+    # Whether the block is a null block that should never be cached.
+    is_null: bool = False
 
     def incr_ref(self):
         self.ref_cnt += 1
@@ -478,6 +482,15 @@ def hash_request_tokens(hash_function: Any, block_size: int,
     return ret
 
 
+def max_memory_usage_bytes(vllm_config: VllmConfig,
+                           kv_cache_specs: Iterable[KVCacheSpec]) -> int:
+    """
+    Get the maximum memory usage in bytes for the given KV cache specs.
+    """
+    return sum(
+        spec.max_memory_usage_bytes(vllm_config) for spec in kv_cache_specs)
+
+
 def estimate_max_model_len(vllm_config: VllmConfig,
                            kv_cache_spec: dict[str, KVCacheSpec],
                            available_memory: int) -> int:
@@ -499,11 +512,8 @@ def estimate_max_model_len(vllm_config: VllmConfig,
         # Modify the max_model_len for this calculation
         vllm_config.model_config.max_model_len = model_len
         # Calculate memory needed for the given model length
-        memory_needed = sum(
-            (layer_spec.max_memory_usage_bytes(vllm_config)
-             for layer_spec in kv_cache_spec.values()),
-            start=0,
-        )
+        memory_needed = max_memory_usage_bytes(vllm_config,
+                                               kv_cache_spec.values())
         return memory_needed <= available_memory
 
     # Binary search for the maximum model length
@@ -548,9 +558,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
                          "initializing the engine.")
 
     max_model_len = vllm_config.model_config.max_model_len
-    needed_memory = 0
-    for layer_spec in kv_cache_spec.values():
-        needed_memory += layer_spec.max_memory_usage_bytes(vllm_config)
+    needed_memory = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
 
     if needed_memory > available_memory:
         # Estimate the maximum model length that can fit in the available memory
@@ -558,16 +566,17 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
                                                    available_memory)
         estimated_msg = ""
         if estimated_max_len > 0:
-            estimated_msg = " Based on the available memory,"
-            f" the estimated maximum model length is {estimated_max_len}."
+            estimated_msg = (
+                "Based on the available memory, "
+                f"the estimated maximum model length is {estimated_max_len}.")
 
         raise ValueError(
             f"To serve at least one request with the models's max seq len "
             f"({max_model_len}), ({needed_memory/GiB_bytes:.2f} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory/GiB_bytes:.2f} GiB)."
+            f"memory ({available_memory/GiB_bytes:.2f} GiB). "
             f"{estimated_msg} "
-            f" Try increasing `gpu_memory_utilization` or decreasing "
+            f"Try increasing `gpu_memory_utilization` or decreasing "
             f"`max_model_len` when initializing the engine.")
 
 
@@ -613,6 +622,24 @@ def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
 
     layer_keys = {layer.type_id for layer in kv_cache_spec.values()}
     return len(layer_keys) == 1
+
+
+def get_max_concurrency_for_kv_cache_config(
+        vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> float:
+    """
+    Get the maximum concurrency for the given KV cache configuration.
+    """
+    num_layer_per_group = max(
+        len(group.layer_names) for group in kv_cache_config.kv_cache_groups)
+    max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
+        vllm_config,
+        (group.kv_cache_spec for group in kv_cache_config.kv_cache_groups))
+    memory_per_block = kv_cache_config.kv_cache_groups[
+        0].kv_cache_spec.page_size_bytes * num_layer_per_group
+    num_block_per_request = cdiv(max_memory_usage_per_request,
+                                 memory_per_block)
+    max_concurrency = kv_cache_config.num_blocks / num_block_per_request
+    return max_concurrency
 
 
 def get_num_blocks(vllm_config: VllmConfig, num_layers: int,
@@ -674,17 +701,6 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
             "Overriding num_gpu_blocks=%d with "
             "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
 
-    num_tokens = num_blocks * vllm_config.cache_config.block_size
-    num_tokens_str = f"{num_tokens:,}"
-    logger.info("GPU KV cache size: %s tokens", num_tokens_str)
-    max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
-    max_concurrency = num_tokens / vllm_config.model_config.max_model_len
-    logger.info(
-        "Maximum concurrency for %s tokens per request: %.2fx",
-        max_model_len_str,
-        max_concurrency,
-    )
-
     per_layer_size = page_size * num_blocks
     # All layers have the same KV cache spec, so we create one kv cache group
     # for all layers.
@@ -702,6 +718,15 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
     )
+
+    num_tokens = num_blocks * vllm_config.cache_config.block_size
+    num_tokens_str = f"{num_tokens:,}"
+    logger.info("GPU KV cache size: %s tokens", num_tokens_str)
+    max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
+    max_concurrency = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config)
+    logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                max_model_len_str, max_concurrency)
     return kv_cache_config
 
 
@@ -841,6 +866,12 @@ def _get_kv_cache_config_uniform_page_size(
         kv_cache_tensors.append(
             KVCacheTensor(size=per_memory_pool_size, shared_by=shared_by))
 
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+    )
+
     # Print the KV cache size and maximum concurrency.
     num_tokens = num_blocks // len(
         grouped_layers) * vllm_config.cache_config.block_size
@@ -854,12 +885,6 @@ def _get_kv_cache_config_uniform_page_size(
         "Maximum concurrency for %s tokens per request: %.2fx",
         max_model_len_str,
         max_concurrency,
-    )
-
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,
-        kv_cache_tensors=kv_cache_tensors,
-        kv_cache_groups=kv_cache_groups,
     )
     return kv_cache_config
 

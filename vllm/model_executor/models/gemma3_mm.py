@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, Set, Tuple, TypedDict
+from typing import Any, Literal, Optional, TypedDict
 
 import torch
 from torch import nn
@@ -504,18 +505,12 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         return next(self.parameters()).dtype
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            if d.shape != expected_dims:
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_dims}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
+        image_size = self.config.vision_config.image_size
+        expected_dims = (3, image_size, image_size)
+        if data.shape[1:] != expected_dims:
+            raise ValueError(
+                "The expected shape of pixel values per image per batch is "
+                f"{expected_dims}. You supplied {tuple(data.shape)}.")
         return data
 
     def _parse_and_validate_image_input(
@@ -549,9 +544,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         vision_tower: SiglipVisionModel,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-        target_dtype = vision_tower.get_input_embeddings().weight.dtype
-        image_features = vision_tower(pixel_values.to(dtype=target_dtype))
-        return image_features
+        return vision_tower(pixel_values)
 
     def _process_image_input(
         self,
@@ -701,8 +694,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file contains a new class `KVLookupBufferBase` that allows developers to
 think of KV cache operations as inserting new KV cache entries (`insert`)

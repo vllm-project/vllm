@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
 import mimetypes
@@ -10,6 +11,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageChops
 
+from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (MediaConnector,
                                    merge_and_sort_multimodal_metadata)
@@ -53,7 +55,7 @@ def get_supported_suffixes() -> tuple[str, ...]:
 
 
 def _image_equals(a: Image.Image, b: Image.Image) -> bool:
-    return (np.asarray(a) == np.asarray(b.convert(a.mode))).all()
+    return (np.asarray(a) == np.asarray(convert_image_mode(b, a.mode))).all()
 
 
 @pytest.mark.asyncio

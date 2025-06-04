@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the with and without prefix caching."""
 
 import copy
@@ -39,7 +40,6 @@ def make_request(request_id,
         sampling_params=SamplingParams(max_tokens=17,
                                        prompt_logprobs=prompt_logprobs),
         eos_token_id=100,
-        arrival_time=0,
         lora_request=None,
         cache_salt=cache_salt,
     )

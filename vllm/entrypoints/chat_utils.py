@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import json
@@ -339,7 +340,7 @@ def resolve_hf_chat_template(
     tools: Optional[list[dict[str, Any]]],
     *,
     model_config: ModelConfig,
-    trsut_remote_code: Optional[bool] = None,
+    trust_remote_code: Optional[bool] = None,
 ) -> Optional[str]:
     # 1st priority: The given chat template
     if chat_template is not None:
@@ -387,7 +388,6 @@ def resolve_hf_chat_template(
 def _resolve_chat_template_content_format(
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
-    given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
     *,
     model_config: ModelConfig,
@@ -408,7 +408,7 @@ def _resolve_chat_template_content_format(
     detected_format = ("string" if jinja_text is None else
                        _detect_content_format(jinja_text, default="string"))
 
-    return detected_format if given_format == "auto" else given_format
+    return detected_format
 
 
 @lru_cache
@@ -451,7 +451,6 @@ def resolve_chat_template_content_format(
     detected_format = _resolve_chat_template_content_format(
         chat_template,
         tools,
-        given_format,
         tokenizer,
         model_config=model_config,
     )
@@ -462,7 +461,8 @@ def resolve_chat_template_content_format(
         detected_format=detected_format,
     )
 
-    return detected_format
+    return detected_format if given_format == "auto" else given_format
+
 
 
 ModalityStr = Literal["image", "audio", "video", "image_embeds"]
@@ -557,6 +557,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "(<audio>./</audio>)"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
+            if model_type == "internvl_chat":
+                return "<video>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             if model_type == "qwen2_5_omni":
@@ -1251,7 +1253,7 @@ def apply_hf_chat_template(
         # investigation.
         logger.exception(
             "An error occurred in `transformers` while applying chat template")
-        raise ValueError from e
+        raise ValueError(str(e)) from e
 
 def apply_mistral_chat_template(
     tokenizer: MistralTokenizer,
@@ -1280,7 +1282,7 @@ def apply_mistral_chat_template(
     # We convert those assertion errors to ValueErrors so they can be
     # are properly caught in the preprocessing_input step
     except (AssertionError, MistralCommonException) as e:
-        raise ValueError from e
+        raise ValueError(str(e)) from e
 
     # External library exceptions can sometimes occur despite the framework's
     # internal exception management capabilities.
@@ -1291,7 +1293,7 @@ def apply_mistral_chat_template(
         logger.exception(
             "An error occurred in `mistral_common` while applying chat "
             "template")
-        raise ValueError from e
+        raise ValueError(str(e)) from e
 
 def random_tool_call_id() -> str:
     return f"chatcmpl-tool-{random_uuid()}"

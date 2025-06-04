@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -23,8 +24,7 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
-                    Union)
+from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -559,8 +559,8 @@ class MiniCPMO(MiniCPMV2_6):
         self.audio_encoder_layer = -1
         return model
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["tts"])
         return loader.load_weights(weights)
 

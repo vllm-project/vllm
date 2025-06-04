@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
 from dataclasses import dataclass
@@ -182,6 +183,7 @@ class KVCacheManager:
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
+        num_draft_tokens: int = 0,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
@@ -283,7 +285,7 @@ class KVCacheManager:
         # generated (accepted) tokens.
         self.coordinator.cache_blocks(
             request, self.req_to_block_hashes[request.request_id],
-            num_computed_tokens + num_new_tokens - len(request.spec_token_ids))
+            num_computed_tokens + num_new_tokens - num_draft_tokens)
 
         return KVCacheBlocks(new_blocks)
 
