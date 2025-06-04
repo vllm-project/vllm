@@ -126,8 +126,9 @@ class XPUPlatform(Platform):
             # FIXME(kunshang):
             # spawn needs calling `if __name__ == '__main__':``
             # fork is not supported for xpu start new process.
-            logger.warning(
-                "Please use spawn as start method if you want to use mp.")
+            if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
+                logger.warning(
+                    "Please use spawn as start method if you want to use mp.")
         elif parallel_config.distributed_executor_backend != "ray" and \
                 parallel_config.distributed_executor_backend != "uni":
             logger.warning(
