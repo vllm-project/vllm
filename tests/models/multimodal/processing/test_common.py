@@ -245,7 +245,7 @@ def _test_processing_correctness_one(
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
     "THUDM/glm-4v-9b",
-    "ibm-granite/granite-speech-3.3-8b",
+    "ibm-granite/granite-speech-3.3-2b",
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
     "OpenGVLab/InternVL3-1B",
