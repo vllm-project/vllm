@@ -6,19 +6,25 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               UnquantizedLinearMethod)
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+    QuantizationConfig,
+    QuantizeMethodBase,
+)
 from vllm.model_executor.utils import set_weight_attrs
 
 
 class TorchAOConfig(QuantizationConfig):
     """Config class for torchao."""
 
-    def __init__(self, torchao_config) -> None:
+    def __init__(self, torchao_config, skip_modules) -> None:
         self.torchao_config = torchao_config
+        self.skip_modules = skip_modules
 
     def __repr__(self) -> str:
         return f"TorchAOConfig({self.torchao_config})"
@@ -50,24 +56,31 @@ class TorchAOConfig(QuantizationConfig):
 
         hf_config = cls.get_from_keys_or(config, ["quant_type"], None)
         assert hf_config is not None, "quant_type must be specified"
-        assert (len(hf_config) == 1 and "default" in hf_config
-                ), "Expected only one key 'default' in quant_type dictionary"
+        assert len(hf_config) == 1 and "default" in hf_config, (
+            "Expected only one key 'default' in quant_type dictionary"
+        )
         quant_type = hf_config["default"]
         ao_config = config_from_dict(quant_type)
-        return cls(ao_config)
+        skip_modules = config["modules_to_not_convert"]
+        return cls(ao_config, skip_modules)
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional["QuantizeMethodBase"]:
         if not isinstance(layer, LinearBase):
             return None
 
         from torchao.quantization import AOPerModuleConfig
 
+        if any(s in prefix for s in self.skip_modules):
+            return UnquantizedLinearMethod()
+
         module_fqn = prefix
         if isinstance(self.torchao_config, AOPerModuleConfig):
             module_fqn_to_config = self.torchao_config.module_fqn_to_config
             c = module_fqn_to_config.get(
-                module_fqn) or module_fqn_to_config.get("_default", None)
+                module_fqn
+            ) or module_fqn_to_config.get("_default", None)
             if c is not None:
                 current_torchao_config = TorchAOConfig(c)
                 return TorchAOLinearMethod(current_torchao_config)
@@ -80,8 +93,9 @@ class TorchAOConfig(QuantizationConfig):
         return []
 
 
-def torchao_quantize_param_data(param: torch.Tensor,
-                                torchao_config: Any) -> torch.nn.Parameter:
+def torchao_quantize_param_data(
+    param: torch.Tensor, torchao_config: Any
+) -> torch.nn.Parameter:
     """Quantize a Tensor with torchao quantization specified by torchao_config
 
     Args:
@@ -91,8 +105,11 @@ def torchao_quantize_param_data(param: torch.Tensor,
     """
     from torchao.core.config import AOBaseConfig
     from torchao.quantization import quantize_
+
     assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
-    dummy_linear = torch.nn.Linear(param.shape[1], param.shape[0], bias=False)
+    dummy_linear = torch.nn.Linear(1, 1, bias=False)
+    dummy_linear.in_features = param.shape[1]
+    dummy_linear.out_features = param.shape[0]
     dummy_linear.weight = param
     quantize_(dummy_linear, torchao_config)
     return dummy_linear.weight
@@ -127,8 +144,9 @@ class TorchAOLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        weight = torchao_quantize_param_data(weight,
-                                             self.quant_config.torchao_config)
+        weight = torchao_quantize_param_data(
+            weight, self.quant_config.torchao_config
+        )
 
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 
