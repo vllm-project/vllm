@@ -1,12 +1,14 @@
 #!/bin/bash
 
+set -euo pipefail
+
 VLLM_LOG="$WORKSPACE/vllm_log.txt"
 BM_LOG="$WORKSPACE/bm_log.txt"
 
-if [ -z "$TAGET_COMMIT" ]; then
+if [ -n "$TARGET_COMMIT" ]; then
   head_hash=$(git rev-parse HEAD)
-  if [ "$TAGET_COMMIT" != "$head_hash" ]; then
-    echo "Error: target commit $TAGET_COMMIT does not match HEAD: $head_hash"
+  if [ "$TARGET_COMMIT" != "$head_hash" ]; then
+    echo "Error: target commit $TARGET_COMMIT does not match HEAD: $head_hash"
     exit 1
   fi
 fi
@@ -51,6 +53,7 @@ VLLM_USE_V1=1 vllm serve $MODEL \
  --download_dir $DOWNLOAD_DIR \
  --max-model-len $MAX_MODEL_LEN > "$VLLM_LOG" 2>&1 &
 
+# TODO: find a better way to detect launching error.
 echo "wait for 20 minutes.."
 echo
 # sleep 1200
@@ -76,12 +79,11 @@ python benchmarks/benchmark_serving.py \
     --model $MODEL  \
     --dataset-name sonnet \
     --dataset-path benchmarks/sonnet_4x.txt \
-    --sonnet-input-len 1800 \
-    --sonnet-output-len 128 \
-    --ignore-eos \
-    --port 8004 > "$BM_LOG"
+    --sonnet-input-len $INPUT_LEN \
+    --sonnet-output-len $OUTPUT_LEN \
+    --ignore-eos > "$BM_LOG"
 
-echo "complelted..."
+echo "completed..."
 echo
 
 throughput=$(grep "Request throughput (req/s):" "$BM_LOG" | sed 's/[^0-9.]//g')

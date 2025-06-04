@@ -1,8 +1,9 @@
 #!/bin/bash
 
+set -euo pipefail
+
 if [ ! -f "$1" ]; then
   echo "Error: The env file '$1' does not exist."
-  echo "Error: The env file '$1' does not exist." >> $RESULT
   exit 1  # Exit the script with a non-zero status to indicate an error
 fi
 
@@ -57,13 +58,11 @@ docker run \
  -v $DOWNLOAD_DIR:$DOWNLOAD_DIR \
  --env-file $ENV_FILE \
  -e HF_TOKEN="$HF_TOKEN" \
- -e TAGET_COMMIT=$BUILDKITE_COMMIT \
+ -e TARGET_COMMIT=$BUILDKITE_COMMIT \
  -e MODEL=$MODEL \
  -e WORKSPACE=/workspace \
  --name $CONTAINER_NAME \
  -d \
- --privileged \
- --network host \
  -v /dev/shm:/dev/shm \
  vllm/vllm-tpu-bm tail -f /dev/null
 
@@ -74,7 +73,6 @@ docker exec "$CONTAINER_NAME" /bin/bash -c ".buildkite/scripts/hardware_ci/run_b
 echo "copy result back..."
 VLLM_LOG="$LOG_ROOT/$TEST_NAME"_vllm_log.txt
 BM_LOG="$LOG_ROOT/$TEST_NAME"_bm_log.txt
-TABLE_FILE="./$TEST_NAME"_table.txt
 docker cp "$CONTAINER_NAME:/workspace/vllm_log.txt" "$VLLM_LOG" 
 docker cp "$CONTAINER_NAME:/workspace/bm_log.txt" "$BM_LOG"
 

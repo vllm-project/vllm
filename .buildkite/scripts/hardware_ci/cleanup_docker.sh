@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 docker_root=$(docker info -f '{{.DockerRootDir}}')
 if [ -z "$docker_root" ]; then
   echo "Failed to determine Docker root directory."
