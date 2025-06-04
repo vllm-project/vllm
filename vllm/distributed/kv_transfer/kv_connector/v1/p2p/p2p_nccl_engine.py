@@ -76,7 +76,8 @@ class P2pNcclEngine:
         self.send_stream = torch.cuda.Stream()
         self.recv_stream = torch.cuda.Stream()
 
-        mem_pool_size_gb = self.config.get_from_extra_config("mem_pool_size_gb", 128)
+        mem_pool_size_gb = self.config.get_from_extra_config(
+            "mem_pool_size_gb", 128)
         self.pool = TensorMemoryPool(max_block_size=mem_pool_size_gb *
                                      1024**3)  # GB
 
