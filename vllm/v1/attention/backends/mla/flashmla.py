@@ -57,7 +57,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
     def __init__(self, runner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
-        super().__init__(runner, kv_cache_spec, block_table)
+        super().__init__(runner, kv_cache_spec, block_table, FlashMLAMetadata)
 
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)

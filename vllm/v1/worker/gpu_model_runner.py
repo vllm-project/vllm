@@ -41,7 +41,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
                         check_use_alibi, is_pin_memory_available)
-from vllm.v1.attention.backends.mla.flashmla import FlashMLAMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
@@ -1253,40 +1252,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True)
 
+        # Some attention backends only support CUDA graphs in pure decode.
+        # Assume cuda_graph_supported is false if it does not exist.
+        attention_cuda_graphs = all(
+            getattr(m, "cuda_graph_supported", False)
+            for _, m in attn_metadata.items())
+        skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
+
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens,
-                                 num_tokens_across_dp=num_tokens_across_dp):
+        with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                skip_cuda_graphs=skip_cuda_graphs,
+        ):
             self.maybe_setup_kv_connector(scheduler_output)
 
-            # TODO bypass typecheck, in the future either:
-            # - fix dtype on _prepare_inputs return
-            # - add has_prefill method to metadata
-            def has_prefill(attn_metadata: Any):
-                return any(m.prefill is not None
-                           for _, m in attn_metadata.items())
-
-            is_mla = isinstance(self.attn_metadata_builders[0],
-                                FlashMLAMetadataBuilder)
-            direct_call = is_mla and has_prefill(
-                attn_metadata) and self.full_cuda_graph
-            if direct_call:
-                # Skip the outer model layer as inner model is compiled
-                model_output = self.model.model.forward(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                )
-            else:
-                model_output = self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                )
+            model_output = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+            )
 
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (
