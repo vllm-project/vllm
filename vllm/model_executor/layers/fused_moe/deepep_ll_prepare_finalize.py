@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional
+from typing import Optional, Union
 
 import deep_ep
 import torch
@@ -65,6 +65,54 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         return torch.int64
 
+    def _do_quant(
+            self, x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+            a1_scale: Optional[torch.Tensor], a2_scale: Optional[torch.Tensor],
+            a1_dtype: torch.dtype
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+
+        block_k = self.block_shape[1] if self.block_shape is not None else None
+        if self.use_fp8_dispatch:
+            if block_k == DEEPEP_QUANT_BLOCK_SIZE:
+                # DeepEP kernels did the quantization for us.
+                x, x_scales = x
+                return x, x_scales
+
+            # Dequant to get back the tokens in the datatype we dispatched in.
+            x_fp8, x_scales = x
+            x = dequant_fp8(x_fp8, x_scales).to(dtype=a1_dtype)
+
+        assert isinstance(x, torch.Tensor)
+
+        # Check if there is a block_shape / or if we can infer the quantization
+        # schemes from the scales.
+        per_token_quant = None
+        if all([v is None for v in [self.block_shape, a1_scale, a2_scale]
+                ]) and self.quant_dtype is not None:
+            # Quantization required despite none of the inputs suggesting
+            # quantization. Fallback to per_token_dynamic quant.
+            per_token_quant = True
+        else:
+            per_token_quant = ((self.block_shape is not None) or
+                               (a1_scale is not None and a1_scale.numel() != 1)
+                               or (a2_scale is not None
+                                   and a2_scale.numel() != 1))
+
+        num_experts, max_tokens, hidden_dim = x.size()
+
+        # TODO (varun): Optimization - Use a batched version of quant
+        x = x.view((-1, hidden_dim))
+        x, x_scales = moe_kernel_quantize_input(x, a1_scale, self.quant_dtype,
+                                                per_token_quant,
+                                                self.block_shape)
+        x = x.view((num_experts, -1, hidden_dim))
+
+        if per_token_quant:
+            assert x_scales is not None
+            x_scales = x_scales.view(num_experts, max_tokens, -1)
+
+        return x, x_scales
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -87,11 +135,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             assert hidden_size % 128 == 0, \
             "DeepEP kernels quantize the inputs in blocks of shape 128"
 
-        # Quantize
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
+        has_per_token_scales = a1_scale.numel(
+        ) != 1 if a1_scale is not None else (
             a2_scale.numel() != 1 if a2_scale is not None else False)
-        assert not per_act_token, (
-            "low_latency kernels don't support per-act-token quant")
+        assert not has_per_token_scales, (
+            "low_latency kernels doesn't support dispatching per-token scales")
 
         if apply_router_weight_on_input:
             topk = rank_topk_ids.size(1)
@@ -110,22 +158,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 async_finish=False,
                                                 return_recv_hook=False)
 
-        if self.use_fp8_dispatch:
-            # TODO (varun) : In the case of dynamic quantization, we could
-            # probably skip the quant below and use the results directly.
-            # Although note that the deepep quant is per token 128 elements.
-            expert_x_fp8, expert_x_scales = expert_x
-            expert_x = dequant_fp8(expert_x_fp8,
-                                   expert_x_scales).to(dtype=a1.dtype)
-
-        num_experts = expert_x.size(0)
-        hidden_dim = expert_x.size(-1)
-
-        expert_x = expert_x.view((-1, expert_x.size(-1)))
-        expert_x, expert_x_scale = moe_kernel_quantize_input(
-            expert_x, a1_scale, self.quant_dtype, per_act_token,
-            self.block_shape)
-        expert_x = expert_x.view((num_experts, -1, hidden_dim))
+        expert_x, expert_x_scale = self._do_quant(expert_x, a1_scale, a2_scale,
+                                                  a1.dtype)
 
         return (expert_x, expert_x_scale, expert_num_tokens, None, None)
 
