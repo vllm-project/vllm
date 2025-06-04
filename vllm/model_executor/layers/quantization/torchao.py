@@ -22,9 +22,11 @@ from vllm.model_executor.utils import set_weight_attrs
 class TorchAOConfig(QuantizationConfig):
     """Config class for torchao."""
 
-    def __init__(self, torchao_config, skip_modules) -> None:
+    def __init__(
+        self, torchao_config, skip_modules: Optional[list[str]] = None
+    ) -> None:
         self.torchao_config = torchao_config
-        self.skip_modules = skip_modules
+        self.skip_modules = skip_modules or []
 
     def __repr__(self) -> str:
         return f"TorchAOConfig({self.torchao_config})"
@@ -82,7 +84,7 @@ class TorchAOConfig(QuantizationConfig):
                 module_fqn
             ) or module_fqn_to_config.get("_default", None)
             if c is not None:
-                current_torchao_config = TorchAOConfig(c)
+                current_torchao_config = TorchAOConfig(c, self.skip_modules)
                 return TorchAOLinearMethod(current_torchao_config)
             else:
                 return UnquantizedLinearMethod()
