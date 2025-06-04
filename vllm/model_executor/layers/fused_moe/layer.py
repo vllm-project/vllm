@@ -582,7 +582,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor:
         
         if envs.VLLM_USE_EXP_TRITON_KERNEL:
-            forward_cuda_triton(
+            return forward_cuda_triton(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
