@@ -56,7 +56,11 @@ steps:
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
   - label: "Annotate release workflow"
-    depends_on: build-release-image, build-wheel-cuda-12-8, build-wheel-cuda-12-6, build-wheel-cuda-11-8, input-release-version
+    depends_on:
+      - build-release-image
+      - build-wheel-cuda-12-8
+      - build-wheel-cuda-12-6
+      - build-wheel-cuda-11-8
     id: annotate-release-workflow
     agents:
       queue: cpu_queue_postmerge
@@ -85,7 +89,7 @@ steps:
     id: input-release-version
     fields:
       - text: "What is the release version?"
-        key: "release-version"
+        key: release-version
 
   - block: "Build CPU release image"
     key: block-cpu-release-image-build
