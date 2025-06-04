@@ -46,7 +46,6 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
                          rank=rank,
@@ -132,6 +131,21 @@ class Worker(WorkerBase):
             self.device = torch.device(f"cuda:{self.local_rank}")
             torch.cuda.set_device(self.device)
 
+            # if `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
+            # then we default to FlashMLA backend, so we need to force the
+            # blocksize here.
+            # This needs to be delayed until it can execute on a GPU worker.
+            if (self.vllm_config.model_config
+                    and self.vllm_config.model_config.use_mla):
+                from vllm.attention.ops.flashmla import is_flashmla_supported
+                use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None
+                                or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
+                if (use_flashmla and is_flashmla_supported()[0]
+                        and self.vllm_config.cache_config.block_size != 64):
+                    self.vllm_config.cache_config.block_size = 64
+                    logger.info(
+                        "Forcing kv cache block size 64 for FlashMLA backend.")
+
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
@@ -186,7 +200,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how much 
+        """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
