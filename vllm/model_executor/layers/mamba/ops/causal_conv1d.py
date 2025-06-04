@@ -4,7 +4,7 @@
 # Copyright (c) 2024, Tri Dao.
 # Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -328,7 +328,7 @@ def causal_conv1d_update_triton(
     conv_state: torch.Tensor,
     weight: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
-    activation: bool | str | None = None,
+    activation: Union[bool, str, None] = None,
     cache_seqlens: Optional[torch.Tensor] = None,
     conv_state_indices: Optional[torch.Tensor] = None,
     pad_slot_id: int = PAD_SLOT_ID,
