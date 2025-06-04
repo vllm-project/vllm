@@ -127,7 +127,6 @@ class PoolingModelRunner(
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalKwargs.as_kwargs(
                     multi_modal_kwargs,
-                    dtype=self.model_config.dtype,
                     device=self.device,
                 ),
                 **cross_enc_kwargs,

@@ -17,7 +17,6 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.gpu_base_model_runner import GPUBaseModelRunner
@@ -222,7 +221,7 @@ class GPUPoolingModelRunner(GPUBaseModelRunner[GPUPoolingInputBatch,
                 raise e
         return pooler_output
 
-    def initialize_input_batch(self, kv_cache_config: KVCacheConfig):
+    def initialize_input_batch(self, block_sizes: list[int]):
         self.input_batch = GPUPoolingInputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -230,11 +229,8 @@ class GPUPoolingModelRunner(GPUBaseModelRunner[GPUPoolingInputBatch,
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            block_size=self.cache_config.block_size,
+            block_sizes=block_sizes,
         )
-
-    # def get_input_batch(self) -> InputBatch:
-    #     return self.input_batch
 
     def get_attention_type_support(
             self) -> tuple[list[AttentionType], list[AttentionType]]:

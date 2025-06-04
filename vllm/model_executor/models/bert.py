@@ -12,6 +12,7 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -56,6 +57,7 @@ class BertEmbedding(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
+        seq_lens: torch.Tensor,
         position_ids: torch.Tensor,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -340,10 +342,13 @@ class BertModel(nn.Module, SupportsQuant):
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
-            hidden_states = self.embeddings(input_ids=input_ids,
-                                            position_ids=position_ids,
-                                            token_type_ids=token_type_ids)
-
+            attn_metadata = get_forward_context().attn_metadata
+            assert hasattr(attn_metadata, "seq_lens_tensor")
+            hidden_states = self.embeddings(
+                input_ids=input_ids,
+                seq_lens=attn_metadata.seq_lens_tensor,
+                position_ids=position_ids,
+                token_type_ids=token_type_ids)
         return self.encoder(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -410,11 +415,16 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.model(input_ids=input_ids,
-                          position_ids=positions,
-                          token_type_ids=token_type_ids,
-                          inputs_embeds=inputs_embeds,
-                          intermediate_tensors=intermediate_tensors)
+        hidden_states = self.model(input_ids=input_ids,
+                                   position_ids=positions,
+                                   token_type_ids=token_type_ids,
+                                   inputs_embeds=inputs_embeds,
+                                   intermediate_tensors=intermediate_tensors)
+
+        # convert the embedding output to float32,
+        # otherwise precision will be lost significantly
+        hidden_states = hidden_states.to(torch.float32)
+        return hidden_states
 
     def pooler(
         self,

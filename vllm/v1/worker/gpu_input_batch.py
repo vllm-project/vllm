@@ -46,7 +46,7 @@ class InputBatch(BaseInputBatch[SamplingRequestState]):
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
-        block_size: int,
+        block_sizes: list[int],
     ):
         super().__init__(
             max_num_reqs,
@@ -55,7 +55,7 @@ class InputBatch(BaseInputBatch[SamplingRequestState]):
             device,
             pin_memory,
             vocab_size,
-            block_size,
+            block_sizes,
         )
 
         # Sampling-related.

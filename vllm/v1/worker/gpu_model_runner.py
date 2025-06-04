@@ -794,7 +794,7 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
 
         # Must synchronize the non-blocking GPU->CPU transfers.
         if prompt_logprobs_dict:
-            torch.cuda.synchronize()
+            self._sync_device()
 
         return prompt_logprobs_dict
 
@@ -885,7 +885,7 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
             )
         return sampler_output
 
-    def initialize_input_batch(self, kv_cache_config: KVCacheConfig):
+    def initialize_input_batch(self, block_sizes: list[int]):
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -893,7 +893,7 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            block_size=self.cache_config.block_size,
+            block_sizes=block_sizes,
         )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
@@ -903,9 +903,6 @@ class GPUModelRunner(GPUBaseModelRunner[InputBatch, SamplingRequestState],
             # group
             self.drafter.validate_same_kv_cache_group(kv_cache_config)
         super().initialize_kv_cache(kv_cache_config)
-
-    #def get_input_batch(self) -> InputBatch:
-    #    return self.input_batch
 
     def get_attention_type_support(
             self) -> tuple[list[AttentionType], list[AttentionType]]:

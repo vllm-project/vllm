@@ -40,10 +40,10 @@ class GPUPoolingInputBatch(BaseInputBatch):
         device: torch.device,
         pin_memory: bool,
         vocab_size: int,
-        block_size: int,
+        block_sizes: list[int],
     ):
         super().__init__(max_num_reqs, max_model_len, max_num_batched_tokens,
-                         device, pin_memory, vocab_size, block_size)
+                         device, pin_memory, vocab_size, block_sizes)
         self.token_type_ids_cpu_tensor: Optional[torch.Tensor] = None
         self._token_type_ids_cpu: Optional[np.ndarray] = None
         self.pooling_params: dict[str, PoolingParams] = {}
