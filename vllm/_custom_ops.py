@@ -1115,7 +1115,6 @@ def scaled_fp4_experts_quant(
     packed MoE Inputs.
     Args:
         input_tensor: The input tensor to be quantized to FP4
-        shuffle_map: The shuffle map tensor
         input_global_scale: A scalar scaling factor for the entire tensor.
         expert_offsets: The expert offsets tensor
         blockscale_offsets: The blockscale offsets tensor
