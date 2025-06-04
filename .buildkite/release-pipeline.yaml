@@ -1,6 +1,6 @@
 steps:
   - label: "Build wheel - CUDA 12.8"
-    id: build-wheel-cuda-12.8
+    id: build-wheel-cuda-12-8
     agents:
       queue: cpu_queue_postmerge
     commands:
@@ -12,7 +12,7 @@ steps:
       DOCKER_BUILDKIT: "1"
 
   - label: "Build wheel - CUDA 12.6"
-    id: build-wheel-cuda-12.6
+    id: build-wheel-cuda-12-6
     agents:
       queue: cpu_queue_postmerge
     commands:
@@ -30,7 +30,7 @@ steps:
 
   - label: "Build wheel - CUDA 11.8"
     # depends_on: block-build-cu118-wheel
-    id: build-wheel-cuda-11.8
+    id: build-wheel-cuda-11-8
     agents:
       queue: cpu_queue_postmerge
     commands:
@@ -56,7 +56,7 @@ steps:
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
   - label: "Annotate release workflow"
-    depends_on: build-release-image, build-wheel-cuda-12.8, build-wheel-cuda-12.6, build-wheel-cuda-11.8, input-release-version
+    depends_on: build-release-image, build-wheel-cuda-12-8, build-wheel-cuda-12-6, build-wheel-cuda-11-8, input-release-version
     id: annotate-release-workflow
     agents:
       queue: cpu_queue_postmerge
