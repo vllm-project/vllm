@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import time
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -28,17 +29,22 @@ class Request:
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
         client_index: int = 0,
+        arrival_time: Optional[float] = None,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
+        priority: int = 0,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
+        self.priority = priority
         self.sampling_params = sampling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
+        self.arrival_time = arrival_time if arrival_time is not None else \
+            time.time()
 
         self.status = (RequestStatus.WAITING_FOR_FSM
                        if sampling_params.guided_decoding is not None else
@@ -92,17 +98,18 @@ class Request:
 
         return cls(
             request_id=request.request_id,
-            client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
             sampling_params=request.sampling_params,
             eos_token_id=request.eos_token_id,
+            arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
             cache_salt=request.cache_salt,
+            priority=request.priority,
         )
 
     def append_output_token_ids(
