@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class IPEXAttentionMetadata(FlashAttentionMetadata):
-    seq_start_loc: torch.Tensor = torch.tensor([0], dtype=torch.int64)
+    seq_start_loc: torch.Tensor = torch.tensor([0], dtype=torch.int32)
 
     def __init__(self,
                  flash_attn_metadata: FlashAttentionMetadata,
@@ -34,7 +34,7 @@ class IPEXAttentionMetadata(FlashAttentionMetadata):
             self.seq_start_loc = seq_start_loc
         else:
             self.seq_start_loc = torch.tensor([0],
-                                              dtype=torch.int64,
+                                              dtype=torch.int32,
                                               device=self.block_table.device)
 
 
