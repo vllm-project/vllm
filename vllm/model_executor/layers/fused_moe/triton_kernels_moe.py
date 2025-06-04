@@ -11,15 +11,15 @@ from triton_kernels.routing import (routing, RoutingData, GatherIndx,
 
 def can_use_triton_moe(**kwargs):
     if kwargs.get("quant_config") is not None:
-        raise NotImplementedError("triton kernel doesn't support quantization now")
+        raise NotImplementedError("Triton kernel doesn't support quantization now")
     if kwargs.get("custom_routing_function") is not None:
-        raise NotImplementedError("triton kernel doesn't support custom_routing_function now")
+        raise NotImplementedError("Triton kernel doesn't support custom routing function now")
     if kwargs.get("use_grouped_topk"):
-        raise NotImplementedError("triton kernel doesn't support use_grouped_topk now")
+        raise NotImplementedError("Triton kernel doesn't support use grouped topk now")
     if kwargs.get("scoring_func") != 'softmax':
-        raise NotImplementedError("triton kernel only support softmax as scoring_func now")
-    if kwargs.get("use_up"):
-        raise NotImplementedError("triton kernel doesn't support EP now")
+        raise NotImplementedError("Triton kernel only support softmax scoring function")
+    if kwargs.get("use_ep"):
+        raise NotImplementedError("Triton kernel doesn't support Experts Parallelism now")
     return True
 
 def triton_kernel_moe_forward(
