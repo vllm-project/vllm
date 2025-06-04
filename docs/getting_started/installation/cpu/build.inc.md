@@ -16,7 +16,7 @@
     - **NumPy ≥2.0 error**: Downgrade using `pip install "numpy<2.0"`.
     - **CMake picks up CUDA**: Add `CMAKE_DISABLE_FIND_PACKAGE_CUDA=ON` to prevent CUDA detection.
     - **Torch CPU wheel not resolving**: Use `--index-url` during the `requirements/cpu.txt` install.
-    - **`torch==2.6.0+cpu` not found**: Set `"torch==2.6.0+cpu"` in [`pyproject.toml`](https://github.com/vllm-project/vllm/blob/main/pyproject.toml).
+    - **`torch==X.Y.Z+cpu` not found**: Set `"torch==X.Y.Z+cpu"` in [`pyproject.toml`](https://github.com/vllm-project/vllm/blob/main/pyproject.toml).
     - **Deprecated `setup.py install`**: Use the [PEP 517-compliant](https://peps.python.org/pep-0517/) `python -m build` instead.
 
 
@@ -50,7 +50,7 @@ You can do this using one of the following methods:
 ```console
 # Specify kv cache in GiB
 export VLLM_CPU_KVCACHE_SPACE=2
-# Check how many cores your machine have with lscpu -e (i.e values : 1,2/0-2/2)
+# Example: to bind to the first 4 CPU cores, use '0-3'. Check available cores using: lscpu -e
 export VLLM_CPU_OMP_THREADS_BIND=0-4 
 # Build the wheel
 VLLM_TARGET_DEVICE=cpu CMAKE_DISABLE_FIND_PACKAGE_CUDA=ON python -m build --wheel --no-isolation
@@ -79,14 +79,14 @@ VLLM_TARGET_DEVICE=cpu CMAKE_DISABLE_FIND_PACKAGE_CUDA=ON uv pip install -e . --
 ```
 
 !!! tip
-    If you recieve an error such as: `Could not find a version that satisfies the requirement torch==2.6.0+cpu`, consider updating [pyproject.toml](https://github.com/vllm-project/vllm/blob/main/pyproject.toml) to help pip resolve the dependency.
+    If you receive an error such as: `Could not find a version that satisfies the requirement torch==X.Y.Z+cpu+cpu`, consider updating [pyproject.toml](https://github.com/vllm-project/vllm/blob/main/pyproject.toml) to help pip resolve the dependency.
 
     ```toml title="pyproject.toml"
     [build-system]
     requires = [
       "cmake>=3.26.1",
       ...
-      "torch==2.6.0+cpu"   # <-------
+      "torch==X.Y.Z+cpu"   # <-------
     ]
     ```
 ## --8<-- [end:build-wheel-from-source]
