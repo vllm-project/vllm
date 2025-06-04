@@ -27,6 +27,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (Handle,
 from vllm.executor.multiproc_worker_utils import (
     _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import (get_distributed_init_method, get_mp_context,
                         get_open_port)
 from vllm.v1.executor.abstract import Executor, FailureCallback
@@ -38,7 +39,7 @@ logger = init_logger(__name__)
 POLLING_TIMEOUT_MS = 5000
 POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 
-EXECUTE_MODEL_TIMEOUT_S = 40
+EXECUTE_MODEL_TIMEOUT_S = 80 if current_platform.is_hpu() else 40
 
 
 class MultiprocExecutor(Executor):
