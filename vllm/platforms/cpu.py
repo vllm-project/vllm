@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import platform
 import sys
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
@@ -20,6 +21,15 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
+
+
+def get_max_threads(pid=0):
+    if hasattr(os, 'sched_getaffinity'):
+        return len(os.sched_getaffinity(pid))
+    elif platform.system() == 'Darwin':
+        return os.cpu_count()
+    else:
+        raise NotImplementedError("Unsupported OS")
 
 
 class CpuPlatform(Platform):
@@ -190,7 +200,7 @@ class CpuPlatform(Platform):
 
         # Note: to avoid the error 'nthreads cannot be larger than environment
         #  variable "NUMEXPR_MAX_THREADS" (64)'.
-        os.environ["NUMEXPR_MAX_THREADS"] = str(len(os.sched_getaffinity(0)))
+        os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
         # Set default threads num for OpenMP parallel
         os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
