@@ -3,6 +3,8 @@
 """Attention layer with FlashInfer."""
 from __future__ import annotations
 
+import functools
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -15,7 +17,14 @@ from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
+<<<<<<< HEAD
 from vllm.config import VllmConfig
+=======
+from vllm.attention.layer import Attention
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    get_kv_connector_cache_layout)
+>>>>>>> 110ad8f8a (flashinfer hnd)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
@@ -32,8 +41,19 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+FLASHINFER_KV_CACHE_LAYOUT: str = os.getenv("FLASHINFER_KV_CACHE_LAYOUT",
+                                            "").upper()
 
 logger = init_logger(__name__)
+
+
+@functools.lru_cache
+def get_flashinfer_kv_cache_layout():
+    # Override with format specified by the user.
+    cache_layout = FLASHINFER_KV_CACHE_LAYOUT
+    if not cache_layout:
+        cache_layout = get_kv_connector_cache_layout()
+    return cache_layout
 
 
 class FlashInferBackend(AttentionBackend):
@@ -254,6 +274,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 dtype=torch.uint8,
                 device=self.device)
         return self._workspace_buffer
+
+    def get_kv_cache_layout(self):
+        if self._kv_cache_layout is None:
+            self._kv_cache_layout = get_flashinfer_kv_cache_layout()
+        return self._kv_cache_layout
 
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
