@@ -3,7 +3,6 @@
 """
 KV cache helper for store.
 """
-import functools
 
 import torch
 
@@ -94,7 +93,6 @@ class model_aware_kv_ops_helper:
             )
 
 
-@functools.lru_cache
 def get_kv_connector_cache_layout():
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
