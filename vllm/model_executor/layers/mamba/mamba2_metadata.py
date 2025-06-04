@@ -6,11 +6,14 @@ from typing import Optional
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.attention.backends.placeholder_attn import (
     PlaceholderAttentionMetadata)
 from vllm.attention.backends.xformers import XFormersMetadata
+
+use_triton_causal_conv_1d = envs.VLLM_USE_TRITON_CONV1D
 
 
 @dataclass
@@ -86,18 +89,6 @@ def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
     return chunk_indices, chunk_offsets
 
 
-def is_conv_in_Triton():
-    import os
-    path = os.environ.get("VLLM_USE_TRITON_CONV1D", None)
-    if path is not None:
-        print("mamba_mixer2 - VLLM_USE_TRITON_CONV1D")
-        return True
-    return False
-
-
-conv_in_triton = is_conv_in_Triton()
-
-
 def prepare_mamba2_metadata(
     chunk_size: int,
     attn_metadata: AttentionMetadata,
@@ -124,7 +115,7 @@ def prepare_mamba2_metadata(
                 and attn_metadata.context_lens_tensor is not None):
             # keeping flags for both prefill and decode causal_conv1d varlen
             # [batch,]
-            if conv_in_triton:
+            if use_triton_causal_conv_1d:
                 has_initial_states = attn_metadata.context_lens_tensor > 0
                 prep_initial_states = torch.any(
                     has_initial_states[:num_prefills]).item()

@@ -16,8 +16,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
-                                                              conv_in_triton)
+from vllm.model_executor.layers.mamba.mamba2_metadata import (
+    Mamba2Metadata, use_triton_causal_conv_1d)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_fn_triton, causal_conv1d_update,
     causal_conv1d_update_triton)
@@ -146,7 +146,7 @@ def mamba_v2_sharded_weight_loader(
 ) -> LoaderFunction:
     """Create a weight loader for mamba v2. This ensures that the projections
     are correctly sharded so that they can be split into x, B, C. It also
-    ensures the the all the groups corresponding to a head shard is placed
+    ensures that all the groups corresponding to a head shard is placed
     together with it.
     """
 
@@ -380,7 +380,7 @@ class MambaMixer2(CustomOp):
                                        eps=rms_norm_eps)
 
     def forward_cuda(self, *args, **kwargs):
-        if conv_in_triton:
+        if use_triton_causal_conv_1d:
             return self.forward_triton(*args, **kwargs)
         else:
             return self.forward_cuda_split(*args, **kwargs)

@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
     VLLM_ALL2ALL_BACKEND: str = "naive"
+    VLLM_USE_TRITON_CONV1D: bool = False
 
 
 def get_default_cache_root():
@@ -780,6 +781,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # all2all backend for vllm's expert parallel communication
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
+
+    # use Triton implementation of causal-conv1d
+    "VLLM_USE_TRITON_CONV1D":
+    lambda: os.getenv("VLLM_USE_TRITON_CONV1D", "0") == "1",
 }
 
 # end-env-vars-definition
