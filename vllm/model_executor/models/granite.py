@@ -36,7 +36,8 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               SplitQKVParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -129,16 +130,29 @@ class GraniteAttention(nn.Module):
         self.scaling = config.attention_multiplier
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
+        self.split_qkv = cache_config.split_qkv
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size=hidden_size,
-            head_size=self.head_dim,
-            total_num_heads=self.total_num_heads,
-            total_num_kv_heads=self.total_num_kv_heads,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
+        if self.split_qkv:
+            self.qkv_proj = SplitQKVParallelLinear(
+                hidden_size=hidden_size,
+                head_size=self.head_dim,
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_kv_heads,
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size=hidden_size,
+                head_size=self.head_dim,
+                total_num_heads=self.total_num_heads,
+                total_num_kv_heads=self.total_num_kv_heads,
+                bias=bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
@@ -167,8 +181,12 @@ class GraniteAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.split_qkv:
+            q, k, v, _ = self.qkv_proj(hidden_states)
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
+                                dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -287,6 +305,8 @@ class GraniteModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
+        self.split_qkv = cache_config.split_qkv
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -324,14 +344,24 @@ class GraniteModel(nn.Module):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
+        if not self.split_qkv:
+            stacked_params_mapping = [
+                # (param_name, shard_name, shard_id)
+                (".qkv_proj", ".q_proj", "q"),
+                (".qkv_proj", ".k_proj", "k"),
+                (".qkv_proj", ".v_proj", "v"),
+                (".gate_up_proj", ".gate_proj", 0),
+                (".gate_up_proj", ".up_proj", 1),
+            ]
+        else:
+            stacked_params_mapping = [
+                # (param_name, shard_name, shard_id)
+                (".qkv_proj.q_proj", ".q_proj", "q"),
+                (".qkv_proj.k_proj", ".k_proj", "k"),
+                (".qkv_proj.v_proj", ".v_proj", "v"),
+                (".gate_up_proj", ".gate_proj", 0),
+                (".gate_up_proj", ".up_proj", 1),
+            ]
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
@@ -359,8 +389,11 @@ class GraniteModel(nn.Module):
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-
+                if self.split_qkv and (shard_id == "q" or shard_id == "v"
+                                       or shard_id == "k"):
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 # Skip loading extra bias for GPTQ models.
