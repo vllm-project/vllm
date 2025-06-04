@@ -309,8 +309,9 @@ class FlashAttentionMetadataBuilder:
 
         self.aot_schedule = (get_flash_attn_version() == 3)
         self.use_full_cuda_graph = compilation_config.full_cuda_graph
-        if self.use_full_cuda_graph:
-            assert self.aot_schedule
+        if self.use_full_cuda_graph and not self.aot_schedule:
+            raise ValueError("Full CUDA graph mode requires AOT scheduling, "
+                             "which requires FlashAttention 3.")
         self.scheduler_metadata = torch.zeros(self.runner.max_num_reqs + 1,
                                               dtype=torch.int32,
                                               device=self.runner.device)
