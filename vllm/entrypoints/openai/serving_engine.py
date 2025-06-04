@@ -470,6 +470,7 @@ class OpenAIServing:
         # we have exactly one lora matched on the request.
         if len(default_mm_loras) == 1:
             return default_mm_loras.pop()
+        return None
 
     def _maybe_get_adapters(
         self,
@@ -503,7 +504,7 @@ class OpenAIServing:
         until `_`; we use this to match potential multimodal data
         with default per modality loras.
         """
-        message_types = set()
+        message_types: set[str] = set()
 
         if not hasattr(request, "messages"):
             return message_types

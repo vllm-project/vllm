@@ -1171,7 +1171,9 @@ async def init_app_state(
                     resolved_chat_template, args.model)
 
     # Merge default_mm_loras into the static lora_modules
-    default_mm_loras = vllm_config.lora_config.default_mm_loras
+    default_mm_loras = (vllm_config.lora_config.default_mm_loras
+                        if vllm_config.lora_config is not None else {})
+
     lora_modules = args.lora_modules
     if default_mm_loras:
         default_mm_lora_paths = [
