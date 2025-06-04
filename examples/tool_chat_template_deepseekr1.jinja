@@ -12,21 +12,23 @@
         {%- endif %}
     {%- endif %}
 {%- endfor %}
+
+{# --- Append tool descriptions if tools are defined --- #}
+{% if tools is defined and tools is not none %}
+    {% set tool_ns = namespace(text='You are a helpful assistant with tool calling capabilities. '
+        'When a tool call is needed, you MUST use the following format to issue the call:\n'
+        '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>FUNCTION_NAME\n'
+        '```json\n{"param1": "value1", "param2": "value2"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>\n\n'
+        'Make sure the JSON is valid.'
+        '## Tools\n\n### Function\n\nYou have the following functions available:\n\n') %}
+    {% for tool in tools %}
+        {% set tool_ns.text = tool_ns.text + '\n```json\n' + (tool | tojson) + '\n```\n' %}
+    {% endfor %}
+    {% set ns.system_prompt = ns.system_prompt + '\n\n' + tool_ns.text %}
+{% endif %}
+
 {{ bos_token }}
 {{ ns.system_prompt }}
-{%- if tools %}
-    {{"You may call one or more functions to assist with the user query.\n" }}
-    {{"Here are the available functions:\n"}}
-    {%- for tool in tools %}
-        {{- tool | tojson }}
-        {{- "\n" }}
-    {%- endfor %}
-    {{"For function call returns, you should first print <｜tool▁calls▁begin｜>"}}
-    {{"For each function call, you should return object like:\n" }}
-    {{"<｜tool▁call▁begin｜>function<｜tool▁sep｜><function_name>\n```json\n<function_arguments_in_json_format>\n```<｜tool▁call▁end｜>"}}
-    {{"At the end of function call returns, you should print <｜tool▁calls▁end｜><｜end▁of▁sentence｜>"}}
-    {{- "\n" }}
-{%- endif %}
 {%- for message in messages %}
     {% set content = message['content'] %}
     {%- if message['role'] == 'user' %}
