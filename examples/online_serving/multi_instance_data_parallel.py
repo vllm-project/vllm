@@ -30,7 +30,6 @@ async def main():
         data_parallel_address="127.0.0.1",
         data_parallel_rpc_port=62300,
         data_parallel_size_local=1,
-        data_parallel_start_rank=0,
         enforce_eager=True,
     )
 
