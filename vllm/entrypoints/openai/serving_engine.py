@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
 import io
 import json
@@ -134,11 +135,9 @@ class RequestProcessingMixin(BaseModel):
     Mixin for request processing, 
     handling prompt preparation and engine input.
     """
-    request_prompts: Optional[Sequence[RequestPrompt]] = \
-                            Field(default_factory=list)
+    request_prompts: Optional[Sequence[RequestPrompt]] = []
     engine_prompts: Optional[Union[list[EngineTokensPrompt],
-                                   list[EngineEmbedsPrompt]]] = Field(
-                                       default_factory=list)
+                                   list[EngineEmbedsPrompt]]] = []
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -528,12 +527,14 @@ class OpenAIServing:
         if isinstance(request,
                       (EmbeddingChatRequest, EmbeddingCompletionRequest,
                        ScoreRequest, RerankRequest, ClassificationRequest)):
-            operation = {
-                ScoreRequest: "score",
-                ClassificationRequest: "classification"
-            }.get(type(request), "embedding generation")
 
             if token_num > self.max_model_len:
+                operations: dict[type[AnyRequest], str] = {
+                    ScoreRequest: "score",
+                    ClassificationRequest: "classification"
+                }
+                operation = operations.get(type(request),
+                                           "embedding generation")
                 raise ValueError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "

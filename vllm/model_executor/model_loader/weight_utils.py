@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for downloading and initializing model weights."""
 import fnmatch
 import glob
@@ -696,7 +697,7 @@ def initialize_dummy_weights(
                 # Note: We avoid using torch.rank_like as it doesn't currently
                 # support the generator argument.
                 param.copy_((high - low) *
-                            torch.rand(*param.shape,
+                            torch.rand(param.shape,
                                        generator=generator,
                                        dtype=param.dtype,
                                        layout=param.layout,

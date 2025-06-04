@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
@@ -750,7 +751,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         json_inputs = cast(JSONTree[torch.Tensor], batched_inputs)
 
         json_mapped = json_map_leaves(
-            lambda x: x.to(device, non_blocking=True),
+            lambda x: x.to(device=device, non_blocking=True),
             json_inputs,
         )
 

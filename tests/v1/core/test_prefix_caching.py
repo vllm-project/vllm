@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the with and without prefix caching."""
 
 from typing import Optional
@@ -12,7 +13,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
-from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          hash_block_tokens)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, SlidingWindowSpec)
@@ -38,7 +39,6 @@ def make_request(request_id,
         sampling_params=SamplingParams(max_tokens=17,
                                        prompt_logprobs=prompt_logprobs),
         eos_token_id=100,
-        arrival_time=0,
         lora_request=None,
         cache_salt=cache_salt,
     )
@@ -548,7 +548,7 @@ def test_cache_blocks(hash_fn):
 
     # Test that blocks are cached correctly for 2 full blocks from the start.
     blocks = [KVCacheBlock(block_id=i) for i in range(2)]
-    block_hashes: list[BlockHashType] = []
+    block_hashes: list[BlockHash] = []
 
     block_pool.cache_full_blocks(
         request=req,

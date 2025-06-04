@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 import sys
@@ -40,11 +41,16 @@ class TorchCompileWrapperWithCustomDispatcher:
             # compiling the forward method
 
             backend = vllm_config.compilation_config.init_backend(vllm_config)
+            options = None
+            if isinstance(backend, str) and backend == "inductor":
+                options = get_current_vllm_config(
+                ).compilation_config.inductor_compile_config
 
             compiled_callable = torch.compile(
                 self.forward,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend)
+                backend=backend,
+                options=options)
 
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
