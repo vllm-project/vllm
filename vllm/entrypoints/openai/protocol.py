@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
-from vllm.sequence import Logprob
+from vllm.sequence import AdditionalHeads, Logprob
 from vllm.streaming_params import StreamingParams
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
@@ -994,6 +994,7 @@ class CompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
+            additional_heads=True,
             )
 
     def to_streaming_params(self, ) -> StreamingParams:
@@ -1002,6 +1003,8 @@ class CompletionRequest(OpenAIBaseModel):
             self.stream_options.stream_n is not None:
             stream_n = self.stream_options.stream_n
         return StreamingParams(stream_n=stream_n)
+            allowed_token_ids=self.allowed_token_ids,
+        )
 
     @model_validator(mode="before")
     @classmethod
@@ -1253,6 +1256,7 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "including encountering the EOS token"),
     )
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    additional_heads: Optional[AdditionalHeads] = None
 
 
 class CompletionResponse(OpenAIBaseModel):

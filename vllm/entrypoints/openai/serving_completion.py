@@ -8,6 +8,7 @@ from collections.abc import Sequence as GenericSequence
 from typing import Optional, Union, cast
 
 import jinja2
+import torch
 from fastapi import Request
 from typing_extensions import assert_never
 
@@ -44,6 +45,8 @@ from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators
 
+from numba.np.old_arraymath import numpy_unwrap
+
 logger = init_logger(__name__)
 
 
@@ -75,6 +78,40 @@ class OpenAIServingCompletion(OpenAIServing):
             logger.info("Using default completion sampling params from %s: %s",
                         source, self.default_sampling_params)
 
+    async def _get_beams(self, request: CompletionRequest, raw_request: Optional[Request] = None):
+        request.stream = False
+        n = request.n
+        request.n = 1
+        request.echo = True
+        tasks = []
+        for _ in range(n):
+            request = request
+            tasks.append(self.create_completion(
+                request,
+            ))
+        res = await asyncio.gather(*tasks)
+        request.n = n
+        return res
+
+    async def _collapse_beams(self, responses: list[AsyncGenerator], chunk_num = 0, max_chunks = 4):
+        scores = torch.zeros(len(responses), dtype=torch.float)
+
+        is_done = torch.tensor([response.choices[0].finish_reason == 'stop'
+                                 for response in responses], dtype=torch.bool)
+
+        prefer_done = chunk_num > max_chunks // 2
+        scores += 100 * is_done * prefer_done
+        lengths = torch.tensor([len(response.choices[0].text) for response in responses],
+                               dtype=torch.float)
+
+        has_additional_heads = torch.tensor([response.choices[0].additional_heads is not None for response in responses], dtype=torch.bool)
+        print('has_additional_heads', has_additional_heads)
+        scores += 1 * lengths
+
+        print('scores', scores)
+        best_idx = torch.argmax(scores).item()
+        return responses[best_idx]
+
     async def create_completion_with_chunkwise_beam(
             self,
             request: CompletionRequest,
@@ -83,40 +120,31 @@ class OpenAIServingCompletion(OpenAIServing):
         """
         Chunkwise beam search hack
         """
-        async def _get_new_beams(request: CompletionRequest):
+        async def _process_prefix(request: CompletionRequest):
             request = request
             og_max_tokens = request.max_tokens
+            og_n = request.n
             request.max_tokens = 1
-            request.n = 3
-            request.use_beam_search = True
-            gen = await self.create_completion(
+            request.n = 1
+            await self.create_completion(
                 request,
                 raw_request=raw_request,
             )
             request.max_tokens = og_max_tokens
-            request.n = 1
-            request.use_beam_search = False
-            return gen
+            request.n =  og_n
 
-        res = await _get_new_beams(request)
-        print(res.choices)
-        tasks = []
-        for choice in res.choices:
-            dup = request
-            dup.prompt = dup.prompt + " " + choice.text
-            tasks.append(
-                self.create_completion(
-                    dup,
-                    raw_request=raw_request,
-                )
-            )
+        await _process_prefix(request)
+        num_chunks = 0
+        eom = False
+        final = None
+        while num_chunks < 4 or eom:
+            num_chunks += 1
+            beams = await self._get_beams(request=request, raw_request=raw_request)
+            final = await self._collapse_beams(beams, num_chunks)
+            request.prompt = final.choices[0].text
+            eom = final.choices[0].finish_reason == "stop"
 
-        responses = await asyncio.gather(*tasks)
-        longest = max(responses, key=lambda res: len(res.choices[0].text))
-        for response in responses:
-            print(response)
-
-        return longest
+        return final
 
     async def create_completion(
         self,
@@ -593,6 +621,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 else:
                     logprobs = None
 
+                
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
                     text=output_text,
@@ -600,6 +629,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason=output.finish_reason,
                     stop_reason=output.stop_reason,
                     prompt_logprobs=final_res.prompt_logprobs,
+                    additional_heads=output.additional_heads,
                 )
                 choices.append(choice_data)
 
