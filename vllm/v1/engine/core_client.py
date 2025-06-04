@@ -843,6 +843,10 @@ class AsyncMPClient(MPClient):
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        if request.data_parallel_rank is not None:
+            raise ValueError("data_parallel_rank is only respected in "
+                             "multi-process DP mode")
+
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
