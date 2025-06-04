@@ -1,26 +1,33 @@
-from typing import Callable, List, Optional
-from dataclasses import dataclass, field
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import List, Optional
 
 import torch
+from triton_kernels.matmul_ogs import matmul_ogs
+from triton_kernels.routing import (GatherIndx, RoutingData, ScatterIndx,
+                                    routing)
 
 from vllm.utils import direct_register_custom_op
 
-from triton_kernels.matmul_ogs import matmul_ogs
-from triton_kernels.routing import (routing, RoutingData, GatherIndx,
-                                    ScatterIndx)
 
 def can_use_triton_moe(**kwargs):
     if kwargs.get("quant_config") is not None:
-        raise NotImplementedError("Triton kernel doesn't support quantization now")
+        raise NotImplementedError(
+            "Triton kernel doesn't support quantization now")
     if kwargs.get("custom_routing_function") is not None:
-        raise NotImplementedError("Triton kernel doesn't support custom routing function now")
+        raise NotImplementedError(
+            "Triton kernel doesn't support custom routing function now")
     if kwargs.get("use_grouped_topk"):
-        raise NotImplementedError("Triton kernel doesn't support use grouped topk now")
+        raise NotImplementedError(
+            "Triton kernel doesn't support use grouped topk now")
     if kwargs.get("scoring_func") != 'softmax':
-        raise NotImplementedError("Triton kernel only support softmax scoring function")
+        raise NotImplementedError(
+            "Triton kernel only support softmax scoring function")
     if kwargs.get("use_ep"):
-        raise NotImplementedError("Triton kernel doesn't support Experts Parallelism now")
+        raise NotImplementedError(
+            "Triton kernel doesn't support Experts Parallelism now")
     return True
+
 
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
@@ -70,24 +77,26 @@ def triton_kernel_moe_forward(
 
 
 # This is a triton implementation of the fused_experts function
-def triton_kernel_fused_experts(hidden_states: torch.Tensor,
-                             w1: torch.Tensor,
-                             w2: torch.Tensor,
-                             routing_data: RoutingData,
-                             gather_indx: GatherIndx,
-                             scatter_indx: ScatterIndx,
-                             inplace: bool = False,
-                             activation: str = "silu",
-                             apply_router_weight_on_input: bool = False,
-                             use_fp8_w8a8: bool = False,
-                             per_channel_quant: bool = False,
-                             global_num_experts: int = -1,
-                             expert_map: Optional[torch.Tensor] = None,
-                             w1_scale: Optional[torch.Tensor] = None,
-                             w2_scale: Optional[torch.Tensor] = None,
-                             a1_scale: Optional[torch.Tensor] = None,
-                             a2_scale: Optional[torch.Tensor] = None,
-                             block_shape: Optional[List[int]] = None,) -> torch.Tensor:
+def triton_kernel_fused_experts(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    routing_data: RoutingData,
+    gather_indx: GatherIndx,
+    scatter_indx: ScatterIndx,
+    inplace: bool = False,
+    activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
+    use_fp8_w8a8: bool = False,
+    per_channel_quant: bool = False,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[List[int]] = None,
+) -> torch.Tensor:
 
     # type check
     assert hidden_states.dtype == torch.bfloat16, "hidden_states must be bfloat16"

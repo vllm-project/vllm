@@ -842,7 +842,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
     lambda: int(os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")),
-    
+
     # If set, use experimental triton MoE kernel
     "VLLM_USE_EXP_TRITON_MOE_KERNEL":
     lambda: bool(int(os.getenv("VLLM_USE_EXP_MOE", "1"))),

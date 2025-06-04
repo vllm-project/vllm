@@ -38,7 +38,8 @@ if current_platform.is_cuda_alike():
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
                                  FusedMoEPrepareAndFinalize)
-    from .triton_kernels_moe import can_use_triton_moe, triton_kernel_moe_forward
+    from .triton_kernels_moe import (can_use_triton_moe,
+                                     triton_kernel_moe_forward)
     if has_pplx:
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
     if has_deepep:
@@ -462,28 +463,24 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
         # Fused gate_up_proj (column parallel)
-        w13_weight_raw = torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size,
-            dtype=params_dtype)
+        w13_weight_raw = torch.empty(num_experts,
+                                     2 * intermediate_size_per_partition,
+                                     hidden_size,
+                                     dtype=params_dtype)
         if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
             w13_weight_raw = w13_weight_raw.transpose(-2, -1).contiguous()
-        w13_weight = torch.nn.Parameter(w13_weight_raw,
-                                        requires_grad=False)
+        w13_weight = torch.nn.Parameter(w13_weight_raw, requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         # down_proj (row parallel)
-        w2_weight_raw = torch.empty(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition,
-            dtype=params_dtype)
+        w2_weight_raw = torch.empty(num_experts,
+                                    hidden_size,
+                                    intermediate_size_per_partition,
+                                    dtype=params_dtype)
         if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
             w2_weight_raw = w2_weight_raw.transpose(-2, -1).contiguous()
-        w2_weight = torch.nn.Parameter(w2_weight_raw,
-                                       requires_grad=False)
+        w2_weight = torch.nn.Parameter(w2_weight_raw, requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
@@ -579,7 +576,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-        
+
         if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
             return triton_kernel_moe_forward(
                 hidden_states=x,
@@ -602,8 +599,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 custom_routing_function=custom_routing_function,
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
-                indices_type=torch.uint32 if self.moe.use_pplx_kernels else None)
-            
+                indices_type=torch.uint32
+                if self.moe.use_pplx_kernels else None)
+
             if self.rocm_aiter_moe_enabled:
                 assert expert_map is None
                 return self.rocm_aiter_fused_experts(
@@ -615,7 +613,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     activation=activation,
                     apply_router_weight_on_input=apply_router_weight_on_input)
             else:
-                return self.fused_experts(  
+                return self.fused_experts(
                     hidden_states=x,
                     w1=layer.w13_weight,
                     w2=layer.w2_weight,
@@ -901,15 +899,13 @@ class FusedMoE(torch.nn.Module):
         self.quant_config = quant_config
 
         if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL and not can_use_triton_moe(
-            quant_config=self.quant_config,
-            custom_routing_function=self.custom_routing_function,
-            use_grouped_topk=self.use_grouped_topk,
-            scoring_func=self.scoring_func,
-            use_ep=self.use_ep
-        ):
+                quant_config=self.quant_config,
+                custom_routing_function=self.custom_routing_function,
+                use_grouped_topk=self.use_grouped_topk,
+                scoring_func=self.scoring_func,
+                use_ep=self.use_ep):
             raise NotImplementedError(
-                "Some functionality is not supported in new Triton MoE kernel"
-            )
+                "Some functionality is not supported in new Triton MoE kernel")
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.

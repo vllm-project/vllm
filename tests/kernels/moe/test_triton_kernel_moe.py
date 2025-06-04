@@ -1,16 +1,14 @@
-from typing import Callable, List, Optional
-import pytest
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, fields
 
+import pytest
 import torch
-import triton
-import triton.language as tl
-
 from triton_kernels.testing import assert_close
 
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_moe, )
-from vllm.model_executor.layers.fused_moe.triton_kernels_moe import triton_kernel_moe_forward
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe.triton_kernels_moe import (
+    triton_kernel_moe_forward)
 
 
 @dataclass
