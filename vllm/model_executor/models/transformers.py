@@ -174,10 +174,10 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return self.ctx.model_config.hf_config
 
     def get_supported_mm_limits(self):
-        return {"image": None, "video": None}
+        return {"image": None}
 
     def get_mm_max_tokens_per_item(self, seq_len, mm_counts):
-        return {"image": self.get_max_image_tokens(), "video": 0}
+        return {"image": self.get_max_image_tokens()}
 
     def get_max_image_tokens(self) -> int:
         width, height = self.get_max_image_size()
@@ -750,7 +750,6 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder)
-@support_torch_compile
 class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
                                   SupportsPP, SupportsMultiModal):
     embedding_padding_modules = ["lm_head"]
@@ -857,12 +856,11 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
         if pixel_values is not None:
             if isinstance(pixel_values, torch.Tensor):
                 pixel_values = pixel_values.flatten(0, 1).to(self.dtype)
-                if isinstance(num_image_patches, list):
-                    num_image_patches = torch.cat(num_image_patches)
-                num_image_patches = num_image_patches.flatten()
             else:
                 pixel_values = torch.cat(pixel_values).to(self.dtype)
-                num_image_patches = torch.cat(num_image_patches).flatten()
+
+            if isinstance(num_image_patches, list):
+                num_image_patches = torch.cat(num_image_patches)
 
             vision_embeddings = self.model.model.get_image_features(
                 pixel_values,
@@ -880,7 +878,7 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
                 # but transformers returns concat tensors if each patch
                 # is of different size. We split it back to make vLLM happy
                 vision_embeddings = torch.split(vision_embeddings,
-                                                num_image_patches.tolist())
+                                                num_image_patches.flatten().tolist())
                 vision_embeddings = [
                     embed.flatten(start_dim=0, end_dim=-2)
                     for embed in vision_embeddings
