@@ -320,6 +320,7 @@ steps:
   # these tests need to be separated, cannot combine
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
+  - pytest -v -s compile/piecewise/test_full_cudagraph.py
 
 - label: PyTorch Fullgraph Test # 18min
   mirror_hardwares: [amdexperimental, amdproduction]
