@@ -458,7 +458,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--dataset-name",
         type=str,
-        default="sharegpt",
+        default="random",
         choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "custom"],
         help="Name of the dataset to benchmark on.",
     )
