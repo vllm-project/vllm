@@ -196,8 +196,8 @@ class AiterFlashAttentionMetadataBuilder:
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
-        max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        total_tokens = self.runner.seq_lens_np[:num_reqs].sum()
+        max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
+        total_tokens = int(self.runner.seq_lens_np[:num_reqs].sum())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table = self.block_table
@@ -391,9 +391,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
-            self.sliding_window = (-1, -1)
+            self.sliding_window = [-1, -1]
         else:
-            self.sliding_window = (sliding_window - 1, 0)
+            self.sliding_window = [sliding_window - 1, 0]
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -524,7 +524,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     total_tokens=total_tokens,
                     softmax_scale=self.scale,
                     alibi_slopes=self.alibi_slopes,
-                    window_size=list(self.sliding_window),
+                    window_size=self.sliding_window,
                     block_table=block_table,
                     cu_seqlens_k=cu_seq_lens,
                 )
@@ -554,7 +554,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 block_table,
                 cu_seqlens_q,
                 seqused_k,
-                int(max_seqlen_k),
+                max_seqlen_k,
                 self.alibi_slopes,
                 self.kv_cache_dtype,
                 "NHD",
