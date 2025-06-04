@@ -10,7 +10,7 @@ from triton_kernels.testing import assert_close
 
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_moe, )
-from vllm.model_executor.layers.fused_moe.triton_kernels_moe import forward_cuda_triton
+from vllm.model_executor.layers.fused_moe.triton_kernels_moe import triton_kernel_moe_forward
 
 
 @dataclass
@@ -75,7 +75,7 @@ def test_equiv(num_token, inter_size, K, num_expts_tot, num_expts_act,
     w1_tri = w1_tri.transpose(-2, -1).contiguous()
     w2_tri = w2_tri.transpose(-2, -1).contiguous()
 
-    out_triton_monolithic = forward_cuda_triton(
+    out_triton_monolithic = triton_kernel_moe_forward(
         hidden_states=x_tri,
         w1=w1_tri,
         w2=w2_tri,

@@ -22,7 +22,7 @@ def can_use_triton_moe(**kwargs):
         raise NotImplementedError("triton kernel doesn't support EP now")
     return True
 
-def forward_cuda_triton(
+def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -48,7 +48,7 @@ def forward_cuda_triton(
     routing_data, gather_idx, scatter_idx = routing(gating_output, topk,
                                                     renormalize)
 
-    return fused_experts_triton_exp(
+    return triton_kernel_fused_experts(
         hidden_states,
         w1,
         w2,
@@ -70,7 +70,7 @@ def forward_cuda_triton(
 
 
 # This is a triton implementation of the fused_experts function
-def fused_experts_triton_exp(hidden_states: torch.Tensor,
+def triton_kernel_fused_experts(hidden_states: torch.Tensor,
                              w1: torch.Tensor,
                              w2: torch.Tensor,
                              routing_data: RoutingData,
@@ -147,7 +147,7 @@ def fused_experts_triton_exp(hidden_states: torch.Tensor,
     return intermediate_cache3
 
 
-def forward_cuda_triton_fake(
+def triton_kernel_moe_forward_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -172,8 +172,8 @@ def forward_cuda_triton_fake(
 
 direct_register_custom_op(
     op_name="forward_cuda_triton",
-    op_func=forward_cuda_triton,
+    op_func=triton_kernel_moe_forward,
     mutates_args=[],
-    fake_impl=forward_cuda_triton_fake,
+    fake_impl=triton_kernel_moe_forward_fake,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )

@@ -39,7 +39,7 @@ if current_platform.is_cuda_alike():
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
                                  FusedMoEPrepareAndFinalize)
-    from .triton_kernels_moe import can_use_triton_moe, forward_cuda_triton
+    from .triton_kernels_moe import can_use_triton_moe, triton_kernel_moe_forward
     if has_pplx:
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
     if has_deepep:
@@ -582,7 +582,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor:
         
         if envs.VLLM_USE_EXP_TRITON_KERNEL:
-            return forward_cuda_triton(
+            return triton_kernel_moe_forward(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
