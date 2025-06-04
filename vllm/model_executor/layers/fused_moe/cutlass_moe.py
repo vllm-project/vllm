@@ -347,7 +347,7 @@ def cutlass_moe_fp4(a: torch.Tensor, a1_gscale: torch.Tensor,
     ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
                                 problem_sizes2, a_map, c_map, e, n, k,
                                 blockscale_offsets)
-    
+
     a = ops.shuffle_rows(a, a_map)
 
     rep_a_fp4, rep_a_blockscale = ops.scaled_fp4_experts_quant(
