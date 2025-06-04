@@ -49,8 +49,7 @@ class All2AllManagerBase:
 
         # all2all communication often has separate implementations for
         # intra-node and inter-node communication
-        self.intranode = in_the_same_node_as(cpu_group, source_rank=0)
-        self.internode = not self.intranode
+        self.internode = not all(in_the_same_node_as(cpu_group, source_rank=0))
 
     def get_handle(self, kwargs):
         # get a handle for the all2all communication,
