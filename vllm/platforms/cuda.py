@@ -233,7 +233,8 @@ class CudaPlatformBase(Platform):
                 except ImportError:
                     logger.info_once(
                         "FlashInfer failed to import for V1 engine on "
-                        "Blackwell GPU; falling back to other backends.")
+                        "Blackwell (SM 10.0) GPUs; it is recommended to "
+                        "install FlashInfer for better performance.")
                     pass
             if cls.has_device_capability(80):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
