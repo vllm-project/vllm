@@ -566,7 +566,7 @@ class LLM:
                 " used by a single prompt consuming several modalities; "
                 " currently we only support one lora per request; as such,"
                 " lora(s) registered with modalities: %s"
-                " will be skipped.", intersection)
+                " will be skipped", intersection)
             return lora_request
 
         # Build the LoRA request; the ID of the default mm lora is the
@@ -575,12 +575,14 @@ class LLM:
         modality_lora_path = default_mm_loras[modality_name]
         modality_lora_id = sorted(default_mm_loras).index(modality_name) + 1
 
-        if (lora_request is not None
-                and lora_request.lora_int_id != modality_lora_id):
-            logger.warning(
-                "A modality with a registered lora and a lora_request "
-                "with a different ID were provided; falling back to the "
-                "lora_request as we only apply one LoRARequest per prompt.")
+        # If we have a collision, warn if there is a collision,
+        # but always send the explicitly provided request.
+        if lora_request:
+            if lora_request.lora_int_id != modality_lora_id:
+                logger.warning(
+                    "A modality with a registered lora and a lora_request "
+                    "with a different ID were provided; falling back to the "
+                    "lora_request as we only apply one LoRARequest per prompt")
             return lora_request
 
         return LoRARequest(
