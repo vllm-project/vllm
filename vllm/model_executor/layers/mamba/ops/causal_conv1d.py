@@ -4,7 +4,7 @@
 # Copyright (c) 2024, Tri Dao.
 # Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 
-from typing import Literal, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -328,7 +328,7 @@ def causal_conv1d_update_triton(
     conv_state: torch.Tensor,
     weight: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
-    activation: bool | Literal["silu", "swish"] | None = None,
+    activation: bool | str | None = None,
     cache_seqlens: Optional[torch.Tensor] = None,
     conv_state_indices: Optional[torch.Tensor] = None,
     pad_slot_id: int = PAD_SLOT_ID,
@@ -365,6 +365,8 @@ def causal_conv1d_update_triton(
         assert x.stride(1) == 1
     if isinstance(activation, bool):
         activation = "silu" if activation is True else None
+    elif activation is not None:
+        assert activation in ["silu", "swish"]
     unsqueeze = x.dim() == 2
     if unsqueeze:
         # make it (batch, dim, seqlen) with seqlen == 1
