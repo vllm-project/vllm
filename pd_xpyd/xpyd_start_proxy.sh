@@ -42,6 +42,13 @@ else
     FIRST_TOKEN_FROM_P=$4
 fi
 
+DEBUG_MODE=0
+
+if [ "$5" == "debug" ]; then
+    DEBUG_MODE=1
+    echo " Debug mode enabled"
+fi
+
 DECODE_IPS=("10.239.129.81" "10.239.129.165" "10.239.129.67" "10.239.129.21")
 DBASE_PORT=8200
 DECODE_ARGS=""
@@ -65,11 +72,24 @@ for ((i=0; i<P_INSTANCE_NUMBER; i++)); do
     PREFILL_ARGS="$PREFILL_ARGS ${IP}:${PORT}"
 done
 
-CMD="python3 ./examples/online_serving/disagg_examples/disagg_proxy_demo.py \
-    --model $MODEL_PATH \
-    --prefill $PREFILL_ARGS \
-    --decode $DECODE_ARGS \
-    --port 8868"
+if [ "$DEBUG_MODE" == "1" ]; then
+    CMD="python3 ./examples/online_serving/disagg_examples/disagg_proxy_demo_debugmode.py \
+        --model $MODEL_PATH \
+        --prefill $PREFILL_ARGS \
+        --decode $DECODE_ARGS \
+        --port 8868 \
+        --repeat_p_request 1 \
+        --repeat_d_times 100 \
+        --debug_mode"
+
+else
+
+    CMD="python3 ./examples/online_serving/disagg_examples/disagg_proxy_demo.py \
+        --model $MODEL_PATH \
+        --prefill $PREFILL_ARGS \
+        --decode $DECODE_ARGS \
+        --port 8868"
+fi
 
 if [ "$FIRST_TOKEN_FROM_P" = "true" ]; then
     CMD="$CMD --generator_on_p_node"

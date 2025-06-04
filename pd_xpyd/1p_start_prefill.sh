@@ -1,9 +1,22 @@
+#!/bin/bash
 
 BASH_DIR=$(dirname "${BASH_SOURCE[0]}")
 
+DEBUG_MODE=0
+
+if [ "$2" == "debug" ]; then
+    DEBUG_MODE=1
+    echo " Debug mode enabled"
+fi
+
 if [ -z "$1" ] || [ "$1" == "g10" ]; then
-    source "$BASH_DIR"/start_etc_mooncake_master.sh
-    echo "source "$BASH_DIR"/start_etc_mooncake_master.sh"
+    if [ "$DEBUG_MODE" == "1" ]; then
+    	source "$BASH_DIR"/start_etc_mooncake_master.sh debug
+    	echo "source "$BASH_DIR"/start_etc_mooncake_master.sh debug"
+    else
+	source "$BASH_DIR"/start_etc_mooncake_master.sh
+        echo "source "$BASH_DIR"/start_etc_mooncake_master.sh"
+    fi
 fi
 
 
