@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer ROCm GPUs."""
 import itertools
 from dataclasses import dataclass
@@ -493,8 +494,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0.")
         if use_irope:
             logger.warning_once(
                 "Using irope in ROCm Flash Attention is not supported yet, it "
@@ -768,14 +772,13 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
 
-                    # TODO: envs.VLLM_USE_ROCM_FP8_FLASH_ATTN
-                    # could cause performance degradation
+                    use_fp8_scales = (layer._q_scale and layer._k_scale
+                                      and layer._v_scale and layer._prob_scale
+                                      and self.kv_cache_dtype == "fp8")
                     full_scales = (
                         layer._q_scale.item(), layer._k_scale.item(),
-                        layer._v_scale.item(), layer._prob_scale.item()) if (
-                            fp8_out_scale and layer._q_scale
-                            and layer._prob_scale
-                            and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN) else None
+                        layer._v_scale.item(),
+                        layer._prob_scale.item()) if use_fp8_scales else None
                     self.triton_attn_func(
                         query,
                         key,
@@ -790,7 +793,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         attn_masks[0][None]
                         if attn_masks is not None else None,
                         full_scales,
-                        fp8_out_scale,
+                        # fp8_out_scale,
                     )
                 elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:
@@ -817,7 +820,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         self.num_heads,
                         self.head_size,
                         self.scale,
-                        causal_mask,
                         attn_masks,
                     )
                 else:
@@ -880,7 +882,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 assert _PARTITION_SIZE_ROCM % block_size == 0
                 tmp_output = torch.empty(
                     size=(num_seqs, num_heads, max_num_partitions, head_size),
-                    dtype=query.dtype,
+                    dtype=output.dtype,
                     device=output.device,
                 )
                 exp_sums = torch.empty(
@@ -914,7 +916,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.kv_cache_dtype,
                     layer._k_scale,
                     layer._v_scale,
-                    fp8_out_scale,
+                    # fp8_out_scale,
                 )
             else:
                 output[num_prefill_tokens:] = paged_attn.forward_decode(
@@ -952,7 +954,6 @@ def _sdpa_attention(
     num_heads: int,
     head_size: int,
     scale: float,
-    is_causal: bool,
     attn_masks: Optional[List[torch.Tensor]] = None,
 ) -> torch.Tensor:
     start = 0
@@ -969,7 +970,7 @@ def _sdpa_attention(
                 key[:, start:end, :],
                 value[:, start:end, :],
                 dropout_p=0.0,
-                is_causal=is_causal,
+                is_causal=attn_masks is None,
                 attn_mask=attn_masks[i] if attn_masks else None,
                 scale=scale).movedim(query.dim() - 2, 0)
             output[start:end, :, :] = sub_out

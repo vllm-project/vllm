@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
 import importlib.util
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from shutil import which
 
-import regex as re
 import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup

@@ -92,6 +92,11 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
+void apply_repetition_penalties_(torch::Tensor& logits,
+                                 const torch::Tensor& prompt_mask,
+                                 const torch::Tensor& output_mask,
+                                 const torch::Tensor& repetition_penalties);
+
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
                                double epsilon);

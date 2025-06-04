@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ Attention layer with torch scaled_dot_product_attention
     and PagedAttention."""
 from dataclasses import dataclass
@@ -122,8 +123,11 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0.")
         if use_irope:
             logger.warning_once(
                 "Using irope in Ipex is not supported yet, it will fall"

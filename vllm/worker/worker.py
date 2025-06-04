@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 import gc
 import os
@@ -151,11 +152,9 @@ class Worker(LocalOrDistributedWorkerBase):
     def stop_profile(self):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
-
-        if envs.VLLM_RPD_PROFILER_DIR:
-            self.profiler.__exit__()
-        else:
-            self.profiler.stop()
+        self.profiler.stop()
+        print(
+            self.profiler.key_averages().table(sort_by="self_cuda_time_total"))
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]

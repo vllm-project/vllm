@@ -190,11 +190,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb3")
 
   #
-  # Set rocm version dev int.
-  #
-  list(APPEND VLLM_GPU_FLAGS "-DROCM_VERSION=${ROCM_VERSION_DEV_INT}")
-
-  #
   # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
   # a lot of warnings that always mask real issues. Suppressing until this is properly addressed.
   #
@@ -247,6 +242,7 @@ set(VLLM_EXT_SRC
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
   "csrc/layernorm_quant_kernels.cu"
+  "csrc/sampler.cu"
   "csrc/cuda_view.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"

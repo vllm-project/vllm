@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .abstract_tool_parser import ToolParser, ToolParserManager
 from .deepseekv3_tool_parser import DeepSeekV3ToolParser

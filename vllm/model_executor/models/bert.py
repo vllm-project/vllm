@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
 from typing import Optional
@@ -16,7 +17,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
+from vllm.model_executor.layers.pooler import (ClassifierPooler, Pooler,
                                                PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -470,8 +471,8 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                               embedding_class=BertEmbedding,
                               add_pooling_layer=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = CrossEncodingPooler(config, self.classifier,
-                                           self.bert.pooler)
+        self._pooler = ClassifierPooler(vllm_config.model_config,
+                                        self.classifier, self.bert.pooler)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
