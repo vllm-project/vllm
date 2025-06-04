@@ -29,8 +29,8 @@ def moe_mmk(
         stride_ak,
         stride_bk,
         stride_ase,
-        stride_ask,
         stride_asm,
+        stride_ask,
         stride_bse,
         stride_bsk,
         stride_bsn,
@@ -156,8 +156,8 @@ def expert_triton_kernel(
         stride_cm,
         stride_cn,
         stride_ase,
-        stride_ask,
         stride_asm,
+        stride_ask,
         stride_bse,
         stride_bsk,
         stride_bsn,
@@ -196,8 +196,8 @@ def expert_triton_kernel(
         stride_ak,
         stride_bk,
         stride_ase,
-        stride_ask,
         stride_asm,
+        stride_ask,
         stride_bse,
         stride_bsk,
         stride_bsn,
@@ -253,8 +253,8 @@ def batched_triton_kernel(
         stride_cm,
         stride_cn,
         stride_ase,
-        stride_ask,
         stride_asm,
+        stride_ask,
         stride_bse,
         stride_bsk,
         stride_bsn,
@@ -297,11 +297,11 @@ def batched_triton_kernel(
 
     if use_fp8_w8a8:
         # block-wise
-        if group_k > 0 and group_n > 0:
+        if (group_k > 0 and group_n > 0) or per_channel_quant:
             a_scale_ptr = a_scale_ptr + (expert_id * stride_ase) + cta_m_start * stride_asm
             #b_scale_ptr = b_scale_ptr + (expert_id * stride_bse) # + cta_n_start * stride_bsn?
-        # channel-wise
-        elif per_channel_quant:
+        # channel-wise or tensor-wise
+        else:
             a_scale_ptr = a_scale_ptr + (expert_id * stride_ase)
             #b_scale_ptr = b_scale_ptr + (expert_id * stride_bse)
 
@@ -325,8 +325,8 @@ def batched_triton_kernel(
         stride_cm,
         stride_cn,
         stride_ase,
-        stride_ask,
         stride_asm,
+        stride_ask,
         stride_bse,
         stride_bsk,
         stride_bsn,
@@ -373,6 +373,36 @@ def invoke_moe_batched_triton_kernel(
     grid = (expert_num_tokens.size(0), triton.cdiv(max_num_tokens, BLOCK_M) *
             triton.cdiv(B.size(1), BLOCK_N))
 
+    assert A_scale is None or A_scale.ndim == 1 or A_scale.ndim == 3, f"{0 if A_scale is None else (A_scale.ndim, A_scale.shape)}"
+    assert B_scale is None or B_scale.ndim == 1 or B_scale.ndim == 3, f"{0 if B_scale is None else (B_scale.ndim, B_scale.shape)}"
+
+    #print(f"SCALES {A_scale.shape}, {B_scale.shape}")
+
+    stride_bse = 0
+    stride_bsk = 0
+    stride_bsn = 0
+    if B_scale is not None:
+        if B_scale.ndim == 1:
+            stride_bsk = B_scale.stride(0)
+        else:
+            assert B_scale.ndim == 3
+            stride_bse = B_scale.stride(0)
+            stride_bsn = B_scale.stride(1)
+            stride_bsk = B_scale.stride(2)
+
+    stride_ase = 0
+    stride_asm = 0
+    stride_ask = 0
+    if A_scale is not None:
+        if A_scale.ndim == 1:
+            stride_ask = A_scale.stride(0)
+        else:
+            assert A_scale.ndim == 3
+            stride_ase = A_scale.stride(0)
+            stride_asm = A_scale.stride(1)
+            stride_ask = A_scale.stride(2)
+
+
     batched_triton_kernel[grid](
         A,
         B,
@@ -397,15 +427,12 @@ def invoke_moe_batched_triton_kernel(
         C.stride(0),
         C.stride(1),
         C.stride(2),
-
-        A_scale.stride(0) if A_scale is not None and A_scale.ndim >= 2 else 0,  #E
-        A_scale.stride(2) if A_scale is not None and A_scale.ndim == 3 else 0,  #K
-        A_scale.stride(1) if A_scale is not None and A_scale.ndim >= 2 else 0,  #M
-
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,  #E
-        B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,  #K
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,  #N
-
+        stride_ase,
+        stride_asm,
+        stride_ask,
+        stride_bse,
+        stride_bsk,
+        stride_bsn,
         # Blockwise quantization data
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
@@ -537,7 +564,11 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
             tokens_per_expert[idx] = rows
 
-        return b_a1, b_a1_scale, tokens_per_expert, None, None
+        #b_a1_scale.fill_(0.0001)
+        #print(f"A1Q_scale = {b_a1_scale.shape}\n{b_a1_scale}")
+        assert b_a1_scale is None or b_a1_scale.ndim == 3
+
+        return b_a1, b_a1_scale, tokens_per_expert
 
     def finalize(
         self,

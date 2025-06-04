@@ -97,27 +97,32 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
-
-        repeat_cols = 4
-        repeat_rows = 1 if self.per_act_token_quant else a1.shape[0]
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1, (None if self.per_act_token_quant else a1_scale), self.quant_dtype,
             self.per_act_token_quant, self.block_shape)
 
+        # pplx requires 2-d scales even for scalars
         if a1q_scale is not None:
-            a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
+            if a1q_scale.dim() <= 1:
+                assert a1q_scale.numel() == 1
+                a1q_scale = a1q_scale.view(1, 1)
 
-        # per_act_token_quant = a1_scale.numel() != 1 if a1_scale is not None else (
-        #     a2_scale.numel() != 1 if a2_scale is not None else False)
+            #print(f"ORIG {a1q_scale.shape}, {a1q_scale}")
 
-        # a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
-        #                                            self.quant_dtype,
-        #                                            per_act_token,
-        #                                            self.block_shape)
+            orig_scale = a1q_scale
+            orig_a1q_scale_shape = a1q_scale.shape
 
-        if a1q_scale is not None and a1q_scale.dim() == 1:
-            assert a1q_scale.numel() == 1
-            a1q_scale = a1q_scale.view(1, 1)
+            # pad out scales if needed
+            if a1q_scale.numel() == 1:
+                a1q_scale = a1q_scale.repeat(a1q.shape[1], 4)
+
+            assert a1q_scale.shape[0] == a1q.shape[1]
+
+            #print(f"FINAL {a1q_scale.shape}, {a1q_scale}")
+
+
+        assert a1q_scale is None or a1q_scale.ndim == 2, \
+            f"{0 if a1q_scale is None else (a1q_scale.ndim, a1q_scale.shape)}"
 
         # rem_experts need to be 0 for pplx to work properly.
         rem_experts = num_experts % self.world_size
@@ -147,7 +152,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_x_scale_shape = (
                 num_local_experts,
                 expert_x.size(1),
-                (expert_x.size(2) + block_size - 1) // block_size,
+                #(expert_x.size(2) + block_size - 1) // block_size,
+                orig_a1q_scale_shape[-1],
             )
 
             #print(f"XXXXXXXXXX {block_size} {expert_x_scale_shape}")
@@ -176,9 +182,22 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, 0:1]
 
-        #print(f"ZZZZZZZZZZZZZZ")
+        #print(f"ZZZZZZZZZZZZZZ {expert_x_scale.shape}")
         if expert_x_scale is not None:
-            expert_x_scale = expert_x_scale[:, :, 0:1]
+            expert_x_scale = expert_x_scale[:, :, :orig_a1q_scale_shape[-1]]
+            from math import prod
+            if prod(orig_a1q_scale_shape) == 1:
+                expert_x_scale = expert_x_scale[:, :1, :1]
+                #print(f"EPT {expert_num_tokens.flatten()}")
+                #print(f"SCALARIZING!!! {expert_x_scale.shape}, {expert_x_scale.flatten()}")
+                idx = expert_num_tokens.flatten() != 0
+                assert torch.all(expert_x_scale.flatten()[idx] != 0)
+                #zidx = expert_num_tokens.flatten() == 0
+                #assert torch.all(expert_x_scale.flatten()[zidx] == 0)
+                assert expert_x_scale.ndim == 3
+                #expert_x_scale = orig_scale.view(1)
+
+            assert expert_x_scale.ndim == 1 or expert_x_scale.ndim == 3
 
         return expert_x, expert_x_scale, expert_num_tokens, None, None
 

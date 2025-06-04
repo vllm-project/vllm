@@ -788,7 +788,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         use_batched_experts = max_num_tokens_per_rank is not None
 
         if use_batched_experts:
-            logger.debug("BatchedTritonExperts(fp8)")
+            logger.debug(
+                "BatchedTritonOrDeepGemmExperts(%s): block_size=%s, per_act_token=%s",
+                self.__class__.__name__,
+                self.quant_config.weight_block_size,
+                False
+            )
             return BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 world_size=prepare_finalize.world_size,
@@ -799,10 +804,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         else:
-            logger.debug("TritonOrDeepGemmExperts(fp8)")
+            logger.debug(
+                "TritonOrDeepGemmExperts(%s): block_size=%s, per_act_token=%s",
+                self.__class__.__name__,
+                self.quant_config.weight_block_size,
+                False
+            )
             return TritonOrDeepGemmExperts(
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
+                per_act_token=False, #?
                 allow_deep_gemm=self.allow_deep_gemm,
             )
 

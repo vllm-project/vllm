@@ -204,29 +204,69 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     config_block_shape = [16, 16, 32]  # 16 for k if not fp8
 
     #print(f"A {use_fp8_w8a8} {A_q.dtype} {B_q.dtype} {A_scale.shape} {B_scale.shape}")
-
-    invoke_moe_batched_triton_kernel(
-        A_q,
-        B_q,
-        test_output,
-        num_expert_tokens,
-        compute_tl_dtype,
-        # Quantization data
-        A_scale,
-        B_scale,
-        None,
-        # Quantization schemes
-        use_fp8_w8a8,
-        False,
-        False,
-        config={
-            "BLOCK_SIZE_M": config_block_shape[0],
-            "BLOCK_SIZE_N": config_block_shape[1],
-            "BLOCK_SIZE_K": config_block_shape[2],
-        },
-        per_act_token_quant=False,
-        block_shape=block_shape,
-    )
+    if False:
+        from vllm.model_executor.layers.fused_moe.batched_moe2 import fused_moe_kernel2
+        fused_moe_kernel2(
+            A_q,
+            B_q,
+            test_output,
+            A_scale,
+            B_scale,
+            num_expert_tokens,
+            N,
+            K,
+            max_tokens_per_expert,
+            max_tokens_per_expert,
+            A_q.stride(0),
+            A_q.stride(1),
+            A_q.stride(2),
+            B_q.stride(0),
+            B_q.stride(1),
+            B_q.stride(2),
+            test_output.stride(0),
+            test_output.stride(1),
+            A_scale.stride(0),
+            A_scale.stride(1),
+            A_scale.stride(2),
+            B_scale.stride(0),
+            B_scale.stride(1),
+            B_scale.stride(2),
+            block_shape[0] if block_shape is not None else 0,
+            block_shape[1] if block_shape is not None else 0,
+            config_block_shape[0],
+            config_block_shape[1],
+            config_block_shape[2],
+            1,
+            1, # topk hack
+            compute_tl_dtype,
+            use_fp8_w8a8,
+            False,
+            False,
+            per_channel_quant=False,
+        )
+    else:
+        invoke_moe_batched_triton_kernel(
+            A_q,
+            B_q,
+            test_output,
+            num_expert_tokens,
+            compute_tl_dtype,
+            # Quantization data
+            A_scale,
+            B_scale,
+            None,
+            # Quantization schemes
+            use_fp8_w8a8,
+            False,
+            False,
+            config={
+                "BLOCK_SIZE_M": config_block_shape[0],
+                "BLOCK_SIZE_N": config_block_shape[1],
+                "BLOCK_SIZE_K": config_block_shape[2],
+            },
+            per_act_token_quant=False,
+            block_shape=block_shape,
+        )
 
     ref_output = ref_impl(
         A,
@@ -283,7 +323,7 @@ def per_block_cast_to_fp8(
     return x_scaled_sub, scales
 
 
-def make_test_weights(
+def _make_test_weights(
     e: int,
     n: int,
     k: int,
@@ -298,10 +338,10 @@ def make_test_weights(
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
-    w1_bf16 = torch.randn((e, 2 * n, k), dtype=dtype) / 10
+    w1_bf16 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w1_bf16 = w1_bf16.clamp(min=fp8_min, max=fp8_max).to(dtype=dtype)
 
-    w2_bf16 = torch.randn((e, k, n), dtype=dtype) / 10
+    w2_bf16 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
     w2_bf16 = w2_bf16.clamp(min=fp8_min, max=fp8_max).to(dtype=dtype)
 
     block_n, block_k = block_size[0], block_size[1]
@@ -330,7 +370,7 @@ def make_test_weights(
     return w1, w2, w1_s, w2_s, w1_bf16, w2_bf16
 
 
-def _make_test_weights(e, n, k, block_shape, dtype):
+def make_test_weights(e, n, k, block_shape, dtype):
     use_fp8_w8a8 = dtype == torch.torch.float8_e4m3fn
     w_dtype = torch.bfloat16 if use_fp8_w8a8 else dtype
 

@@ -84,9 +84,6 @@ class PPLXAll2AllManager(All2AllManagerBase):
         assert has_pplx, "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install pplx_kernels."  # noqa
         super().__init__(cpu_group)
 
-        # Intranode doesn't work yet.
-        self.internode = True
-
         if self.internode:
             # inter-node communication needs nvshmem,
             # intra-node communication uses p2p mapping directly

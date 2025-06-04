@@ -92,6 +92,8 @@ class GraniteMoeMoE(nn.Module):
                                 tp_size=tp_size,
                                 prefix=f"{prefix}.experts")
 
+        self.tp_size = tp_size if tp_size is not None else 1
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
@@ -99,6 +101,11 @@ class GraniteMoeMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states, router_logits)
+
+        if self.tp_size > 1:
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
+                final_hidden_states)
+
         return final_hidden_states.view(orig_shape)
 
 
