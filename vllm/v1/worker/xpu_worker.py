@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
-from typing import Optional
 
 import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.v1.worker.gpu_worker import Worker
+from vllm.v1.worker.gpu_worker import (Worker,
+                                       init_worker_distributed_environment)
 from vllm.v1.worker.xpu_model_runner import XPUModelRunner
 
 logger = init_logger(__name__)
@@ -140,52 +138,27 @@ class XPUWorker(Worker):
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
-        init_worker_distributed_environment(self.parallel_config, self.rank,
-                                            self.distributed_init_method,
-                                            self.local_rank)
-        # Set random seed.
-        set_random_seed(self.model_config.seed)
-        self.model_runner = XPUModelRunner(  # type: ignore
-            self.vllm_config, self.device)
 
-
-def init_worker_distributed_environment(
-    parallel_config: ParallelConfig,
-    rank: int,
-    distributed_init_method: Optional[str] = None,
-    local_rank: int = -1,
-) -> None:
-    """Initialize the distributed environment."""
-
-    if torch.distributed.is_initialized():
-        torch_world_size = torch.distributed.get_world_size()
-        if torch_world_size != parallel_config.world_size:
-            raise RuntimeError(
-                "torch.distributed is already initialized but the torch "
-                "world size does not match parallel_config.world_size "
-                f"({torch_world_size} vs. {parallel_config.world_size}).")
-    elif not distributed_init_method:
-        raise ValueError(
-            "distributed_init_method must be set if torch.distributed "
-            "is not already initialized")
-    else:
-        # oneapi 2025 will use pidfd as default
         ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE", "drmfd")
         ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
         ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE",
-                                         str(parallel_config.world_size))
+                                         str(self.parallel_config.world_size))
         os.environ["CCL_ZE_IPC_EXCHANGE"] = ENV_CCL_ZE_IPC_EXCHANGE
         os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
-        os.environ["LOCAL_RANK"] = str(local_rank)
-        init_distributed_environment(
-            world_size=parallel_config.world_size,
-            rank=rank,
-            distributed_init_method=distributed_init_method,
-            local_rank=local_rank,
-            backend="ccl")
+        os.environ["LOCAL_RANK"] = str(self.local_rank)
+        dist_backend = "ccl"
 
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
-    # global all_reduce needed for overall oneccl warm up
-    torch.distributed.all_reduce(torch.zeros(1).xpu())
+        init_worker_distributed_environment(self.vllm_config, self.rank,
+                                            self.distributed_init_method,
+                                            self.local_rank, dist_backend)
+
+        # global all_reduce needed for overall oneccl warm up
+        torch.distributed.all_reduce(torch.zeros(1).xpu())
+
+        # Set random seed.
+        set_random_seed(self.model_config.seed)
+
+        # Construct the model runner
+        self.model_runner = XPUModelRunner(  # type: ignore
+            self.vllm_config, self.device)

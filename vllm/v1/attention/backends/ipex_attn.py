@@ -43,7 +43,7 @@ class IPEXAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
     def __init__(self, runner: "XPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
         super().__init__(runner, kv_cache_spec, block_table)
-        # avoid “GPUModelerunner” has no attribute
+        # avoid “GPUModelerunner”, has no attribute
         self.runner: XPUModelRunner = runner
         self.aot_schedule = (get_flash_attn_version() == 3)
 
@@ -114,6 +114,8 @@ class IPEXAttentionImpl(AttentionImpl):
         blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
+        use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -134,6 +136,7 @@ class IPEXAttentionImpl(AttentionImpl):
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -148,6 +151,8 @@ class IPEXAttentionImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "IpexAttnBackendImpl")
+        self.use_irope = use_irope
+        self.vllm_flash_attn_version = get_flash_attn_version()
 
     def forward(
         self,
