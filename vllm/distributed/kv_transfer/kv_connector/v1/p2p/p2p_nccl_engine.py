@@ -76,8 +76,8 @@ class P2pNcclEngine:
         self.send_stream = torch.cuda.Stream()
         self.recv_stream = torch.cuda.Stream()
 
-        mem_pool_size = self.config.get_from_extra_config("mem_pool_size", 128)
-        self.pool = TensorMemoryPool(max_block_size=mem_pool_size *
+        mem_pool_size_gb = self.config.get_from_extra_config("mem_pool_size_gb", 128)
+        self.pool = TensorMemoryPool(max_block_size=mem_pool_size_gb *
                                      1024**3)  # GB
 
         # The sending type includes tree mutually exclusive options:
@@ -468,22 +468,11 @@ class P2pNcclEngine:
                     logger.debug("🐞get_finished, remove tensor_id:%s, addr:%d",
                                  tensor_id, addr)
 
-        # num_layers = len(forward_context.no_compile_layers)
-
-        # Retrieve requests that have already sent the KV cache.
+        # TODO:Retrieve requests that have already sent the KV cache.
         finished_sending: set[str] = set()
-        # if self.send_type == "PUT_ASYNC" or self.send_type == "GET":
-        #     for request_id in self.send_request_id_to_tensor_ids:
-        #         if (len(self.send_request_id_to_tensor_ids[request_id]) ==
-        #                 num_layers):
-        #             finished_sending.add(request_id)
 
-        # Retrieve requests that have already received the KV cache.
+        # TODO:Retrieve requests that have already received the KV cache.
         finished_recving: set[str] = set()
-        # for request_id in self.recv_request_id_to_tensor_ids:
-        #     if (len(self.recv_request_id_to_tensor_ids[request_id]) ==
-        #             num_layers):
-        #         finished_recving.add(request_id)
 
         logger.debug("🐞get_finished, finished_sending:%s, finished_recving:%s",
                      finished_sending, finished_recving)
