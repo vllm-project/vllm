@@ -223,7 +223,7 @@ class Metrics:
             documentation="Number of emitted tokens.",
             labelnames=labelnames))
 
-        # Tokens metrics
+        # Tokens throughput metrics
         self.gauge_prompt_throughput = self._gauge_cls(
             name="vllm:prompt_token_throughput",
             documentation="Prompt token throughput (tokens/sec).",
