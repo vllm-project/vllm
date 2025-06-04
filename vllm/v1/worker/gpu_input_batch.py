@@ -20,7 +20,11 @@ from vllm.v1.sample.logits_processor import (BatchUpdate,
                                              LogitBiasLogitsProcessor,
                                              LogitsProcessor,
                                              MinPLogitsProcessor,
-                                             MinTokensLogitsProcessor)
+                                             MinTokensLogitsProcessor,
+                                             RemovedRequestType,
+                                             AddedRequestType,
+                                             MovedRequestType,
+                                             SwappedRequestType)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
@@ -253,21 +257,38 @@ class InputBatch:
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
 
+        # Internal representation of per-step batch state changes.
+        # Should reset each step.
+        self.batch_update = BatchUpdate()
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
         # while performing state updates to the batch.
         return cast(list[str], self._req_ids)
 
+    def _get_next_add_index(self) -> int:
+        if req_index := self.batch_update.pop_removed_if_can():
+            # Fill the empty index.
+            return req_index
+        # Append to end
+        return self.num_reqs
+
+    def _register_add_request(self, request: "CachedRequestState") -> None:
+        """Track add-request operations"""
+        req_index = self._get_next_add_index()
+        assert req_index < self.max_num_reqs
+        self.batch_update.added.append((req_index,request.sampling_params,
+                                        request.output_token_ids))
+
+    def has_step_removed_requests(self) -> bool:
+        return self.batch_update.has_removed()
+
     def add_request(
         self,
         request: "CachedRequestState",
-        req_index: Optional[int] = None,
     ) -> int:
-        if req_index is None:
-            req_index = self.num_reqs
-        assert req_index < self.max_num_reqs
-
+        req_index=self._register_add_request(request)
         req_id = request.req_id
         if req_index == len(self._req_ids):
             self._req_ids.append(req_id)
@@ -385,6 +406,7 @@ class InputBatch:
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
+        self.batch_update.append_removed(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
@@ -418,7 +440,13 @@ class InputBatch:
         self.bad_words_token_ids.pop(req_index, None)
         return req_index
 
+    def _register_swap_requests(self, a: int, b: int) -> None:
+        """Track swap operations (exchanges of requests at
+        respective differing indices.)"""
+        self.batch_update.swapped.append((a,b))
+
     def swap_states(self, i1: int, i2: int) -> None:
+        self.batch_update.swapped.append((i1,i2))
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] =\
@@ -475,9 +503,12 @@ class InputBatch:
 
         self.block_table.swap_row(i1, i2)
 
-    def condense(
-        self, empty_req_indices: list[int]
-    ) -> tuple[list[tuple[int, int]], list[int]]:
+    def _register_move_request(self,
+                               from_idx: int, 
+                               to_idx: int) -> None:
+        self.batch_update.moved.append((from_idx,to_idx))
+
+    def condense(self) -> None:
         """Slide non-empty requests down into empty indices.
 
         Any consecutive empty indices at the very end of the list are not
@@ -499,21 +530,23 @@ class InputBatch:
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
         # is sorted in descending order.
-        last_req_index = num_reqs + len(empty_req_indices) - 1
-        swaps = []
-        while empty_req_indices:
+        last_req_index = num_reqs + self.batch_update.num_removed() - 1
+        while self.batch_update.has_removed():
             # Find the largest non-empty index.
+            empty_req_indices = self.batch_update.removed
             while last_req_index in empty_req_indices:
                 last_req_index -= 1
 
             # Find the smallest empty index.
-            empty_index = empty_req_indices[-1]
+            empty_index = self.batch_update.peek_removed()
             if empty_index >= last_req_index:
                 break
 
-            # Swap the states.
-            empty_req_indices.pop()
-            swaps.append((last_req_index, empty_index))
+            # Move active request down into empty request
+            # index.
+            self.batch_update.pop_removed_if_can()
+            self.batch_update.moved.append((last_req_index, 
+                                            empty_index))
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
             assert req_id is not None
@@ -571,9 +604,15 @@ class InputBatch:
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
-        return swaps, empty_req_indices
+    def _commit_logit_procs_state_changes(self) -> None:
+        """Apply batch add/remove/permute to logits procs' states"""
+        for logit_proc in self.logit_procs + self.nongreedy_logits_procs:
+            logit_proc.commit_state_changes(self.num_reqs,self.batch_update)
+        # Clear state change representation to prepare for next step
+        self.batch_update.reset()
 
-    def refresh_sampling_metadata(self):
+    def refresh(self):
+        self._commit_logit_procs_state_changes()
         self.sampling_metadata = self._make_sampling_metadata()
 
     def logit_procs_update_states(
@@ -586,7 +625,7 @@ class InputBatch:
 
         # Update states of logits processors
         for processor in chain(self.logit_procs, self.nongreedy_logits_procs):
-            processor.update_states(
+            processor.commit_state_changes(
                 BatchUpdate(
                     removed=removed,
                     moved=moved,

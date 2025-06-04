@@ -306,7 +306,7 @@ def test_logit_bias(device: str, batch_size: int, bias_value: float):
         batch_size=batch_size,
     )
     # Register batch update with logit processor
-    logit_bias_logitproc.update_states(batch_update)
+    logit_bias_logitproc.commit_state_changes(batch_update)
     # Emulate application of greedy logits processors in engine
     logits = _fake_apply_greedy_logits_processors(fake_logits,
                                                   sampling_metadata)
@@ -353,7 +353,7 @@ def test_min_p(device: str, batch_size: int, min_p: float):
         batch_size=batch_size,
     )
     # Register batch update with logit processor
-    min_p_logitproc.update_states(batch_update)
+    min_p_logitproc.commit_state_changes(batch_update)
     # Emulate application of non-greedy logits processors in engine
     logits = _fake_apply_nongreedy_logits_processors(fake_logits,
                                                      sampling_metadata)
@@ -405,7 +405,7 @@ def test_min_tokens_penalty(device: str, batch_size: int):
         batch_size=batch_size,
     )
     # Register batch update with logit processor
-    min_tokens_logitproc.update_states(batch_update)
+    min_tokens_logitproc.commit_state_changes(batch_update)
     # Emulate application of greedy logits processors in engine
     logits = _fake_apply_greedy_logits_processors(fake_logits,
                                                   sampling_metadata)

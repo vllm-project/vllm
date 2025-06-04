@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import dataclasses
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from typing import Optional
 
 import torch
@@ -12,39 +11,81 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# (index, params, output_tok_ids) for new
+# requests added to the batch.
+AddedRequestType=tuple[int, SamplingParams, list[int]]
+# (a, b) batch indices of any requests
+# swapped within the batch.
+SwappedRequestType=tuple[int, int]
+# (from, to) batch indices of any requests
+# moved within the batch.
+MovedRequestType=tuple[int, int]
+# Batch indices of any removed requests.
+RemovedRequestType=int
 
 @dataclasses.dataclass
 class BatchUpdate:
     # The current number of requests in the batch.
-    batch_size: int
-    # Batch indices of any removed requests.
-    removed: Sequence[int] = ()
-    # (from, to) batch indices of any requests
-    # moved within the batch.
-    moved: Sequence[tuple[int, int]] = ()
-    # (index, params, output_tok_ids) for new
-    # requests added to the batch.
-    added: Sequence[tuple[int, SamplingParams, list[int]]] = ()
+    batch_size: int = 0 # Must be updated
+    _removed: list[RemovedRequestType] = []
+    _is_removed_sorted: bool = False
+    moved: list[MovedRequestType] = []
+    swapped: list[SwappedRequestType] = []
+    added: list[AddedRequestType] = []
+
+    def _sort_removed(self)->None:
+        """Sort removed request indices in
+        descending order.
+        
+        Idempotent after first call, until
+        reset.
+        """
+        if not self._is_removed_sorted:
+            self._removed.sort(reverse=True)
+            self._is_removed_sorted=True
+
+    @property
+    def removed(self) -> list[RemovedRequestType]:
+        self._sort_removed()
+        return self._removed
+
+    def has_removed(self) -> bool:
+        return bool(self._removed)
+
+    def num_removed(self) -> int:
+        return len(self._removed)
+
+    def peek_removed(self) -> int:
+        self._sort_removed()
+        return self._removed[-1]
+
+    def pop_removed_if_can(self) -> Optional[int]:
+        if self.has_removed():
+            self._sort_removed()
+            return self._removed.pop()
+        return None
+
+    def append_removed(self,req_index: int) -> None:
+        self._removed.append(req_index)
+
+    def reset(self):
+        self.batch_size = 0
+        self._removed = []
+        self._is_removed_sorted = False
+        self.moved = []
+        self.swapped = []
+        self.added = []
 
 
 class LogitsProcessor(ABC):
+    batch_update: BatchUpdate
+
+    def __init__(self):
+        # Empty batch update
+        self.batch_update = BatchUpdate()
 
     @abstractmethod
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    @abstractmethod
-    def update_states(
-        self,
-        batch_update: Optional[BatchUpdate] = None,
-    ) -> None:
-        """Called when there are new output tokens, prior
-        to each forward pass.
-
-        Args:
-            batch_update is non-None iff there have been
-            changes to the batch makeup.
-        """
         raise NotImplementedError
 
     @classmethod
@@ -57,6 +98,38 @@ class LogitsProcessor(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def _commit_state_changes(
+        self,
+        batch_update: BatchUpdate,
+    ) -> None:
+        """Called when there are new output tokens, prior
+        to each forward pass.
+
+        Args:
+            batch_update is non-None iff there have been
+            changes to the batch makeup.
+        """
+        raise NotImplementedError
+
+    def add_request(self, request_info: AddedRequestType) -> None:
+        self.batch_update.added.append(request_info)
+
+    def remove_request(self, 
+                       request_index: RemovedRequestType) -> None:
+        self.batch_update.removed.append(request_index)
+
+    def move_request(self,
+                     from_index: int, to_index: int) -> None:
+        self.batch_update.moved.append((from_index,to_index))
+
+    def swap_requests(self,
+                      a_index: int, b_index: int) -> None:
+        self.batch_update.swapped.append((a_index,b_index))
+
+    def commit_state_changes(self, batch_size: int) -> None:
+        self.batch_update.batch_size = batch_size
+        self._commit_state_changes(self.batch_update)
 
 ###### ----- LogitsProcessor impls below here
 
@@ -65,6 +138,7 @@ class MinPLogitsProcessor(LogitsProcessor):
 
     def __init__(self, max_num_reqs: int, pin_memory: bool,
                  device: DeviceLikeType):
+        super().__init__()
         self.min_p_count: int = 0
 
         self.min_p_cpu_tensor = torch.zeros((max_num_reqs, ),
@@ -86,7 +160,7 @@ class MinPLogitsProcessor(LogitsProcessor):
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
-    def update_states(self, batch_update: Optional[BatchUpdate] = None):
+    def _commit_state_changes(self, batch_update: BatchUpdate):
         if not batch_update:
             return
 
@@ -142,6 +216,7 @@ class MinPLogitsProcessor(LogitsProcessor):
 class LogitBiasLogitsProcessor(LogitsProcessor):
 
     def __init__(self, pin_memory: bool, device: torch.device):
+        super().__init__()
         self.biases: dict[int, dict[int, float]] = {}
         self.device = device
         self.pin_memory = pin_memory
@@ -154,7 +229,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
     def requires_nongreedy(cls) -> bool:
         return False
 
-    def update_states(self, batch_update: Optional[BatchUpdate] = None):
+    def _commit_state_changes(self, batch_update: BatchUpdate):
         if not batch_update:
             return
 
@@ -205,6 +280,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
     def __init__(self, pin_memory: bool, device: torch.device):
         # index -> (min_toks, output_token_ids, stop_token_ids)
+        super().__init__()
         self.min_toks: dict[int, tuple[int, Sequence[int], set[int]]] = {}
         self.device = device
         self.pin_memory = pin_memory
@@ -220,7 +296,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     def requires_nongreedy(cls) -> bool:
         return False
 
-    def update_states(self, batch_update: Optional[BatchUpdate] = None):
+    def _commit_state_changes(self, batch_update: BatchUpdate):
         needs_update = False
         if batch_update:
             # Process added requests.
