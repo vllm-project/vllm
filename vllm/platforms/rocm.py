@@ -214,6 +214,10 @@ class RocmPlatform(Platform):
             selected_backend = _Backend.ROCM_FLASH
 
         if envs.VLLM_USE_V1:
+            if selected_backend == _Backend.CONCH:
+                logger.info("Using Conch Attention backend on V1 engine.")
+                return "vllm.v1.attention.backends.conch.ConchBackend"
+
             logger.info("Using Triton Attention backend on V1 engine.")
             return ("vllm.v1.attention.backends."
                     "triton_attn.TritonAttentionBackend")

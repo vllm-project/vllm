@@ -1318,7 +1318,8 @@ class EngineArgs:
                 and not envs.is_set("VLLM_ATTENTION_BACKEND")
             ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
             supported = False
-            if current_platform.is_rocm():
+            if (current_platform.is_rocm()
+                    or envs.VLLM_ATTENTION_BACKEND == "CONCH"):
                 supported = True
             elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (
@@ -1414,6 +1415,7 @@ class EngineArgs:
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
             "FLEX_ATTENTION",
+            "CONCH",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
