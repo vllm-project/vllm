@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
 
 import pytest
@@ -11,13 +12,11 @@ from vllm.utils import GiB_bytes, sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
-from vllm.v1.core.kv_cache_utils import (FreeKVCacheBlockQueue, KVCacheBlock,
-                                         PrefixCachingMetrics,
-                                         estimate_max_model_len,
-                                         generate_block_hash_extra_keys,
-                                         hash_block_tokens,
-                                         hash_request_tokens,
-                                         unify_kv_cache_configs)
+from vllm.v1.core.kv_cache_utils import (
+    FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
+    estimate_max_model_len, generate_block_hash_extra_keys,
+    get_max_concurrency_for_kv_cache_config, hash_block_tokens,
+    hash_request_tokens, unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         SlidingWindowSpec)
@@ -45,7 +44,6 @@ def make_request(request_id,
         multi_modal_placeholders=mm_positions,
         sampling_params=SamplingParams(max_tokens=17),
         eos_token_id=100,
-        arrival_time=0,
         lora_request=None,
         cache_salt=cache_salt,
     )
@@ -101,8 +99,8 @@ def test_kv_cache_block():
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
-    block_hash = vllm.v1.core.kv_cache_utils.BlockHashType(hash_value=123,
-                                                           token_ids=(1, 2, 3))
+    block_hash = vllm.v1.core.kv_cache_utils.BlockHash(hash_value=123,
+                                                       token_ids=(1, 2, 3))
     block.block_hash = block_hash
     assert block.block_hash == block_hash
 
@@ -283,7 +281,7 @@ def test_hash_block_tokens(hash_fn):
 
     block_hash = hash_block_tokens(hash_fn, parent_block_hash,
                                    curr_block_token_ids, extra_keys)
-    assert isinstance(block_hash, vllm.v1.core.kv_cache_utils.BlockHashType)
+    assert isinstance(block_hash, vllm.v1.core.kv_cache_utils.BlockHash)
     assert block_hash.hash_value == hash_fn(
         (parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
@@ -307,10 +305,8 @@ def test_hash_request_tokens(hash_fn):
     block_hashes = hash_request_tokens(hash_fn, block_size, request)
 
     assert len(block_hashes) == 2
-    assert isinstance(block_hashes[0],
-                      vllm.v1.core.kv_cache_utils.BlockHashType)
-    assert isinstance(block_hashes[1],
-                      vllm.v1.core.kv_cache_utils.BlockHashType)
+    assert isinstance(block_hashes[0], vllm.v1.core.kv_cache_utils.BlockHash)
+    assert isinstance(block_hashes[1], vllm.v1.core.kv_cache_utils.BlockHash)
 
     # Check the first block
     assert block_hashes[0].token_ids == (0, 1, 2)
@@ -597,6 +593,84 @@ def test_estimate_max_model_len(model_id, max_model_len,
     estimated_max_len = estimate_max_model_len(vllm_config, kv_cache_spec,
                                                8 * GiB_bytes)
     assert estimated_max_len == want_estimated_max_len
+
+
+def test_get_max_concurrency_for_kv_cache_config():
+    # Create a VllmConfig
+    model_id = "Qwen/Qwen1.5-7B"
+    max_model_len = 16384
+    model_config = ModelConfig(
+        model_id,
+        task="generate",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        max_model_len=max_model_len,
+    )
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=1024,
+                                       enable_chunked_prefill=True)
+
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    full_attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=32,
+        head_size=128,
+        dtype=torch.float16,
+        use_mla=False,
+    )
+
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=32,
+        head_size=128,
+        dtype=torch.float16,
+        use_mla=False,
+        sliding_window=1024,
+    )
+
+    kv_cache_config_full_attention = KVCacheConfig(
+        num_blocks=int(1024 * 1.5),
+        tensors={},
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
+                             full_attention_spec),
+        ],
+    )
+    max_concurrency_full_attention = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_full_attention)
+    assert max_concurrency_full_attention == 1.5
+
+    kv_cache_config_sliding_window = KVCacheConfig(
+        num_blocks=129 * 3,
+        tensors={},
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
+                             sliding_window_spec),
+        ],
+    )
+    max_concurrency_sliding_window = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_sliding_window)
+    assert max_concurrency_sliding_window == 3
+
+    kv_cache_config_hybrid_model = KVCacheConfig(
+        num_blocks=(1024 + 129) * 3,
+        tensors={},
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
+                             full_attention_spec),
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32, 64)],
+                             sliding_window_spec),
+        ],
+    )
+    max_concurrency_hybrid_model = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_hybrid_model)
+    assert max_concurrency_hybrid_model == 3
 
 
 def test_allocate_with_lookahead():

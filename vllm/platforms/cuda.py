@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Code inside this file can safely assume cuda platform, e.g. importing
 pynvml. However, it should not initialize cuda context.
 """
 
 import os
+from datetime import timedelta
 from functools import wraps
 from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
+from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
@@ -103,7 +107,6 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
-        compilation_config = vllm_config.compilation_config
         model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
@@ -151,15 +154,20 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
 
-        if (parallel_config.data_parallel_size > 1
-                and compilation_config.use_cudagraph):
+        if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+                and parallel_config.data_parallel_size > 1
+                and vllm_config.compilation_config.use_cudagraph):
             logger.info(
-                "Data Parallel: Forcing enforce eager to be True since DP is "
-                "currently not supported with CUDA Graphs.")
+                "Data Parallel: Forcing enforce eager to be True since DP "
+                "with DeepEP high-throughput kernels are not CUDA Graph "
+                "compatible. The DeepEP low-latency kernels are CUDA Graph "
+                "compatible. Set the all_to_all backend to deepep_low_latency "
+                "to use those kernels instead.")
+            vllm_config.compilation_config.use_cudagraph = False
             vllm_config.model_config.enforce_eager = True
-            compilation_config.use_cudagraph = False
-            # FIXME: inductor breaks cudagraph (from @bnell)
-            compilation_config.use_inductor = False
+            # TODO (varun): Turning this ON gives incorrect results for the
+            # Deepseek-V2-lite model.
+            vllm_config.compilation_config.use_inductor = False
 
     @classmethod
     def get_current_memory_usage(cls,
@@ -175,6 +183,14 @@ class CudaPlatformBase(Platform):
         if use_mla:
             # TODO(lucas): refactor to  be more concise
             #  we should probably consider factoring out V1 here
+            if selected_backend == _Backend.CUTLASS_MLA_VLLM_V1:
+                if use_v1:
+                    logger.info_once("Using Cutlass MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "cutlass_mla.CutlassMLABackend")
+                else:
+                    logger.warning(
+                        "Cutlass MLA backend is only supported on V1 engine")
             if selected_backend == _Backend.TRITON_MLA or block_size != 64:
                 if use_v1:
                     logger.info_once("Using Triton MLA backend on V1 engine.")
@@ -315,6 +331,36 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_piecewise_backend_cls(cls) -> str:
         return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
+
+    @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        assert is_nccl_available()
+        pg: ProcessGroup = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
+        from torch.distributed.distributed_c10d import ProcessGroupNCCL
+
+        backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupNCCL(prefix_store, group_rank, group_size,
+                                         backend_options)
+        backend_type = ProcessGroup.BackendType.NCCL
+        device = torch.device("cuda")
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(device, backend_type, backend_class)
+        return pg
 
 
 # NVML utils

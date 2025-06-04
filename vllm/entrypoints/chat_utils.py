@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import json
@@ -1252,7 +1253,7 @@ def apply_hf_chat_template(
         # investigation.
         logger.exception(
             "An error occurred in `transformers` while applying chat template")
-        raise ValueError from e
+        raise ValueError(str(e)) from e
 
 def apply_mistral_chat_template(
     tokenizer: MistralTokenizer,
@@ -1281,7 +1282,7 @@ def apply_mistral_chat_template(
     # We convert those assertion errors to ValueErrors so they can be
     # are properly caught in the preprocessing_input step
     except (AssertionError, MistralCommonException) as e:
-        raise ValueError from e
+        raise ValueError(str(e)) from e
 
     # External library exceptions can sometimes occur despite the framework's
     # internal exception management capabilities.
@@ -1292,7 +1293,7 @@ def apply_mistral_chat_template(
         logger.exception(
             "An error occurred in `mistral_common` while applying chat "
             "template")
-        raise ValueError from e
+        raise ValueError(str(e)) from e
 
 def random_tool_call_id() -> str:
     return f"chatcmpl-tool-{random_uuid()}"
