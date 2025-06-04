@@ -26,12 +26,7 @@ def is_flashmla_supported() -> Tuple[bool, Optional[str]]:
     """
     if not current_platform.is_cuda():
         return False, "FlashMLA is only supported on CUDA devices."
-
-    device_capability = current_platform.get_device_capability()
-    if device_capability is None:
-        return False, "Unable to determine device capability."
-
-    if device_capability[0] != 9:
+    if current_platform.get_device_capability()[0] != 9:
         return False, "FlashMLA is only supported on Hopper devices."
     if not _flashmla_C_AVAILABLE:
         return False, "vllm._flashmla_C is not available, likely was not "\
@@ -53,7 +48,7 @@ def get_mla_metadata(
         num_heads_k: num_heads_k.
 
     Return:
-        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize),
+        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), 
                                  dtype torch.int32.
         num_splits: (batch_size + 1), dtype torch.int32.
     """
@@ -80,10 +75,10 @@ def flash_mla_with_kvcache(
         block_table: (batch_size, max_num_blocks_per_seq), torch.int32.
         cache_seqlens: (batch_size), torch.int32.
         head_dim_v: Head_dim of v.
-        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize),
+        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), 
                                  torch.int32, return by get_mla_metadata.
         num_splits: (batch_size + 1), torch.int32, return by get_mla_metadata.
-        softmax_scale: float. The scaling of QK^T before applying softmax.
+        softmax_scale: float. The scaling of QK^T before applying softmax. 
                        Default to 1 / sqrt(head_dim).
         causal: bool. Whether to apply causal attention mask.
 
