@@ -650,7 +650,7 @@ def test_get_max_concurrency_for_kv_cache_config():
 
     kv_cache_config_full_attention = KVCacheConfig(
         num_blocks=int(1024 * 1.5),
-        tensors={},
+        kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
                              full_attention_spec),
@@ -662,7 +662,7 @@ def test_get_max_concurrency_for_kv_cache_config():
 
     kv_cache_config_sliding_window = KVCacheConfig(
         num_blocks=129 * 3,
-        tensors={},
+        kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
                              sliding_window_spec),
@@ -674,7 +674,7 @@ def test_get_max_concurrency_for_kv_cache_config():
 
     kv_cache_config_hybrid_model = KVCacheConfig(
         num_blocks=(1024 + 129) * 3,
-        tensors={},
+        kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
                              full_attention_spec),

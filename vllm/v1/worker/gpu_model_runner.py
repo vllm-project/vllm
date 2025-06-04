@@ -2168,7 +2168,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         bind_kv_cache(
             kv_caches,
-            self.vllm_config.compilation_config.static_forward_context, [])
+            self.vllm_config.compilation_config.static_forward_context,
+            self.kv_caches)
         return kv_caches
 
     def may_reinitialize_input_batch(self,
