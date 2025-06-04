@@ -139,7 +139,6 @@ def extra_backend_options_completion(client: OpenAI, model: str):
             extra_body={
                 "guided_regex": r"\w+@\w+\.com\n",
                 "stop": ["\n"],
-                "guided_decoding_backend": "xgrammar",
                 "guided_decoding_disable_fallback": True,
             },
         )
