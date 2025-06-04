@@ -33,7 +33,7 @@ check_num_gpus() {
 
 ensure_python_library_installed() {
     echo "Checking if $1 is installed..."
-    python -c "import $1" > /dev/null 2>&1
+    python3 -c "import $1" > /dev/null 2>&1
     if [ $? -ne 0 ]; then
         if [ "$1" == "nixl" ]; then
             echo "$1 is not installed. Please refer to https://github.com/ai-dynamo/nixl for installation."
@@ -121,8 +121,8 @@ main() {
     echo "All servers are up. Starting benchmark..."
 
     # begin benchmark
-    cd ../../../benchmarks/
-    python benchmark_serving.py --port 9000 --seed $(date +%s) \
+    cd ../../../../benchmarks/
+    python3 benchmark_serving.py --port 9000 --seed $(date +%s) \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
         --num-prompts 200 --burstiness 100 --request-rate 3.6 | tee benchmark.log
