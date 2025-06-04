@@ -183,11 +183,10 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
 
     B_q, _, B_scale, _, B, _ = make_test_weights(
         num_experts,
-        max_tokens_per_expert,
         N // 2,
         K,
+        block_shape,
         dtype,
-        block_shape
     )
 
     out_dtype = torch.bfloat16 if use_fp8_w8a8 else dtype
@@ -284,7 +283,54 @@ def per_block_cast_to_fp8(
     return x_scaled_sub, scales
 
 
-def make_test_weights(e, m, n, k, dtype, block_shape):
+def make_test_weights(
+    e: int,
+    n: int,
+    k: int,
+    block_size: list[int],
+    dtype=torch.torch.float8_e4m3fn,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Return weights w1, w2, w1q, w2q, w1_scale, w2_scale
+    """
+    dtype = torch.bfloat16
+
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    fp8_max, fp8_min = fp8_info.max, fp8_info.min
+
+    w1_bf16 = torch.randn((e, 2 * n, k), dtype=dtype) / 10
+    w1_bf16 = w1_bf16.clamp(min=fp8_min, max=fp8_max).to(dtype=dtype)
+
+    w2_bf16 = torch.randn((e, k, n), dtype=dtype) / 10
+    w2_bf16 = w2_bf16.clamp(min=fp8_min, max=fp8_max).to(dtype=dtype)
+
+    block_n, block_k = block_size[0], block_size[1]
+    n_tiles_w1 = ((2 * n) + block_n - 1) // block_n
+    k_tiles_w1 = (k + block_k - 1) // block_k
+    n_tiles_w2 = (k + block_n - 1) // block_n
+    k_tiles_w2 = (n + block_k - 1) // block_k
+
+    w1 = torch.empty_like(w1_bf16, dtype=torch.float8_e4m3fn)
+    w2 = torch.empty_like(w2_bf16, dtype=torch.float8_e4m3fn)
+
+    w1_s = torch.empty((e, n_tiles_w1, k_tiles_w1),
+                       device="cuda",
+                       dtype=torch.float32)
+    w2_s = torch.empty((e, n_tiles_w2, k_tiles_w2),
+                       device="cuda",
+                       dtype=torch.float32)
+
+    assert w1_s.shape == (e, (2 * n + 127) // 128, (k + 127) // 128)
+    assert (w2.shape[-2] + block_n - 1) // block_n == w2_s.shape[-2]
+
+    for i in range(e):
+        w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
+        w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
+
+    return w1, w2, w1_s, w2_s, w1_bf16, w2_bf16
+
+
+def _make_test_weights(e, n, k, block_shape, dtype):
     use_fp8_w8a8 = dtype == torch.torch.float8_e4m3fn
     w_dtype = torch.bfloat16 if use_fp8_w8a8 else dtype
 
@@ -381,7 +427,7 @@ def test_fused_moe_batched_experts(
 
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
-    w1, w2, w1_s, w2_s, _, _ = make_test_weights(e, m, n, k, dtype, block_shape)
+    w1, w2, w1_s, w2_s, _, _ = make_test_weights(e, n, k, block_shape, dtype)
 
     torch.set_printoptions(profile="full")
 
