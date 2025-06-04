@@ -833,7 +833,7 @@ def get_cutlass_moe_mm_data(topk_ids: torch.Tensor,
                          before executing the MMs.
     - output_permutation: Permutation that must be used to shuffle the output
                           after executing the MMs.
-    - blockscale_offsets: Optional arugument passed for fp4 moe. Indices that
+    - blockscale_offsets: Optional argument passed for fp4 moe. Indices that
                           mark at which block scale index each expert begins
                           its computation. The number of block scale rows
                           computed with expert E is blockscale_offsets[E + 1] -
@@ -1109,7 +1109,6 @@ def scaled_fp4_experts_quant(
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
     topk: int,
-    shuffle_map: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale, for
@@ -1128,9 +1127,11 @@ def scaled_fp4_experts_quant(
     assert input_tensor.ndim == 2, (
         f'input.ndim needs to be == 2, but got {input_tensor.ndim}.')
 
+    # Control the maximum number of tokens per expert supported by the
+    # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
+    # from running out of memory. This value can also be increased to support
+    # larger models.
     MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
-    input_tensor = shuffle_rows(
-        input_tensor, shuffle_map) if shuffle_map is not None else input_tensor
     m_numtopk, k = input_tensor.shape
 
     assert (m_numtopk <= MAX_TOKENS_PER_EXPERT * topk), (
