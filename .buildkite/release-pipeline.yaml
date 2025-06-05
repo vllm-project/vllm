@@ -1,5 +1,6 @@
 steps:
   - label: "Build wheel - CUDA 12.8"
+    id: build-wheel-cuda-12-8
     agents:
       queue: cpu_queue_postmerge
     commands:
@@ -11,6 +12,7 @@ steps:
       DOCKER_BUILDKIT: "1"
 
   - label: "Build wheel - CUDA 12.6"
+    id: build-wheel-cuda-12-6
     agents:
       queue: cpu_queue_postmerge
     commands:
@@ -28,6 +30,7 @@ steps:
 
   - label: "Build wheel - CUDA 11.8"
     # depends_on: block-build-cu118-wheel
+    id: build-wheel-cuda-11-8
     agents:
       queue: cpu_queue_postmerge
     commands:
@@ -44,12 +47,25 @@ steps:
 
   - label: "Build release image"
     depends_on: block-release-image-build
+    id: build-release-image
     agents:
       queue: cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT --target vllm-openai --progress plain -f docker/Dockerfile ."
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
+
+  - label: "Annotate release workflow"
+    depends_on:
+      - build-release-image
+      - build-wheel-cuda-12-8
+      - build-wheel-cuda-12-6
+      - build-wheel-cuda-11-8
+    id: annotate-release-workflow
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "bash .buildkite/scripts/annotate-release.sh"
 
   - label: "Build and publish TPU release image"
     depends_on: ~
@@ -70,9 +86,10 @@ steps:
       DOCKER_BUILDKIT: "1"
 
   - input: "Provide Release version here"
+    id: input-release-version
     fields:
       - text: "What is the release version?"
-        key: "release-version"
+        key: release-version
 
   - block: "Build CPU release image"
     key: block-cpu-release-image-build
