@@ -269,7 +269,6 @@ def get_config(
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
 
-    using_tensorizer = kwargs.get("using_tensorizer", False)
     is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
@@ -277,7 +276,7 @@ def get_config(
 
     if config_format == ConfigFormat.AUTO:
         try:
-            if is_gguf or using_tensorizer or file_or_path_exists(
+            if is_gguf or file_or_path_exists(
                     model, HF_CONFIG_NAME, revision=revision):
                 config_format = ConfigFormat.HF
             elif file_or_path_exists(model,
@@ -308,12 +307,6 @@ def get_config(
             raise ValueError(error_message) from e
 
     if config_format == ConfigFormat.HF:
-        if using_tensorizer:
-            from vllm.model_executor.model_loader.tensorizer import \
-                deserialize_hf_model_artifacts_to_path
-            temp_dir_with_cfg = deserialize_hf_model_artifacts_to_path(model)
-            model = os.path.join(temp_dir_with_cfg.name, "config.json")
-
         config_dict, _ = PretrainedConfig.get_config_dict(
             model,
             revision=revision,

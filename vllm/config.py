@@ -26,6 +26,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
 
+import vllm
 import vllm.envs as envs
 from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
@@ -521,13 +522,6 @@ class ModelConfig:
                                self.code_revision, self.config_format,
                                using_tensorizer=self.using_tensorizer)
 
-        if self.using_tensorizer:
-            # If loading with tensorizer, hf_config.name_or_path becomes a
-            # temporary directory containing all model artifacts, so
-            # we change self.tokenizer to reflect the correct location
-            # when it's used to load the tokenizer artifacts
-            self.tokenizer = os.path.dirname(hf_config.name_or_path)
-
         if hf_overrides_kw:
             logger.info("Overriding HF config with %s", hf_overrides_kw)
             hf_config.update(hf_overrides_kw)
@@ -627,6 +621,19 @@ class ModelConfig:
     def architectures(self) -> list[str]:
         return getattr(self.hf_config, "architectures", [])
 
+
+    @staticmethod
+    def maybe_wrap_tensorizer(func):
+        def wrapper(self, *args, **kwargs):
+            if self.using_tensorizer:
+                from vllm.model_executor.model_loader.tensorizer import \
+                    TensorizerS3Wrapper
+                vllm.config.S3Model = TensorizerS3Wrapper
+            return func(self, *args, **kwargs)
+
+        return wrapper
+
+    @maybe_wrap_tensorizer
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
         """Pull model/tokenizer from S3 to temporary directory when needed.
