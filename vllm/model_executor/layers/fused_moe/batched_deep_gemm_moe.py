@@ -36,6 +36,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert (len(self.block_shape) == 2 and all(
             [v == self.DEEPGEMM_BLOCK_SHAPE for v in self.block_shape]))
 
+    def supports_chunking(self) -> bool:
+        return False
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -45,14 +48,15 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = num_experts * max_num_tokens * num_dp * max(K, N)
-        workspace2 = num_experts * max_num_tokens * num_dp * (N // 2)
-        return (workspace13, workspace2, a.dtype)
+        workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
+        workspace2 = (num_experts, max_num_tokens * num_dp,  (N // 2))
+        output = (num_experts, max_num_tokens * num_dp, K)
+        return (workspace13, workspace2, K, a.dtype)
 
     def apply(
         self,

@@ -213,6 +213,9 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         self.per_act_token = per_act_token
         self.per_out_ch = per_out_ch
 
+    def supports_chunking(self) -> bool:
+        return True
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -222,11 +225,12 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         padded_M = aq.shape[1]
         workspace1 = self.max_experts_per_worker * padded_M * max(N, K)
         workspace2 = self.max_experts_per_worker * padded_M * (N // 2)
-        return (workspace1, workspace2, self.out_dtype)
+        output = (padded_M, topk, K)
+        return (workspace1, workspace2, output, self.out_dtype)
 
     def apply(
         self,

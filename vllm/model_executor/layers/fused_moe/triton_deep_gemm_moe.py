@@ -34,6 +34,12 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.deep_gemm_expert = DeepGemmExperts(
         ) if self.allow_deep_gemm else None
 
+    def supports_chunking(self) -> bool:
+        dge = self.deep_gemm_expert
+        te  = self.triton_expert
+        return ((dge is None or dge.supports_chunking()) and
+                (te is None or te.supports_chunking()))
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -43,7 +49,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
@@ -52,8 +58,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             return self.deep_gemm_expert.workspace_shapes(
                 a, aq, M, N, K, topk, num_experts)
         else:
-            return self.triton_expert.workspace_shapes(a, aq, M, N, K, topk,
-                                                       num_experts)
+            return self.triton_expert.workspace_shapes(
+                a, aq, M, N, K, topk, num_experts)
 
     def apply(
         self,

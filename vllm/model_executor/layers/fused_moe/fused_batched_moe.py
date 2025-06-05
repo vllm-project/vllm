@@ -518,6 +518,9 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.world_size = world_size
         self.dp_size = dp_size
 
+    def supports_chunking(self) -> bool:
+        return False
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -527,15 +530,14 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
-        #print(f"WORKSPACE {max_num_tokens} {num_dp}")
-        workspace13 = num_experts * max_num_tokens * num_dp * K
-        workspace2 = max_num_tokens * num_dp * N
-        return (workspace13, workspace2, a.dtype)
+        workspace13 = (num_experts, max_num_tokens * num_dp, K)
+        workspace2 = (max_num_tokens * num_dp, N)
+        return (workspace13, workspace2, workspace13, a.dtype)
 
     def apply(
         self,
@@ -630,6 +632,9 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not use_int4_w4a16, "NYI"
         assert self.block_shape is None, "NYI"
 
+    def supports_chunking(self) -> bool:
+        return False
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -639,14 +644,15 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = num_experts * max_num_tokens * num_dp * max(K, N)
-        workspace2 = num_experts * max_num_tokens * num_dp * (N // 2)
-        return (workspace13, workspace2, a.dtype)
+        workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
+        workspace2 = (num_experts, max_num_tokens * num_dp, (N // 2))
+        output = (num_experts, max_num_tokens * num_dp, K)
+        return (workspace13, workspace2, output, a.dtype)
 
     def apply(
         self,

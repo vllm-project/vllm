@@ -64,6 +64,15 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=self.block_shape,  # type: ignore[arg-type]
         ) if (self.allow_deep_gemm and is_fp8_128_block_quantized) else None
 
+        assert (self.batched_deep_gemm_experts is not None or
+                self.batched_triton_experts is not None)
+
+    def supports_chunking(self) -> bool:
+        bdge = self.batched_deep_gemm_experts
+        bte  = self.batched_triton_experts
+        return ((bdge is None or bdge.supports_chunking()) and
+                (bte is None or bte.supports_chunking()))
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -73,7 +82,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
