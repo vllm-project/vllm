@@ -71,8 +71,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.block_shape = deep_gemm_block_shape()
 
     def supports_chunking(self) -> bool:
-        # TODO: for now
-        return False
+        return True
 
     def workspace_shapes(
         self,
@@ -88,7 +87,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         M_sum = round_up(M_sum, block_m)
         workspace1 = (M_sum, max(N * 2, K))
         workspace2 = (M_sum, N)
-        output = (M_sum, K)
+        output = (M * topk, K)
         return (workspace1, workspace2, output, a.dtype)
 
     def apply(

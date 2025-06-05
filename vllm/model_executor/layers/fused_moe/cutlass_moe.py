@@ -31,8 +31,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         self.out_dtype = out_dtype
 
     def supports_chunking(self) -> bool:
-        # TODO: for now
-        return False
+        return True
 
     def workspace_shapes(
         self,
@@ -47,7 +46,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         N, K = K, N
         workspace1 = (M, topk, max(2 * N, K))
         workspace2 = (M, topk, N)
-        output = (M, topk, K)
+        output = (M * topk, K)
         return (workspace1, workspace2, output, self.out_dtype)
 
     def apply(
