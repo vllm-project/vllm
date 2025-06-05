@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 import vllm_hpu_extension.kernels as kernels
 import vllm_hpu_extension.ops as ops
-from vllm_hpu_extension.flags import enabled_flags
+from vllm_hpu_extension.runtime import get_config
 from vllm_hpu_extension.utils import (FP8Matmul, Matmul, ModuleFusedSDPA,
                                       Softmax, VLLMFP8KVCache, VLLMKVCache)
 
@@ -178,12 +178,9 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             else VLLMFP8KVCache()
         self.fused_scaled_dot_product_attention = kernels.fsdpa()
 
-        if "fsdpa" in enabled_flags():
-            assert alibi_slopes is None, \
-                'Prefill with FusedSDPA not supported with alibi slopes!'
-            self.prefill_impl = 'fsdpa'
-        else:
-            self.prefill_impl = 'naive'
+        self.prefill_impl = get_config().prompt_attn_impl
+        assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
+            'Prefill with FusedSDPA not supported with alibi slopes!'
 
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
@@ -399,13 +396,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
 
-        self.prefill_impl = 'naive'
-        if "flex_attention" in enabled_flags():
-            self.prefill_impl = 'flex'
-        if "fsdpa" in enabled_flags():
-            assert alibi_slopes is None, \
-                'Prefill with FusedSDPA not supported with alibi slopes!'
-            self.prefill_impl = 'fsdpa'
+        self.prefill_impl = get_config().prompt_attn_impl
+        assert self.prefill_impl != 'fsdpa_impl' or alibi_slopes is None, \
+            'Prefill with FusedSDPA not supported with alibi slopes!'
 
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
@@ -416,10 +409,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             self.alibi_slopes = alibi_slopes_tensor
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        if self.prefill_impl == 'fsdpa':
-            assert alibi_slopes is None, \
-                'Prefill with FusedSDPA not supported with alibi slopes!'
 
         supported_head_sizes = HPUPagedAttention.get_supported_head_sizes()
         if head_size not in supported_head_sizes:

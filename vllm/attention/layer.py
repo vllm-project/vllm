@@ -328,9 +328,9 @@ class MultiHeadAttention(nn.Module):
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
 
-            from vllm_hpu_extension.flags import enabled_flags
+            from vllm_hpu_extension.runtime import get_config
 
-            if "fsdpa" in enabled_flags():
+            if get_config().fsdpa_impl:
                 from habana_frameworks.torch.hpex.kernels import FusedSDPA
                 from vllm_hpu_extension.utils import ModuleFusedSDPA
 
