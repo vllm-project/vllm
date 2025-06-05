@@ -302,6 +302,10 @@ def _detect_content_format(
     if jinja_ast is None:
         return default
 
+    for loop_ast in jinja_ast.find_all(jinja2.nodes.TemplateData):
+        if loop_ast.data:
+            return "string"
+
     try:
         next(_iter_nodes_assign_content_item(jinja_ast))
     except StopIteration:
