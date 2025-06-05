@@ -196,9 +196,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
-        self.cudagraph_batch_sizes = list(sorted(
-            self.vllm_config.compilation_config.cudagraph_capture_sizes))
-        self.max_cudagraph_batch_size = self.cudagraph_batch_sizes[-1]
+        # The batch sizes in the config are in descending order.
+        self.cudagraph_batch_sizes = list(
+            reversed(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # Cache the device properties.
         self._init_device_properties()
