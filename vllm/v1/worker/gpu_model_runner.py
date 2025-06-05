@@ -1178,7 +1178,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
-                and num_scheduled_tokens <= self.max_cudagraph_batch_size):
+                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
