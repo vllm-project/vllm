@@ -3,11 +3,9 @@
 
 import inspect
 from typing import Callable, Optional, TypeVar, Union, overload
-from unittest.mock import patch
 
 import torch
 import torch.nn as nn
-from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher

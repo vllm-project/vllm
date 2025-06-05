@@ -408,7 +408,8 @@ class VllmBackend:
             #    it mainly summarizes how the model is used in forward pass)
             from torch._dynamo.utils import get_traced_code
 
-            forward_code_files = sorted(list(set(c.co_filename for c in get_traced_code())))
+            forward_code_files = sorted(
+                list(set(c.co_filename for c in get_traced_code())))
             logger.debug(
                 "Traced files (to be considered for compilation cache):\n%s",
                 "\n".join(forward_code_files))
