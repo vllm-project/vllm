@@ -327,8 +327,11 @@ class OutputProcessor:
         if request_id in self.request_states:
             raise ValueError(f"Request id {request_id} already running.")
 
+        tokenizer = None if not self.tokenizer else \
+            self.tokenizer.get_lora_tokenizer(request.lora_request)
+
         req_state = RequestState.from_new_request(
-            tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
+            tokenizer=tokenizer,
             request=request,
             prompt=prompt,
             parent_req=parent_req,
