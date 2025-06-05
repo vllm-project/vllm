@@ -3964,7 +3964,7 @@ class CompilationConfig:
     """custom ops that are enabled"""
     disabled_custom_ops: Counter[str] = field(default_factory=Counter,
                                               init=False)
-    """files that are traced for compilation"""
+    """custom ops that are disabled"""
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
 
