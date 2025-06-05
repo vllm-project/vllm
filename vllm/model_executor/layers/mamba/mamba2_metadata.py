@@ -158,3 +158,64 @@ def prepare_mamba2_metadata(
                           seq_idx=seq_idx,
                           chunk_indices=chunk_indices,
                           chunk_offsets=chunk_offsets)
+
+
+def update_metadata(x: torch.Tensor, query_start_loc: torch.Tensor,
+                    mamba2_metadata: Mamba2Metadata):
+    dim, cu_seqlen = x.shape
+    out = torch.zeros_like(x)
+    mamba2_metadata.cu_seqlen = cu_seqlen
+    mamba2_metadata.out = out
+    seqlens = np.diff(query_start_loc.to('cpu'))
+    nums_dict = {}  # type: ignore
+    for BLOCK_M in [8]:  # cover all BLOCK_M values
+        nums = -(-seqlens // BLOCK_M)
+        nums_dict[BLOCK_M] = {}
+        nums_dict[BLOCK_M]['nums'] = nums
+        nums_dict[BLOCK_M]['tot'] = nums.sum().item()
+        mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums))
+        nums_dict[BLOCK_M]['mlist'] = mlist
+        mlist_len = len(nums_dict[BLOCK_M]['mlist'])
+        nums_dict[BLOCK_M]['mlist_len'] = mlist_len
+        # type: ignore
+        mamba2_metadata.MAX_NUM_PROGRAMS = max(
+            mamba2_metadata.MAX_NUM_PROGRAMS, mlist_len)
+        offsetlist = []  # type: ignore
+        for idx, num in enumerate(nums):
+            offsetlist.extend(range(num))
+        offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+        nums_dict[BLOCK_M]['offsetlist'] = offsetlist
+
+        if mamba2_metadata.batch_ptr is None:
+            # Update default value after class definition
+            PAD_SLOT_ID = -1
+            mamba2_metadata.MAX_NUM_PROGRAMS *= 2
+            mamba2_metadata.batch_ptr = torch.full(
+                (mamba2_metadata.MAX_NUM_PROGRAMS, ),
+                PAD_SLOT_ID,
+                dtype=torch.int32,
+                device='cuda')
+            mamba2_metadata.token_chunk_offset_ptr = torch.full(
+                (mamba2_metadata.MAX_NUM_PROGRAMS, ),
+                PAD_SLOT_ID,
+                dtype=torch.int32,
+                device='cuda')
+        else:
+            if mamba2_metadata.batch_ptr.nelement(
+            ) < mamba2_metadata.MAX_NUM_PROGRAMS:
+                mamba2_metadata.batch_ptr.resize_(
+                    mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
+                        PAD_SLOT_ID)  # type: ignore
+                mamba2_metadata.token_chunk_offset_ptr.resize_(  # type: ignore
+                    mamba2_metadata.MAX_NUM_PROGRAMS).fill_(
+                        PAD_SLOT_ID)  # type: ignore
+
+        mamba2_metadata.batch_ptr[0:mlist_len].copy_(mlist)
+        mamba2_metadata.token_chunk_offset_ptr[  # type: ignore
+            0:mlist_len].copy_(offsetlist)
+        nums_dict[BLOCK_M]['batch_ptr'] = mamba2_metadata.batch_ptr
+        nums_dict[BLOCK_M]['token_chunk_offset_ptr'] = (
+            mamba2_metadata.token_chunk_offset_ptr)  # type: ignore
+    mamba2_metadata.seqlens = seqlens
+    mamba2_metadata.nums_dict = nums_dict
+    return mamba2_metadata
