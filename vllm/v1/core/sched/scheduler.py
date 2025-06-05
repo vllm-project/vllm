@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, DummyKVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -92,7 +92,8 @@ class Scheduler(SchedulerInterface):
         )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
-        assert num_gpu_blocks is not None and num_gpu_blocks > 0
+        # num_gpu_blocks can be ero for attention free models
+        assert num_gpu_blocks is not None
 
         self.block_size = self.cache_config.block_size
 
@@ -151,16 +152,18 @@ class Scheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
-        self.kv_cache_manager = KVCacheManager(
-            kv_cache_config=kv_cache_config,
-            max_model_len=self.max_model_len,
-            enable_caching=self.cache_config.enable_prefix_caching,
-            caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
-            use_eagle=self.use_eagle,
-            log_stats=self.log_stats,
-            enable_kv_cache_events=self.enable_kv_cache_events,
-        )
-        self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        if self.cache_config.is_attention_free:
+            self.kv_cache_manager = DummyKVCacheManager()
+        else:
+            self.kv_cache_manager = KVCacheManager(
+                kv_cache_config=kv_cache_config,
+                max_model_len=self.max_model_len,
+                enable_caching=self.cache_config.enable_prefix_caching,
+                caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
+                use_eagle=self.use_eagle,
+                log_stats=self.log_stats,
+                enable_kv_cache_events=self.enable_kv_cache_events,
+            )
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:

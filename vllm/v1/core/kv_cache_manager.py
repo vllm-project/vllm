@@ -63,6 +63,53 @@ class KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""
         return KVCacheBlocks(tuple([] for _ in range(len(self.blocks))))
 
+class DummyKVCacheManager:
+    @property
+    def usage(self) -> float:
+        return 0.0
+
+    def make_prefix_cache_stats(self) -> Optional[PrefixCacheStats]:
+        return None
+
+    def get_computed_blocks(self,
+                            request: Request) -> tuple[KVCacheBlocks, int]:
+        return(KVCacheBlocks([]), 0)
+
+    def allocate_slots(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: Optional[KVCacheBlocks] = None,
+        num_draft_tokens: int = 0,
+        num_lookahead_tokens: int = 0,
+        delay_cache_blocks: bool = False,
+    ) -> Optional[KVCacheBlocks]:
+        #if we do not return a KV cache block requests are unschedulable
+        return KVCacheBlocks([KVCacheBlock(block_id=0)])
+
+    def free(self, request: Request) -> None:
+        pass
+
+    def reset_prefix_cache(self) -> bool:
+        return True
+
+    def get_num_common_prefix_blocks(
+        self,
+        request: Request,
+        num_running_requests: int,
+    ) -> list[int]:
+        return []
+
+    def free_block_hashes(self, request: Request) -> None:
+        pass
+
+    def take_events(self) -> list[KVCacheEvent]:
+        return []
+
+    def get_block_ids(self, request_id: str) -> list[list[int]]:
+        """Get the block ids of a request."""
+        return []
 
 class KVCacheManager:
 
