@@ -223,6 +223,8 @@ class OpenAIServingChat(OpenAIServing):
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
 
+                streaming_params = request.to_streaming_params()
+
                 self._log_inputs(request_id,
                                  request_prompts[i],
                                  params=sampling_params,
@@ -243,6 +245,7 @@ class OpenAIServingChat(OpenAIServing):
                     generator = self.engine_client.generate(
                         engine_prompt,
                         sampling_params,
+                        streaming_params,
                         request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
