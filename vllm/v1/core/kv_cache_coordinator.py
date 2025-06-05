@@ -166,6 +166,7 @@ class KVCacheCoordinator(ABC):
         return [
             manager.req_to_blocks[request_id]
             for manager in self.single_type_managers
+            if request_id in manager.req_to_blocks
         ]
 
     @abstractmethod
