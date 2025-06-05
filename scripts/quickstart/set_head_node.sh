@@ -1,16 +1,28 @@
 #! /bin/bash
 
 # set -x
+# parameters to be changed
 # set IP address of header node
 export VLLM_HOST_IP=
 # set NIC interface name of worker IP address
 export GLOO_SOCKET_IFNAME=
-export HCCL_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME
 
+# warmup cache folder
+export PT_HPU_RECIPE_CACHE_CONFIG=/data/cache/cache_32k_1k_20k_16k,false,32768
+
+# vllm parameters
+max_num_batched_tokens=32768
+max_num_seqs=512
+input_min=768
+input_max=20480
+output_max=16896
+
+export HCCL_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME
 export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 export PT_HPUGRAPH_DISABLE_TENSOR_CACHE=1
-export VLLM_MLA_DISABLE_REQUANTIZATION=1
 export VLLM_DELAYED_SAMPLING="true"
+export VLLM_MLA_PERFORM_MATRIX_ABSORPTION=0
+export VLLM_MLA_DISABLE_REQUANTIZATION=0
 
 
 BASH_DIR=$(dirname "${BASH_SOURCE[0]}")
@@ -40,14 +52,7 @@ export VLLM_GRAPH_RESERVED_MEM=0.2
 export VLLM_GRAPH_PROMPT_RATIO=0
 
 #export VLLM_SKIP_WARMUP=true
-export PT_HPU_RECIPE_CACHE_CONFIG=/data/cache_32k_1k_20k_16k,false,32768
 
-# params
-max_num_batched_tokens=32768
-max_num_seqs=512
-input_min=768
-input_max=20480
-output_max=16896
 
 
 unset VLLM_PROMPT_BS_BUCKET_MIN VLLM_PROMPT_BS_BUCKET_STEP VLLM_PROMPT_BS_BUCKET_MAX

@@ -70,6 +70,7 @@ set_bucketing(){
 
     # decode_bs_step = ROUNDUP(max_num_seqs / 16, 0)
     decode_bs_step=$(( ($max_num_seqs + 15) / 16 ))
+    decode_bs_step=$(( $max_num_seqs > 16 ? 16 : $max_num_seqs ))
     decode_bs_min=1
     # decode_bs_max = CEILING.MATH(max_num_seqs, decode_bs_step)
     decode_bs_max=$(( ($max_num_seqs + $decode_bs_step -1) / $decode_bs_step * $decode_bs_step ))

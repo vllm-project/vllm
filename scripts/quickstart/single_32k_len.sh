@@ -10,9 +10,9 @@ ray stop --force
 #To be changed
 model_path=/data/hf_models/DeepSeek-R1-Gaudi
 vllm_port=8688
-export PT_HPU_RECIPE_CACHE_CONFIG=/data/16k_cache,false,16384
+export PT_HPU_RECIPE_CACHE_CONFIG=/data/32k_cache,false,16384
 
-# check platform
+# Check platform
 if hl-smi 2>/dev/null | grep -q HL-225; then
     echo "Gaudi2 OAM platform"
     default_decode_bs_step=8
@@ -41,8 +41,8 @@ block_size=128
 # DO NOT change ends...
 
 # memory footprint tunning params
-export VLLM_GPU_MEMORY_UTILIZATION=0.85
-export VLLM_GRAPH_RESERVED_MEM=0.1
+export VLLM_GPU_MEMORY_UTILIZATION=0.8
+export VLLM_GRAPH_RESERVED_MEM=0.2
 export VLLM_GRAPH_PROMPT_RATIO=0
 export VLLM_MLA_DISABLE_REQUANTIZATION=0
 export VLLM_DELAYED_SAMPLING="true"
@@ -50,13 +50,12 @@ export VLLM_MLA_PERFORM_MATRIX_ABSORPTION=0
 #export VLLM_MOE_SLICE_LENGTH=20480
 
 # params
-max_model_len=16384
-max_num_batched_tokens=16384
+max_model_len=32768
+max_num_batched_tokens=32768
 max_num_seqs=128
 input_min=1
-input_max=16384
-output_max=16384
-
+input_max=32768
+output_max=32768
 
 unset VLLM_PROMPT_BS_BUCKET_MIN VLLM_PROMPT_BS_BUCKET_STEP VLLM_PROMPT_BS_BUCKET_MAX
 unset VLLM_PROMPT_SEQ_BUCKET_MIN VLLM_PROMPT_SEQ_BUCKET_STEP VLLM_PROMPT_SEQ_BUCKET_MAX
@@ -64,8 +63,6 @@ unset VLLM_DECODE_BS_BUCKET_MIN VLLM_DECODE_BS_BUCKET_STEP VLLM_DECODE_BS_BUCKET
 unset VLLM_DECODE_BLOCK_BUCKET_MIN VLLM_DECODE_BLOCK_BUCKET_STEP VLLM_DECODE_BLOCK_BUCKET_MAX
 
 #export VLLM_SKIP_WARMUP=True
-
-
 
 # !!!!!!!!!!!!!!!!!!!! set bucketing !!!!!!!!!!!!!
 prompt_bs_min=1
