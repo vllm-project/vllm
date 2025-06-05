@@ -1737,7 +1737,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        num_reqs = max_num_reqs if num_tokens >= max_num_reqs else num_tokens
+        num_reqs = min(num_tokens, max_num_reqs)
         min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
@@ -1765,7 +1765,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.kv_cache_config.kv_cache_groups):
                 attn_metadata_i = (
                     self.attn_metadata_builders[kv_cache_group_id].build(
-                        num_reqs=num_tokens,
+                        num_reqs=num_reqs,
                         num_actual_tokens=num_tokens,
                         max_query_len=num_tokens,
                         common_prefix_len=0,
