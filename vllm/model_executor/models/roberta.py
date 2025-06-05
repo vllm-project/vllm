@@ -180,8 +180,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
 
         if vllm_config.model_config.task == "score":
             # fix cross_encoding. See #19201
-            padding_idx = getattr(config,
-                                  "pad_token_id", 0)
+            padding_idx = getattr(config, "pad_token_id", 0)
             vllm_config.model_config.max_model_len -= padding_idx * 2
 
         self.default_activation_function = \
