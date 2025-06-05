@@ -678,7 +678,6 @@ class Zamba2Model(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
-        self.mamba2_metadata = None
 
         # Map hybrid layer indices to block indices
         layer2block_map = {
@@ -752,10 +751,9 @@ class Zamba2Model(nn.Module):
 
         attn_metadata = get_forward_context().attn_metadata
 
-        self.mamba2_metadata = prepare_mamba2_metadata(
+        mamba2_metadata = prepare_mamba2_metadata(
             chunk_size=self.config.chunk_size,
             attn_metadata=attn_metadata,
-            mamba2_metadata=self.mamba2_metadata,
         )
 
         # Process through layers
@@ -766,7 +764,7 @@ class Zamba2Model(nn.Module):
                 original_hidden_states=original_hidden_states,
                 positions=positions,
                 mamba_cache_params=mamba_cache_params.at_layer_idx(layer_idx),
-                mamba2_metadata=self.mamba2_metadata,
+                mamba2_metadata=mamba2_metadata,
             )
             hidden_states = layer_outputs
 
