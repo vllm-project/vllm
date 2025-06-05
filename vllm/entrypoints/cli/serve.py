@@ -16,7 +16,7 @@ from vllm.entrypoints.openai.api_server import (run_server, run_server_worker,
                                                 setup_server)
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
-from vllm.entrypoints.utils import (VLLM_SERVE_PARSER_EPILOG,
+from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
                                     show_filtered_argument_or_group_from_help)
 from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
@@ -101,8 +101,8 @@ class ServeSubcommand(CLISubcommand):
         )
 
         serve_parser = make_arg_parser(serve_parser)
-        show_filtered_argument_or_group_from_help(serve_parser)
-        serve_parser.epilog = VLLM_SERVE_PARSER_EPILOG
+        show_filtered_argument_or_group_from_help(serve_parser, "serve")
+        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
         return serve_parser
 
 

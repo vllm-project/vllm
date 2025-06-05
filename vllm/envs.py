@@ -123,6 +123,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S: int = 300
+    VLLM_SLEEP_WHEN_IDLE: bool = False
 
 
 def get_default_cache_root():
@@ -846,6 +847,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout for calling execute_model() in multiproc_executor
     "VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S":
     lambda: int(os.getenv("VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S", "300")),
+
+    # Reduce CPU usage when vLLM is idle. Enabling this will incur small
+    # latency penalty when a request eventually comes.
+    "VLLM_SLEEP_WHEN_IDLE":
+    lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

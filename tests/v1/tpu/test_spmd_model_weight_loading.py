@@ -45,11 +45,14 @@ def _get_spmd_mesh():
     return MESH
 
 
-@pytest.mark.parametrize("model", [
-    "Qwen/Qwen2-1.5B-Instruct",
-    "meta-llama/Llama-3.1-8B-Instruct",
-    "meta-llama/Llama-3.1-70B-Instruct",
-])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "Qwen/Qwen2-1.5B-Instruct",
+        # Skip large models due to CI runner disk space limitations
+        # "meta-llama/Llama-3.1-8B-Instruct",
+        # "meta-llama/Llama-3.1-70B-Instruct",
+    ])
 def test_tpu_model_loader(model):
     # Skip the 70B test if there are less than 8 chips
     # TODO: Query using torch xla API, the query API is not working

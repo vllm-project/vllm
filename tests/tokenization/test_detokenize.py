@@ -70,7 +70,8 @@ def _run_incremental_decode(tokenizer,
                                 None,
                                 0.0,
                                 None,
-                                cache_salt=None)
+                                cache_salt=None,
+                                data_parallel_rank=None)
 
     if fast is None:
         detokenizer = IncrementalDetokenizer.from_new_request(

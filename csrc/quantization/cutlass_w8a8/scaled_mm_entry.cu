@@ -54,7 +54,8 @@ void get_cutlass_moe_mm_data_caller(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
-    const int64_t num_experts, const int64_t n, const int64_t k);
+    const int64_t num_experts, const int64_t n, const int64_t k,
+    const std::optional<torch::Tensor>& blockscale_offsets);
 #endif
 
 void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
@@ -224,7 +225,8 @@ void get_cutlass_moe_mm_data(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
-    const int64_t num_experts, const int64_t n, const int64_t k) {
+    const int64_t num_experts, const int64_t n, const int64_t k,
+    const std::optional<torch::Tensor>& blockscale_offsets) {
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
@@ -232,7 +234,8 @@ void get_cutlass_moe_mm_data(
     (defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM90)
   get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
                                  problem_sizes2, input_permutation,
-                                 output_permutation, num_experts, n, k);
+                                 output_permutation, num_experts, n, k,
+                                 blockscale_offsets);
   return;
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(

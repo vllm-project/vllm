@@ -84,10 +84,6 @@ class PPLXAll2AllManager(All2AllManagerBase):
         assert has_pplx, "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install pplx_kernels."  # noqa
         super().__init__(cpu_group)
 
-        # TODO(tms): Disable pplx-a2a intranode as it fails with the error:
-        # failed: cuda error /app/pplx/csrc/all_to_all/intranode.cpp:84 'invalid resource handle' # noqa
-        self.internode = True
-
         if self.internode:
             # inter-node communication needs nvshmem,
             # intra-node communication uses p2p mapping directly
@@ -178,7 +174,6 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes = 1024 * 1024 * 1024
             num_qps_per_rank = self.num_sms // 2
         else:
-            assert self.intranode
             num_rdma_bytes = 0
             num_qps_per_rank = 1
 
@@ -243,7 +238,6 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         if self.internode:
             num_rdma_bytes = 1024 * 1024 * 1024
         else:
-            assert self.intranode
             num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
                 num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
                 hidden=token_hidden_size,

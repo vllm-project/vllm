@@ -424,6 +424,10 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     break
 
+                # KVTransfer: the connector uses this info to determine
+                # if a load is needed. Note that
+                # This information is used to determine if a load is
+                # needed for this request.
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
@@ -837,7 +841,7 @@ class Scheduler(SchedulerInterface):
         }
 
         finished_req_ids = self.finished_req_ids_dict
-        if finished_req_ids is not None:
+        if finished_req_ids:
             # Include ids of requests that finished since last outputs
             # were sent.
             for client_index, finished_set in finished_req_ids.items():

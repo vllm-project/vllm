@@ -81,6 +81,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.def("moe_permute_unpermute_supported() -> bool");
   m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
 
+  // Row shuffle for MoE
+  m.def(
+      "shuffle_rows(Tensor input_tensor, Tensor dst2src_map, Tensor! "
+      "output_tensor) -> ()");
+  m.impl("shuffle_rows", torch::kCUDA, &shuffle_rows);
+
 #endif
 }
 
