@@ -515,7 +515,7 @@ class NixlConnectorWorker:
                 self.num_blocks = first_kv_cache.shape[1]
                 block_rank = 3  # [block_size, kv_heads, head_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
-            block_size, n_kv_heads, head_dim = block_shape
+            block_size, n_kv_heads, head_dim = block_shape[-3:]
             # head size in bytes.
             self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
         assert block_size == self.block_size
@@ -672,7 +672,7 @@ class NixlConnectorWorker:
         # We may eventually enable this after asserting equality in cache
         # layout and close outputs.
         assert nixl_agent_meta.attn_backend_name == self.backend_name
-        
+
         self._remote_agents[engine_id][
             remote_tp_rank] = self.nixl_wrapper.add_remote_agent(
                 nixl_agent_meta.agent_metadata)
@@ -691,13 +691,16 @@ class NixlConnectorWorker:
         else:
             remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes * tp_ratio)
+            if self._use_flashinfer:
+                # Account for joint KV in FlashInfer.
+                remote_block_size //= 2
 
             assert nixl_agent_meta.block_len == self.block_len * tp_ratio, (
                 "Remote P worker KV layer cache must be of shape [2, N, "
                 "local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
             )
 
-        assert self.block_size == remote_block_size, "Remote P worker with "
+        assert self.block_size == remote_block_size, "Remote P worker with " \
         "different block size is not supported"
 
         assert self.num_blocks >= nixl_agent_meta.num_blocks
