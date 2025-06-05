@@ -1230,6 +1230,48 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                 device="cpu",
                                                 dtype=torch.int32)
         return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
+
+    def pad_ubatch(self, target_num_tokens, ubatch_slice: UbatchSlice):
+        pass
+
+    def get_dp_padding_ubatch(self,
+                       ubatch_slices: UBatchSlices) -> tuple[int, Optional[torch.Tensor]]:
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+
+        first_ubatch_slice = ubatch_slices[0]
+        second_ubatch_slice = ubatch_slices[1]
+
+        first_ubatch_num_tokens = first_ubatch_slice[1].stop - first_ubatch_slice[1].start
+        second_ubatch_num_tokens = second_ubatch_slice[1].stop - second_ubatch_slice[1].start
+
+        num_tokens = max(first_ubatch_num_tokens, second_ubatch_num_tokens)
+
+        # For DP: Don't pad when setting enforce_eager.
+        # This lets us set enforce_eager on the prefiller in a P/D setup and
+        # still use CUDA graphs (enabled by this padding) on the decoder.
+        #
+        # TODO(tms) : There are many cases where padding is enabled for
+        # prefills, causing unnecessary and excessive padding of activations.
+
+        if dp_size == 1:
+            # Early exit.
+            return 0, None
+
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+                                                dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+        # Note that this num_pad_tokens will actually 
+        # be the number of tokens added to each ubatch. 
+        # Meaning 2*num_pad_tokens are added to each DP rank
+        num_pad_tokens = max_tokens_across_dp_cpu - num_tokens
+        self.pad_ubatch(num_pad_tokens, first_ubatch_slice)
+        self.pad_ubatch(num_pad_tokens, second_ubatch_slice)
+        return num_pad_tokens, num_tokens_after_padding
     
     def should_ubatch(self, should_ubatch: bool) -> bool:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
@@ -1471,6 +1513,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
+        num_pad_tokens, num_tokens_after_padding = \
+            self.get_dp_padding_ubatch(ubatch_slices)
+        num_scheduled_tokens += num_pad_tokens
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         self.maybe_setup_kv_connector(scheduler_output)
