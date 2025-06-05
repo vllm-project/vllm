@@ -77,7 +77,8 @@ class MistralToolParser(ToolParser):
         self.bot_token_id = self.vocab.get(self.bot_token)
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
         if _is_fn_name_regex_support(self.model_tokenizer):
-            self.fn_name_regex = re.compile(r'([a-zA-Z0-9_-]+)(\{.*?\})', re.DOTALL)
+            self.fn_name_regex = re.compile(r'([a-zA-Z0-9_-]+)(\{.*?\})',
+                                            re.DOTALL)
         else:
             self.fn_name_regex = None
 
@@ -133,7 +134,10 @@ class MistralToolParser(ToolParser):
 
                         # fn_name is encoded outside serialized json dump
                         # only arguments are serialized
-                        function_call_arr.append({"name": fn_name, "arguments": json.loads(args)})
+                        function_call_arr.append({
+                            "name": fn_name,
+                            "arguments": json.loads(args)
+                        })
                 else:
                     function_call_arr = json.loads(tool_content)
             except json.JSONDecodeError:
