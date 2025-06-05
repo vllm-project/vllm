@@ -610,7 +610,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # 1 for 2stage f16, 2 for 2stage fp8, 3 for 2stage Q8,
     # 4 for 2stage Q6, 5 for 2stage Q4.
     "VLLM_QUICK_ALLREDUCE_LEVEL":
-    lambda: int(os.getenv("VLLM_QUICK_ALLREDUCE_LEVEL", "1")),
+    lambda: int(os.getenv("VLLM_QUICK_ALLREDUCE_LEVEL", "2")),
 
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
