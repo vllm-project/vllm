@@ -229,6 +229,21 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using Triton backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "triton_attn.TritonAttentionBackend")
+            if cls.is_device_capability(100):
+                # Prefer FlashInfer for V1 on Blackwell GPUs if installed
+                try:
+                    import flashinfer  # noqa: F401
+                    logger.info_once(
+                        "Using FlashInfer backend on V1 engine by default for "
+                        "Blackwell (SM 10.0) GPUs.")
+                    return ("vllm.v1.attention.backends."
+                            "flashinfer.FlashInferBackend")
+                except ImportError:
+                    logger.info_once(
+                        "FlashInfer failed to import for V1 engine on "
+                        "Blackwell (SM 10.0) GPUs; it is recommended to "
+                        "install FlashInfer for better performance.")
+                    pass
             if cls.has_device_capability(80):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."

@@ -229,6 +229,30 @@ class Platform:
         return current_capability.to_int() >= capability
 
     @classmethod
+    def is_device_capability(
+        cls,
+        capability: Union[tuple[int, int], int],
+        device_id: int = 0,
+    ) -> bool:
+        """
+        Test whether this platform has exactly the specified device capability.
+
+        The `capability` argument can either be:
+
+        - A tuple `(major, minor)`.
+        - An integer `<major><minor>`. (See
+        [`DeviceCapability.to_int`][vllm.platforms.interface.DeviceCapability.to_int])
+        """
+        current_capability = cls.get_device_capability(device_id=device_id)
+        if current_capability is None:
+            return False
+
+        if isinstance(capability, tuple):
+            return current_capability == capability
+
+        return current_capability.to_int() == capability
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         """Get the name of a device."""
         raise NotImplementedError
