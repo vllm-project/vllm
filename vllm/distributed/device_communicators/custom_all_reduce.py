@@ -381,7 +381,7 @@ class CustomAllreduce:
                 return torch.empty_like(input)
             return self.qr_all_reduce(input)
 
-        elif self.should_custom_allreduce(input):
+        if self.should_custom_allreduce(input):
             if self._IS_CAPTURING:
                 if torch.cuda.is_current_stream_capturing():
                     return self.cr_all_reduce(input, registered=True)
@@ -395,6 +395,8 @@ class CustomAllreduce:
                 # (<=1% of overall latency) compared to the performance
                 # gain of using custom kernels
                 return self.cr_all_reduce(input, registered=False)
+
+        return None
 
     def close(self):
         if not self.disabled:
