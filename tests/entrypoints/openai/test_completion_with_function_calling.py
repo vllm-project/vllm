@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import NamedTuple
+
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
@@ -22,7 +24,9 @@ def server():  # noqa: F811
         "--guided-decoding-backend",
         "xgrammar",
         "--tool-call-parser",
-        "hermes"
+        "hermes",
+        "--reasoning-parser",
+        "qwen3",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -35,9 +39,53 @@ async def client(server):
         yield async_client
 
 
+class TestCase(NamedTuple):
+    model_name: str
+    stream: bool
+    tool_choice: str
+    enable_thinking: bool
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_required_tool_use(client: openai.AsyncOpenAI, model_name: str):
+@pytest.mark.parametrize(
+    "test_case",
+    [
+        TestCase(model_name=MODEL_NAME,
+                 stream=True,
+                 tool_choice="auto",
+                 enable_thinking=False),
+        TestCase(model_name=MODEL_NAME,
+                 stream=False,
+                 tool_choice="auto",
+                 enable_thinking=False),
+        TestCase(model_name=MODEL_NAME,
+                 stream=True,
+                 tool_choice="required",
+                 enable_thinking=False),
+        TestCase(model_name=MODEL_NAME,
+                 stream=False,
+                 tool_choice="required",
+                 enable_thinking=False),
+        TestCase(model_name=MODEL_NAME,
+                 stream=True,
+                 tool_choice="auto",
+                 enable_thinking=True),
+        TestCase(model_name=MODEL_NAME,
+                 stream=False,
+                 tool_choice="auto",
+                 enable_thinking=True),
+        TestCase(model_name=MODEL_NAME,
+                 stream=True,
+                 tool_choice="required",
+                 enable_thinking=True),
+        TestCase(model_name=MODEL_NAME,
+                 stream=False,
+                 tool_choice="required",
+                 enable_thinking=True),
+    ],
+)
+async def test_function_tool_use(client: openai.AsyncOpenAI,
+                                 test_case: TestCase):
     tools = [
         {
             "type": "function",
@@ -126,30 +174,38 @@ async def test_required_tool_use(client: openai.AsyncOpenAI, model_name: str):
             "forecast for the next 5 days, in fahrenheit?",
         },
     ]
+    if not test_case.stream:
+        # Non-streaming test
+        chat_completion = await client.chat.completions.create(
+            messages=messages,
+            model=test_case.model_name,
+            tools=tools,
+            tool_choice=test_case.tool_choice,
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": test_case.enable_thinking
+                }
+            })
 
-    # Non-streaming test
-    chat_completion = await client.chat.completions.create(
-        messages=messages,
-        model=model_name,
-        tools=tools,
-        tool_choice="required",
-    )
+        assert chat_completion.choices[0].message.tool_calls is not None
+        assert len(chat_completion.choices[0].message.tool_calls) > 0
+    else:
+        # Streaming test
+        stream = await client.chat.completions.create(
+            messages=messages,
+            model=test_case.model_name,
+            tools=tools,
+            tool_choice=test_case.tool_choice,
+            stream=True,
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": test_case.enable_thinking
+                }
+            })
 
-    assert chat_completion.choices[0].message.tool_calls is not None
-    assert len(chat_completion.choices[0].message.tool_calls) > 0
+        output = []
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.tool_calls:
+                output.extend(chunk.choices[0].delta.tool_calls)
 
-    # Streaming test
-    stream = await client.chat.completions.create(
-        messages=messages,
-        model=model_name,
-        tools=tools,
-        tool_choice="required",
-        stream=True,
-    )
-
-    output = []
-    async for chunk in stream:
-        if chunk.choices and chunk.choices[0].delta.tool_calls:
-            output.extend(chunk.choices[0].delta.tool_calls)
-
-    assert len(output) > 0
+        assert len(output) > 0
