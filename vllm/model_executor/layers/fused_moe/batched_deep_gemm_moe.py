@@ -54,9 +54,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dp,  (N // 2))
+        workspace2 = (num_experts, max_num_tokens * num_dp, (N // 2))
         output = (num_experts, max_num_tokens * num_dp, K)
-        return (workspace13, workspace2, K, a.dtype)
+        return (workspace13, workspace2, output, a.dtype)
 
     def apply(
         self,

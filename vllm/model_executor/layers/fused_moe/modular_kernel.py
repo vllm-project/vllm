@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Optional
 from math import prod
+from typing import Optional
 
 import torch
 
@@ -405,27 +405,21 @@ class FusedMoEModularKernel(torch.nn.Module):
                 num_chunks = 1
 
             if num_chunks == 1:
-                workspace13_shape, workspace2_shape, fused_out_shape, workspace_dtype = (
-                    self.fused_experts.workspace_shapes(
-                        a1, M, N, K, top_k,
-                        global_num_experts)
-                    )
+                (workspace13_shape, workspace2_shape, fused_out_shape,
+                 workspace_dtype) = self.fused_experts.workspace_shapes(
+                     a1, M, N, K, top_k, global_num_experts)
             else:
                 # Use the full M to get the final output shape.
                 _, _, fused_out_shape, workspace_dtype = (
                     self.fused_experts.workspace_shapes(
-                        a1, M, N, K, top_k,
-                        global_num_experts)
-                )
+                        a1, M, N, K, top_k, global_num_experts))
                 # Use the CHUNK_SIZE to get the workspace shapes.
                 workspace13_shape, workspace2_shape, _, workspace_dtype = (
                     self.fused_experts.workspace_shapes(
-                        a1, CHUNK_SIZE, N, K, top_k,
-                        global_num_experts)
-                )
+                        a1, CHUNK_SIZE, N, K, top_k, global_num_experts))
 
-            # We can reuse the memory between cache1 and cache3 because by the time
-            # we need cache3, we're done with cache1
+            # We can reuse the memory between cache1 and cache3 because by the
+            # time we need cache3, we're done with cache1.
             workspace13 = torch.zeros(prod(workspace13_shape),
                                       device=a1.device,
                                       dtype=workspace_dtype)
@@ -436,7 +430,8 @@ class FusedMoEModularKernel(torch.nn.Module):
             if num_chunks == 1:
                 fused_out = _resize_cache(workspace13, fused_out_shape)
             else:
-                fused_out = torch.empty(fused_out_shape, device=a1q.device,
+                fused_out = torch.empty(fused_out_shape,
+                                        device=a1q.device,
                                         dtype=workspace_dtype)
 
             for chunk in range(num_chunks):
@@ -450,29 +445,28 @@ class FusedMoEModularKernel(torch.nn.Module):
                 curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
                 tokens_in_chunk = end_chunk_idx - begin_chunk_idx
 
-                #print(f"CHUNK {chunk}/{num_chunks}: {a1q.shape}/{fused_out_shape} {begin_chunk_idx}:{end_chunk_idx}")
-
                 if tokens_in_chunk == 0:
                     break
 
-                fused_out[begin_chunk_idx:end_chunk_idx] = self.fused_experts.apply(
-                    curr_a1q,
-                    w1,
-                    w2,
-                    curr_topk_ids,
-                    activation=activation,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    w1_zp=w1_zp,
-                    w2_zp=w2_zp,
-                    a1q_scale=curr_a1q_scale,
-                    a2_scale=curr_a2_scale,
-                    workspace13=workspace13,
-                    workspace2=workspace2,
-                    expert_num_tokens=expert_num_tokens,
-                )
+                fused_out[
+                    begin_chunk_idx:end_chunk_idx] = self.fused_experts.apply(
+                        curr_a1q,
+                        w1,
+                        w2,
+                        curr_topk_ids,
+                        activation=activation,
+                        global_num_experts=global_num_experts,
+                        expert_map=expert_map,
+                        w1_scale=w1_scale,
+                        w2_scale=w2_scale,
+                        w1_zp=w1_zp,
+                        w2_zp=w2_zp,
+                        a1q_scale=curr_a1q_scale,
+                        a2_scale=curr_a2_scale,
+                        workspace13=workspace13,
+                        workspace2=workspace2,
+                        expert_num_tokens=expert_num_tokens,
+                    )
 
         self.prepare_finalize.finalize(output, fused_out, topk_weights,
                                        topk_ids, apply_router_weight_on_input)

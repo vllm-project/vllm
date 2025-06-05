@@ -64,14 +64,14 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=self.block_shape,  # type: ignore[arg-type]
         ) if (self.allow_deep_gemm and is_fp8_128_block_quantized) else None
 
-        assert (self.batched_deep_gemm_experts is not None or
-                self.batched_triton_experts is not None)
+        assert (self.batched_deep_gemm_experts is not None
+                or self.batched_triton_experts is not None)
 
     def supports_chunking(self) -> bool:
         bdge = self.batched_deep_gemm_experts
-        bte  = self.batched_triton_experts
-        return ((bdge is None or bdge.supports_chunking()) and
-                (bte is None or bte.supports_chunking()))
+        bte = self.batched_triton_experts
+        return ((bdge is None or bdge.supports_chunking())
+                and (bte is None or bte.supports_chunking()))
 
     def workspace_shapes(
         self,
