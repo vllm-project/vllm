@@ -169,6 +169,7 @@ class RocmPlatform(Platform):
         "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
         "quark", "ptpc_fp8"
     ]
+    _fp8_dtype: torch.dtype = None
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -393,12 +394,13 @@ class RocmPlatform(Platform):
         return 'gfx94' in torch.cuda.get_device_properties(0).gcnArchName
 
     @classmethod
-    @cache
     def fp8_dtype(cls) -> torch.dtype:
-        if cls.is_fp8_fnuz():
-            return torch.float8_e4m3fnuz
-        else:
-            return torch.float8_e4m3fn
+        if cls._fp8_dtype is None:
+            if cls.is_fp8_fnuz():
+                cls._fp8_dtype = torch.float8_e4m3fnuz
+            else:
+                cls._fp8_dtype = torch.float8_e4m3fn
+        return cls._fp8_dtype
 
     @classmethod
     def supports_v1(cls, model_config: "ModelConfig") -> bool:

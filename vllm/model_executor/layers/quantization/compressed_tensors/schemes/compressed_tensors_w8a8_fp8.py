@@ -7,6 +7,7 @@ import torch
 from compressed_tensors.quantization import QuantizationStrategy
 from torch.nn import Parameter
 
+from vllm import envs
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -27,6 +28,12 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.out_dtype = torch.get_default_dtype()
         self.is_static_input_scheme = is_static_input_scheme
         self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=True)
+        # AITER is only supported on ROCm and only for FP8_FNUZ
+        # and at the moment are MI300 series
+        self.use_aiter_and_is_supported = (current_platform.is_rocm()
+                                           and envs.VLLM_ROCM_USE_AITER
+                                           and envs.VLLM_ROCM_USE_AITER_LINEAR
+                                           and current_platform.is_fp8_fnuz())
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -60,6 +67,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # If channelwise, scales are already lined up, so just transpose.
         elif self.strategy == QuantizationStrategy.CHANNEL:
+
             weight = layer.weight
 
             if current_platform.is_fp8_fnuz():
@@ -76,7 +84,16 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             else:
                 weight_scale = layer.weight_scale.data
 
-            layer.weight = Parameter(weight.t(), requires_grad=False)
+            if self.use_aiter_and_is_supported:
+                from aiter.ops.shuffle import shuffle_weight
+
+                # keep the weight as (N, K)
+                layer.weight = Parameter(shuffle_weight(weight,
+                                                        layout=(16, 16)),
+                                         requires_grad=False)
+            else:
+                # keep the weight as (K, N)
+                layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
