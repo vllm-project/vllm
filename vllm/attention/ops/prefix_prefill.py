@@ -14,6 +14,7 @@ NUM_WARPS = 4 if current_platform.is_rocm() else 8
 
 # To check compatibility
 IS_TURING = current_platform.get_device_capability() == (7, 5)
+float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
 # Here's an example autotuner config for this kernel. This config does provide
@@ -82,7 +83,9 @@ def _fwd_kernel(Q,
                 SKIP_DECODE: tl.constexpr,
                 USE_FP8: tl.constexpr,
                 MAX_Q_LEN: tl.constexpr = 0,
-                MAX_CTX_LEN: tl.constexpr = 0):
+                MAX_CTX_LEN: tl.constexpr = 0,
+                FP8_MIN: tl.constexpr = float8_info.min,
+                FP8_MAX: tl.constexpr = float8_info.max):
 
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -277,6 +280,7 @@ def _fwd_kernel(Q,
     out_ptrs = Out + off_o
     if USE_FP8:
         acc = acc / tl.load(out_scale)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
     tl.store(out_ptrs,
              acc,
              mask=dim_mask[None, :] & (offs_m[:, None] < cur_batch_query_len))
