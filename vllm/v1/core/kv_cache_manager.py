@@ -50,6 +50,10 @@ class KVCacheBlocks:
             block.block_id for block in self.blocks if block.block_hash is None
         ]
 
+    def get_block_hashes(self) -> list[BlockHash]:
+        """Get block_hashes of blocks from KVCacheBlocks instance."""
+        return [block.block_hash for block in self.blocks if block.block_hash is not None]
+
 
 class KVCacheManager:
 

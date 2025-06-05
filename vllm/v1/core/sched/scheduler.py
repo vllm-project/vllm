@@ -236,6 +236,7 @@ class Scheduler(SchedulerInterface):
                 request.num_tokens, 0)
 
             while True:
+                print(f"request.request_id: {request.request_id}, request.num_tokens: {request.num_tokens}, num_new_tokens: {num_new_tokens}, num_draft_tokens: {num_draft_tokens}, num_lookahead_tokens: {self.num_lookahead_tokens}")
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -412,6 +413,7 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
+                print(f"request.request_id: {request.request_id}, request.num_tokens: {request.num_tokens}, num_new_tokens: {num_new_tokens}, num_external_computed_tokens: {num_external_computed_tokens}, num_new_local_computed_tokens: {num_new_local_computed_tokens}, len(new_computed_blocks.get_block_hashes()): {len(new_computed_blocks.get_block_hashes())}, num_lookahead_tokens: {self.num_lookahead_tokens}, load_kv_async: {load_kv_async}")
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
