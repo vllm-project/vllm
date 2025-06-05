@@ -247,7 +247,7 @@ def kernel_unified_attention_3d(
         segm_output_ptr,
         # [num_tokens, num_query_heads, num_segments, head_size]
         segm_max_ptr,  # [num_tokens, num_query_heads, num_segments]
-        segm_expsum_ptr,  # [num_num_tokens, num_query_heads, num_segments]
+        segm_expsum_ptr,  # [num_tokens, num_query_heads, num_segments]
         query_ptr,  # [num_tokens, num_query_heads, head_size]
         key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
         value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
@@ -551,7 +551,9 @@ def reduce_segments(
         other=0.0,
     )
     segm_output *= tl.exp(segm_max - overall_max)[:, None]
-    acc = tl.sum(segm_output, axis=0) / overall_expsum
+    acc_sum = tl.sum(segm_output, axis=0)
+    # safely divide by overall_expsum, returning 0.0 if overall_expsum is 0
+    acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
 
     # write result
     output_offset = (token_idx * output_stride_0 +
@@ -653,6 +655,8 @@ def unified_attention(
             BLOCK_M=BLOCK_M,
         )
     else:
+        # for initial version, NUM_SEGMENTS = 16 is chosen as a default
+        # value that showed good performance in tests
         NUM_SEGMENTS = 16
 
         segm_output = torch.empty(
