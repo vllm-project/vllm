@@ -167,25 +167,41 @@ template <typename scalar_t, typename scale_type>
 __global__ void dynamic_scaled_int8_quant_kernel(
     scalar_t const* __restrict__ input, int8_t* __restrict__ out,
     scale_type* scale, const int hidden_size) {
+  constexpr int VEC_SIZE = 16;
+  using in_vec_t = vec_n_t<scalar_t, VEC_SIZE>;
+  using out_vec_t = vec_n_t<int8_t, VEC_SIZE>;
   int const tid = threadIdx.x;
   int64_t const token_idx = blockIdx.x;
-  float absmax_val = 0.0f;
-  float const zero = 0.0f;
 
   // Must be performed using 64-bit math to avoid integer overflow.
   out += token_idx * hidden_size;
   input += token_idx * hidden_size;
+  auto const* vectorized_in = reinterpret_cast<in_vec_t const*>(input);
+  auto* vectorized_out = reinterpret_cast<out_vec_t*>(out);
+  int64_t const num_vec_elements = hidden_size / VEC_SIZE;
 
-  for (int i = tid; i < hidden_size; i += blockDim.x) {
-    float val = static_cast<float>(input[i]);
-    val = val > zero ? val : -val;
-    absmax_val = val > absmax_val ? val : absmax_val;
+  // vectorized scan for absmax
+  float thread_absmax = 0.0f;
+  for (int64_t i = tid; i < num_vec_elements; i += blockDim.x) {
+    in_vec_t in_vec = vectorized_in[i];
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      thread_absmax =
+          fmaxf(thread_absmax, fabsf(static_cast<float>(in_vec.val[j])));
+    }
   }
 
+  // handle the rest
+  int64_t const remainder_start = num_vec_elements * VEC_SIZE;
+  for (int64_t i = remainder_start + tid; i < hidden_size; i += blockDim.x) {
+    thread_absmax = fmaxf(thread_absmax, fabsf(static_cast<float>(input[i])));
+  }
+
+  // reduce the absmax across the block
   using BlockReduce = cub::BlockReduce<float, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduceStorage;
-  float const block_absmax_val_maybe =
-      BlockReduce(reduceStorage).Reduce(absmax_val, cub::Max{}, blockDim.x);
+  __shared__ typename BlockReduce::TempStorage reduce_storage;
+  float block_absmax_val_maybe =
+      BlockReduce(reduce_storage).Reduce(thread_absmax, cub::Max());
   __shared__ float block_absmax_val;
   if (tid == 0) {
     block_absmax_val = block_absmax_val_maybe;
@@ -193,8 +209,20 @@ __global__ void dynamic_scaled_int8_quant_kernel(
   }
   __syncthreads();
 
+  // vectorized quantization
   float const tmp_scale = 127.0f / block_absmax_val;
-  for (int i = tid; i < hidden_size; i += blockDim.x) {
+  for (int64_t i = tid; i < num_vec_elements; i += blockDim.x) {
+    in_vec_t in_vec = vectorized_in[i];
+    out_vec_t out_vec;
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      out_vec.val[j] =
+          float_to_int8_rn(static_cast<float>(in_vec.val[j]) * tmp_scale);
+    }
+    vectorized_out[i] = out_vec;
+  }
+  // handle the rest
+  for (int64_t i = remainder_start + tid; i < hidden_size; i += blockDim.x) {
     out[i] = float_to_int8_rn(static_cast<float>(input[i]) * tmp_scale);
   }
 }
