@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
 from vllm.platforms import current_platform
 from vllm.utils import PlaceholderModule
+from vllm import envs
 
 try:
     from runai_model_streamer import SafetensorsStreamer
@@ -140,6 +141,29 @@ def convert_bin_to_safetensor_file(
         if not torch.equal(pt_tensor, sf_tensor):
             raise RuntimeError(f"The output tensors do not match for key {k}")
 
+def _maybe_download_json_from_modelscope(model: str, revision: Optional[str], path) -> Optional[str]:
+    if envs.VLLM_USE_MODELSCOPE:
+        # download model from ModelScope hub,
+        # lazy import so that modelscope is not required for normal use.
+        # pylint: disable=C.
+        from modelscope.hub.snapshot_download import snapshot_download
+
+        if not os.path.exists(model):
+            # Use file lock to prevent multiple processes from
+            # downloading the same model weights at the same time.
+            with get_lock(model, path):
+                model_path = snapshot_download(
+                    model_id=model,
+                    cache_dir=path,
+                    local_files_only=huggingface_hub.constants.
+                    HF_HUB_OFFLINE,
+                    allow_patterns="*.json",
+                    revision=revision
+                )
+        else:
+            model_path = model
+        return model_path
+    return None
 
 # TODO(woosuk): Move this to other place.
 def get_quant_config(model_config: ModelConfig,
@@ -169,16 +193,18 @@ def get_quant_config(model_config: ModelConfig,
         return quant_cls.from_config({})
     is_local = os.path.isdir(model_config.model)
     if not is_local:
-        # Download the config files.
-        with get_lock(model_config.model, load_config.download_dir):
-            hf_folder = snapshot_download(
-                model_config.model,
-                revision=model_config.revision,
-                allow_patterns="*.json",
-                cache_dir=load_config.download_dir,
-                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                tqdm_class=DisabledTqdm,
-            )
+        hf_folder = _maybe_download_json_from_modelscope(model_config.model, model_config.revision, load_config.download_dir)
+        if hf_folder is None:
+            # Download the config files.
+            with get_lock(model_config.model, load_config.download_dir):
+                hf_folder = snapshot_download(
+                    model_config.model,
+                    revision=model_config.revision,
+                    allow_patterns="*.json",
+                    cache_dir=load_config.download_dir,
+                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                    tqdm_class=DisabledTqdm,
+                )
     else:
         hf_folder = model_config.model
 
