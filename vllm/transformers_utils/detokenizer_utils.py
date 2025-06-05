@@ -89,7 +89,7 @@ def convert_ids_list_to_tokens(
       Python list of token string representations
     
     """
-    token_str_lst = tokenizer.convert_ids_to_tokens(token_ids)
+    token_str_lst = tokenizer.decode(token_ids)
     _replace_none_with_empty(token_str_lst)  # type: ignore
     return token_str_lst
 
