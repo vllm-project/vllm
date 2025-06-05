@@ -903,7 +903,7 @@ class NixlConnectorWorker:
             remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes * tp_ratio)
             if self._use_flashinfer:
-                # Account for joint KV in FlashInfer.
+                # With flashinfer, KV are sent in the same message.
                 remote_block_size //= 2
             if tp_ratio > 1:
                 # Heterogeneous TP expects same kv_cache_layout.
