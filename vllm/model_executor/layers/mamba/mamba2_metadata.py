@@ -27,30 +27,10 @@ class Mamba2Metadata:
     chunk_indices: torch.Tensor
     chunk_offsets: torch.Tensor
 
-    # The information here is reused across Mamba layers.
-    # Even stride ops trigger Torch calls,
-    # introducing unnecessary overhead.
-    num_cache_lines: Optional[int] = None
-    stride_istate_seq: Optional[int] = None
-    stride_istate_dim: Optional[int] = None
-    stride_istate_token: Optional[int] = None
     seqlens: Optional[np.ndarray] = None
-    padded_batch: Optional[int] = None
     nums_dict: Optional[dict] = None
-    is_channel_last: bool = True
-    stride_w_dim: Optional[int] = None
-    stride_w_width: Optional[int] = None
-    width: Optional[int] = None
-    np2_statelen: Optional[int] = None
-    stride_x_seq: Optional[int] = 0
-    stride_x_dim: Optional[int] = None
-    stride_x_token: Optional[int] = None
-    dim: Optional[int] = None
     cu_seqlen: Optional[int] = None
     out: Optional[torch.Tensor] = None
-    stride_o_seq: Optional[int] = 0
-    stride_o_dim: Optional[int] = None
-    stride_o_token: Optional[int] = None
     MAX_NUM_PROGRAMS: int = 1024
     batch_ptr: Optional[torch.tensor] = None
     token_chunk_offset_ptr: Optional[torch.tensor] = None

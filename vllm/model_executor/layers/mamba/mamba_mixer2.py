@@ -5,7 +5,6 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
-import triton
 from torch import nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
@@ -480,33 +479,12 @@ class MambaMixer2(CustomOp):
             #   pointed to by "mamba_cache_params.state_indices_tensor"
             x = hidden_states_B_C.transpose(
                 0, 1)  # this is the form that causal-conv see
-            if mamba2_metadata.width is None:
-                # load the conv1d.weight information
-                # (expected to be the same across layers)
-                mamba2_metadata.stride_w_dim, mamba2_metadata.stride_w_width = (
-                    conv_weights.stride())
-                _, width = conv_weights.shape
-                final_states = mamba_cache_params.conv_state
-                (mamba2_metadata.num_cache_lines, mamba2_metadata.dim,
-                 state_len) = final_states.size()
-                mamba2_metadata.width = width
-                mamba2_metadata.np2_statelen = triton.next_power_of_2(
-                    state_len)
-                (mamba2_metadata.stride_istate_seq,
-                 mamba2_metadata.stride_istate_dim,
-                 mamba2_metadata.stride_istate_token) = final_states.stride()
-
             if mamba2_metadata.cu_seqlen is None:
                 dim, cu_seqlen = x.shape
                 out = torch.zeros_like(x)
                 # mamba2_metadata.dim = dim
                 mamba2_metadata.cu_seqlen = cu_seqlen
-                mamba2_metadata.stride_x_seq = 0
-                (mamba2_metadata.stride_x_dim,
-                 mamba2_metadata.stride_x_token) = x.stride()
                 mamba2_metadata.out = out
-                (mamba2_metadata.stride_o_dim,
-                 mamba2_metadata.stride_o_token) = out.stride()
                 query_start_loc = attn_metadata.query_start_loc
                 seqlens = np.diff(query_start_loc.to('cpu'))
                 nums_dict = {}  # type: ignore

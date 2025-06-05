@@ -395,31 +395,17 @@ def causal_conv1d_update_triton(
 
     # adopt the strategy in vLLM that overwrite on 'x' directly, rather than creating a new tensor 'o'
     out = x
-    if metadata is not None:
-        stride_w_dim = metadata.stride_w_dim
-        stride_w_width = metadata.stride_w_width
-        stride_x_seq = metadata.stride_x_seq
-        stride_x_dim = metadata.stride_x_dim
-        stride_x_token = metadata.stride_x_token
-        stride_o_seq = metadata.stride_x_seq
-        stride_o_dim = metadata.stride_x_dim
-        stride_o_token = metadata.stride_x_token
-        stride_istate_seq = metadata.stride_istate_seq
-        stride_istate_dim = metadata.stride_istate_dim
-        stride_istate_token = metadata.stride_istate_token
-        np2_statelen = metadata.np2_statelen
-    else:
-        stride_w_dim, stride_w_width = weight.stride()
+    stride_w_dim, stride_w_width = weight.stride()
 
-        stride_x_seq, stride_x_dim, stride_x_token = x.stride(
-        )  # X (batch, dim, seqlen)
+    stride_x_seq, stride_x_dim, stride_x_token = x.stride(
+    )  # X (batch, dim, seqlen)
 
-        stride_o_seq, stride_o_dim, stride_o_token = out.stride()
+    stride_o_seq, stride_o_dim, stride_o_token = out.stride()
 
-        stride_istate_seq, stride_istate_dim, stride_istate_token = conv_state.stride(
-        )
-        state_len = width - 1
-        np2_statelen = triton.next_power_of_2(state_len)
+    stride_istate_seq, stride_istate_dim, stride_istate_token = conv_state.stride(
+    )
+    state_len = width - 1
+    np2_statelen = triton.next_power_of_2(state_len)
 
     def grid(META):
         return (
@@ -891,70 +877,52 @@ def causal_conv1d_fn_triton(
 
     args = None
     if metadata is not None:
-        padded_batch = metadata.padded_batch
-        dim = metadata.dim
         cu_seqlen = metadata.cu_seqlen
-        is_channel_last = metadata.is_channel_last
-        stride_x_seq = metadata.stride_x_seq
-        stride_x_dim = metadata.stride_x_dim
-        stride_x_token = metadata.stride_x_token
-        stride_w_dim = metadata.stride_w_dim
-        stride_w_width = metadata.stride_w_width
-        width = metadata.width
-        num_cache_lines = metadata.num_cache_lines
-        stride_istate_seq = metadata.stride_istate_seq
-        stride_istate_dim = metadata.stride_istate_dim
-        stride_istate_token = metadata.stride_istate_token
         out = metadata.out
-        stride_o_seq = metadata.stride_o_seq
-        stride_o_dim = metadata.stride_o_dim
-        stride_o_token = metadata.stride_o_token
         seqlens = metadata.seqlens
-        np2_statelen = metadata.np2_statelen
         nums_dict = metadata.nums_dict
         #x = metadata.x
         args = nums_dict
     else:
-        padded_batch = query_start_loc.size(0) - 1
-        dim, cu_seqlen = x.shape
-        is_channel_last = (x.stride(0) == 1) & (x.stride(1) > 1)
-        stride_x_seq = 0
-        stride_x_dim = x.stride(0)
-        stride_x_token = x.stride(1)
-        stride_w_dim = weight.stride(0)
-        stride_w_width = weight.stride(1)
-
-        _, width = weight.shape
-
-        stride_istate_seq = 0
-        stride_istate_dim = 0
-        stride_istate_token = 0
-        num_cache_lines = 0
-        if conv_states is not None:
-            # extensions to support vLLM:
-            # 1. conv_states is used to replaced initial_states
-            # 2. conv_states serve as a cache with num cache lines can be larger than batch size
-            # 3. mapping from sequence x[idx] to a cache line at index as specified via cache_indices[idx]
-            # 4. computation can be skipped if cache_indices[idx] == pad_slot_id
-            num_cache_lines = conv_states.size(0)
-            assert (num_cache_lines, dim, width - 1) == conv_states.shape
-            stride_istate_seq = conv_states.stride(0)
-            stride_istate_dim = conv_states.stride(1)
-            stride_istate_token = conv_states.stride(2)
-            assert stride_istate_dim == 1
         out = torch.zeros_like(x)
-        if out.dim() == 2:
-            stride_o_seq = 0
-            stride_o_dim = out.stride(0)
-            stride_o_token = out.stride(1)
-        else:
-            stride_o_seq = out.stride(0)
-            stride_o_dim = out.stride(1)
-            stride_o_token = out.stride(2)
         seqlens = np.diff(query_start_loc.to('cpu'))
-        state_len = width - 1
-        np2_statelen = triton.next_power_of_2(state_len)
         args = seqlens
+    is_channel_last = (x.stride(0) == 1) & (x.stride(1) > 1)
+    dim, cu_seqlen = x.shape
+    _, width = weight.shape
+    state_len = width - 1
+    np2_statelen = triton.next_power_of_2(state_len)
+
+    padded_batch = query_start_loc.size(0) - 1
+    stride_x_seq = 0
+    stride_x_dim = x.stride(0)
+    stride_x_token = x.stride(1)
+    stride_w_dim = weight.stride(0)
+    stride_w_width = weight.stride(1)
+    stride_istate_seq = 0
+    stride_istate_dim = 0
+    stride_istate_token = 0
+    num_cache_lines = 0
+    if conv_states is not None:
+        # extensions to support vLLM:
+        # 1. conv_states is used to replaced initial_states
+        # 2. conv_states serve as a cache with num cache lines can be larger than batch size
+        # 3. mapping from sequence x[idx] to a cache line at index as specified via cache_indices[idx]
+        # 4. computation can be skipped if cache_indices[idx] == pad_slot_id
+        num_cache_lines = conv_states.size(0)
+        assert (num_cache_lines, dim, width - 1) == conv_states.shape
+        stride_istate_seq = conv_states.stride(0)
+        stride_istate_dim = conv_states.stride(1)
+        stride_istate_token = conv_states.stride(2)
+        assert stride_istate_dim == 1
+    if out.dim() == 2:
+        stride_o_seq = 0
+        stride_o_dim = out.stride(0)
+        stride_o_token = out.stride(1)
+    else:
+        stride_o_seq = out.stride(0)
+        stride_o_dim = out.stride(1)
+        stride_o_token = out.stride(2)
 
     if validate_data:
         assert x.dim() == 2
