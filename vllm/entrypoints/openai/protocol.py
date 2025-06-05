@@ -702,20 +702,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # it matches a valid tool
             if isinstance(data["tool_choice"], dict):
                 valid_tool = False
-                specified_function = data["tool_choice"].get("function")
-                if not specified_function:
+                function = data["tool_choice"].get("function")
+                if not isinstance(function, dict) or (
+                    (function_name := function.get("name"))
+                        and not isinstance(function_name, str)):
                     raise ValueError(
-                        "Expected field `function` in `tool_choice`."
-                        " Correct usage: `{\"type\": \"function\","
-                        " \"function\": {\"name\": \"my_function\"}}`")
-                specified_function_name = specified_function.get("name")
-                if not specified_function_name:
-                    raise ValueError(
-                        "Expected field `name` in `function` in `tool_choice`."
-                        "Correct usage: `{\"type\": \"function\", "
-                        "\"function\": {\"name\": \"my_function\"}}`")
+                        f'Invalid value for `function`: {function} in '
+                        '`tool_choice`! Correct usage: `{"type": "function",'
+                        ' "function": {"name": "my_function"}}`')
                 for tool in data["tools"]:
-                    if tool["function"]["name"] == specified_function_name:
+                    if tool["function"]["name"] == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
