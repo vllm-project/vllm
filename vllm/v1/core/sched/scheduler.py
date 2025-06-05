@@ -89,6 +89,8 @@ class Scheduler(SchedulerInterface):
 
         self.block_size = self.cache_config.block_size
 
+        # Track total tokens in waiting queue
+        self._waiting_tokens = 0
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Priority queues for requests.
@@ -151,6 +153,17 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+
+    def _get_request_total_tokens(self, request: Request) -> int:
+        """Calculate total tokens (prompt + decode) for a request.
+        This function calculates the total tokens that will be
+        needed for a request, including both prompt tokens and
+        future decode tokens.
+        """
+        prompt_tokens = len(request.prompt_token_ids)
+        max_new_tokens = 0 if request.max_tokens is None\
+            else request.max_tokens
+        return prompt_tokens + max_new_tokens
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -424,6 +437,7 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     break
 
+                request_total_tokens = self._get_request_total_tokens(request)
                 # KVConnector: update internal state after allocation.
                 # This information is used to determine if a load is
                 # needed for this request.
@@ -436,6 +450,7 @@ class Scheduler(SchedulerInterface):
                     )
 
                 self.waiting.popleft()
+                self._waiting_tokens -= request_total_tokens
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
@@ -867,6 +882,7 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         self.requests[request.request_id] = request
+        self._waiting_tokens += self._get_request_total_tokens(request)
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
@@ -896,6 +912,7 @@ class Scheduler(SchedulerInterface):
                 self.running.remove(request)
             else:
                 self.waiting.remove(request)
+                self._waiting_tokens -= self._get_request_total_tokens(request)
             request.status = finished_status
             self._free_request(request)
 
@@ -943,6 +960,7 @@ class Scheduler(SchedulerInterface):
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
+            num_tokens_waiting=self._waiting_tokens,
             gpu_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
