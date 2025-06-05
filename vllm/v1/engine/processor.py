@@ -227,8 +227,8 @@ class Processor:
             raise ValueError("V1 does not support prompt_adapter_request.")
 
         data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
-        if data_parallel_rank is not None and not (
-            0 <= data_parallel_rank < data_parallel_size):
+        if data_parallel_rank is not None and not (0 <= data_parallel_rank <
+                                                   data_parallel_size):
             raise ValueError(f"data_parallel_rank {data_parallel_rank} "
                              f"is out of range [0, {data_parallel_size}).")
 
