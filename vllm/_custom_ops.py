@@ -845,11 +845,16 @@ def cutlass_scaled_sparse_mm(
     return out
 
 
-def get_cutlass_moe_mm_data(
-        topk_ids: torch.Tensor, expert_offsets: torch.Tensor,
-        problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor,
-        input_permutation: torch.Tensor, output_permutation: torch.Tensor,
-        num_experts: int, n: int, k: int):
+def get_cutlass_moe_mm_data(topk_ids: torch.Tensor,
+                            expert_offsets: torch.Tensor,
+                            problem_sizes1: torch.Tensor,
+                            problem_sizes2: torch.Tensor,
+                            input_permutation: torch.Tensor,
+                            output_permutation: torch.Tensor,
+                            num_experts: int,
+                            n: int,
+                            k: int,
+                            blockscale_offsets: Optional[torch.Tensor] = None):
     """
     Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
@@ -867,12 +872,31 @@ def get_cutlass_moe_mm_data(
                          before executing the MMs.
     - output_permutation: Permutation that must be used to shuffle the output
                           after executing the MMs.
+    - blockscale_offsets: Optional argument passed for fp4 moe. Indices that
+                          mark at which block scale index each expert begins
+                          its computation. The number of block scale rows
+                          computed with expert E is blockscale_offsets[E + 1] -
+                          blockscale_offsets[E]
     """
     return torch.ops._C.get_cutlass_moe_mm_data(topk_ids, expert_offsets,
                                                 problem_sizes1, problem_sizes2,
                                                 input_permutation,
                                                 output_permutation,
-                                                num_experts, n, k)
+                                                num_experts, n, k,
+                                                blockscale_offsets)
+
+
+def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
+    """
+    Shuffle and expand the input tensor according to the dst2src_map and store the result in output_tensor.
+    This is used in MoE to permute the input tensor before performing grouped matrix multiplications.
+    """
+    num_tokens_permuted = dst2src_map.shape[0]
+    output_tensor = torch.empty((num_tokens_permuted, input_tensor.shape[1]),
+                                device=input_tensor.device,
+                                dtype=input_tensor.dtype)
+    torch.ops._moe_C.shuffle_rows(input_tensor, dst2src_map, output_tensor)
+    return output_tensor
 
 
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
@@ -1124,14 +1148,12 @@ def scaled_fp4_experts_quant(
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
     topk: int,
-    expert_map: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale, for
     packed MoE Inputs.
     Args:
-        input: The input tensor to be quantized to FP4
-        expert_map: The expert map tensor
+        input_tensor: The input tensor to be quantized to FP4
         input_global_scale: A scalar scaling factor for the entire tensor.
         expert_offsets: The expert offsets tensor
         blockscale_offsets: The blockscale offsets tensor
@@ -1143,14 +1165,13 @@ def scaled_fp4_experts_quant(
     assert input_tensor.ndim == 2, (
         f'input.ndim needs to be == 2, but got {input_tensor.ndim}.')
 
-    input_tensor = input_tensor[
-        expert_map] if expert_map is not None else input_tensor
-    m_numtopk, k = input_tensor.shape
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
     # from running out of memory. This value can also be increased to support
     # larger models.
     MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+    m_numtopk, k = input_tensor.shape
+
     assert (m_numtopk <= MAX_TOKENS_PER_EXPERT * topk), (
         f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
         f"{MAX_TOKENS_PER_EXPERT})"
