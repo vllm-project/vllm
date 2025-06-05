@@ -108,7 +108,10 @@ template <typename scalar_t, typename scale_type>
 __global__ void static_scaled_int8_quant_kernel(
     scalar_t const* __restrict__ input, int8_t* __restrict__ out,
     scale_type const* scale_ptr, const int hidden_size) {
-  int const VEC_SIZE = 4;
+  int const VEC_SIZE = 16;
+  using in_vec_t = vec_n_t<scalar_t, VEC_SIZE>;
+  using out_vec_t = vec_n_t<int8_t, VEC_SIZE>;
+
   int const tid = threadIdx.x;
   int64_t const token_idx = blockIdx.x;
   scale_type const scale_val = *scale_ptr;
@@ -117,30 +120,25 @@ __global__ void static_scaled_int8_quant_kernel(
   out += token_idx * hidden_size;
   input += token_idx * hidden_size;
 
-  vec4_t<scalar_t> const* vec_input =
-      reinterpret_cast<vec4_t<scalar_t> const*>(input);
-  q8x4_t<int8_t>* vec_out = reinterpret_cast<q8x4_t<int8_t>*>(out);
-  int const num_vec_elements = hidden_size / VEC_SIZE;
-  for (int i = tid; i < num_vec_elements; i += blockDim.x) {
-    vec4_t<scalar_t> in_vec = vec_input[i];
-    q8x4_t<int8_t> out_vec;
-    out_vec.val[0] =
-        float_to_int8_rn(static_cast<float>(in_vec.val[0]) / scale_val);
-    out_vec.val[1] =
-        float_to_int8_rn(static_cast<float>(in_vec.val[1]) / scale_val);
-    out_vec.val[2] =
-        float_to_int8_rn(static_cast<float>(in_vec.val[2]) / scale_val);
-    out_vec.val[3] =
-        float_to_int8_rn(static_cast<float>(in_vec.val[3]) / scale_val);
+  auto const* vectorized_in = reinterpret_cast<in_vec_t const*>(input);
+  auto* vectorized_out = reinterpret_cast<out_vec_t*>(out);
+  int64_t const num_vec_elements = hidden_size / VEC_SIZE;
 
-    vec_out[i] = out_vec;
+  // vectorized quantization
+  for (int i = tid; i < num_vec_elements; i += blockDim.x) {
+    in_vec_t in_vec = vectorized_in[i];
+    out_vec_t out_vec;
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      out_vec.val[j] =
+          float_to_int8_rn(static_cast<float>(in_vec.val[j]) / scale_val);
+    }
+    vectorized_out[i] = out_vec;
   }
   // handle the rest
-  int base = num_vec_elements * VEC_SIZE + tid;
-  int rem = hidden_size % VEC_SIZE;
-  for (int i = tid; i < rem; i += blockDim.x) {
-    out[base + i] =
-        float_to_int8_rn(static_cast<float>(input[base + i]) / scale_val);
+  int64_t const remainder_start = num_vec_elements * VEC_SIZE;
+  for (int64_t i = remainder_start + tid; i < hidden_size; i += blockDim.x) {
+    out[i] = float_to_int8_rn(static_cast<float>(input[i]) / scale_val);
   }
 }
 
