@@ -142,6 +142,19 @@ async def test_fetch_image_local_files(image_url: str):
 
 
 @pytest.mark.asyncio
+async def test_fetch_image_error_conversion():
+    connector = MediaConnector()
+    broken_img = "data:image/png;base64,aGVsbG9fdmxsbV9jb21tdW5pdHkK"
+
+    # PIL.UnidentifiedImageError should be converted to ValueError
+    with pytest.raises(ValueError):
+        await connector.fetch_image_async(broken_img)
+
+    with pytest.raises(ValueError):
+        connector.fetch_image(broken_img)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
 async def test_fetch_video_http(video_url: str, num_frames: int):
