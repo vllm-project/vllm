@@ -11,7 +11,7 @@ import vllm.entrypoints.cli.openai
 import vllm.entrypoints.cli.run_batch
 import vllm.entrypoints.cli.serve
 import vllm.version
-from vllm.entrypoints.utils import VLLM_SERVE_PARSER_EPILOG, cli_env_setup
+from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG, cli_env_setup
 from vllm.utils import FlexibleArgumentParser
 
 CMD_MODULES = [
@@ -37,7 +37,7 @@ def main():
 
     parser = FlexibleArgumentParser(
         description="vLLM CLI",
-        epilog=VLLM_SERVE_PARSER_EPILOG,
+        epilog=VLLM_SUBCMD_PARSER_EPILOG,
     )
     parser.add_argument('-v',
                         '--version',
