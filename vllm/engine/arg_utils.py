@@ -622,9 +622,10 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
-        parser.add_argument('--log-global-stats',
-                            action='store_true',
-                            help='Use GlobalStatLogger when log stats is enabled.')
+        parser.add_argument(
+            '--log-global-stats',
+            action='store_true',
+            help='Use GlobalStatLogger when log stats is enabled.')
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',
@@ -919,12 +920,11 @@ class EngineArgs:
             default=None,
             help="Override or set neuron device configuration. "
             "e.g. ``{\"cast_logits_dtype\": \"bloat16\"}``.")
-        parser.add_argument(
-            '--override-tt-config',
-            type=json.loads,
-            default=None,
-            help="Override or set TT device configuration. "
-            "e.g. '{\"sample_on_device_mode\": \"all\"}'")
+        parser.add_argument('--override-tt-config',
+                            type=json.loads,
+                            default=None,
+                            help="Override or set TT device configuration. "
+                            "e.g. '{\"sample_on_device_mode\": \"all\"}'")
         parser.add_argument(
             '--override-pooler-config',
             type=PoolerConfig.from_json,

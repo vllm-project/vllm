@@ -129,7 +129,7 @@ class Platform:
 
     def is_tpu(self) -> bool:
         return self._enum == PlatformEnum.TPU
-    
+
     def is_tt(self) -> bool:
         return self._enum == PlatformEnum.TT
 

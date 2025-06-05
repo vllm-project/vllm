@@ -673,7 +673,7 @@ package_data = {
 
 if _no_device():
     ext_modules = []
-    
+
 if _is_tt():
     ext_modules = []
 

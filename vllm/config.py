@@ -510,7 +510,7 @@ class ModelConfig:
             self.override_neuron_config = override_neuron_config
         else:
             self.override_neuron_config = None
-        
+
         if current_platform.is_tt():
             self.override_tt_config = override_tt_config
         else:

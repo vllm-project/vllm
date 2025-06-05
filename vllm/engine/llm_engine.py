@@ -212,7 +212,8 @@ class LLMEngine:
         vllm_config: VllmConfig,
         executor_class: Type[ExecutorBase],
         log_stats: bool,
-        log_global_stats: bool = False,  # if True and log_stats is True, log with GlobalStatLogger as well
+        log_global_stats:
+        bool = False,  # if True and log_stats is True, log with GlobalStatLogger as well
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
@@ -790,7 +791,7 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
         )
         processed_inputs = self.input_processor(preprocessed_inputs)
-        
+
         from vllm.platforms import current_platform
         current_platform.validate_request(
             prompt=prompt,

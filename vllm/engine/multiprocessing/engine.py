@@ -117,7 +117,8 @@ class MQLLMEngine:
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig,
                          usage_context: UsageContext,
-                         disable_log_requests: bool, disable_log_stats: bool, log_global_stats: bool,
+                         disable_log_requests: bool, disable_log_stats: bool,
+                         log_global_stats: bool,
                          ipc_path: str) -> "MQLLMEngine":
         # Setup plugins for each process
         from vllm.plugins import load_general_plugins
@@ -429,8 +430,9 @@ def signal_handler(*_) -> None:
 
 
 def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
-                  ipc_path: str, disable_log_stats: bool, log_global_stats: bool,
-                  disable_log_requests: bool, engine_alive):
+                  ipc_path: str, disable_log_stats: bool,
+                  log_global_stats: bool, disable_log_requests: bool,
+                  engine_alive):
     try:
         # Ensure we can serialize transformer config before spawning
         maybe_register_config_serialize_by_value()
