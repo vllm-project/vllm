@@ -12,9 +12,9 @@ logger = init_logger(__name__)
 # that interact with vllm workers.
 # they are executed whenever `import vllm` is called.
 
-if os.environ.get('NCCL_CUMEM_ENABLE') == '1':
+if 'NCCL_CUMEM_ENABLE' in os.environ:
     logger.warning(
-        "NCCL_CUMEM_ENABLE explicitly set to 1, skipping override. "
+        "NCCL_CUMEM_ENABLE explicitly set, skipping override. "
         "This may increase memory overhead with cudagraph+allreduce: "
         "https://github.com/NVIDIA/nccl/issues/1234")
 elif not os.path.exists('/dev/nvidia-caps-imex-channels'):
