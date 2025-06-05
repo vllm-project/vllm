@@ -14,15 +14,6 @@ import triton.language as tl
 from vllm import _custom_ops as ops
 from vllm.attention.backends.utils import PAD_SLOT_ID
 
-MAX_NUM_PROGRAMS = 1024
-
-batch_ptr = torch.full(
-    (MAX_NUM_PROGRAMS, ), PAD_SLOT_ID, dtype=torch.int32,
-    device='cpu')  # tracking which seq-idx the Triton program is handling
-token_chunk_offset_ptr = torch.full(
-    (MAX_NUM_PROGRAMS, ), PAD_SLOT_ID, dtype=torch.int32, device='cpu'
-)  # tracking BLOCK_M-based index in the sequence the Triton program is handling
-
 
 def causal_conv1d_fn(x: torch.Tensor,
                      weight: torch.Tensor,
@@ -883,10 +874,27 @@ def causal_conv1d_fn_triton(
         nums_dict = metadata.nums_dict
         #x = metadata.x
         args = nums_dict
+        batch_ptr = metadata.batch_ptr
+        token_chunk_offset_ptr = metadata.token_chunk_offset_ptr
     else:
         out = torch.zeros_like(x)
         seqlens = np.diff(query_start_loc.to('cpu'))
         args = seqlens
+        MAX_NUM_PROGRAMS = 1024
+
+        batch_ptr = torch.full(
+            (MAX_NUM_PROGRAMS, ),
+            PAD_SLOT_ID,
+            dtype=torch.int32,
+            device=x.device
+        )  # tracking which seq-idx the Triton program is handling
+        token_chunk_offset_ptr = torch.full(
+            (MAX_NUM_PROGRAMS, ),
+            PAD_SLOT_ID,
+            dtype=torch.int32,
+            device=x.device
+        )  # tracking BLOCK_M-based index in the sequence the Triton program is handling
+
     is_channel_last = (x.stride(0) == 1) & (x.stride(1) > 1)
     dim, cu_seqlen = x.shape
     _, width = weight.shape
@@ -1008,7 +1016,6 @@ def causal_conv1d_fn_triton(
             triton.cdiv(dim, META["BLOCK_N"]),
         )
 
-    global batch_ptr, token_chunk_offset_ptr
     if batch_ptr.device != x.device:
         batch_ptr = batch_ptr.to(x.device)
         token_chunk_offset_ptr = token_chunk_offset_ptr.to(x.device)
