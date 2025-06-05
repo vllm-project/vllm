@@ -23,7 +23,12 @@ def test_create_attention_op():
     num_q_heads = 96
     num_kv_heads = 8
     head_dim = 128
-    dims = AttentionLayerDimensions(num_q_heads, num_kv_heads, head_dim)
+
+    dims = AttentionLayerDimensions()
+    dims.numQHeads = num_q_heads
+    dims.numKVHeads = num_kv_heads
+    dims.headSize = head_dim
+
     max_attention_window_size = 2048
 
     # Rotary embedding dimensions.
@@ -31,14 +36,15 @@ def test_create_attention_op():
     rotary_embedding_base = 10000
     rotary_embedding_max_positions = 2048
     rotary_embedding_scale = 0
-    rotary_embedding = RotaryEmbedding(
-        type=RotaryPositionalEmbeddingType.GPT_NEOX,
-        rotaryEmbeddingDim=rotary_embedding_dim,
-        rotaryEmbeddingBase=rotary_embedding_base,
-        rotaryEmbeddingScale=rotary_embedding_scale,
-        rotaryEmbeddingMaxPositions=rotary_embedding_max_positions,
-        rotaryScalingType=RotaryScalingType.NONE,
-    )
+
+    rotary_embedding = RotaryEmbedding()
+    rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
+    rotary_embedding.rotaryEmbeddingDim = rotary_embedding_dim
+    rotary_embedding.rotaryEmbeddingBase = rotary_embedding_base
+    rotary_embedding.rotaryEmbeddingScale = rotary_embedding_scale
+    rotary_embedding.rotaryEmbeddingMaxPositions = rotary_embedding_max_positions
+    rotary_embedding.rotaryScalingType = RotaryScalingType.NONE
+
     # KV-cache dimensions.
     num_tokens_per_block = 32
     max_blocks_per_sequence = 32
@@ -55,7 +61,7 @@ def test_create_attention_op():
     )
     op = create_op(
         inputDataType=DeviceDataType.BF16,
-        outputDataType=DeviceDataType.BF16,
+        outputDataType=DeviceDataType.FP8_E4M3,
         attentionLayerDimensions=dims,
         rotaryEmbedding=rotary_embedding,
         numTokensPerBlock=num_tokens_per_block,
@@ -70,7 +76,7 @@ def test_create_attention_op():
 
     # Parameters of the particular op call.
     batch_size = 1
-    context_length = 32
+    context_length = 256
     sequence_length = context_length + 1
     context_lengths_host = torch.tensor([context_length], dtype=torch.uint32)
     context_lengths_device = context_lengths_host.cuda()
