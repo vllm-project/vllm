@@ -413,6 +413,14 @@ class MambaMixer2(CustomOp):
                                        self.use_rms_norm,
                                        eps=rms_norm_eps)
 
+    def forward_native(
+        self,
+        hidden_states: torch.Tensor,
+        conv_state: torch.Tensor,
+        ssm_state: torch.Tensor,
+    ):
+        pass
+
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
@@ -798,11 +806,3 @@ class MambaMixer2(CustomOp):
         # 5. Final linear projection
         out, _ = self.out_proj(hidden_states)
         return out
-
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        conv_state: torch.Tensor,
-        ssm_state: torch.Tensor,
-    ):
-        pass
