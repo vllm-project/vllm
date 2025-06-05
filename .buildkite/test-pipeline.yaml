@@ -508,7 +508,7 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
 
 - label: Multi-Modal Models Test (Standard)
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental] 
   torch_nightly: true
   source_file_dependencies:
   - vllm/
