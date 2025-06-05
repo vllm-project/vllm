@@ -36,9 +36,9 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_chunking(self) -> bool:
         dge = self.deep_gemm_expert
-        te  = self.triton_expert
-        return ((dge is None or dge.supports_chunking()) and
-                (te is None or te.supports_chunking()))
+        te = self.triton_expert
+        return ((dge is None or dge.supports_chunking())
+                and (te is None or te.supports_chunking()))
 
     def workspace_shapes(
         self,
@@ -57,8 +57,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             return self.deep_gemm_expert.workspace_shapes(
                 a, M, N, K, topk, num_experts)
         else:
-            return self.triton_expert.workspace_shapes(
-                a, M, N, K, topk, num_experts)
+            return self.triton_expert.workspace_shapes(a, M, N, K, topk,
+                                                       num_experts)
 
     def apply(
         self,
