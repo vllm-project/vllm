@@ -163,85 +163,56 @@ _worker-run-r1 i:
     export DP_SIZE_LOCAL=8
     export START_RANK=$(({{i}} * 8))
 
-
     # Get the actual IP address of this node
     export HOST=$(hostname -I | awk '{print $1}')
     
-    # Enhanced network interface environment variables
+    # This is needed to prevent gloo from using ib0.
     export GLOO_SOCKET_IFNAME=eth0
-    # export NCCL_SOCKET_IFNAME=eth0
-    # export NCCL_IB_DISABLE=0
-    # export NCCL_NET_GDR_LEVEL=3
-    # export NCCL_TIMEOUT=1800  # 30 minutes timeout for NCCL operations
-    # export NCCL_BLOCKING_WAIT=1
     
-    # DeepEP and distributed communication timeouts
-    export VLLM_RPC_TIMEOUT=600000  # 10 minutes in milliseconds
-    export DEEPEP_TIMEOUT=300  # 5 minutes timeout for DeepEP operations
-    export TORCH_DISTRIBUTED_TIMEOUT=1800  # 30 minutes for torch distributed
+    # Network timeouts, we shouldn't need these but in case of slow network.
+    # export VLLM_RPC_TIMEOUT=600000  # 10 minutes in milliseconds
+    # export DEEPEP_TIMEOUT=300  # 5 minutes timeout for DeepEP operations
+    # export TORCH_DISTRIBUTED_TIMEOUT=1800  # 30 minutes for torch distributed
 
+    # Memory control
+    export VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1
 
-    export CUDA_LAUNCH_BLOCKING=1
-    export VLLM_LOGGING_LEVEL=DEBUG
-
+    # Debugging for illegal memory access or other issues
+    # export CUDA_LAUNCH_BLOCKING=1
+    # export VLLM_LOGGING_LEVEL=DEBUG
     
-    # PyTorch distributed debugging (optional - comment out for less verbose output)
-    # export TORCH_DISTRIBUTED_DEBUG=DETAIL
-    # export NCCL_DEBUG=INFO
-    
-    # Ray timeout configuration if using Ray backend
-    # export RAY_CGRAPH_get_timeout=600
-    
-    # Memory and performance tuning
-    # export CUDA_DEVICE_MAX_CONNECTIONS=1
-    # export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
-    
-    # Only the leader node (index 0) should specify data-parallel-address
-    # Worker nodes connect to the leader but don't bind to its address
     if [ {{i}} -eq 0 ]; then
         LEADER_OR_WORKER_ARGS=""
-        DATA_PARALLEL_ADDRESS_ARG="--data-parallel-address {{leader_address}}"
-        echo "Starting LEADER node (rank {{i}}) at {{leader_address}}"
     else
         LEADER_OR_WORKER_ARGS="--headless"
-        DATA_PARALLEL_ADDRESS_ARG="--data-parallel-address {{leader_address}}"
-        echo "Starting WORKER node (rank {{i}}) connecting to {{leader_address}}"
     fi
 
-    # Add longer startup delay for worker nodes to ensure leader is ready
-    if [ {{i}} -ne 0 ]; then
-        sleep_time=$(({{i}} * 10))  # Stagger worker startup
-        echo "Worker node {{i}} waiting ${sleep_time} seconds for leader..."
-        sleep $sleep_time
-    fi
-
-    echo "Starting vLLM server with the following configuration:"
-    echo "  Node rank: {{i}}"
-    echo "  DP_SIZE: $DP_SIZE"
-    echo "  START_RANK: $START_RANK"
-    echo "  Host IP: $HOST"
-    echo "  Leader address: {{leader_address}}"
-
-    # --max-num-seqs 1 \
-    # --max-model-len 2048 \
-    # --max-seq-len 2048 \
-    # --max-num-batched-tokens 2048 \
-    
-    # Start vLLM with enhanced error handling and timeouts
     vllm serve deepseek-ai/DeepSeek-R1 --trust-remote-code \
         --no-enable-prefix-caching --disable-log-requests \
         --tensor-parallel-size 1 \
         --enable-expert-parallel \
         --data-parallel-size $DP_SIZE \
         --data-parallel-size-local $DP_SIZE_LOCAL \
-        $DATA_PARALLEL_ADDRESS_ARG \
+        --data-parallel-address {{leader_address}} \
         --data-parallel-rpc-port 5555 \
         --data-parallel-start-rank $START_RANK \
         --enforce-eager \
-        --gpu-memory-utilization 0.8 \
+        --gpu-memory-utilization 0.95 \
         $LEADER_OR_WORKER_ARGS 2>&1 | tee {{pwd}}/logs/r1-rank-{{i}}.log
 
-# Enhanced R1 runner with better error handling and timeouts
 run-r1:
     @just kill-vllm-processes
     @just _run-indexed-on-all-hosts "cd {{pwd}} && just _worker-run-r1 INDEX_PLACEHOLDER"
+
+bench-serving:
+    #!/usr/bin/env bash
+    source {{env_sh}}
+    cd ~/vllm
+    source .venv/bin/activate
+
+    vllm bench serve --model deepseek-ai/DeepSeek-R1 \
+         --dataset-name random --ignore-eos \
+        --num-prompts 128 \
+        --request-rate 10 \
+        --random-input-len 1024 \
+        --random-output-len 2048 

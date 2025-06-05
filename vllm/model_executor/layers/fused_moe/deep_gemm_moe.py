@@ -33,10 +33,11 @@ def _valid_deep_gemm_shape(M: int, N: int, K: int):
     # DeepGemm workspace size is almost twice what the TritonExperts require.
     # Limit M so we fallback to TritonExperts.
     # TODO (varun) needs tuning
-    max_M = 16384
+    # max_M = 16384
 
     align = deep_gemm_block_shape()[0]
-    return align <= M and max_M >= M and N % align == 0 and K % align == 0
+    # return align <= M and max_M >= M and N % align == 0 and K % align == 0
+    return align <= M and N % align == 0 and K % align == 0
 
 
 def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
