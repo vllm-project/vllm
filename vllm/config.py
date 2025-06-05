@@ -3964,8 +3964,6 @@ class CompilationConfig:
     """custom ops that are enabled"""
     disabled_custom_ops: Counter[str] = field(default_factory=Counter,
                                               init=False)
-    """custom ops that are disabled"""
-    traced_files: set[str] = field(default_factory=set, init=False)
     """files that are traced for compilation"""
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
@@ -4007,7 +4005,6 @@ class CompilationConfig:
             "compilation_time",
             "bs_to_padded_graph_size",
             "pass_config",
-            "traced_files",
         }
         # The cast to string is necessary because Pydantic is mocked in docs
         # builds and sphinx-argparse doesn't know the return type of decode()
