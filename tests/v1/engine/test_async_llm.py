@@ -253,7 +253,7 @@ async def test_customize_loggers(monkeypatch):
 
 
 @pytest.mark.asyncio(scope="module")
-async def test_invalid_argument(monkeypatch: pytest.MonkeyPatch):
+async def test_dp_rank_argument(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -265,10 +265,17 @@ async def test_invalid_argument(monkeypatch: pytest.MonkeyPatch):
                                          temperature=1.0,
                                          seed=33)
 
-        # Non-None data_parallel_rank only valid in multi-instance DP setups
+        # Test with valid DP rank.
+        async for _ in engine.generate(request_id="request-34",
+                                       prompt=TEXT_PROMPT,
+                                       sampling_params=sampling_params,
+                                       data_parallel_rank=0):
+            pass
+
+        # Test with out-of-range DP rank.
         with pytest.raises(ValueError):
-            async for _ in engine.generate(request_id="request-33",
+            async for _ in engine.generate(request_id="request-35",
                                            prompt=TEXT_PROMPT,
                                            sampling_params=sampling_params,
-                                           data_parallel_rank=0):
+                                           data_parallel_rank=1):
                 pass

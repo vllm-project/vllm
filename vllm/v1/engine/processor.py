@@ -225,12 +225,13 @@ class Processor:
             raise ValueError("V1 does not support tracing yet.")
         if prompt_adapter_request is not None:
             raise ValueError("V1 does not support prompt_adapter_request.")
-        parallel_config = self.vllm_config.parallel_config
-        if data_parallel_rank is not None and (
-                parallel_config.data_parallel_size == 1
-                or parallel_config.data_parallel_backend != "mp"):
-            raise ValueError("data_parallel_rank is only respected when "
-                             "data_parallel_size > 1 with 'mp' backend.")
+
+        data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
+        if data_parallel_rank is not None and (data_parallel_rank < 0
+                                               or data_parallel_rank
+                                               >= data_parallel_size):
+            raise ValueError(f"data_parallel_rank {data_parallel_rank} "
+                             f"is out of range [0, {data_parallel_size}).")
 
         if arrival_time is None:
             arrival_time = time.time()
