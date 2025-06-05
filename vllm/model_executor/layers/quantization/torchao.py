@@ -63,7 +63,16 @@ class TorchAOConfig(QuantizationConfig):
         )
         quant_type = hf_config["default"]
         ao_config = config_from_dict(quant_type)
-        skip_modules = config.get("modules_to_not_convert", [])
+
+        # Adds skipped modules defined in "modules_to_not_convert"
+        skip_modules = config.get("modules_to_not_convert", []) or []
+
+        # adds skipped modules defined in "module_fqn_to_config"
+        module_fqn = quant_type["_data"]["module_fqn_to_config"]
+        for layer in module_fqn:
+            if module_fqn.get(layer, None) is None:
+                skip_modules.append(layer)
+
         return cls(ao_config, skip_modules)
 
     def get_quant_method(
