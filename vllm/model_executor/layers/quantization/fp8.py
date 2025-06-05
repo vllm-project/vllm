@@ -730,7 +730,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2_weight = layer.w2_weight
                 w2_weight_scale_inv = layer.w2_weight_scale_inv
 
-            if self.block_quant:
+            if self.quant_config.weight_block_size is not None:
                 (w2_weight, w2_weight_scale_inv, w13_weight, w13_weight_scale_inv
                 ) = self._maybe_pad_rocm_aiter_block_scaled_fused_moe_weights(
                     w2_weight,
