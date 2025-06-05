@@ -1,14 +1,25 @@
-{%- if messages[0]['role'] == 'system' -%}
-    {%- set system_message = messages[0]['content'] -%}
-    {%- set messages = messages[1:] -%}
-{%- else -%}
-    {% set system_message = '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' -%}
-{%- endif -%}
+{% set audio_count = namespace(value=0) %}
 
 {% for message in messages %}
-    {{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}
+    {% if loop.first and message['role'] != 'system' %}
+        <|im_start|>system\nYou are a helpful assistant.<|im_end|>\n
+    {% endif %}
+    <|im_start|>{{ message['role'] }}\n
+    {% if message['content'] is string %}
+        {{ message['content'] }}<|im_end|>\n
+    {% else %}
+        {% for content in message['content'] %}
+            {% if 'audio' in content or 'audio_url' in content or message['type'] == 'audio' %}
+                {% set audio_count.value = audio_count.value + 1 %}
+                Audio {{ audio_count.value }}: <|audio_bos|><|AUDIO|><|audio_eos|>\n
+            {% elif 'text' in content %}
+                {{ content['text'] }}
+            {% endif %}
+        {% endfor %}
+        <|im_end|>\n
+    {% endif %}
 {% endfor %}
 
 {% if add_generation_prompt %}
-    {{ '<|im_start|>assistant\n' }}
+    <|im_start|>assistant\n
 {% endif %}
