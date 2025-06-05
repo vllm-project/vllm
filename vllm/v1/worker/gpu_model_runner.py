@@ -556,6 +556,46 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
+    def _add_multimodal_inputs_to_model_args(self, model_kwargs: dict[str, Any],
+                                             scheduler_output: "SchedulerOutput"):
+        # Multi-modal data.
+        if scheduler_output:
+            multi_modal_kwargs_list = []
+            for req in scheduler_output.scheduled_new_reqs:
+                req_mm_inputs = req.mm_inputs
+                if not isinstance(req_mm_inputs, list):
+                    req_mm_inputs = list(req_mm_inputs)
+                multi_modal_kwargs_list.extend(req_mm_inputs)
+            multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
+        else:
+            # The only case where SchedulerOtput is None is for a dummy run, let's get some dummy data.
+            dummy_data = self.mm_registry.get_decoder_dummy_data(model_config=self.model_config, seq_len =1)
+            multi_modal_kwargs = MultiModalKwargs.batch([dummy_data.multi_modal_data])
+            
+        model_kwargs.update(multi_modal_kwargs)
+
+    def _maybe_add_model_args(self, num_tokens: int,
+                              model_kwargs: dict[str,Any], 
+                              scheduler_output: "SchedulerOutput"=None):
+        
+        if self.supports_token_type_ids:
+            model_kwargs["token_type_ids"] =\
+                  self.get_token_type_ids()[:num_tokens]
+
+        if self.model_supports_multimodal_raw_input:
+            self._add_multimodal_inputs_to_model_args(model_kwargs, scheduler_output)
+
+    def _maybe_compute_attn_prefix(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> list[int]:
+        return [0] * len(self.kv_cache_config.kv_cache_groups)
+
+    def _maybe_prepare_additional_inputs(self,
+                                         scheduler_output: "SchedulerOutput",
+                                         token_indices: torch.Tensor):
+        pass
+
     def _get_cumsum_and_arange(
         self,
         num_tokens: np.ndarray,
