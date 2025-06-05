@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 
 if 'NCCL_CUMEM_ENABLE' in os.environ:
     logger.warning(
-        "NCCL_CUMEM_ENABLE explicitly set to %s, skipping override. "
+        "NCCL_CUMEM_ENABLE is set to %s, skipping override. "
         "This may increase memory overhead with cudagraph+allreduce: "
         "https://github.com/NVIDIA/nccl/issues/1234",
         os.environ['NCCL_CUMEM_ENABLE'])
