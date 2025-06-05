@@ -924,7 +924,8 @@ def test_resolve_content_format_hf_defined(model, expected_format):
      ("adept/fuyu-8b", "string"),
      ("google/paligemma-3b-mix-224", "string"),
      ("Qwen/Qwen-VL", "string"),
-     ("Qwen/Qwen-VL-Chat", "string")],
+     ("Qwen/Qwen-VL-Chat", "string"),
+     ("Qwen/Qwen2-Audio-7B-Instruct", "string")],
 )
 # yapf: enable
 def test_resolve_content_format_fallbacks(model, expected_format):
