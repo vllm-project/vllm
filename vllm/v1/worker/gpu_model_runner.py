@@ -1770,6 +1770,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         max_query_len=num_tokens,
                         common_prefix_len=0,
                         common_attn_metadata=common_attn_metadata,
+                        for_cudagraph_capture=True,
                     ))
                 for layer_name in kv_cache_group_spec.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
@@ -2045,11 +2046,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.vllm_config.compilation_config.full_cuda_graph:
                 attn_backend_name = attn_backend_i.__name__
                 flash_attn_version = get_flash_attn_version()
-                if attn_backend_name != "FlashAttentionBackend" or \
-                    flash_attn_version != 3:
+                if not (attn_backend_name == "FlashAttentionBackend" and \
+                    flash_attn_version == 3) and \
+                        attn_backend_name != "TritonAttentionBackend":
                     raise ValueError(
                         f"full_cuda_graph is only supported with "
-                        f"FA3. Current attention backend is "
+                        f"FA3 or triton. Current attention backend is "
                         f"{attn_backend_name}, FlashAttention version is "
                         f"{flash_attn_version}.")
 
