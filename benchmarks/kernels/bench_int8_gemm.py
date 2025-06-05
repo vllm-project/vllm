@@ -79,19 +79,15 @@ def benchmark(batch_size, provider, N, K):
                 a_int8, scale_a_int8, _ = vllm_scaled_int8_quant(a, scale_a)
 
             elif "channel-w-token-a" in provider:
-                # Static per-channel quantization for weights, per-token quant for A
-                scale_b = torch.tensor((N,), device=device, dtype=torch.float32)
-                b_int8, scale_b_int8, _ = vllm_scaled_int8_quant(b, scale_b)
-                scale_b_int8 = scale_b_int8.expand(N).contiguous()
+                # Dynamic per-channel quantization for weights, per-token quant for A
+                b_int8, scale_b_int8, _ = vllm_scaled_int8_quant(b)
                 assert scale_b_int8.numel() == N
                 a_int8, scale_a_int8, _ = vllm_scaled_int8_quant(a)
 
             elif "channel-w-tensor-a" in provider:
-                # Static per-channel quantization for weights, per-tensor quant for A
+                # Dynamic per-channel quantization for weights, per-tensor quant for A
                 scale_a = torch.tensor([1.0], device=device, dtype=torch.float32)
-                scale_b = torch.tensor((N,), device=device, dtype=torch.float32)
-                b_int8, scale_b_int8, _ = vllm_scaled_int8_quant(b, scale_b)
-                scale_b_int8 = scale_b_int8.expand(N).contiguous()
+                b_int8, scale_b_int8, _ = vllm_scaled_int8_quant(b)
                 assert scale_b_int8.numel() == N
                 a_int8, scale_a_int8, _ = vllm_scaled_int8_quant(a, scale_a)
 
@@ -126,10 +122,8 @@ def benchmark(batch_size, provider, N, K):
                     )
 
             elif "channel-w-token-a" in provider:
-                # Static per-channel quant for weights, per-token quant for A
-                scale_b = torch.tensor((N,), device=device, dtype=torch.float32)
-                b_int8, scale_b_int8, _ = vllm_scaled_int8_quant(b, scale_b)
-                scale_b_int8 = scale_b_int8.expand(N).contiguous()
+                # Dynamic per-channel quant for weights, per-token quant for A
+                b_int8, scale_b_int8, _ = vllm_scaled_int8_quant(b)
                 assert scale_b_int8.numel() == N
 
                 def run_quant():
@@ -139,11 +133,9 @@ def benchmark(batch_size, provider, N, K):
                     )
 
             elif "channel-w-tensor-a" in provider:
-                # Static per-channel quant for weights, static per-tensor quant for A
+                # Dynamic per-channel quant for weights, static per-tensor quant for A
                 scale_a = torch.tensor([1.0], device=device, dtype=torch.float32)
-                scale_b = torch.tensor((N,), device=device, dtype=torch.float32)
-                b_int8, scale_b_int8, _ = vllm_scaled_int8_quant(b, scale_b)
-                scale_b_int8 = scale_b_int8.expand(N).contiguous()
+                b_int8, scale_b_int8, _ = vllm_scaled_int8_quant(b)
                 assert scale_b_int8.numel() == N
 
                 def run_quant():
