@@ -105,6 +105,7 @@ class CustomAllreduce:
         if not quick_ar:
             logger.info("Quick allreduce is disabled because "
                         "of missing quick allreduce library")
+            self._QR_SHOULD_INIT = False
         if not quick_ar and not custom_ar:
             return
 
@@ -136,7 +137,8 @@ class CustomAllreduce:
                 world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
             return
 
-        if world_size == 6:
+        if world_size not in CustomAllreduce._SUPPORTED_WORLD_SIZES \
+            and self._QR_SHOULD_INIT:
             self._QR_SHOULD_INIT = False
             logger.warning(
                 "Quick allreduce is disabled due to an unsupported world"
@@ -228,20 +230,23 @@ class CustomAllreduce:
             self._QR_SHOULD_INIT = False
 
         self.qr_level: int = envs.VLLM_QUICK_ALLREDUCE_LEVEL
-        if self.qr_level not in [1, 2, 3, 4, 5]:
+        if self.qr_level == 0: # close qr
+            self._QR_SHOULD_INIT = False
+        if self.qr_level not in [1, 2, 3, 4, 5] and self._QR_SHOULD_INIT:
             logger.warning(
                 "Quick AllReduce is not initialized because the quant "
                 "level %s is invalid. It must be one of "
-                "[1, 2, 3, 4, 5]. You can change this via "
+                "[0, 1, 2, 3, 4, 5]. You can change this via "
                 "`envs.VLLM_QUICK_ALLREDUCE_LEVEL`.", self.qr_level)
             self._QR_SHOULD_INIT = False
-        if self.qr_level != 5 and world_size == 8:
-            logger.warning(
-                "When world_size=8, only VLLM_QUICK_ALLREDUCE_LEVEL=5 for "
-                "quick allreduce is effective for performance improvement. "
-                "set `envs.VLLM_QUICK_ALLREDUCE_LEVEL = 5` for speedup.")
 
         if self._QR_SHOULD_INIT:
+            if self.qr_level != 5 and world_size == 8:
+                logger.warning(
+                    "When world_size=8, only VLLM_QUICK_ALLREDUCE_LEVEL=5 "
+                    "for quick allreduce is effective for performance "
+                    "improvement. set `envs.VLLM_QUICK_ALLREDUCE_LEVEL = 5`"
+                    " for speedup.")
             # These numbers are based on kernel tests.
             if world_size == 4:
                 qr_min_size = 8 * 1024 * 1024
