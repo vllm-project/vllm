@@ -197,10 +197,10 @@ def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
-    model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
-    vllm_config.model_config = ModelConfig(model=model,
+    model_name = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
+    vllm_config.model_config = ModelConfig(model=model_name,
                                            task="auto",
-                                           tokenizer=model,
+                                           tokenizer=model_name,
                                            tokenizer_mode="auto",
                                            trust_remote_code=True,
                                            dtype=dtype,
