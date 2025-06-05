@@ -736,8 +736,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                  w2_weight_scale_inv,
                  w13_weight,
                  w13_weight_scale_inv,
-                 block_n=self.quant_config.weight_block_size[0],
-                 block_k=self.quant_config.weight_block_size[1])
+                 block_n=self.quant_config.weight_block_size[0] \
+                    if self.quant_config.weight_block_size[0] is not None else 128,
+                 block_k=self.quant_config.weight_block_size[1] \
+                    if self.quant_config.weight_block_size[1] is not None else 128)
 
             # torch.compile() cannot use Parameter subclasses.
             layer.w13_weight = Parameter(w13_weight, requires_grad=False)
