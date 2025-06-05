@@ -361,7 +361,7 @@ class Fp8LinearOp:
                     num_token_padding=self.output_padding,
                     use_per_token_if_dynamic=use_per_token_if_dynamic)
             else:
-                if x_scale is not None:
+                if input_scale is not None:
                     qinput, x_scale = input_2d, input_scale
                 else:
                     qinput = input_2d
