@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 from copy import deepcopy
 from typing import Optional
@@ -431,7 +432,12 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
         else:
             hidden_states = self.embeddings(input_ids=input_ids,
                                             token_type_ids=token_type_ids)
-        return self.encoder(positions, hidden_states)
+        hidden_states = self.encoder(positions, hidden_states)
+
+        # convert the embedding output to float32,
+        # otherwise precision will be lost significantly
+        hidden_states = hidden_states.to(torch.float32)
+        return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

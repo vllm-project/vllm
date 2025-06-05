@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
 import time
@@ -41,6 +42,7 @@ def make_request() -> EngineCoreRequest:
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,
+        data_parallel_rank=None,
     )
 
 

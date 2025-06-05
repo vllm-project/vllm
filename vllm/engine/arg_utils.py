@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # yapf: disable
 import argparse
@@ -14,7 +15,7 @@ from typing import (Annotated, Any, Callable, Dict, List, Literal, Optional,
 
 import regex as re
 import torch
-from pydantic import SkipValidation, TypeAdapter, ValidationError
+from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
@@ -150,17 +151,29 @@ def is_not_builtin(type_hint: TypeHint) -> bool:
     return type_hint.__module__ != "builtins"
 
 
+def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
+    """Extract type hints from Annotated or Union type hints."""
+    type_hints: set[TypeHint] = set()
+    origin = get_origin(type_hint)
+    args = get_args(type_hint)
+
+    if origin is Annotated:
+        type_hints.update(get_type_hints(args[0]))
+    elif origin is Union:
+        for arg in args:
+            type_hints.update(get_type_hints(arg))
+    else:
+        type_hints.add(type_hint)
+
+    return type_hints
+
+
 def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
     kwargs = {}
     for field in fields(cls):
         # Get the set of possible types for the field
-        type_hints: set[TypeHint] = set()
-        if get_origin(field.type) in {Union, Annotated}:
-            predicate = lambda arg: not isinstance(arg, SkipValidation)
-            type_hints.update(filter(predicate, get_args(field.type)))
-        else:
-            type_hints.add(field.type)
+        type_hints: set[TypeHint] = get_type_hints(field.type)
 
         # If the field is a dataclass, we can use the model_validate_json
         generator = (th for th in type_hints if is_dataclass(th))
@@ -1277,7 +1290,7 @@ class EngineArgs:
         # Skip this check if we are running on a non-GPU platform,
         # or if the device capability is not available
         # (e.g. in a Ray actor without GPUs).
-        from vllm.platforms import current_platform
+        from vllm.platforms import CpuArchEnum, current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
@@ -1382,10 +1395,12 @@ class EngineArgs:
             "PALLAS_VLLM_V1",
             "TRITON_ATTN_VLLM_V1",
             "TRITON_MLA",
+            "CUTLASS_MLA_VLLM_V1",
             "FLASHMLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
             "ROCM_AITER_MLA",
+            "TORCH_SDPA_VLLM_V1",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
@@ -1418,7 +1433,9 @@ class EngineArgs:
 
         # Non-[CUDA, TPU] may be supported on V1, but off by default for now.
         v0_hardware = not any(
-            (current_platform.is_cuda(), current_platform.is_tpu()))
+            (current_platform.is_cuda(), current_platform.is_tpu(),
+             (current_platform.is_cpu()
+              and current_platform.get_cpu_architecture() == CpuArchEnum.X86)))
         if v0_hardware and _warn_or_fallback(  # noqa: SIM103
                 current_platform.device_name):
             return False

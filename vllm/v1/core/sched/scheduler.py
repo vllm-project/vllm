@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -79,7 +80,9 @@ class Scheduler(SchedulerInterface):
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
         self.kv_event_publisher = EventPublisherFactory.create(
-            self.kv_events_config)
+            self.kv_events_config,
+            vllm_config.parallel_config.data_parallel_rank,
+        )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -421,11 +424,11 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     break
 
-                # KVConnector: update internal state after allocation.
+                # KVTransfer: the connector uses this info to determine
+                # if a load is needed. Note that
                 # This information is used to determine if a load is
                 # needed for this request.
-                if num_external_computed_tokens:
-                    assert self.connector is not None
+                if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
@@ -838,7 +841,7 @@ class Scheduler(SchedulerInterface):
         }
 
         finished_req_ids = self.finished_req_ids_dict
-        if finished_req_ids is not None:
+        if finished_req_ids:
             # Include ids of requests that finished since last outputs
             # were sent.
             for client_index, finished_set in finished_req_ids.items():
