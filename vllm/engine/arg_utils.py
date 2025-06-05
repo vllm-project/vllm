@@ -386,6 +386,7 @@ class EngineArgs:
     enable_chunked_prefill: Optional[
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
+    rpc_mq_max_chunk_bytes: int = SchedulerConfig.rpc_mq_max_chunk_bytes
 
     guided_decoding_backend: GuidedDecodingBackend = DecodingConfig.backend
     guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
@@ -849,6 +850,8 @@ class EngineArgs:
             **scheduler_kwargs["disable_chunked_mm_input"])
         scheduler_group.add_argument("--scheduler-cls",
                                      **scheduler_kwargs["scheduler_cls"])
+        scheduler_group.add_argument("--rpc-mq-max-chunk-bytes",
+                                     **scheduler_kwargs["rpc_mq_max_chunk_bytes"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1174,6 +1177,7 @@ class EngineArgs:
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            rpc_mq_max_chunk_bytes=self.rpc_mq_max_chunk_bytes,
         )
 
         lora_config = LoRAConfig(

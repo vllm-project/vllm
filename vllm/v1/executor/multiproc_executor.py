@@ -72,7 +72,7 @@ class MultiprocExecutor(Executor):
 
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        self.rpc_broadcast_mq = MessageQueue(self.world_size, self.world_size)
+        self.rpc_broadcast_mq = MessageQueue(self.world_size, self.world_size, max_chunk_bytes=self.vllm_config.scheduler_config.rpc_mq_max_chunk_bytes)
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
