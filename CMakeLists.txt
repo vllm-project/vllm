@@ -164,6 +164,15 @@ endif()
 #
 get_torch_gpu_compiler_flags(VLLM_GPU_FLAGS ${VLLM_GPU_LANG})
 
+# Show additional HIP flags status for ROCm builds
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  if(HIPCC_COMPILE_FLAGS_APPEND)
+    message(STATUS "Additional HIP flags: ${HIPCC_COMPILE_FLAGS_APPEND}")
+  else()
+    message(STATUS "Additional HIP flags: NONE (set via -DHIPCC_COMPILE_FLAGS_APPEND=\"flag1;flag2\" or HIPCC_COMPILE_FLAGS_APPEND=\"flag1 flag2\")")
+  endif()
+endif()
+
 #
 # Set nvcc parallelism.
 #
