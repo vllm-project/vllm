@@ -210,7 +210,7 @@ class MessageQueue:
         n_reader,  # number of all readers
         n_local_reader,  # number of local readers through shared memory
         local_reader_ranks: Optional[list[int]] = None,
-        max_chunk_bytes: int = 1024 * 1024 * 10,
+        max_chunk_bytes: int = 1024 * 1024 * 100,
         max_chunks: int = 10,
         connect_ip: Optional[str] = None,
     ):
