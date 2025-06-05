@@ -171,10 +171,7 @@ class TritonAttentionImpl(AttentionImpl):
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
 
-        num_queries_per_kv = query.shape[1] // key.shape[1]
-        num_q_is_pow2 = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
-        use_prefill_decode_attn = (self.force_prefill_decode_attn
-                                   or not num_q_is_pow2)
+        use_prefill_decode_attn = self.force_prefill_decode_attn
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         if use_prefill_decode_attn:
