@@ -9,7 +9,9 @@ pytest-shard
 pytest-timeout
 
 librosa # required by audio tests in entrypoints/openai
-sentence-transformers
+sentence-transformers # required for embedding tests
+transformers==4.51.3
+transformers_stream_generator # required for qwen-vl test
 numba == 0.61.2; python_version > '3.9'
 # testing utils
 boto3
@@ -39,3 +41,6 @@ matplotlib # required for qwen-vl test
 num2words # required for smolvlm test
 pqdm
 timm # required for internvl test
+
+schemathesis>=3.39.15  # Required for openai schema test.
+mteb>=1.38.11, <2 # required for mteb test

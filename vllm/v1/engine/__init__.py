@@ -55,6 +55,7 @@ class EngineCoreRequest(
     arrival_time: float
     lora_request: Optional[LoRARequest]
     cache_salt: Optional[str]
+    data_parallel_rank: Optional[int]
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
