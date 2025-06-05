@@ -18,7 +18,7 @@ class CustomOp(nn.Module):
 
     def __new__(cls, *args, **kwargs):
         try:
-            op_name = cls.name
+            op_name = cls.__name__
         except AttributeError:
             raise TypeError(
                 f"Cannot instantiate '{cls.__name__}': its 'name' attribute "
@@ -30,6 +30,8 @@ class CustomOp(nn.Module):
             op_cls_to_instantiate = cls
         else:
             op_cls_to_instantiate = cls.op_registry_oot[op_name]
+            logger.debug("Instantiating custom op: %s using %s", op_name,
+                         str(op_cls_to_instantiate))
         return super().__new__(op_cls_to_instantiate)
 
     def __init__(self):
