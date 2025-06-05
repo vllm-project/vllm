@@ -137,10 +137,13 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Note: M_sum is different than the pre-permuted shape of a1q.
         M_sum = a1q.size(0)
+
         mm1_out = _resize_cache(workspace13, (M_sum, N))
         act_out = _resize_cache(workspace2, (M_sum, N // 2))
-        mm2_out = _resize_cache(workspace13, (M_sum, K))
-        out = _resize_cache(workspace2, (inv_perm.size(0), K))
+        quant_out = _resize_cache(workspace13.view(dtype=torch.float8_e4m3fn),
+                                  (M_sum, N // 2))
+        mm2_out = _resize_cache(workspace2, (M_sum, K))
+        out = _resize_cache(workspace13, (inv_perm.size(0), K))
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a1q, a1q_scale), (w1, w1_scale), mm1_out, expert_ids)
@@ -150,7 +153,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2q_scale: Optional[torch.Tensor] = None
         a2q, a2q_scale = per_token_group_quant_fp8(act_out,
                                                    self.block_shape[1],
-                                                   column_major_scales=True)
+                                                   column_major_scales=True,
+                                                   out_q=quant_out)
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a2q, a2q_scale), (w2, w2_scale), mm2_out, expert_ids)
