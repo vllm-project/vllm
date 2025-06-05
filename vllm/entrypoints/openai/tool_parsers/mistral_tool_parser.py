@@ -53,7 +53,7 @@ def _is_fn_name_regex_support(model_tokenizer: AnyTokenizer) -> bool:
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with
-    - [`misral_common`](https://github.com/mistralai/mistral-common/)
+    - [`mistral_common`](https://github.com/mistralai/mistral-common/)
     - the examples/tool_chat_template_mistral.jinja template.
 
     Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
