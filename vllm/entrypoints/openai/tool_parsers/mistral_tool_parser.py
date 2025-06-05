@@ -44,11 +44,17 @@ class MistralToolCall(ToolCall):
         return id.isalnum() and len(id) == 9
 
 
+def _is_fn_name_regex_support(model_tokenizer: AnyTokenizer) -> bool:
+    return isinstance(model_tokenizer, MistralTokenizer) \
+        and model_tokenizer.version >= 11
+
+
 @ToolParserManager.register_module("mistral")
 class MistralToolParser(ToolParser):
     """
-    Tool call parser for Mistral 7B Instruct v0.3, intended for use with the
-    examples/tool_chat_template_mistral.jinja template.
+    Tool call parser for Mistral 7B Instruct v0.3, intended for use with
+    - [`misral_common`](https://github.com/mistralai/mistral-common/)
+    - the examples/tool_chat_template_mistral.jinja template.
 
     Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
     """
@@ -70,7 +76,7 @@ class MistralToolParser(ToolParser):
         self.bot_token = "[TOOL_CALLS]"
         self.bot_token_id = self.vocab.get(self.bot_token)
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
-        if isinstance(self.model_tokenizer, MistralTokenizer) and self.model_tokenizer.version >= 11:
+        if _is_fn_name_regex_support(self.model_tokenizer):
             self.fn_name_regex = re.compile(r'([a-zA-Z0-9_-]+)(\{.*?\})', re.DOTALL)
         else:
             self.fn_name_regex = None
