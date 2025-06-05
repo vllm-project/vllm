@@ -219,6 +219,22 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     def workspace_shapes(
         self,
         a: torch.Tensor,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        num_experts: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        # Note that K, N are transposed
+        N, K = K, N
+        workspace1 = (M, topk, max(2 * N, K))
+        workspace2 = (M, topk, N)
+        output = (M * topk, K)
+        return (workspace1, workspace2, output, self.out_dtype)
+
+    def workspace_shapes(
+        self,
+        a: torch.Tensor,
         aq: torch.Tensor,
         M: int,
         N: int,
