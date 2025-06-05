@@ -221,15 +221,6 @@ class NixlConnectorScheduler:
             if count > 0:
                 return count, True
 
-            # NOTE: if count is 0 here, we have less than block_size
-            # tokens to pull after subtracting the local prefix cache hit.
-            # The remote only sends fully computed blocks, so there is
-            # nothing to transfer but we still need to notify the
-            # prefill worker so that the remote blocks are freed.
-            if all(p in params for p in ("remote_engine_id", "remote_host",
-                                         "remote_port")):
-                self._reqs_need_recv[request.request_id] = (request, [])
-
         # No remote prefill for this request.
         return 0, False
 
@@ -247,9 +238,14 @@ class NixlConnectorScheduler:
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
                                              "remote_port")):
+                    # If remote_blocks and num_external_tokens = 0, we have
+                    # a full prefix cache hit on the D worker. We need to call
+                    # send_notif in _read_blocks to free the memory on the P.
+                    local_block_ids = (blocks.get_unhashed_block_ids()
+                                       if num_external_tokens > 0 else [])
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (
-                        request, blocks.get_unhashed_block_ids())
+                        request, local_block_ids)
                 else:
                     logger.warning(
                         "Got invalid KVTransferParams: %s. This "
@@ -268,15 +264,6 @@ class NixlConnectorScheduler:
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
-            # For the case where there are no remote blocks to pull
-            # (block_ids is empty), we don't need to schedule
-            # an async read on the worker side.
-            if not block_ids:
-                logger.debug(
-                    "Skipping adding request %s to NixlConnectorMetadata, "
-                    "as there are no remote blocks to pull", req_id)
-                continue
-
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
@@ -660,26 +647,26 @@ class NixlConnectorWorker:
 
         # Number of D TP workers reading from a single P TP worker. This is
         # 1 when P and D `--tensor-parallel-size` match.
-        assert self._tp_size[self.engine_id] % self._tp_size[engine_id] == 0, \
-        "Local TP size must be divisible by remote TP size."
+        assert self._tp_size[self.engine_id] % self._tp_size[engine_id] == 0, (
+            "Local TP size must be divisible by remote TP size.")
         tp_ratio = self._tp_size[self.engine_id] // self._tp_size[engine_id]
-        assert tp_ratio > 0, "Decode TP cannot be smaller than"
-        " prefill TP"
+        assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
         if self.use_mla:
             # With MLA the only difference is in the number of blocks.
-            remote_block_size = nixl_agent_meta.block_len / (
+            remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes)
             assert self.block_len == nixl_agent_meta.block_len
         else:
-            remote_block_size = nixl_agent_meta.block_len / (
+            remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes * tp_ratio)
 
-            assert nixl_agent_meta.block_len == self.block_len * tp_ratio, \
-            "Remote P worker KV layer cache must be of shape [2, N, \
-            local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
+            assert nixl_agent_meta.block_len == self.block_len * tp_ratio, (
+                "Remote P worker KV layer cache must be of shape [2, N, "
+                "local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
+            )
 
-        assert self.block_size == remote_block_size, "Remote P worker with \
-        different block size is not supported"
+        assert self.block_size == remote_block_size, "Remote P worker with "
+        "different block size is not supported"
 
         assert self.num_blocks >= nixl_agent_meta.num_blocks
 
@@ -712,9 +699,9 @@ class NixlConnectorWorker:
                     # (addr, len, device id)
                     blocks_data.append((addr, self.block_len, remote_tp_rank))
             logger.debug(
-                "Created %s blocks for dst engine %s with remote rank %s and " \
-                "local rank %s",
-                len(blocks_data), engine_id, remote_tp_rank, self.tp_rank)
+                "Created %s blocks for dst engine %s with remote rank %s and "
+                "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
+                self.tp_rank)
 
             # Register with NIXL.
             descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
