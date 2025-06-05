@@ -721,6 +721,7 @@ class SequenceGroup:
                     model; equal to max number of tokens a step can generate
                     for single-draft speculative decoding but larger than
                     that for multi-draft SD (currently not supported).
+        tier: User-defined tier of the request.
     """
 
     def __init__(self,
@@ -735,7 +736,8 @@ class SequenceGroup:
                  trace_headers: Optional[Mapping[str, str]] = None,
                  prompt_adapter_request: Optional[PromptAdapterRequest] = None,
                  priority: int = 0,
-                 draft_size: int = 1) -> None:
+                 draft_size: int = 1,
+                 tier: float = 1) -> None:
         self.request_id = request_id
         self.seqs = seqs
         self.first_seq = seqs[0]
@@ -761,6 +763,7 @@ class SequenceGroup:
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
         self.priority = priority
+        self.tier = tier
 
         self.cached_request_output = None
 
@@ -1526,6 +1529,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             trace_headers=seq_group.trace_headers,
             prompt_adapter_request=seq_group.prompt_adapter_request,
             priority=seq_group.priority,
+            tier=seq_group.tier,
         )
 
         group.streaming = params.output_kind == RequestOutputKind.DELTA

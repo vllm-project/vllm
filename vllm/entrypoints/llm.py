@@ -1386,6 +1386,7 @@ class LLM:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         guided_options: Optional[GuidedDecodingRequest] = None,
         priority: Optional[list[int]] = None,
+        tier: Optional[list[float]] = None,
     ) -> None:
         if guided_options is not None:
             warnings.warn(
@@ -1429,6 +1430,7 @@ class LLM:
                     lora_request, Sequence) else lora_request,
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority[i] if priority else 0,
+                tier=tier[i] if tier else 1,
             )
 
     def _add_request(
@@ -1439,6 +1441,7 @@ class LLM:
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        tier: float = 1,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(
@@ -1449,6 +1452,7 @@ class LLM:
             tokenization_kwargs=tokenization_kwargs,
             prompt_adapter_request=prompt_adapter_request,
             priority=priority,
+            tier=tier,
         )
 
     def _add_guided_params(

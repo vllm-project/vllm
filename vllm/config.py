@@ -1999,6 +1999,14 @@ class SchedulerConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
+    max_num_reqs: Optional[int] = None
+    """Maximum number of requests that can live in the queue,
+    or None if no limit."""
+
+    max_pending_context_tokens: Optional[int] = None
+    """ Maximum sum of context tokens in requests that are in the pending
+    state, or None if no limit. """
+
     max_model_len: SkipValidation[int] = None  # type: ignore
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
