@@ -131,7 +131,10 @@ class BlockPool:
         parent_block_hash = prev_block_hash_value
         new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events
                                            else None)
+        
+        print("inside cache_full_blocks:")
         for i, blk in enumerate(new_full_blocks):
+            print(f"blk.block_id={blk.block_id}, blk.block_hash={blk.block_hash}")
             assert blk.block_hash is None
 
             if i < len(new_block_hashes):
@@ -164,7 +167,7 @@ class BlockPool:
                 block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
                                                block_tokens, extra_keys)
                 block_hashes.append(block_hash)
-
+            print(f"block_hash={block_hash}")
             # Update and added the full block to the cache.
             blk.block_hash = block_hash
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
