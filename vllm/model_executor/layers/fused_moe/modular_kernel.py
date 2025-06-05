@@ -402,6 +402,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_chunks = (M // CHUNK_SIZE) + 1
             else:
+                CHUNK_SIZE = M
                 num_chunks = 1
 
             if num_chunks == 1:
@@ -429,44 +430,59 @@ class FusedMoEModularKernel(torch.nn.Module):
 
             if num_chunks == 1:
                 fused_out = _resize_cache(workspace13, fused_out_shape)
+
+                fused_out = self.fused_experts.apply(
+                    a1q,
+                    w1,
+                    w2,
+                    topk_ids,
+                    activation=activation,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    w1_scale=w1_scale,
+                    w2_scale=w2_scale,
+                    w1_zp=w1_zp,
+                    w2_zp=w2_zp,
+                    a1q_scale=a1q_scale,
+                    a2_scale=a2_scale,
+                    workspace13=workspace13,
+                    workspace2=workspace2,
+                    expert_num_tokens=expert_num_tokens,
+                )
             else:
                 fused_out = torch.empty(fused_out_shape,
                                         device=a1q.device,
                                         dtype=workspace_dtype)
 
-            for chunk in range(num_chunks):
-                begin_chunk_idx = chunk * CHUNK_SIZE
-                end_chunk_idx = min((chunk + 1) * CHUNK_SIZE, M)
-                curr_a1q = a1q[begin_chunk_idx:end_chunk_idx]
-                curr_a1q_scale = _chunk_scales(a1q_scale, begin_chunk_idx,
-                                               end_chunk_idx)
-                curr_a2_scale = _chunk_scales(a2_scale, begin_chunk_idx,
-                                              end_chunk_idx)
-                curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
-                tokens_in_chunk = end_chunk_idx - begin_chunk_idx
+                for chunk in range(num_chunks):
+                    begin_chunk_idx = chunk * CHUNK_SIZE
+                    end_chunk_idx = min((chunk + 1) * CHUNK_SIZE, M)
+                    curr_a1q = a1q[begin_chunk_idx:end_chunk_idx]
+                    curr_a1q_scale = _chunk_scales(a1q_scale, begin_chunk_idx,
+                                                   end_chunk_idx)
+                    curr_a2_scale = _chunk_scales(a2_scale, begin_chunk_idx,
+                                                  end_chunk_idx)
+                    curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
 
-                if tokens_in_chunk == 0:
-                    break
-
-                fused_out[
-                    begin_chunk_idx:end_chunk_idx] = self.fused_experts.apply(
-                        curr_a1q,
-                        w1,
-                        w2,
-                        curr_topk_ids,
-                        activation=activation,
-                        global_num_experts=global_num_experts,
-                        expert_map=expert_map,
-                        w1_scale=w1_scale,
-                        w2_scale=w2_scale,
-                        w1_zp=w1_zp,
-                        w2_zp=w2_zp,
-                        a1q_scale=curr_a1q_scale,
-                        a2_scale=curr_a2_scale,
-                        workspace13=workspace13,
-                        workspace2=workspace2,
-                        expert_num_tokens=expert_num_tokens,
-                    )
+                    fused_out[begin_chunk_idx:
+                              end_chunk_idx] = self.fused_experts.apply(
+                                  curr_a1q,
+                                  w1,
+                                  w2,
+                                  curr_topk_ids,
+                                  activation=activation,
+                                  global_num_experts=global_num_experts,
+                                  expert_map=expert_map,
+                                  w1_scale=w1_scale,
+                                  w2_scale=w2_scale,
+                                  w1_zp=w1_zp,
+                                  w2_zp=w2_zp,
+                                  a1q_scale=curr_a1q_scale,
+                                  a2_scale=curr_a2_scale,
+                                  workspace13=workspace13,
+                                  workspace2=workspace2,
+                                  expert_num_tokens=expert_num_tokens,
+                              )
 
         self.prepare_finalize.finalize(output, fused_out, topk_weights,
                                        topk_ids, apply_router_weight_on_input)
