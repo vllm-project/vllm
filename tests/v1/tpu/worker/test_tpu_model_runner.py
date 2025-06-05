@@ -379,7 +379,6 @@ def test_get_req_paddings():
     assert _get_req_paddings(8, 36) == [8, 16, 32, 36]
 
 
-@pytest.mark.skip(reason="Test is broken on TPU when it's added.")
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(
         model_runner):
     layer_0 = "model.layers.0.self_attn.attn"
@@ -411,7 +410,6 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(
         assert fwd_context is not None
 
 
-@pytest.mark.skip(reason="Test is broken on TPU when it's added.")
 def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(model_runner):
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -442,7 +440,6 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist(model_runner):
         assert fwd_context is not None
 
 
-@pytest.mark.skip(reason="Test is broken on TPU when it's added.")
 def test_init_kv_cache_with_kv_sharing_target_same_as_current(model_runner):
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -473,7 +470,6 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current(model_runner):
         assert fwd_context is not None
 
 
-@pytest.mark.skip(reason="Test is broken on TPU when it's added.")
 def test_init_kv_cache_without_kv_sharing():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
@@ -541,7 +537,6 @@ def test_init_kv_cache_without_kv_sharing():
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
 
 
-@pytest.mark.skip(reason="Test is broken on TPU when it's added.")
 def test_init_kv_cache_with_kv_sharing_valid():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
