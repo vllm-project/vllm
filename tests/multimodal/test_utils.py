@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 from PIL import Image, ImageChops
 
 from tests.utils import multi_gpu_test
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import (init_distributed_environment,
                                              initialize_model_parallel)
 from vllm.multimodal.image import convert_image_mode
@@ -440,13 +441,14 @@ def test_run_dp_sharded_vision_model(batch_size: int):
         args=(
             world_size,
             batch_size,
+            get_open_port(),
         ),
         nprocs=world_size,
     )
 
 
 def run_dp_sharded_vision_model_vs_direct(local_rank: int, world_size: int,
-                                          batch_size: int):
+                                          batch_size: int, master_port: int):
     """
     Test that run_dp_sharded_vision_model produces the same results as 
     calling the model directly.
@@ -464,7 +466,7 @@ def run_dp_sharded_vision_model_vs_direct(local_rank: int, world_size: int,
         'LOCAL_RANK': str(local_rank),
         'WORLD_SIZE': str(world_size),
         'MASTER_ADDR': 'localhost',
-        'MASTER_PORT': str(get_open_port()),
+        'MASTER_PORT': str(master_port),
     })
 
     # initialize distributed
@@ -478,12 +480,15 @@ def run_dp_sharded_vision_model_vs_direct(local_rank: int, world_size: int,
     vision_model = SimpleLinearModel()
 
     # Run the model directly on the full input
-    with torch.no_grad():
+    with torch.inference_mode():
         direct_output = vision_model(image_input)
 
     # Run the model through the sharded function
-    with torch.no_grad():
+    with torch.inference_mode():
         sharded_output = run_dp_sharded_vision_model(image_input, vision_model)
+
+    # Check that the world size is setup correctly
+    assert get_tensor_model_parallel_world_size() == world_size
 
     # Check that the outputs have the same shape
     assert direct_output.shape == sharded_output.shape
