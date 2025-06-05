@@ -31,10 +31,7 @@ pallas_attention_backend_patcher = mock.patch(
     "vllm.v1.worker.tpu_model_runner.PallasAttentionBackend", )
 pallas_attention_backend_patcher.start()
 
-
-@pytest.fixture
-def model_runner():
-    # Patchers have already been started at module level.
+def get_vllm_config():
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
         max_num_batched_tokens=512,
@@ -60,11 +57,19 @@ def model_runner():
         cache_config=cache_config,
         scheduler_config=scheduler_config,
     )
+
+def get_model_runner(vllm_config):
     device = "xla:0"  # Mocking TPU device
     with mock.patch("vllm.v1.worker.tpu_model_runner.torch"), \
          mock.patch("vllm.v1.worker.tpu_model_runner.xm"), \
          mock.patch("vllm.v1.worker.tpu_model_runner.xr"):
         return TPUModelRunner(vllm_config, device)
+
+@pytest.fixture
+def model_runner():
+    # Patchers have already been started at module level.
+    vllm_config = get_vllm_config()
+    return get_model_runner(vllm_config)
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -465,10 +470,10 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current(model_runner):
 
 
 @pytest.mark.skip(reason="Test is broken on TPU when it's added.")
-def test_init_kv_cache_without_kv_sharing(model_runner):
+def test_init_kv_cache_without_kv_sharing():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
-    vllm_config = model_runner.vllm_config
+    vllm_config = get_vllm_config()
     with set_current_vllm_config(vllm_config):
         fwd_context = {
             layer_0:
@@ -491,13 +496,14 @@ def test_init_kv_cache_without_kv_sharing(model_runner):
     # Set high context length to test max context length estimation
     vllm_config.model_config.max_model_len = 3_000_000
     vllm_ctx = vllm_config.compilation_config.static_forward_context
+    model_runner = get_model_runner(vllm_config)
     kv_cache_spec = model_runner.get_kv_cache_spec()
     assert len(kv_cache_spec) == 2
     assert len(model_runner.shared_kv_cache_layers) == 0
 
-    available_memory = 40 * GiB_bytes
-    # page size for layer 0's kv_cache_spec is 32KB
-    num_expected_blocks = 327680  # 20GB / 32KB / 2 (num layers)
+    available_memory = 20 * GiB_bytes
+    # page size for layer 0's kv_cache_spec is 64KB
+    num_expected_blocks = 163840  # 20GB / 64KB / 2 (num layers)
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                           available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
@@ -506,9 +512,9 @@ def test_init_kv_cache_without_kv_sharing(model_runner):
     assert kv_cache_config.tensors[layer_1].size == available_memory // 2
 
     max_context_len =\
-        estimate_max_model_len(vllm_config, kv_cache_spec, 10 * GiB_bytes)
+        estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
-    assert max_context_len == 1310720
+    assert max_context_len == 655360
 
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 2 block worth of memory (2 * 32kb)
@@ -532,10 +538,10 @@ def test_init_kv_cache_without_kv_sharing(model_runner):
 
 
 @pytest.mark.skip(reason="Test is broken on TPU when it's added.")
-def test_init_kv_cache_with_kv_sharing_valid(model_runner):
+def test_init_kv_cache_with_kv_sharing_valid():
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
-    vllm_config = model_runner.vllm_config
+    vllm_config = get_vllm_config()
     with set_current_vllm_config(vllm_config):
         fwd_context = {
             layer_0:
@@ -559,16 +565,17 @@ def test_init_kv_cache_with_kv_sharing_valid(model_runner):
     # Set high context length to test max context length estimation
     vllm_config.model_config.max_model_len = 3_000_000
     vllm_ctx = vllm_config.compilation_config.static_forward_context
+    model_runner = get_model_runner(vllm_config)
     kv_cache_spec = model_runner.get_kv_cache_spec()
     assert len(kv_cache_spec) == 1
     assert layer_0 in kv_cache_spec
     assert model_runner.shared_kv_cache_layers[layer_1] == layer_0
 
-    available_memory = 40 * GiB_bytes
-    # page size for layer 0's kv_cache_spec is 32KB
+    available_memory = 20 * GiB_bytes
+    # page size for layer 0's kv_cache_spec is 64KB
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
-    num_expected_blocks = 655360  # 20GB / 32KB
+    num_expected_blocks = 327680  # 20GB / 64KB
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                           available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
@@ -578,9 +585,9 @@ def test_init_kv_cache_with_kv_sharing_valid(model_runner):
     assert kv_cache_config.tensors[layer_0].size == available_memory
 
     max_context_len =\
-        estimate_max_model_len(vllm_config, kv_cache_spec, 10 * GiB_bytes)
+        estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
-    assert max_context_len == 2 * 1310720
+    assert max_context_len == 2 * 655360
 
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 1 block worth of memory (32kb)
