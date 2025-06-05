@@ -31,6 +31,7 @@ pallas_attention_backend_patcher = mock.patch(
     "vllm.v1.worker.tpu_model_runner.PallasAttentionBackend", )
 pallas_attention_backend_patcher.start()
 
+
 def get_vllm_config():
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
@@ -57,6 +58,8 @@ def get_vllm_config():
         cache_config=cache_config,
         scheduler_config=scheduler_config,
     )
+    return vllm_config
+
 
 def get_model_runner(vllm_config):
     device = "xla:0"  # Mocking TPU device
@@ -64,6 +67,7 @@ def get_model_runner(vllm_config):
          mock.patch("vllm.v1.worker.tpu_model_runner.xm"), \
          mock.patch("vllm.v1.worker.tpu_model_runner.xr"):
         return TPUModelRunner(vllm_config, device)
+
 
 @pytest.fixture
 def model_runner():
