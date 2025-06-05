@@ -48,7 +48,9 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     M = hidden_states.size(0)
     _, K, N = w2.size()
     if not _valid_deep_gemm_shape(M, N, K):
-        logger.debug("DeepGemm disabled: unalinged problem size.")
+        logger.debug(
+            "DeepGemm disabled: unalinged problem size. M=%d, N=%d, K=%d", M,
+            N, K)
         return False
 
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
@@ -60,6 +62,8 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
         logger.debug(
             "DeepGemm disabled: weights or activations not contiguous.")
         return False
+
+    logger.debug("DeepGemm enabled: M=%d, N=%d, K=%d", M, N, K)
 
     return True
 
@@ -146,7 +150,8 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2q_scale: Optional[torch.Tensor] = None
         a2q, a2q_scale = per_token_group_quant_fp8(workspace2,
                                                    self.block_shape[1],
-                                                   column_major_scales=True)
+                                                   column_major_scales=False)
+        #    column_major_scales=True)
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a2q, a2q_scale), (w2, w2_scale), workspace3, expert_ids)
