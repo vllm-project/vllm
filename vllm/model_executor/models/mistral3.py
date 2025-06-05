@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
@@ -559,9 +560,8 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
                 batch.
             pixel_values: The pixels in each input image.
 
-        :::{seealso}
-        {class}`Mistral3ImagePixelInputs`
-        :::
+        Info:
+            [Mistral3ImagePixelInputs][]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None

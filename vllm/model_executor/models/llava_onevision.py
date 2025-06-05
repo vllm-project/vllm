@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
@@ -116,11 +117,13 @@ class LlavaOnevisionProcessingInfo(LlavaNextProcessingInfo):
         current_aspect_ratio = current_width / current_height
 
         if aspect_ratio > current_aspect_ratio:
-            new_height = (original_height * current_width) // original_width
+            new_height = int(
+                round(original_height * (current_width / original_width), 7))
             padding = (current_height - new_height) // 2
             current_height = current_height - (2 * padding)
         else:
-            new_width = (original_width * current_height) // original_height
+            new_width = int(
+                round(original_width * (current_height / original_height), 7))
             padding = (current_width - new_width) // 2
             current_width = current_width - (2 * padding)
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import gc
@@ -729,6 +730,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         mm_kwargs, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
             seq_group_metadata,
             range(positions[0], positions[0] + len(positions)))
+
+        # M-RoPE requires mrope_positions even for plain text; return early
+        # when mm_kwargs is empty only if inter_data.is_prompt is False.
+        if not mm_kwargs and not inter_data.is_prompt:
+            return
 
         inter_data.multi_modal_kwargs = mm_kwargs
         inter_data.multi_modal_placeholder_maps = placeholder_maps
@@ -1840,8 +1846,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     inputs_embeds=model_input.inputs_embeds,
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
-                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                                 device=self.device),
+                    **MultiModalKwargs.as_kwargs(
+                        multi_modal_kwargs,
+                        device=self.device,
+                    ),
                     **seqlen_agnostic_kwargs,
                     **model_kwargs,
                 )

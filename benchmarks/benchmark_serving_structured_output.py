@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 r"""Benchmark online serving throughput with structured outputs.
 
 On the server side, run one of the following commands:
@@ -672,7 +673,7 @@ async def benchmark(
 def evaluate(ret, args):
     def _eval_correctness_json(expected, actual):
         # extract json string from string using regex
-        import re
+        import regex as re
 
         actual = actual.replace("\n", "").replace(" ", "").strip()
         try:
@@ -687,7 +688,7 @@ def evaluate(ret, args):
         return actual in args.choice
 
     def _eval_correctness_regex(expected, actual):
-        import re
+        import regex as re
 
         return re.match(args.regex, actual) is not None
 

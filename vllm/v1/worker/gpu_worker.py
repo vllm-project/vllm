@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 import gc
 import os
@@ -31,6 +32,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 
 
@@ -171,10 +173,9 @@ class Worker(WorkerBase):
         Then, it calculate the free memory that can be used for KV cache in
         bytes.
 
-        :::{tip}
-        You may limit the usage of GPU memory
-        by adjusting the `gpu_memory_utilization` parameter.
-        :::
+        Tip:
+            You may limit the usage of GPU memory
+            by adjusting the `gpu_memory_utilization` parameter.
         """
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -292,6 +293,8 @@ class Worker(WorkerBase):
             self.profiler.start()
         else:
             self.profiler.stop()
+            print(self.profiler.key_averages().table(
+                sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)
@@ -326,23 +329,30 @@ class Worker(WorkerBase):
             max_size=max_size,
         )
 
+    def save_tensorized_model(
+        self,
+        tensorizer_config: "TensorizerConfig",
+    ) -> None:
+        self.model_runner.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
+
 
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
+    backend: str = "nccl",
 ) -> None:
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
+                                 distributed_init_method, local_rank, backend)
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size,
-                                      parallel_config.enable_expert_parallel)
+                                      parallel_config.pipeline_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
 

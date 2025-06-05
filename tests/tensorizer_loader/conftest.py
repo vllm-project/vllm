@@ -1,16 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    Tensorizer only tested on V0 so far.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 @pytest.fixture(autouse=True)

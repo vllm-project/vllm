@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test model set-up and weight loading for llmcompressor-quantized models.
 
 Run `pytest tests/quantization/test_compressed_tensors.py`.
@@ -650,6 +651,7 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
         assert output
 
 
+@pytest.mark.skip(reason="Skip until the model config is updated")
 def test_compressed_tensors_nvfp4a16(vllm_runner):
     # run weight only example
     model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP4"
