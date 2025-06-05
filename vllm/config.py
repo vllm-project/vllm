@@ -3139,6 +3139,8 @@ def _find_dtype(
         config_dtype = getattr(config.get_text_config(), "torch_dtype", None)
     if config_dtype is None and hasattr(config, "vision_config"):
         config_dtype = getattr(config.vision_config, "torch_dtype", None)
+    if config_dtype is None and hasattr(config, "encoder_config"):
+        config_dtype = getattr(config.encoder_config, "torch_dtype", None)
 
     # Try to read the dtype of the weights if they are in safetensors format
     if config_dtype is None:
