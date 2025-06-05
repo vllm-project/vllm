@@ -14,9 +14,10 @@ logger = init_logger(__name__)
 
 if 'NCCL_CUMEM_ENABLE' in os.environ:
     logger.warning(
-        "NCCL_CUMEM_ENABLE explicitly set, skipping override. "
+        "NCCL_CUMEM_ENABLE explicitly set to %s, skipping override. "
         "This may increase memory overhead with cudagraph+allreduce: "
-        "https://github.com/NVIDIA/nccl/issues/1234")
+        "https://github.com/NVIDIA/nccl/issues/1234",
+        os.environ['NCCL_CUMEM_ENABLE'])
 elif not os.path.exists('/dev/nvidia-caps-imex-channels'):
     # NCCL requires NCCL_CUMEM_ENABLE to work with
     # multi-node NVLink, typically on GB200-NVL72 systems.
