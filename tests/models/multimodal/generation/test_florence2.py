@@ -100,6 +100,8 @@ def run_test(
         )
 
 
+# FIXME: https://github.com/huggingface/transformers/issues/38358
+@pytest.mark.skip("Model initialization fails")
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize(

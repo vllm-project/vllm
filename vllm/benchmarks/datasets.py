@@ -24,7 +24,6 @@ from io import BytesIO
 from typing import Any, Callable, Optional, Union
 
 import numpy as np
-import pandas as pd
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
@@ -33,6 +32,23 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
+from vllm.utils import PlaceholderModule
+
+try:
+    from datasets import load_dataset
+except ImportError:
+    datasets = PlaceholderModule("datasets")
+    load_dataset = datasets.placeholder_attr("load_dataset")
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
+
+try:
+    import librosa
+except ImportError:
+    librosa = PlaceholderModule("librosa")
 
 logger = logging.getLogger(__name__)
 
@@ -636,13 +652,6 @@ class BurstGPTDataset(BenchmarkDataset):
         if self.dataset_path is None:
             raise ValueError("dataset_path must be provided for loading data.")
 
-        try:
-            import pandas as pd
-        except ImportError as e:
-            raise ImportError(
-                "Pandas is required for BurstGPTDataset. Please install it "
-                "using `pip install pandas`.") from e
-
         df = pd.read_csv(self.dataset_path)
         # Filter to keep only GPT-4 rows.
         gpt4_df = df[df["Model"] == "GPT-4"]
@@ -717,13 +726,6 @@ class HuggingFaceDataset(BenchmarkDataset):
 
     def load_data(self) -> None:
         """Load data from HuggingFace datasets."""
-        try:
-            from datasets import load_dataset
-        except ImportError as e:
-            raise ImportError(
-                "Hugging Face datasets library is required for this dataset. "
-                "Please install it using `pip install datasets`.") from e
-
         self.data = load_dataset(
             self.dataset_path,
             name=self.dataset_subset,
@@ -1147,13 +1149,6 @@ class ASRDataset(HuggingFaceDataset):
         output_len: Optional[int] = None,
         **kwargs,
     ) -> list:
-        try:
-            import librosa
-        except ImportError as e:
-            raise ImportError(
-                "librosa is required for ASRDataset. Please install it "
-                "using `pip install librosa`.") from e
-
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
