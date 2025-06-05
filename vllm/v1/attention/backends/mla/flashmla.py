@@ -82,19 +82,20 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             else:
                 assert self.cg_buf_num_splits is not None
 
-                tile_scheduler_metadata_view = self.\
-                    cg_buf_tile_scheduler_metadata\
-                    [:, :tile_scheduler_metadata.size(1)]
-                # make sure static buffer is large enough
-                assert tile_scheduler_metadata_view.size(
-                ) == tile_scheduler_metadata.size()
-                tile_scheduler_metadata_view.copy_(tile_scheduler_metadata)
-                tile_scheduler_metadata = tile_scheduler_metadata_view
+                # Metadata per-SM, fixed size (#SMs, TileMetadataSize)
+                assert (self.cg_buf_tile_scheduler_metadata.size() ==
+                        tile_scheduler_metadata.size())
+                self.cg_buf_tile_scheduler_metadata.\
+                    copy_(tile_scheduler_metadata)
+                tile_scheduler_metadata = self.cg_buf_tile_scheduler_metadata
 
-                num_splits_view = self.cg_buf_num_splits[:num_splits.size(0)]
+                # Num splits is per-batch, varying size (batch_size,)
+                n = num_splits.size(0)
                 # make sure static buffer is large enough
-                assert num_splits_view.size() == num_splits.size()
+                assert n <= self.cg_buf_num_splits.size(0)
+                num_splits_view = self.cg_buf_num_splits[:n]
                 num_splits_view.copy_(num_splits)
+                self.cg_buf_num_splits[n:].fill_(0)  # fill the rest with 0s
                 num_splits = num_splits_view
 
         return FlashMLADecodeMetadata(

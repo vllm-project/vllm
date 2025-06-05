@@ -487,7 +487,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         block_table.slot_mapping[:num_actual_tokens].copy_(
             block_table.slot_mapping_cpu[:num_actual_tokens],
             non_blocking=True)
-        # TODO maybe fill rest with -1?
+        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
         slot_mapping = block_table.slot_mapping[:num_actual_tokens]
 
         query_start_loc = common_attn_metadata.query_start_loc
