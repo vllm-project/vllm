@@ -270,6 +270,8 @@ def rocm_aiter_grouped_topk(
     num_share_fusion_replicas: int = 0,
     routed_scaling_factor: Optional[float] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    assert routed_scaling_factor is None, "Share Expert Fusion is not implemented yet"
+    assert num_share_fusion_replicas == 0, "Share Expert Fusion is not implemented yet"
     token = hidden_states.shape[0]
     device = hidden_states.device
     topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
