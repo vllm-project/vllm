@@ -518,7 +518,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         r"^language_model\.model\.layers\.(\d+)\.(.+)\.(g_idx|zp|scales|zeros|qweight|qzeros)$": r"layers.\1.\2.\3"
     }
 
-    def maybe_remap_mistral3(self, name: str, tensor: torch.Tensor) -> Tuple[str, torch.Tensor]:
+    def maybe_remap_mistral3(self, name: str, tensor: torch.Tensor) -> tuple[str, torch.Tensor]:
         """Remap HF-style weight names back to original Pixtral format."""
         self.logger.debug(f"Considering {name}")
 
