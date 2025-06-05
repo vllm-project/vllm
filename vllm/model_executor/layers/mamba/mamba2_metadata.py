@@ -145,10 +145,7 @@ def prepare_mamba2_metadata(
         mamba2_metadata.seq_idx = seq_idx
         mamba2_metadata.chunk_indices = chunk_indices
         mamba2_metadata.chunk_offsets = chunk_offsets
-        # We use 2 reset flags:
-        #  * mamba2_metadata.width is None
-        #      update at first run (never change whole session)
-        #      (become available at first layer, e.g. conv_weights)
+        # We use 1 reset flag:
         #  * mamba2_metadata.cu_seqlen is None
         #      update config specific to (each input)
         #      (become available at first layer, e.g. conv_weights)
