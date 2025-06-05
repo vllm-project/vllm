@@ -386,7 +386,6 @@ class MistralTokenizer(TokenizerBase):
                             **kwargs) -> list[int]:
 
         request = make_mistral_chat_completion_request(messages, tools)
-        print(request)
         encoded = self.mistral.encode_chat_completion(request)
 
         # encode-decode to get clean prompt
