@@ -1,6 +1,6 @@
 # Parameterize base image components
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
-ARG VERSION=1.21.0
+ARG VERSION=1.21.1
 ARG BASE_NAME=ubuntu22.04
 ARG PT_VERSION=2.6.0
 ARG REVISION=latest
@@ -30,11 +30,9 @@ RUN pip install datasets && \
 
 # Copy utility scripts and configuration
 RUN mkdir -p /root/scripts
-COPY entrypoint.sh generate_vars.py settings_vllm.csv template_vllm_server.sh varlist* perftest* /root/scripts
+COPY entrypoint.sh vllm_autocalc.py settings_vllm.csv template_vllm_server.sh varlist* perftest* /root/scripts
 RUN chmod +x /root/scripts/*.sh
 WORKDIR /root/scripts
-
-EXPOSE 22
 
 # Set entrypoint script
 ENTRYPOINT ["/root/scripts/entrypoint.sh"]

@@ -20,6 +20,8 @@ This guide explains how to quickly run vLLM with multi-model support on Gaudi us
 | Qwen/Qwen2.5-32B-Instruct                 | 1 |
 | Qwen/Qwen2.5-72B-Instruct                 | 4 |
 | Qwen/Qwen2.5-7B-Instruct                  | 1 |
+| meta-llama/Llama-3.2-11B-Vision-Instruct  | 1 |
+| meta-llama/Llama-3.2-90B-Vision-Instruct  | 4 |
 
 ## How to Use
 
@@ -78,8 +80,8 @@ This guide explains how to quickly run vLLM with multi-model support on Gaudi us
    ```bash
    docker run -it --rm \
      -e MODEL=$MODEL \
-     -e tensor_parallel_size=8 \
-     -e max_model_len=8192 \
+     -e TENSOR_PARALLEL_SIZE=8 \
+     -e MAX_MODEL_LEN=8192 \
      -e HABANA_VISIBLE_DEVICES=all \
      -e HF_TOKEN=$HF_TOKEN \
      -e http_proxy=$http_proxy -e https_proxy=$https_proxy -e no_proxy=$no_proxy \
@@ -102,9 +104,9 @@ This guide explains how to quickly run vLLM with multi-model support on Gaudi us
    # Instance 1
    docker run -it --rm \
      -e MODEL=$MODEL \
-     -e tensor_parallel_size=4 \
+     -e TENSOR_PARALLEL_SIZE=4 \
      -e HABANA_VISIBLE_DEVICES=0,1,2,3 \
-     -e max_model_len=8192 \
+     -e MAX_MODEL_LEN=8192 \
      -e http_proxy=$http_proxy -e https_proxy=$https_proxy -e no_proxy=$no_proxy \
      --runtime=habana \
      --cap-add=sys_nice \
@@ -116,9 +118,9 @@ This guide explains how to quickly run vLLM with multi-model support on Gaudi us
    # Instance 2 (in another terminal)
    docker run -it --rm \
      -e MODEL=$MODEL \
-     -e tensor_parallel_size=4 \
+     -e TENSOR_PARALLEL_SIZE=4 \
      -e HABANA_VISIBLE_DEVICES=4,5,6,7 \
-     -e max_model_len=8192 \
+     -e MAX_MODEL_LEN=8192 \
      -e http_proxy=$http_proxy -e https_proxy=$https_proxy -e no_proxy=$no_proxy \
      --runtime=habana \
      --cap-add=sys_nice \
