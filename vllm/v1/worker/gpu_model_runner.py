@@ -196,10 +196,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
-        # The batch sizes in the config are in descending order.
-        self.cudagraph_batch_sizes = list(
-            reversed(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+        self.cudagraph_batch_sizes = list(sorted(
+            self.vllm_config.compilation_config.cudagraph_capture_sizes))
+        self.max_cudagraph_batch_size = self.cudagraph_batch_sizes[-1]
 
         # Cache the device properties.
         self._init_device_properties()
@@ -1178,7 +1177,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
-                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
+                and num_scheduled_tokens <= self.max_cudagraph_batch_size):
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
@@ -1737,7 +1736,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        num_reqs = max_num_reqs if num_tokens >= max_num_reqs else num_tokens
+        num_reqs = min(num_tokens, max_num_reqs)
         min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
@@ -1765,7 +1764,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.kv_cache_config.kv_cache_groups):
                 attn_metadata_i = (
                     self.attn_metadata_builders[kv_cache_group_id].build(
-                        num_reqs=num_tokens,
+                        num_reqs=num_reqs,
                         num_actual_tokens=num_tokens,
                         max_query_len=num_tokens,
                         common_prefix_len=0,
