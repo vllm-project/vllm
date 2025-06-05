@@ -1770,6 +1770,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         max_query_len=num_tokens,
                         common_prefix_len=0,
                         common_attn_metadata=common_attn_metadata,
+                        for_cudagraph_capture=True,
                     ))
                 for layer_name in kv_cache_group_spec.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i

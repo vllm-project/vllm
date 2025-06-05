@@ -51,14 +51,24 @@ class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
         self.aot_sliding_window: Optional[tuple[int, int]] = None
         self.aot_schedule = False
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+    def build(self,
+              num_reqs: int,
+              num_actual_tokens: int,
+              max_query_len: int,
               common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+              common_attn_metadata: CommonAttentionMetadata,
+              for_cudagraph_capture: Optional[bool] = False):
         max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
+
+        # When doing full graph capture, setting seq_lens to
+        # max_model_len will cause graph capture to be extremely
+        # slow, so here we set it to 1.
+        if self.use_full_cuda_graph and for_cudagraph_capture:
+            seq_lens.fill_(1)
 
         block_table.slot_mapping[:num_actual_tokens].copy_(
             block_table.slot_mapping_cpu[:num_actual_tokens],
