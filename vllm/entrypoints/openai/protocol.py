@@ -707,7 +707,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     (function_name := function.get("name"))
                         and not isinstance(function_name, str)):
                     raise ValueError(
-                        f'Invalid value for `function`: {function} in '
+                        f'Invalid value for `function`: `{function}` in '
                         '`tool_choice`! Correct usage: `{"type": "function",'
                         ' "function": {"name": "my_function"}}`')
                 for tool in data["tools"]:
