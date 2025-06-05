@@ -7,6 +7,7 @@ set -ex
 # Setup cleanup
 remove_docker_container() {
   if [[ -n "$container_id" ]]; then
+      podman stop --all -t0
       podman rm -f "$container_id" || true
   fi
   podman system prune -f
@@ -44,5 +45,5 @@ function cpu_tests() {
 
 export container_id
 export -f cpu_tests
-timeout 50m bash -c cpu_tests
+timeout 40m bash -c cpu_tests
 
