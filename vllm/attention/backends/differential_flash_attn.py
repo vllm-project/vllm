@@ -30,6 +30,10 @@ from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
+from vllm.attention.backends.flash_attn import (FlashAttentionBackend,
+                                                FlashAttentionImpl,
+                                                FlashAttentionMetadata,
+                                                FlashAttentionMetadataBuilder)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -38,33 +42,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class FlashAttentionBackend(AttentionBackend):
-
-    accept_output_buffer: bool = True
-
-    @staticmethod
-    def get_supported_head_sizes() -> List[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
-
-    @staticmethod
-    def get_name() -> str:
-        return "FLASH_ATTN"
-
-    @staticmethod
-    def get_impl_cls() -> Type["FlashAttentionImpl"]:
-        return FlashAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
-        return FlashAttentionMetadata
-
-    @staticmethod
-    def get_builder_cls() -> Type["FlashAttentionMetadataBuilder"]:
-        return FlashAttentionMetadataBuilder
-
-    @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
-        return CommonAttentionState
+class DifferentialFlashAttentionBackend(FlashAttentionBackend):
 
     @staticmethod
     def get_kv_cache_shape(
@@ -75,35 +53,28 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
-        # return (2, 2, num_blocks, block_size, num_kv_heads // 2, head_size)
+        # return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (2, 2, num_blocks, block_size, num_kv_heads // 2, head_size)
 
     @staticmethod
-    def swap_blocks(
-        src_kv_cache: torch.Tensor,
-        dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
-    ) -> None:
-        src_key_cache = src_kv_cache[0]
-        dst_key_cache = dst_kv_cache[0]
-        ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
-        src_value_cache = src_kv_cache[1]
-        dst_value_cache = dst_kv_cache[1]
-        ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
+    def get_name() -> str:
+        return "DIFFERENTIAL_FLASH_ATTN"
 
     @staticmethod
-    def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: torch.Tensor,
-    ) -> None:
-        key_caches = [kv_cache[0] for kv_cache in kv_caches]
-        value_caches = [kv_cache[1] for kv_cache in kv_caches]
+    def get_impl_cls() -> Type["DifferentialFlashAttentionImpl"]:
+        return DifferentialFlashAttentionImpl
 
-        ops.copy_blocks(key_caches, value_caches, src_to_dists)
+    @staticmethod
+    def get_metadata_cls() -> Type["DifferentialFlashAttentionMetadata"]:
+        return DifferentialFlashAttentionMetadata
 
-
+    @staticmethod
+    def get_builder_cls() -> Type["DifferentialFlashAttentionMetadataBuilder"]:
+        return DifferentialFlashAttentionMetadataBuilder
+        
+    
 @dataclass
-class FlashAttentionMetadata(AttentionMetadata):
+class DifferentialFlashAttentionMetadata(AttentionMetadata):
     """Metadata for FlashAttentionBackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -164,8 +135,8 @@ class FlashAttentionMetadata(AttentionMetadata):
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor] = None
 
-    _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
-    _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
+    _cached_prefill_metadata: Optional["DifferentialFlashAttentionMetadata"] = None
+    _cached_decode_metadata: Optional["DifferentialFlashAttentionMetadata"] = None
 
     # Begin encoder attn & enc/dec cross-attn fields...
 
@@ -206,7 +177,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         return is_all_cross_attn_metadata_set(self)
 
     @property
-    def prefill_metadata(self) -> Optional["FlashAttentionMetadata"]:
+    def prefill_metadata(self) -> Optional["DifferentialFlashAttentionMetadata"]:
         if self.num_prefills == 0:
             return None
 
@@ -236,7 +207,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         cross_layer_shared_block_tables = (None if self.cross_layer_shared_block_tables is None else
                                 self.cross_layer_shared_block_tables[:self.num_prefills])
         
-        self._cached_prefill_metadata = FlashAttentionMetadata(
+        self._cached_prefill_metadata = DifferentialFlashAttentionMetadata(
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
@@ -266,7 +237,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["FlashAttentionMetadata"]:
+    def decode_metadata(self) -> Optional["DifferentialFlashAttentionMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
@@ -284,7 +255,7 @@ class FlashAttentionMetadata(AttentionMetadata):
                         self.block_tables[self.num_prefills:])
         cross_layer_shared_block_tables = (None if self.cross_layer_shared_block_tables is None else
                                  self.cross_layer_shared_block_tables[self.num_prefills:])
-        self._cached_decode_metadata = FlashAttentionMetadata(
+        self._cached_decode_metadata = DifferentialFlashAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
@@ -392,8 +363,8 @@ class FlashAttentionMetadata(AttentionMetadata):
                                    block_tables=self.block_tables)
 
 
-class FlashAttentionMetadataBuilder(
-        AttentionMetadataBuilder[FlashAttentionMetadata]):
+class DifferentialFlashAttentionMetadataBuilder(
+        AttentionMetadataBuilder[DifferentialFlashAttentionMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -594,7 +565,7 @@ class FlashAttentionMetadataBuilder(
             self.multimodal_placeholder_maps.items()
         }
 
-        return FlashAttentionMetadata(
+        return DifferentialFlashAttentionMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
@@ -616,7 +587,7 @@ class FlashAttentionMetadataBuilder(
         )
 
 
-class FlashAttentionImpl(AttentionImpl):
+class DifferentialFlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
     |<--------------- num_prefill_tokens ----------------->|	
@@ -690,6 +661,7 @@ class FlashAttentionImpl(AttentionImpl):
             logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
 
+        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         support_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
@@ -706,9 +678,8 @@ class FlashAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: DifferentialFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -727,11 +698,6 @@ class FlashAttentionImpl(AttentionImpl):
               We use torch's .expand() to avoid duplicating values
         """
         assert output is not None, "Output tensor must be provided."
-
-        if output_scale is not None:
-            raise NotImplementedError(
-                "fused output quantization is not yet supported"
-                " for FlashAttentionImpl")
 
         # NOTE(woosuk): FlashAttention2 does not support FP8 KV cache.
         if not flash_attn_supports_fp8() or output.dtype != torch.bfloat16:
