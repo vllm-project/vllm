@@ -10,6 +10,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.config import get_current_vllm_config
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
 from vllm.distributed.parallel_state import in_the_same_node_as
@@ -221,6 +222,11 @@ class CustomAllreduce:
                                           self.fully_connected)
         ops.register_buffer(self._cr_ptr, self.buffer_ptrs)
 
+        vllm_config = get_current_vllm_config()
+        dtype = vllm_config.model_config.dtype
+        if dtype not in [torch.float16, torch.bfloat16]:
+            self._QR_SHOULD_INIT = False
+
         self.qr_level: int = envs.VLLM_QUICK_ALLREDUCE_LEVEL
         if self.qr_level not in [1, 2, 3, 4, 5]:
             logger.warning(
@@ -254,11 +260,13 @@ class CustomAllreduce:
                 dist.broadcast_object_list(all_handles[src], src=src)
             comm_handles = [h[0] for h in all_handles]
             ops.qr_set_comm_handles(self._qr_ptr, comm_handles)
-            logger.info(
-                "quick allreduce: due to the lack of bf16 assembly instruction "
-                "set, the performance gain of bf16 is limited. You may try "
-                "using '--dtype=float16' to load the model and enable float16 "
-                "kernels for better acceleration.")
+            if dtype == torch.bfloat16:
+                logger.info(
+                    "quick allreduce: due to the lack of bf16 assembly "
+                    "instruction set, the performance gain of bf16 is "
+                    "limited. You may try using '--dtype=float16' to "
+                    "load the model and enable float16 kernels for "
+                    "better acceleration.")
             # There is no case where qr is initialized and
             # cr is not initialized
 
