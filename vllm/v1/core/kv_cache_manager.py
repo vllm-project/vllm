@@ -367,6 +367,8 @@ class KVCacheManager:
 
     def get_block_ids(self, request_id: str) -> list[list[int]]:
         """Get the block ids of a request."""
-        assert request_id in self.single_type_manager.req_to_blocks
+        if request_id not in self.single_type_manager.req_to_blocks:
+            # Request may have been cleaned up due to errors, return empty list
+            return [[]]
         return KVCacheBlocks(self.single_type_manager.req_to_blocks[request_id]
                              ).get_block_ids()
