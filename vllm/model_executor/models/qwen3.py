@@ -343,36 +343,24 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-
-        self.config = config
-        self.lora_config = lora_config
-
-        self.quant_config = quant_config
-        self.model = Qwen3Model(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
-
-        if get_pp_group().is_last_rank:
-            if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(config.vocab_size,
-                                              config.hidden_size,
-                                              quant_config=quant_config,
-                                              prefix=maybe_prefix(
-                                                  prefix, "lm_head"))
-        else:
-            self.lm_head = PPMissingLayer()
-
-        self.score = RowParallelLinear(config.hidden_size,
-                                       getattr(config, "num_labels", 2),
-                                       quant_config=quant_config,
-                                       input_is_parallel=False,
-                                       bias=False,
-                                       prefix=maybe_prefix(prefix, "score"))
-
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
+        self.config = config
+        self.model_config = vllm_config.model_config
+        self.lora_config = lora_config
+        self.quant_config = quant_config
+        self.model = Qwen3Model(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
+        self.prefix = prefix
+        self.num_labels = getattr(config, "num_labels", 2)
+        self.classifier = RowParallelLinear(config.hidden_size,
+                                            self.num_labels,
+                                            quant_config=quant_config,
+                                            input_is_parallel=False,
+                                            bias=False,
+                                            prefix=maybe_prefix(
+                                                prefix, "classifier"))
         self._pooler = LastPool(normalize=False, softmax=False)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -396,7 +384,7 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
     ) -> PoolerOutput:
         hidden_states = self._pooler.extract_states(hidden_states,
                                                     pooling_metadata)
-        logits, _ = self.score(hidden_states)
+        logits, _ = self.classifier(hidden_states)
         batch_scores = torch.nn.functional.log_softmax(logits, dim=1)
         scores = batch_scores[:, 1].exp()
 
@@ -405,6 +393,20 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+        tokens = getattr(self.config, "classifier_from_token", None)
+        if tokens is not None:
+            if get_pp_group().is_last_rank:
+                if self.config.tie_word_embeddings:
+                    self.lm_head = self.model.embed_tokens
+                else:
+                    self.lm_head = ParallelLMHead(
+                        self.config.vocab_size,
+                        self.config.hidden_size,
+                        quant_config=self.quant_config,
+                        prefix=maybe_prefix(self.prefix, "lm_head"))
+            else:
+                self.lm_head = PPMissingLayer()
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
@@ -413,13 +415,23 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
 
         loaded_weights = loader.load_weights(weights)
 
-        TOKEN_FALSE_ID = 2152
-        TOKEN_TRUE_ID = 9693
+        if tokens is None:
+            return loaded_weights
 
-        self.score.weight.data[0] = self.lm_head.weight.data[TOKEN_FALSE_ID]
-        self.score.weight.data[1] = self.lm_head.weight.data[TOKEN_TRUE_ID]
+        assert len(tokens) == self.num_labels
+
+        from vllm.transformers_utils.tokenizer import get_tokenizer
+        tokenizer = get_tokenizer(
+            self.model_config.tokenizer,
+            revision=self.model_config.tokenizer_revision,
+            tokenizer_mode=self.model_config.tokenizer_mode,
+            trust_remote_code=self.model_config.trust_remote_code)
+
+        for i, token in enumerate(tokens):
+            token_id = tokenizer(token, add_special_tokens=False).input_ids[0]
+            print(token_id)
+            self.classifier.weight.data[i] = self.lm_head.weight.data[token_id]
 
         del self.lm_head
-
-        loaded_weights.add("score.weight")
+        loaded_weights.add("classifier.weight")
         return loaded_weights
