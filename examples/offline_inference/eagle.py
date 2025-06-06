@@ -6,7 +6,7 @@ import os
 
 from transformers import AutoTokenizer
 
-from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
 
 
@@ -98,7 +98,10 @@ def main():
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
 
-    outputs = llm.generate(prompt_token_ids=prompt_ids, sampling_params=sampling_params)
+    outputs = llm.generate(
+        TokensPrompt(prompt_token_ids=prompt_ids),
+        sampling_params=sampling_params,
+    )
 
     # print the generated text
     for output in outputs:

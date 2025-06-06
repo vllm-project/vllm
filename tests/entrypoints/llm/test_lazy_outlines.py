@@ -74,13 +74,14 @@ def run_lmfe(sample_regex):
               guided_decoding_backend="lm-format-enforcer",
               gpu_memory_utilization=0.3)
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+    prompt = f"Give an example IPv4 address with this regex: {sample_regex}"
     outputs = llm.generate(
-        prompts=[
-            f"Give an example IPv4 address with this regex: {sample_regex}"
-        ] * 2,
+        [prompt] * 2,
         sampling_params=sampling_params,
         use_tqdm=True,
-        guided_options_request=dict(guided_regex=sample_regex))
+        guided_options_request={"guided_regex": sample_regex},
+    )
 
     for output in outputs:
         prompt = output.prompt

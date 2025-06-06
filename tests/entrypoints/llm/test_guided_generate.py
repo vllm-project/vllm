@@ -31,9 +31,10 @@ def llm():
     # enable garbage collection
     llm = LLM(model=MODEL_NAME, max_model_len=1024, seed=0)
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
-        del llm
+    yield weakref.proxy(llm)
+
+    del llm
+
     cleanup_dist_env_and_memory()
 
 
@@ -49,11 +50,13 @@ def test_guided_regex(sample_regex, llm, guided_decoding_backend: str,
             regex=sample_regex,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
-    outputs = llm.generate(prompts=[
-        f"Give an example IPv4 address with this regex: {sample_regex}"
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
+
+    prompt = f"Give an example IPv4 address with this regex: {sample_regex}"
+    outputs = llm.generate(
+        [prompt] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
 
     assert outputs is not None
     for output in outputs:
@@ -80,12 +83,14 @@ def test_guided_json_completion(sample_json_schema, llm,
             json=sample_json_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
-    outputs = llm.generate(prompts=[
-        f"Give an example JSON for an employee profile "
-        f"that fits this schema: {sample_json_schema}"
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
+
+    prompt = (f"Give an example JSON for an employee profile "
+              f"that fits this schema: {sample_json_schema}")
+    outputs = llm.generate(
+        [prompt] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
 
     assert outputs is not None
 
@@ -114,12 +119,14 @@ def test_guided_complex_json_completion(sample_complex_json_schema, llm,
             json=sample_complex_json_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
-    outputs = llm.generate(prompts=[
-        f"Give an example JSON for an assignment grade "
-        f"that fits this schema: {sample_complex_json_schema}"
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
+
+    prompt = (f"Give an example JSON for an assignment grade "
+              f"that fits this schema: {sample_complex_json_schema}")
+    outputs = llm.generate(
+        [prompt] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
 
     assert outputs is not None
 
@@ -149,12 +156,14 @@ def test_guided_definition_json_completion(sample_definition_json_schema, llm,
             json=sample_definition_json_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
-    outputs = llm.generate(prompts=[
-        f"Give an example JSON for solving 8x + 7 = -23 "
-        f"that fits this schema: {sample_definition_json_schema}"
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
+
+    prompt = (f"Give an example JSON for solving 8x + 7 = -23 "
+              f"that fits this schema: {sample_definition_json_schema}")
+    outputs = llm.generate(
+        [prompt] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
 
     assert outputs is not None
 
@@ -184,12 +193,15 @@ def test_guided_enum_json_completion(sample_enum_json_schema, llm,
             json=sample_enum_json_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
-    outputs = llm.generate(prompts=[
-        "Create a bug report JSON that fits this schema: "
-        f"{sample_enum_json_schema}. Make it for a high priority critical bug."
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
+
+    prompt = ("Create a bug report JSON that fits this schema: "
+              f"{sample_enum_json_schema}. Make it for a high priority "
+              "critical bug.")
+    outputs = llm.generate(
+        [prompt] * 2,
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
 
     assert outputs is not None
 
@@ -229,10 +241,13 @@ def test_guided_choice_completion(sample_guided_choice, llm,
             choice=sample_guided_choice,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
+
+    prompt = "The best language for type-safe systems programming is "
     outputs = llm.generate(
-        prompts="The best language for type-safe systems programming is ",
+        prompt,
         sampling_params=sampling_params,
-        use_tqdm=True)
+        use_tqdm=True,
+    )
 
     assert outputs is not None
     for output in outputs:
@@ -260,9 +275,11 @@ def test_guided_grammar(sample_sql_statements, llm,
             grammar=sample_sql_statements,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
+
+    prompt = ("Generate a sql state that select col_1 from "
+              "table_1 where it is equals to 1")
     outputs = llm.generate(
-        prompts=("Generate a sql state that select col_1 from "
-                 "table_1 where it is equals to 1"),
+        prompt,
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -294,7 +311,7 @@ def test_guided_options_request_deprecation_warning(sample_regex, llm):
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     with pytest.warns(DeprecationWarning, match="guided_options_request"):
-        llm.generate(prompts="This should fail",
+        llm.generate("This should fail",
                      sampling_params=sampling_params,
                      use_tqdm=True,
                      guided_options_request=dict(guided_regex=sample_regex))
@@ -308,7 +325,7 @@ def test_validation_against_both_guided_decoding_options(sample_regex, llm):
         guided_decoding=GuidedDecodingParams(regex=sample_regex))
 
     with pytest.raises(ValueError, match="Cannot set both"):
-        llm.generate(prompts="This should fail",
+        llm.generate("This should fail",
                      sampling_params=sampling_params,
                      use_tqdm=True,
                      guided_options_request=dict(guided_regex=sample_regex))
@@ -337,7 +354,7 @@ def test_disable_guided_decoding_fallback(sample_regex, llm):
             ValueError,
             match="xgrammar does not support advanced JSON schema features "
             "like string length, item limits, or property bounds."):
-        llm.generate(prompts="This should fail",
+        llm.generate("This should fail",
                      sampling_params=sampling_params,
                      use_tqdm=True)
 
@@ -356,11 +373,13 @@ def test_guided_json_object(llm, guided_decoding_backend: str,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
 
+    prompt = ("Generate a JSON object with curly braces for a person with "
+              "name and age fields for John Smith who is 31 years old.")
     outputs = llm.generate(
-        prompts=("Generate a JSON object with curly braces for a person with "
-                 "name and age fields for John Smith who is 31 years old."),
+        prompt,
         sampling_params=sampling_params,
-        use_tqdm=True)
+        use_tqdm=True,
+    )
 
     assert outputs is not None
     for output in outputs:
@@ -406,11 +425,14 @@ def test_guided_json_completion_with_enum(llm, guided_decoding_backend: str,
             json=json_schema,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
+
+    prompt = ("Generate a JSON with the brand, model and car_type of "
+              "the most iconic car from the 90's")
     outputs = llm.generate(
-        prompts="Generate a JSON with the brand, model and car_type of"
-        "the most iconic car from the 90's",
+        prompt,
         sampling_params=sampling_params,
-        use_tqdm=True)
+        use_tqdm=True,
+    )
 
     assert outputs is not None
     for output in outputs:
@@ -458,10 +480,10 @@ def test_guided_number_range_json_completion(llm, guided_decoding_backend: str,
             backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace),
     )
+
+    prompt = "Create a JSON object for a user with age, score, and zipcode."
     outputs = llm.generate(
-        prompts=[
-            "Create a JSON object for a user with age, score, and zipcode."
-        ] * 2,
+        [prompt] * 2,
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -518,7 +540,7 @@ def test_guidance_no_additional_properties(llm):
                                          max_tokens=256,
                                          guided_decoding=guided_params)
 
-        outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
+        outputs = llm.generate(prompt, sampling_params=sampling_params)
         assert outputs is not None
         generated_text = outputs[0].outputs[0].text
         assert generated_text is not None
