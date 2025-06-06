@@ -160,7 +160,7 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
 #################### EXTENSION Build IMAGE ####################
 
 #################### DEV IMAGE ####################
-FROM base as dev
+FROM base AS dev
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
