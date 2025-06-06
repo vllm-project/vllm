@@ -3,6 +3,7 @@
 import contextlib
 import os
 import weakref
+from contextlib import ExitStack
 
 import pytest
 
@@ -75,7 +76,7 @@ def llm_pair(request):
     ],
     indirect=True)
 @pytest.mark.skipif(current_platform.get_device_capability() != (9, 0),
-                    reason="Only Hopper GPUs support FlashAttention 3")
+                    reason="Only Hopper GPUs support FA3 and FlashMLA")
 class TestFullCUDAGraph:
     """
     Use a class such that an llm pair is constructed once for all
@@ -118,6 +119,33 @@ class TestFullCUDAGraph:
         for piecewise_res, full_res in zip(piecewise_responses,
                                            full_responses):
             assert piecewise_res.outputs[0].text == full_res.outputs[0].text
+
+
+@pytest.mark.parametrize(
+    "model, supported",
+    [
+        ("Qwen/Qwen2-1.5B-Instruct", True),
+        # MLA does not support capturing CUDA Graphs with size > max_num_seqs
+        ("deepseek-ai/DeepSeek-V2-Lite", False),
+    ])
+@pytest.mark.skipif(current_platform.get_device_capability() != (9, 0),
+                    reason="Only Hopper GPUs support FA3 and FlashMLA")
+def test_lower_max_num_seqs(model, supported):
+    with temporary_environ({
+            "VLLM_USE_V1": "1",
+            "VLLM_FLASH_ATTN_VERSION": "3"
+    }), ExitStack() as stack:
+        if not supported:
+            stack.enter_context(pytest.raises(RuntimeError))
+
+        llm = LLM(model=model,
+                  max_num_seqs=256,
+                  trust_remote_code=True,
+                  max_model_len=1024,
+                  compilation_config=CompilationConfig(
+                      full_cuda_graph=True,
+                      cudagraph_capture_sizes=[64, 256, 512]))
+        llm.generate(["Hello, my name is"] * 10)
 
 
 def test_full_cudagraph_with_invalid_backend():
