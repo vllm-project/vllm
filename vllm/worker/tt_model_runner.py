@@ -38,6 +38,7 @@ class TTModelInput(ModelRunnerInputBase):
     """
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
+    finished_requests_seq_ids: Optional[List[int]] = None
     prompt_lens: Optional[torch.Tensor] = None
     seq_groups: Optional[List[int]] = None
     block_tables: Optional[torch.Tensor] = None
@@ -149,6 +150,22 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if self.model_config.is_encoder_decoder:
             self.max_cross_blocks = self.model.max_cross_attn_tokens // self.cache_config.block_size
 
+        # Detect if the model is a TG Llama to use DP KV cache
+        # vLLM doesn't know which blocks correspond to which DP device pool so may allocate non-local blocks to a user
+        # To avoid bad output because of this, we maintain a seq_id_to_batch_slot mapping so that we can place the users on the correct devices
+        # This requires passing seq_id and finished requests to the generator
+        # TODO: Extend this to support other DP models
+        if "Llama" in self.model_config.model and "70B" in self.model_config.model and self.device_config.device.get_num_devices(
+        ) == 32 and (self.model_config.override_tt_config.get(
+                "data_parallel", 1) == 1):
+            self.dp_kv_cache = True
+        else:
+            self.dp_kv_cache = False
+
+        if self.dp_kv_cache:
+            # Map request id strs to seq group ids
+            self.req_id_to_seq_id: Dict[str, int] = {}
+
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -193,6 +210,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             ) == 1, "Currently only supporting one sequence per request group"
             seq_id = seq_ids[0]
             seq_groups.append(seq_id)
+            if self.dp_kv_cache
+                self.req_id_to_seq_id[seq_group_metadata.request_id] = seq_id
 
             multi_modal_data = seq_group_metadata.multi_modal_data
             seq_data = seq_group_metadata.seq_data[seq_id]
@@ -355,9 +374,21 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                     device="cpu")
                     ],
                                                    dim=1)
+        if self.dp_kv_cache:
+            # Prepare finished request ids
+            finished_requests_seq_ids = [
+                self.req_id_to_seq_id[req_id] for req_id in finished_requests_ids
+            ]
 
-        return TTModelInput(input_tokens, input_positions, prompt_lens,
-                            seq_groups, block_tables, unpadded_batch_size,
+            # Delete the finished requests from req_id_to_seq_id
+            for req_id in finished_requests_ids:
+                del self.req_id_to_seq_id[req_id]
+        else:
+            finished_requests_seq_ids = None
+
+        return TTModelInput(input_tokens, input_positions,
+                            finished_requests_seq_ids, prompt_lens, seq_groups,
+                            block_tables, unpadded_batch_size,
                             tt_sampling_params, multi_modal_kwargs,
                             cross_block_tables)
 
@@ -506,6 +537,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if model_input.cross_block_tables is not None:
             execute_model_kwargs[
                 "cross_page_table"] = model_input.cross_block_tables
+
+        if self.dp_kv_cache:
+            # Send finished request ids and seq groups to generator
+            execute_model_kwargs[
+                "finished_requests_ids"] = model_input.finished_requests_seq_ids
+            execute_model_kwargs["seq_groups"] = model_input.seq_groups
 
         if not is_decode:
             outputs = self.model.prefill_forward(**execute_model_kwargs)
