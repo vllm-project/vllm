@@ -506,6 +506,7 @@ class NixlConnectorWorker:
         self.backend_name = backend.get_name()
         attn_backend = backend_name_to_enum(self.backend_name)
         self._use_flashinfer = attn_backend == _Backend.FLASHINFER_VLLM_V1
+        self._use_pallas_v1 = attn_backend == _Backend.PALLAS_VLLM_V1
         logger.debug("Detected attention backend %s", self.backend_name)
 
         self._tp_size: dict[str, int] = {self.engine_id: self.world_size}
@@ -633,6 +634,7 @@ class NixlConnectorWorker:
         use_mla = len(first_kv_cache.shape) == 3
         if self.device_type == "tpu":
             assert not use_mla, f"{self.kv_buffer_device} does not support MLA."
+            assert self._use_pallas_v1, f"attn backend: {self.backend_name}"
             # tpu (v1) kv shape per layer:
             # (num_blocks, block_size, num_kv_heads * 2, head_size)
             self.num_blocks = first_kv_cache.shape[0]
@@ -704,7 +706,7 @@ class NixlConnectorWorker:
         for cache_or_caches in xfer_buffers.values():
             # Normalize to always be a list of caches
             cache_list = [cache_or_caches] if use_mla \
-                         or self.device_type == "tpu" or self._use_flashinfer \
+                         or self._use_pallas_v1 or self._use_flashinfer \
                          else cache_or_caches
             for cache in cache_list:
                 base_addr = cache.data_ptr()
