@@ -899,6 +899,7 @@ class DeviceMemoryProfiler:
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
         from vllm.platforms import current_platform
+        gc.collect()
         return current_platform.get_current_memory_usage(self.device)
 
     def __enter__(self):
@@ -2461,7 +2462,7 @@ def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
     Returns:
         A properly formatted ZMQ path string.
     """
-    if not port:
+    if port is None:
         return f"{scheme}://{host}"
     if is_valid_ipv6_address(host):
         return f"{scheme}://[{host}]:{port}"
