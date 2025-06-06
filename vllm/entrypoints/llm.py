@@ -194,10 +194,25 @@ class LLM:
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
-        if "kv_transfer_config" in kwargs and isinstance(kwargs["kv_transfer_config"], dict):
+        if "kv_transfer_config" in kwargs and isinstance(
+                kwargs["kv_transfer_config"], dict):
+            from pydantic import (
+                ValidationError)  # Ensure ValidationError is imported
+
             from vllm.config import KVTransferConfig
-            kwargs["kv_transfer_config"] = KVTransferConfig(
-                **kwargs["kv_transfer_config"])
+            raw_config_dict = kwargs["kv_transfer_config"]
+            try:
+                kwargs["kv_transfer_config"] = KVTransferConfig(
+                    **raw_config_dict)
+            except ValidationError as e:
+                logger.error(
+                    "Failed to convert 'kv_transfer_config' dict to "
+                    "KVTransferConfig object. Dict: %s. Error: %s",
+                    raw_config_dict, e)
+                # Consider re-raising a more specific vLLM error or ValueError
+                # to provide better context to the user.
+                raise ValueError(
+                    f"Invalid 'kv_transfer_config' provided: {e}") from e
 
         if hf_overrides is None:
             hf_overrides = {}
