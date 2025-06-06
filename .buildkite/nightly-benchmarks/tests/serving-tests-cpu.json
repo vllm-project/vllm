@@ -30,7 +30,7 @@
         }
     },
     {
-        "test_name": "serving_llama8B_tp4_random_128_128",
+        "test_name": "serving_llama8B_tp4_sharegpt",
         "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
 	    "VLLM_USE_V1": 1,
@@ -47,7 +47,6 @@
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
 	    "trust_remote_code": "",
-	    "enable_chunked_prefill": "",
             "disable_log_stats": "",
             "disable_log_requests": "",
             "load_format": "dummy"
@@ -55,11 +54,9 @@
         "client_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "backend": "vllm",
-            "dataset_name": "random",
-	    "random-input-len": 128,
-	    "random-output-len": 128,
-	    "ignore-eos": "",
-            "num_prompts": 450
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200
         }
     },
     {
