@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
 _config: Optional[dict[str, Any]] = None
@@ -32,7 +33,7 @@ __all__ = [
     "get_config",
 ]
 
-if HAS_TRITON:
+if HAS_TRITON and not current_platform.is_cpu():
     # import to register the custom ops
     import vllm.model_executor.layers.fused_moe.fused_marlin_moe  # noqa
     import vllm.model_executor.layers.fused_moe.fused_moe  # noqa
