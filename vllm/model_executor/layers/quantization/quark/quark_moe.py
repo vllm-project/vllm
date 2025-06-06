@@ -227,6 +227,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
+            activation=activation,
             use_fp8_w8a8=True,
             global_num_experts=global_num_experts,
             apply_router_weight_on_input=apply_router_weight_on_input,
