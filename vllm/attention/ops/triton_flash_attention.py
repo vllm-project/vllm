@@ -383,7 +383,45 @@ def get_rdna_autotune_configs():
     ], ['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL', 'USE_FP8']
 
 
+def get_general_autotune_configs():
+    return [
+        triton.Config(
+            {
+                'BLOCK_M': 128,
+                'BLOCK_N': 128,
+                'SHOULD_PRE_LOAD_V': False,
+                'GRID_CU_MULTIP': 2
+            },
+            num_stages=1,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_M': 128,
+                'BLOCK_N': 64,
+                'SHOULD_PRE_LOAD_V': False,
+                'GRID_CU_MULTIP': 2
+            },
+            num_stages=1,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_M': 128,
+                'BLOCK_N': 32,
+                'SHOULD_PRE_LOAD_V': False,
+                'GRID_CU_MULTIP': 2
+            },
+            num_stages=1,
+            num_warps=4),
+    ], [
+        'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
+        'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
+    ]
+
+
 def get_autotune_configs():
+    if current_platform.is_hpu():
+        return get_general_autotune_configs()
+
     if on_gfx1x():
         return get_rdna_autotune_configs()
     else:
