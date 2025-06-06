@@ -652,10 +652,11 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
         assert output
 
 
-# TODO: update model configs with next ct release
-@pytest.mark.parametrize("args", [
-    ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16", CompressedTensorsW4A16Fp4)
-])
+@pytest.mark.parametrize(
+    "args",
+    [("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16",
+      CompressedTensorsW4A16Fp4),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4)])
 def test_compressed_tensors_nvfp4(vllm_runner, args):
     model, scheme = args
     with vllm_runner(model, enforce_eager=True) as llm:
@@ -668,6 +669,7 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
                               CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, scheme)
             assert qkv_proj.scheme.group_size == 16
+            assert qkv_proj.strategy == "tensor_group"
 
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
