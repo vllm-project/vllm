@@ -194,6 +194,11 @@ class LLM:
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
+        if "kv_transfer_config" in kwargs and isinstance(kwargs["kv_transfer_config"], dict):
+            from vllm.config import KVTransferConfig
+            kwargs["kv_transfer_config"] = KVTransferConfig(
+                **kwargs["kv_transfer_config"])
+
         if hf_overrides is None:
             hf_overrides = {}
 
