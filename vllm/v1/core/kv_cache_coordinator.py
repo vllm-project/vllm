@@ -164,7 +164,7 @@ class KVCacheCoordinator(ABC):
         Get the blocks for the request.
         """
         return [
-            manager.req_to_blocks[request_id]
+            manager.req_to_blocks.get(request_id) or []
             for manager in self.single_type_managers
         ]
 
