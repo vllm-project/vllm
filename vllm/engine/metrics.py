@@ -567,6 +567,16 @@ class PrometheusStatLogger(StatLoggerBase):
         self._log_histogram(self.metrics.histogram_time_per_output_token,
                             stats.time_per_output_tokens_iter)
 
+        self._log_counter(self.metrics.counter_total_flops,
+                          stats.total_flops_iter)
+        self._log_counter(self.metrics.counter_mm_flops, stats.mm_flops_iter)
+        self._log_counter(self.metrics.counter_attention_flops,
+                          stats.attention_flops_iter)
+        self._log_counter(self.metrics.counter_activation_flops,
+                          stats.activation_flops_iter)
+        self._log_counter(self.metrics.counter_normalization_flops,
+                          stats.normalization_flops_iter)
+
         # Request level data
         # Latency
         self._log_histogram(self.metrics.histogram_e2e_time_request,

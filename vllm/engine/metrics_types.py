@@ -47,6 +47,13 @@ class Stats:
     time_per_output_tokens_iter: List[float]
     num_preemption_iter: int
 
+    # FLOP stats (should have _iter suffix)
+    total_flops_iter: int
+    mm_flops_iter: int
+    attention_flops_iter: int
+    activation_flops_iter: int
+    normalization_flops_iter: int
+
     # Request stats (should have _requests suffix)
     #   Latency
     time_e2e_requests: List[float]
