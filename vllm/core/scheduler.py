@@ -1393,18 +1393,21 @@ class Scheduler:
             partial_prefill_metadata=partial_prefill_metadata,
         )
 
-        # Schedule swapped out requests.
-        # If preemption happens, it means we don't have space for swap-in.
+        # If preemption happens, it means we don't have space for other
+        # requests.
         if len(running_scheduled.preempted) + len(
                 running_scheduled.swapped_out) == 0:
+            # Schedule swapped out requests.
             swapped_in = self._schedule_swapped(budget, curr_loras)
 
-        prefills = self._schedule_prefills(
-            budget,
-            curr_loras,
-            enable_chunking=True,
-            partial_prefill_metadata=partial_prefill_metadata,
-        )
+            # Schedule new prefills.
+            if not self.swapped:
+                prefills = self._schedule_prefills(
+                    budget,
+                    curr_loras,
+                    enable_chunking=True,
+                    partial_prefill_metadata=partial_prefill_metadata,
+                )
 
         assert (budget.num_batched_tokens
                 <= self.scheduler_config.max_num_batched_tokens)
