@@ -2,12 +2,18 @@ list:
     @just --list
 
 leader_address := "10.96.0.64" # nb1-h100-60
-# hosts := "nb1-h100-60 nb1-h100-61"
-# num_nodes := "2"
-hosts := "nb1-h100-60 nb1-h100-61 nb1-h100-62 nb1-h100-63"
-num_nodes := "4"
-# hosts := "nb1-h100-60 nb1-h100-15 nb1-h100-45 nb1-h100-61 nb1-h100-62 nb1-h100-63"
-# num_nodes := "6"
+
+# Prefill
+# hosts := "nb1-h100-60 nb1-h100-61 nb1-h100-62 nb1-h100-63"
+# num_nodes := "4"
+
+# Decode
+# hosts := "nb1-h100-60 nb1-h100-1 nb1-h100-2 nb1-h100-3 nb1-h100-4 nb1-h100-5 nb1-h100-6 nb1-h100-7 nb1-h100-8 nb1-h100-10 nb1-h100-11 nb1-h100-12 nb1-h100-13 nb1-h100-14 nb1-h100-15 nb1-h100-16 nb1-h100-45 nb1-h100-61"
+# num_nodes := "18"
+hosts := "nb1-h100-60 nb1-h100-1 nb1-h100-2 nb1-h100-3 nb1-h100-4 nb1-h100-5 nb1-h100-6 nb1-h100-7 nb1-h100-8 nb1-h100-10 nb1-h100-11 nb1-h100-12 nb1-h100-13 nb1-h100-14 nb1-h100-15 nb1-h100-16"
+num_nodes := "16"
+
+
 
 # Helper function to run commands on all hosts with proper signal handling
 _run-on-all-hosts cmd:
@@ -119,7 +125,7 @@ _worker-run-deepep-intranode-test host:
 run-deepep-intranode-test:
     @just _run-indexed-on-all-hosts "cd {{pwd}} && just _worker-run-deepep-intranode-test HOST_PLACEHOLDER"
 
-_worker-run-deepep-internode-test i host:
+_worker-run-deepep-internode-test i host test_file:
     #!/usr/bin/env bash
     # set -ex
     source {{env_sh}}
@@ -131,17 +137,17 @@ _worker-run-deepep-internode-test i host:
     export MASTER_ADDR={{leader_address}}
 
     # export NCCL_DEBUG=INFO
-    python $WORKSPACE/DeepEP/tests/test_internode.py 2>&1 | tee {{pwd}}/logs/deepep-internode-test-{{host}}.log
+    python $WORKSPACE/DeepEP/tests/{{test_file}} 2>&1 | tee {{pwd}}/logs/deepep-internode-test-{{host}}.log
 
-run-deepep-internode-test:
-    @just _run-indexed-on-all-hosts "cd {{pwd}} && just _worker-run-deepep-internode-test INDEX_PLACEHOLDER HOST_PLACEHOLDER"
+run-deepep-internode-test test_file="test_internode.py": # other option is test_low_latency.py
+    @just _run-indexed-on-all-hosts "cd {{pwd}} && just _worker-run-deepep-internode-test INDEX_PLACEHOLDER HOST_PLACEHOLDER {{test_file}}"
 
 # Kill any existing vLLM processes across all nodes
 kill-vllm-processes:
     #!/usr/bin/env bash
     echo "Killing vLLM processes on all nodes..."
     for host in {{hosts}}; do
-        ssh $host "pkill -f 'vllm serve' || true; pkill -f 'python.*vllm' || true" &
+        ssh $host "pkill -f 'vllm serve' || true; pkill -f 'python.*' || true" &
     done
     wait
     echo "All vLLM processes killed."
@@ -157,7 +163,8 @@ _worker-run-r1 i:
     set -ex
 
     # Enhanced timeout and network configuration for DeepEP
-    export VLLM_ALL2ALL_BACKEND="deepep_high_throughput" 
+    # export VLLM_ALL2ALL_BACKEND="deepep_high_throughput" 
+    export VLLM_ALL2ALL_BACKEND="deepep_low_latency" 
     export VLLM_USE_DEEP_GEMM=1
     export DP_SIZE=$(({{num_nodes}} * 8))
     export DP_SIZE_LOCAL=8
@@ -187,6 +194,9 @@ _worker-run-r1 i:
         LEADER_OR_WORKER_ARGS="--headless"
     fi
 
+    # TUNING_ARGS="--enforce-eager --gpu-memory-utilization 0.95"
+    TUNING_ARGS="--gpu-memory-utilization 0.95"
+
     vllm serve deepseek-ai/DeepSeek-R1 --trust-remote-code \
         --no-enable-prefix-caching --disable-log-requests \
         --tensor-parallel-size 1 \
@@ -196,8 +206,7 @@ _worker-run-r1 i:
         --data-parallel-address {{leader_address}} \
         --data-parallel-rpc-port 5555 \
         --data-parallel-start-rank $START_RANK \
-        --enforce-eager \
-        --gpu-memory-utilization 0.95 \
+        $TUNING_ARGS \
         $LEADER_OR_WORKER_ARGS 2>&1 | tee {{pwd}}/logs/r1-rank-{{i}}.log
 
 run-r1:
@@ -210,9 +219,28 @@ bench-serving:
     cd ~/vllm
     source .venv/bin/activate
 
-    vllm bench serve --model deepseek-ai/DeepSeek-R1 \
-         --dataset-name random --ignore-eos \
-        --num-prompts 128 \
-        --request-rate 10 \
-        --random-input-len 1024 \
-        --random-output-len 2048 
+    pids=()
+
+    kill-pids() {
+        for pid in "${pids[@]}"; do
+            kill -9 $pid
+        done
+    }
+    trap kill-pids INT TERM
+
+    bench() {
+        vllm bench serve --model deepseek-ai/DeepSeek-R1 \
+            --dataset-name random --ignore-eos \
+            --num-prompts 10000 \
+            --request-rate inf \
+            --random-input-len 1 \
+            --random-output-len 256
+    }
+
+    num_benches=10
+    for i in $(seq 1 $num_benches); do
+        bench &
+        pids+=($!)
+    done
+
+    wait

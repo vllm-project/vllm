@@ -235,7 +235,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_qps_per_rank = num_local_experts
         num_rdma_bytes = None
 
-        if self.internode:
+        if False:  # self.internode:
             num_rdma_bytes = 1024 * 1024 * 1024
         else:
             num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
