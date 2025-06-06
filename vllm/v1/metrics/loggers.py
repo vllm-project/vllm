@@ -203,6 +203,11 @@ class PrometheusStatLogger(StatLoggerBase):
             "GPU prefix cache hits, in terms of number of cached tokens.",
             labelnames=labelnames).labels(*labelvalues)
 
+        self.counter_num_tokens_preempted = self._counter_cls(
+            name="vllm:num_tokens_preempted",
+            documentation="Number of tokens from preempted requests",
+            labelnames=labelnames).labels(*labelvalues)
+
         #
         # Counters
         #
@@ -418,6 +423,8 @@ class PrometheusStatLogger(StatLoggerBase):
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)
         self.counter_generation_tokens.inc(
             iteration_stats.num_generation_tokens)
+        self.counter_num_tokens_preempted.inc(
+            scheduler_stats.num_tokens_preempted)
         self.histogram_iteration_tokens.observe(
             iteration_stats.num_prompt_tokens + \
             iteration_stats.num_generation_tokens)

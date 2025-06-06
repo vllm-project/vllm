@@ -92,6 +92,9 @@ class Scheduler(SchedulerInterface):
 
         self.block_size = self.cache_config.block_size
 
+        # Track total tokens in preempted requests
+        self._preempted_tokens = 0
+
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Priority queues for requests.
@@ -248,6 +251,8 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
+                    preempted_tokens = preempted_req.num_computed_tokens
+                    self._preempted_tokens += preempted_tokens
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
@@ -948,6 +953,7 @@ class Scheduler(SchedulerInterface):
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             gpu_cache_usage=self.kv_cache_manager.usage,
+            num_tokens_preempted=self._preempted_tokens,
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
         )
