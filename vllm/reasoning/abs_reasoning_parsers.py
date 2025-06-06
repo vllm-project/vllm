@@ -7,13 +7,15 @@ import os
 from abc import abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
-from typing import Callable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import import_from_path, is_list_of
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                                  DeltaMessage)
 
 logger = init_logger(__name__)
 
