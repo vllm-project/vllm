@@ -2104,6 +2104,10 @@ class SchedulerConfig:
     default scheduler. Can be a class directly or the path to a class of form
     "mod.custom_class"."""
 
+    rpc_mq_max_chunk_bytes: int = 1024 * 1024 * 10
+    """ Max chunk bytes of rp message queue
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
