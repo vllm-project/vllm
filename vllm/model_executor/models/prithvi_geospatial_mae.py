@@ -62,8 +62,8 @@ class PrithviGeoSpatialMAEInputBuilder(
         # The size of pixel_values might change in the cases where we resize
         # the input but never exceeds the dimensions below.
         return {
-            "pixel_values": torch.full((1, 6, 512, 512), 1.0),
-            "location_coords": torch.full((1, 2), 1.0),
+            "pixel_values": torch.full((1, 6, 512, 512), 1.0, dtype=torch.float16),
+            "location_coords": torch.full((1, 2), 1.0, dtype=torch.float16),
         }
 
 
