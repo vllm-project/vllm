@@ -56,6 +56,7 @@ def make_request(
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,
+        data_parallel_rank=None,
     )
 
 
