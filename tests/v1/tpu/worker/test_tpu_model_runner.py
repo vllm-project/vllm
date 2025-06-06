@@ -494,7 +494,7 @@ def test_init_kv_cache_without_kv_sharing():
         # suppress var not used error
         assert fwd_context is not None
     # Set high context length to test max context length estimation
-    vllm_config.model_config.max_model_len = 3_000_000
+    vllm_config.model_config.max_model_len = 1_000_000
     vllm_ctx = vllm_config.compilation_config.static_forward_context
     model_runner = get_model_runner(vllm_config)
     kv_cache_spec = model_runner.get_kv_cache_spec()
@@ -502,8 +502,8 @@ def test_init_kv_cache_without_kv_sharing():
     assert len(model_runner.shared_kv_cache_layers) == 0
 
     available_memory = 20 * GiB_bytes
-    # page size for layer 0's kv_cache_spec is 64KB
-    num_expected_blocks = 163840  # 20GB / 64KB / 2 (num layers)
+    # page size for layer 0's kv_cache_spec is 128KB
+    num_expected_blocks = 81920  # 20GB / 128KB / 2 (num layers)
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                           available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
@@ -514,7 +514,7 @@ def test_init_kv_cache_without_kv_sharing():
     max_context_len =\
         estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
-    assert max_context_len == 655360
+    assert max_context_len == 327680
 
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 2 block worth of memory (2 * 32kb)
@@ -562,7 +562,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
         # suppress var not used error
         assert fwd_context is not None
     # Set high context length to test max context length estimation
-    vllm_config.model_config.max_model_len = 3_000_000
+    vllm_config.model_config.max_model_len = 1_000_000
     vllm_ctx = vllm_config.compilation_config.static_forward_context
     model_runner = get_model_runner(vllm_config)
     kv_cache_spec = model_runner.get_kv_cache_spec()
@@ -571,10 +571,10 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert model_runner.shared_kv_cache_layers[layer_1] == layer_0
 
     available_memory = 20 * GiB_bytes
-    # page size for layer 0's kv_cache_spec is 64KB
+    # page size for layer 0's kv_cache_spec is 128KB
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
-    num_expected_blocks = 327680  # 20GB / 64KB
+    num_expected_blocks = 163840  # 20GB / 128KB
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                           available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
@@ -586,7 +586,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
     max_context_len =\
         estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
-    assert max_context_len == 2 * 655360
+    assert max_context_len == 2 * 327680
 
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 1 block worth of memory (32kb)
