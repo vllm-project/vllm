@@ -23,7 +23,7 @@ vLLM requires Python 3.9+ (Python 3.10.12 is the default `python3` on Ubuntu 22.
 4. Install vLLM:
     ```sh
     pip3 install --upgrade pip
-    cd $vllm_dir && pip install -e .
+    cd $vllm_dir && pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 
 **To activate the vLLM+tt-metal environment (after the first time):**
