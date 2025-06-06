@@ -3244,10 +3244,19 @@ def _get_and_verify_dtype(
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":
-            # Don't resolve here - let the worker handle it
-            # This avoids using current_platform which might be incorrect
-            # in distributed setups or during config initialization
-            return "auto"
+            if envs.VLLM_USE_V1:
+                # Don't resolve here - let the worker handle it
+                # This avoids using current_platform which might be incorrect
+                # in distributed setups or during config initialization
+                return "auto"
+
+            # TODO(seiji): remove after V0 deprecation
+            # Set default dtype from model config
+            torch_dtype = _resolve_auto_dtype(
+                model_type,
+                config_dtype,
+                is_pooling_model=is_pooling_model,
+            )
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype!r}")
