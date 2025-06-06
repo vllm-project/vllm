@@ -170,13 +170,6 @@ class EngineCore:
         # `kv_cache_config` to be consistent across all workers to make sure
         # all the memory operators can be applied to all workers.
         unify_kv_cache_configs(kv_cache_configs)
-        # All workers have the same kv_cache_config except layer names,
-        # so use an arbitrary one to get the number of blocks.
-        assert all([
-            cfg.num_blocks == kv_cache_configs[0].num_blocks
-            for cfg in kv_cache_configs
-        ])
-        num_gpu_blocks = kv_cache_configs[0].num_blocks
 
         # All workers have the same kv_cache_config except layer names, so use
         # an arbitrary one to initialize the scheduler.
