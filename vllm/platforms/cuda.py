@@ -107,6 +107,7 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
+        model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
@@ -137,6 +138,21 @@ class CudaPlatformBase(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
+
+        # TODO(seiji): remove after V0 deprecation
+        if (not envs.VLLM_USE_V1 and model_config is not None
+                and model_config.use_mla):
+            # if `VLLM_ATTENTION_BACKEND` is not set and we are using MLA, then
+            # we default to FlashMLA backend, so we need to force the blocksize
+            # here
+            use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None \
+                or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
+            from vllm.attention.ops.flashmla import is_flashmla_supported
+            if use_flashmla and is_flashmla_supported()[0] \
+                and cache_config.block_size != 64:
+                cache_config.block_size = 64
+                logger.info(
+                    "Forcing kv cache block size to 64 for FlashMLA backend.")
 
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
                 and parallel_config.data_parallel_size > 1
