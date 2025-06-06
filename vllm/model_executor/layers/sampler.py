@@ -400,29 +400,52 @@ def _apply_top_k_top_p(
     p: torch.Tensor,
     k: torch.Tensor,
 ) -> torch.Tensor:
+    # logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+
+    # # Apply top-k.
+    # top_k_mask = logits_sort.size(1) - k.to(torch.long)
+    # # Get all the top_k values.
+    # top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
+    # top_k_mask = logits_sort < top_k_mask
+    # logits_sort.masked_fill_(top_k_mask, -float("inf"))
+
+    # # Apply top-p.
+    # probs_sort = logits_sort.softmax(dim=-1)
+    # probs_sum = probs_sort.cumsum(dim=-1)
+    # top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+    # # at least one
+    # top_p_mask[:, -1] = False
+    # logits_sort.masked_fill_(top_p_mask, -float("inf"))
+
+    # # Re-sort the probabilities.
+    # logits = torch.empty_like(logits_sort).scatter_(dim=-1,
+    #                                                 index=logits_idx,
+    #                                                 src=logits_sort)
+    # return logits
+
+    batch_size, vocab_size = logits.shape
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
-
+    
     # Apply top-k.
-    top_k_mask = logits_sort.size(1) - k.to(torch.long)
-    # Get all the top_k values.
-    top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
-    top_k_mask = logits_sort < top_k_mask
+    boundary = logits_sort.gather(1, (vocab_size - k).unsqueeze(dim=1))
+    top_k_mask = logits_sort < boundary
     logits_sort.masked_fill_(top_k_mask, -float("inf"))
-
+    
     # Apply top-p.
-    probs_sort = logits_sort.softmax(dim=-1)
+    cutoff = top_k_mask.sum(dim=-1).min()
+    probs_sort = logits_sort.softmax(dim=-1)[:, cutoff:]
     probs_sum = probs_sort.cumsum(dim=-1)
-    top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
-    # at least one
-    top_p_mask[:, -1] = False
-    logits_sort.masked_fill_(top_p_mask, -float("inf"))
-
-    # Re-sort the probabilities.
-    logits = torch.empty_like(logits_sort).scatter_(dim=-1,
-                                                    index=logits_idx,
-                                                    src=logits_sort)
-    return logits
-
+    top_p_mask = probs_sum > 1 - p.unsqueeze(dim=1)
+    
+    top_p_mask[:, -1] = True
+    strides = torch.arange(0, batch_size*vocab_size, vocab_size, device=logits.device)
+    flatten_idx = logits_idx[:, cutoff:] + strides.unsqueeze(dim=1)
+    valid_idx = torch.masked_select(flatten_idx, top_p_mask)
+    logits_flatten = logits.flatten()
+    valid_logits = torch.index_select(logits_flatten, 0, valid_idx)
+    logits = torch.empty_like(logits_flatten).fill_(-float("inf"))
+    logits[valid_idx] = valid_logits
+    return logits.reshape(batch_size, vocab_size)
 
 def _apply_min_p(
     logits: torch.Tensor,
@@ -525,6 +548,27 @@ def _random_sample(
 # Note that we always sample with replacement.
 # probs will be modified in place, but this is fine, as we pass
 # in a copy already.
+# def _multinomial(
+#     probs: torch.Tensor,
+#     num_samples: int,
+#     seq_groups: Optional[list[SequenceGroupToSample]] = None,
+# ) -> torch.Tensor:
+    # if num_samples > 1:
+    #     probs = probs.repeat_interleave(num_samples, dim=0)
+    # q = torch.empty_like(probs)
+    # if seq_groups is None:
+    #     q.exponential_()
+    # else:
+    #     sample_idx = 0
+    #     for seq_group in seq_groups:
+    #         seq_ids = seq_group.seq_ids
+    #         stride = len(seq_ids) * num_samples
+    #         assert seq_group.generator is not None
+    #         q[sample_idx:sample_idx +
+    #           stride].exponential_(generator=seq_group.generator)
+    #         sample_idx += stride
+    # return probs.div_(q).argmax(dim=1).view(-1, num_samples)
+EXP_STREAM = None  # 新增
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
@@ -534,7 +578,12 @@ def _multinomial(
         probs = probs.repeat_interleave(num_samples, dim=0)
     q = torch.empty_like(probs)
     if seq_groups is None:
-        q.exponential_()
+        global EXP_STREAM  # 新增
+        if EXP_STREAM is None:  # 新增
+            EXP_STREAM = torch.npu.Stream()  # 新增
+        with torch.npu.stream(EXP_STREAM):  # 新增
+            q.exponential_()  # 新增
+        torch.npu.current_stream().wait_stream(EXP_STREAM)
     else:
         sample_idx = 0
         for seq_group in seq_groups:
