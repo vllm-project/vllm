@@ -109,7 +109,7 @@ def should_use_deepgemm(output_dtype: torch.dtype, weight: torch.Tensor):
     """
 
     return (current_platform.is_cuda()
-            and current_platform.has_device_capability(90) and has_deep_gemm
+            and current_platform.is_device_capability(90) and has_deep_gemm
             and envs.VLLM_USE_DEEP_GEMM and output_dtype == torch.bfloat16
             and weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
 
