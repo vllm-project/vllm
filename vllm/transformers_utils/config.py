@@ -876,10 +876,10 @@ def try_get_tokenizer_config(
     revision: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     try:
-        tokenizer_config = get_tokenizer_config(
+        return get_tokenizer_config(
             pretrained_model_name_or_path,
             trust_remote_code=trust_remote_code,
-            revision=revision)
-        return tokenizer_config
+            revision=revision,
+        )
     except Exception:
         return None
