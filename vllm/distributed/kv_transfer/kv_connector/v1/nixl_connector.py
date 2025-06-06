@@ -666,7 +666,6 @@ class NixlConnectorWorker:
             assert block_size == self.block_size
         else:
             raise RuntimeError(f"{self.device_type} is not supported yet.")
-        block_shape = first_kv_cache.shape[-block_rank:]
 
         # TODO(tms): self.block_len needs to be per-layer for sliding window,
         # hybrid attn, etc
@@ -703,7 +702,7 @@ class NixlConnectorWorker:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
                 caches_data.append(
-                    (base_addr, region_len, cache.device.index, ""))
+                    (base_addr, region_len, self.device.index, ""))
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
