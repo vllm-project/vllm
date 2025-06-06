@@ -28,6 +28,7 @@ from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
+from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from typing_extensions import deprecated, runtime_checkable
 
 import vllm.envs as envs
@@ -1427,6 +1428,16 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config)
+        try:
+            tokenizer_config = get_tokenizer_config(
+                self.tokenizer,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.tokenizer_revision)
+            model_max_length = getattr(tokenizer_config, "model_max_length",
+                                       max_model_len)
+            max_model_len = min(max_model_len, model_max_length)
+        except ValueError:
+            pass
         return max_model_len
 
 
