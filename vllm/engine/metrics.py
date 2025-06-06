@@ -225,7 +225,7 @@ class Metrics:
             name="vllm:normalization_flops",
             documentation="FLOPs from normalization operations.",
             labelnames=labelnames)
-        
+
         # Speculative decoding stats
         self.gauge_spec_decode_draft_acceptance_rate = self._gauge_cls(
             name="vllm:spec_decode_draft_acceptance_rate",

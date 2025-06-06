@@ -12,11 +12,11 @@ from torch._C._profiler import _EventType, _ExperimentalConfig, _ProfilerEvent
 from torch.autograd.profiler import FunctionEvent
 from torch.profiler import ProfilerActivity, profile
 
+from vllm.profiler.flop_counter import (DetailedFlopCount, FlopCounter,
+                                        format_flops)
 from vllm.profiler.utils import (TablePrinter, event_has_module,
                                  event_is_torch_op, event_module_repr,
                                  event_torch_op_stack_trace, indent_string)
-from vllm.profiler.flop_counter import (DetailedFlopCount, FlopCounter,
-                                       format_flops)
 
 
 @dataclass
@@ -147,22 +147,27 @@ class LayerwiseProfileResults(profile):
         if not self.flop_counts:
             print("No FLOP data available")
             return
-            
-        print(f"\n=== FLOP Summary ===")
+
+        print("\n=== FLOP Summary ===")
         print(f"Total FLOPs: {format_flops(self.flop_counts.total_flops)}")
-        
+
         if self.flop_counts.operation_counts:
-            print(f"\nTop Operations by FLOP Count:")
-            sorted_ops = sorted(self.flop_counts.operation_counts.items(), 
-                              key=lambda x: x[1], reverse=True)
+            print("\nTop Operations by FLOP Count:")
+            sorted_ops = sorted(self.flop_counts.operation_counts.items(),
+                                key=lambda x: x[1],
+                                reverse=True)
             for op_name, flops in sorted_ops[:10]:  # Top 10
                 print(f"  {op_name}: {format_flops(flops)}")
-        
+
         if self.flop_counts.layer_counts:
-            print(f"\nTop Layers by FLOP Count:")
-            layer_totals = [(layer, flop_count.total()) 
-                          for layer, flop_count in self.flop_counts.layer_counts.items()]
-            sorted_layers = sorted(layer_totals, key=lambda x: x[1], reverse=True)
+            print("\nTop Layers by FLOP Count:")
+            layer_totals = [
+                (layer, flop_count.total())
+                for layer, flop_count in self.flop_counts.layer_counts.items()
+            ]
+            sorted_layers = sorted(layer_totals,
+                                   key=lambda x: x[1],
+                                   reverse=True)
             for layer_name, total_flops in sorted_layers[:10]:  # Top 10
                 print(f"  {layer_name}: {format_flops(total_flops)}")
 
@@ -176,15 +181,18 @@ class LayerwiseProfileResults(profile):
             "model_stats":
             self._convert_stats_tree_to_dict(self._model_stats_tree)
         }
-        
+
         if self.flop_counts:
             result["flop_summary"] = {
                 "total_flops": self.flop_counts.total_flops,
                 "operation_counts": self.flop_counts.operation_counts,
-                "layer_counts": {layer: flop_count.to_dict() 
-                               for layer, flop_count in self.flop_counts.layer_counts.items()}
+                "layer_counts": {
+                    layer: flop_count.to_dict()
+                    for layer, flop_count in
+                    self.flop_counts.layer_counts.items()
+                }
             }
-        
+
         return result
 
     @staticmethod
@@ -273,7 +281,7 @@ class LayerwiseProfileResults(profile):
     def _total_cuda_time(self):
         return sum(
             [self._cumulative_cuda_time(root) for root in self._module_tree])
-    
+
     def _get_flop_count_for_layer(self, layer_name: str) -> int:
         """Get FLOP count for a specific layer from flop_counts.
         
@@ -282,12 +290,20 @@ class LayerwiseProfileResults(profile):
         """
         if not self.flop_counts or not self.flop_counts.layer_counts:
             return 0
-        
+
+        # First try exact match
+        if layer_name in self.flop_counts.layer_counts:
+            return self.flop_counts.layer_counts[layer_name].total()
+
+        # Then try hierarchical prefix matching (for nested modules)
         for layer, flop_count in self.flop_counts.layer_counts.items():
-            if layer_name in layer or layer in layer_name:
+            if layer_name.startswith(layer +
+                                     ".") or layer.startswith(layer_name +
+                                                              "."):
                 return flop_count.total()
+
         return 0
-    
+
     def _get_flop_count_for_operation(self, op_name: str) -> int:
         """Get FLOP count for a specific operation from flop_counts.
         
@@ -296,12 +312,19 @@ class LayerwiseProfileResults(profile):
         """
         if not self.flop_counts or not self.flop_counts.operation_counts:
             return 0
-        
+
+        # First try exact match
+        if op_name in self.flop_counts.operation_counts:
+            return self.flop_counts.operation_counts[op_name]
+
+        # Then try suffix matching for operation overloads
         for op, flops in self.flop_counts.operation_counts.items():
-            if op_name in op or op in op_name:
+            if op_name.endswith(op.split('.')[-1]) or op.endswith(
+                    op_name.split('.')[-1]):
                 return flops
+
         return 0
-    
+
     def _calculate_gflops_per_sec(self, flops: int, time_us: float) -> float:
         """Calculate GFLOPS/sec given FLOP count and time in microseconds.
         
@@ -337,7 +360,8 @@ class LayerwiseProfileResults(profile):
             else:
                 return None
 
-            gflops_per_sec = self._calculate_gflops_per_sec(flops, cuda_time_us)
+            gflops_per_sec = self._calculate_gflops_per_sec(
+                flops, cuda_time_us)
             summary_trace = summary_trace + (name, )
             if summary_trace in summary_dict:
                 entry = summary_dict[summary_trace].entry
@@ -345,7 +369,8 @@ class LayerwiseProfileResults(profile):
                 entry.flops += flops
                 entry.invocations += 1
                 entry.pct_cuda_time = pct_cuda_time(entry.cuda_time_us)
-                entry.gflops_per_sec = self._calculate_gflops_per_sec(entry.flops, entry.cuda_time_us)
+                entry.gflops_per_sec = self._calculate_gflops_per_sec(
+                    entry.flops, entry.cuda_time_us)
             else:
                 new_node = _StatsTreeNode(entry=SummaryStatsEntry(
                     name=name,
@@ -387,7 +412,8 @@ class LayerwiseProfileResults(profile):
             else:
                 return None
 
-            gflops_per_sec = self._calculate_gflops_per_sec(flops, cuda_time_us)
+            gflops_per_sec = self._calculate_gflops_per_sec(
+                flops, cuda_time_us)
             new_node = _StatsTreeNode(entry=ModelStatsEntry(
                 name=name,
                 cpu_time_us=cpu_time_us,
@@ -444,7 +470,9 @@ class LayerwiseProfileResults(profile):
 
 class layerwise_profile(profile):
 
-    def __init__(self, num_running_seqs: Optional[int] = None, enable_flop_counting: bool = False):
+    def __init__(self,
+                 num_running_seqs: Optional[int] = None,
+                 enable_flop_counting: bool = False):
         """Layerwise profile constructor.
 
         Args:
@@ -475,7 +503,7 @@ class layerwise_profile(profile):
         if self.flop_counter:
             self.flop_counter.__exit__(exc_type, exc_val, exc_tb)
             flop_counts = self.flop_counter.get_detailed_counts()
-            
+
         super().__exit__(exc_type, exc_val, exc_tb)
         self.results = LayerwiseProfileResults(
             self.profiler.kineto_results,
