@@ -174,7 +174,7 @@ def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
         bias = F.pad(bias, (0, pad_dim0_bias), mode='constant', value=0.0)
 
     if envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi3xx(
-    ) and qinput.shape[0] == 1 and qinput.shape[1] % 16 == 0:
+    ) and qinput.shape[0] == 1:
         output = ops.wvSplitKQ(weight.t(), qinput, out_dtype, scale_a, scale_b,
                                current_platform.get_cu_count())
 
