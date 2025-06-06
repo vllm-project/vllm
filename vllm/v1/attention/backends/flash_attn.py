@@ -73,8 +73,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_kv_cache_stride_order() -> tuple[int, ...]:
-        # NOTE When running disaggregated PD with NIXL, HND layout is used for
-        # faster transfer. `stride_order` indicates the permutation that gets
+        # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
         cache_layout = get_kv_connector_cache_layout()
         if cache_layout == "NHD":
@@ -82,7 +81,7 @@ class FlashAttentionBackend(AttentionBackend):
         elif cache_layout == "HND":
             stride_order = (0, 1, 3, 2, 4)
         else:
-            raise ValueError("Unknown cache layout format %s.", cache_layout)
+            raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
 
 
