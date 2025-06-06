@@ -38,7 +38,10 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               RowParallelLinear,
+                                               AttnRowParallelLinear,
+                                               AttnQKVParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -111,6 +114,11 @@ class Qwen2Attention(nn.Module):
                  prefix: str = "",
                  attn_type: str = AttentionType.DECODER) -> None:
         super().__init__()
+        from vllm.distributed import (
+                              get_lm_tensor_model_parallel_world_size,
+                              get_lm_tensor_model_parallel_rank)
+         self.hidden_size = hidden_size
+        tp_size = get_lm_tensor_model_parallel_world_size()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -131,8 +139,8 @@ class Qwen2Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-
-        self.qkv_proj = QKVParallelLinear(
+   
+        self.qkv_proj = AttnQKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
@@ -141,7 +149,7 @@ class Qwen2Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
-        self.o_proj = RowParallelLinear(
+        self.o_proj = AttnRowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
