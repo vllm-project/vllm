@@ -1156,7 +1156,6 @@ class LLM:
             engine_prompt = TokensPrompt(
                 prompt_token_ids=prompt_inputs["input_ids"],
                 token_type_ids=prompt_inputs.get("token_type_ids"))
-
             parsed_prompts.append(engine_prompt)
 
         self._validate_and_add_requests(
