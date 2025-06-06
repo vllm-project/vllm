@@ -414,7 +414,7 @@ def get_general_autotune_configs():
             num_warps=4),
     ], [
         'IS_CAUSAL', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
-        'IS_ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
+        'VARLEN', 'HQ', 'HK'
     ]
 
 
