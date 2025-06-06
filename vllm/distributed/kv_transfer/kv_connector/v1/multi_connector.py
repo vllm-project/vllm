@@ -153,6 +153,7 @@ class MultiConnector(KVConnectorBase_V1):
                                  num_external_tokens: int):
         chosen_connector = self._requests_to_connector.get(
             request.request_id, -1)
+        empty_blocks = blocks.new_empty()
         for i, c in enumerate(self._connectors):
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
@@ -160,8 +161,7 @@ class MultiConnector(KVConnectorBase_V1):
                                            num_external_tokens)
             else:
                 # Call with empty blocks for other connectors.
-                c.update_state_after_alloc(request,
-                                           KVCacheBlocks.create_empty(), 0)
+                c.update_state_after_alloc(request, empty_blocks, 0)
 
     def build_connector_meta(
             self,
