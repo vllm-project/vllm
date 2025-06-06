@@ -130,9 +130,11 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 block_size=self.block_size,
             )
 
-        if self.max_block_sliding_window is not None:
-            num_required_blocks = min(num_required_blocks,
-                                      self.max_block_sliding_window)
+        # FIXME: Ideally self.max_block_sliding_window blocks should be
+        # sufficient, but this does not hold at the prefill stage.
+        # if self.max_block_sliding_window is not None:
+        #     num_required_blocks = min(num_required_blocks,
+        #                               self.max_block_sliding_window)
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             device=Device.GPU)
