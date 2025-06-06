@@ -398,7 +398,7 @@ class SamplingTensors:
         vocab_size: int,
         device: torch.device,
         dtype: torch.dtype,
-    ) -> Tuple["SamplingTensors", bool, bool, bool, Optional[int],
+    ) -> tuple["SamplingTensors", bool, bool, bool, Optional[int],
                Optional[float]]:
         prompt_tokens: List[array] = []
         output_tokens: List[array] = []
