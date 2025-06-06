@@ -31,6 +31,9 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQMarlinConfig)
 from vllm.model_executor.models.aimv2 import AIMv2Model
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.utils import (AutoWeightsLoader, flatten_bn,
@@ -431,8 +434,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
         # seems to avoid vision encoder sections for some models.
         # See: https://huggingface.co/AIDC-AI/Ovis2-2B-GPTQ-Int4
-        if (quant_config is not None
-                and quant_config.get_name() in ("gptq", "gptq_marlin")):
+        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
             return None
         return quant_config
 

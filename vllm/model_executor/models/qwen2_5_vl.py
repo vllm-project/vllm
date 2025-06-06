@@ -49,6 +49,9 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQMarlinConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -859,8 +862,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
         # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
         # seems to avoid vision encoder sections for some models.
-        if (quant_config is not None
-                and quant_config.get_name() in ("gptq", "gptq_marlin")):
+        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
             return None
         return quant_config
 

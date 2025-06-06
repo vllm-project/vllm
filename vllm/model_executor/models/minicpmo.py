@@ -35,6 +35,9 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.gptq import GPTQConfig
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQMarlinConfig)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
@@ -517,8 +520,7 @@ class MiniCPMO(MiniCPMV2_6):
         # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
         # seems to avoid vision encoder sections for some models.
         # See: https://huggingface.co/openbmb/MiniCPM-o-2_6-int4
-        if (quant_config is not None
-                and quant_config.get_name() in ("gptq", "gptq_marlin")):
+        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
             return None
         return quant_config
 
