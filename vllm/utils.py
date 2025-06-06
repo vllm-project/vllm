@@ -899,6 +899,7 @@ class DeviceMemoryProfiler:
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
         from vllm.platforms import current_platform
+        gc.collect()
         return current_platform.get_current_memory_usage(self.device)
 
     def __enter__(self):
