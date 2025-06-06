@@ -41,7 +41,7 @@ from vllm.triton_utils import triton
             # "int8-channel-w-tensor-a-noquant",
         ],
         ylabel="TFLOP/s (larger is better)",
-        plot_name="BF16 vs int8 GEMMs",
+        plot_name="BF16 vs INT8 GEMMs",
         args={},
     )
 )
@@ -188,7 +188,7 @@ if __name__ == "__main__":
 
     KN_model_names = prepare_shapes(args)
     for K, N, model_name in KN_model_names:
-        print(f"{model_name}, N={N} K={K}, BF16 vs int8 GEMMs TFLOP/s:")
+        print(f"{model_name}, N={N} K={K}, BF16 vs INT8 GEMMs TFLOP/s:")
         benchmark.run(
             print_data=True,
             show_plots=True,
