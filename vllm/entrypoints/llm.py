@@ -541,6 +541,7 @@ class LLM:
                 of token IDs.
             params: The beam search parameters.
             lora_request: LoRA request to use for generation, if any.
+            use_tqdm: Whether to use tqdm to display the progress bar.
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
