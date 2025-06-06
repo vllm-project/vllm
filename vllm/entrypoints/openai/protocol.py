@@ -257,7 +257,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
 
     # --8<-- [start:chat-completion-sampling-params]
-    allowed_token_ids: Optional[list[int]] = None
     best_of: Optional[int] = None
     use_beam_search: bool = False
     top_k: Optional[int] = None
@@ -272,6 +271,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     prompt_logprobs: Optional[int] = None
+    allowed_token_ids: Optional[list[int]] = None
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
