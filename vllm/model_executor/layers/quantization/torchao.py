@@ -17,6 +17,23 @@ from vllm.model_executor.utils import set_weight_attrs
 logger = init_logger(__name__)
 
 
+def should_skip(prefix: str, skip_modules: list[str]) -> bool:
+    """
+    Robust skipping logic: 
+    should_skip("model.model.layers.1.q_proj", ["model.model.layers.1.q_proj"]) #True
+    should_skip("model.model.layers.10.o_proj", ["o_proj"]) -> True
+    should_skip("visual.model.layers.1.q_proj", ["visual"]) -> True
+    should_skip("model.model.layers.1.q_proj", ["layers.1"]) -> True
+    should_skip("model.model.layers.11.q_proj", ["layers.1"]) -> False
+    """
+    for s in skip_modules:
+        if prefix == s:
+            return True
+        if f".{s}." in f".{prefix}.":
+            return True
+    return False
+
+
 class TorchAOConfig(QuantizationConfig):
     """Config class for torchao."""
 
@@ -93,7 +110,7 @@ class TorchAOConfig(QuantizationConfig):
 
         from torchao.quantization import ModuleFqnToConfig
 
-        if any(s in prefix for s in self.skip_modules):
+        if should_skip(prefix, self.skip_modules):
             return UnquantizedLinearMethod()
 
         module_fqn = prefix
