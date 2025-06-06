@@ -12,12 +12,12 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
                            SequenceGroupMetadata)
+from vllm.spec_decode.interfaces import SpeculativeProposals
 
 if current_platform.is_cuda_alike():
     from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 
-from vllm.spec_decode.interfaces import (SpeculativeProposals,
-                                         SpeculativeProposer)
+from vllm.spec_decode.interfaces import SpeculativeProposer
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker_base import DelegateWorkerBase
@@ -87,7 +87,8 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         model_outputs: List[SamplerOutput] = []
         if current_platform.is_cuda_alike() and isinstance(
                 self.model_runner, TP1DraftModelRunner
-        ) and self.model_runner.supports_gpu_multi_step(expanded_request):
+        ) and self.model_runner.supports_gpu_multi_step(
+                expanded_request) and not self.pard:
             # Here we run the draft_model_runner with multi-step prepare
             # on the GPU directly
             expanded_request.num_steps = sample_len
@@ -103,6 +104,12 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
             # supports_gpu_multi_step(..)
             if expanded_request.previous_hidden_states is not None:
                 self.worker.model_runner.return_hidden_states = True
+
+            if hasattr(self, "pard") and self.pard is True:
+                filtered_model_outputs = self.pard_infer(
+                    expanded_request, sample_len)
+                return filtered_model_outputs, True
+
             for _ in range(sample_len):
                 model_output: List[SamplerOutput] = self.worker.execute_model(
                     execute_model_req=expanded_request)
@@ -123,6 +130,107 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         filtered_model_outputs = self._filter_model_output(
             model_outputs, indices_of_seq_with_bonus_tokens)
         return filtered_model_outputs, True
+
+    def pard_infer(self, expanded_request: ExecuteModelRequest,
+                   sample_len: int) -> List[SamplerOutput]:
+        # prepare recompute kv token
+        # update seq_group_metadata_list
+        mask_token_id = self.pard_token
+        request_by_id: Dict[str, List[SequenceGroupMetadata]] = {}
+        for tmp in expanded_request.seq_group_metadata_list:
+            name = tmp.request_id
+            request_by_id[name] = request_by_id.get(name, [])
+            request_by_id[name].append(tmp)
+        all_rm_token_ids = []
+        new_request_list = []
+        for name, tmp_request in request_by_id.items():
+            seq_num_base = len(tmp_request)
+            group_key = list(tmp_request[-1].seq_data.keys())[0]
+            output_token_ids = tmp_request[-1].seq_data[
+                group_key].output_token_ids
+            rm_num = min(sample_len - 1 + seq_num_base - 1,
+                         len(output_token_ids) - 1)
+            rm_token_ids = list(output_token_ids[len(output_token_ids) -
+                                                 rm_num:])
+            all_rm_token_ids.append(rm_token_ids)
+            tmp_new_requests = tmp_request[-1]
+            tmp_new_requests.seq_data[
+                group_key].output_token_ids = output_token_ids[:len(
+                    output_token_ids) - rm_num]
+            tmp_new_requests.seq_data[group_key]._num_computed_tokens -= rm_num
+            new_request_list.append(tmp_new_requests)
+        expanded_request.seq_group_metadata_list = new_request_list
+        max_rm_num = max([len(i) for i in all_rm_token_ids])
+
+        # get proposal
+        proposal = SpeculativeProposals(
+            proposal_token_ids=torch.tensor([
+                rm_token_ids + [
+                    mask_token_id for i in range(sample_len - 1 + max_rm_num -
+                                                 len(rm_token_ids))
+                ] for rm_token_ids in all_rm_token_ids
+            ],
+                                            device=self.device),
+            proposal_probs=torch.tensor([sample_len - 1 + max_rm_num] *
+                                        len(new_request_list),
+                                        device=self.device),  #fake
+            proposal_lens=torch.tensor([sample_len - 1 + max_rm_num] *
+                                       len(new_request_list),
+                                       device=self.device))
+
+        # pard forward
+        keep_index = []
+        rm_token_num = []
+        rm_token_num_sum = []
+        for i, rm_token_ids in enumerate(all_rm_token_ids):
+            keep_index.extend([
+                i * (sample_len + max_rm_num) + j
+                for j in range(sample_len + len(rm_token_ids))
+            ])
+            rm_token_num.append(len(rm_token_ids))
+            rm_token_num_sum.append(sum(rm_token_num))
+
+        pard_draft_out = self.pard_scorer.score_proposals(
+            expanded_request,
+            proposal,
+            return_output=True,
+            keep_index=keep_index)
+
+        # align probs shape of target and draft model
+        target_dim = self.pard_scorer._vocab_size
+        if pard_draft_out.sampled_token_probs.shape[1] > target_dim:
+            tmp_draft_probs = pard_draft_out.sampled_token_probs[:, :
+                                                                 target_dim]
+            pard_draft_out.sampled_token_probs = tmp_draft_probs
+        elif pard_draft_out.sampled_token_probs.shape[1] < target_dim:
+            pard_draft_out.sampled_token_probs = torch.nn.functional.pad(
+                pard_draft_out.sampled_token_probs,
+                (0, target_dim - pard_draft_out.sampled_token_probs.shape[1]),
+                value=0)
+
+        # get output
+        output_indices = torch.tensor([[
+            i + tmp_rm + j * sample_len
+            for j, tmp_rm in enumerate(rm_token_num_sum)
+        ] for i in range(sample_len)],
+                                      device=self.device)
+        filtered_model_outputs = [
+            SamplerOutput(
+                outputs=[
+                    pard_draft_out.outputs[i] for i in output_indices_to_retain
+                ] if len(pard_draft_out.outputs) > 0 else [],
+                sampled_token_probs=(
+                    pard_draft_out.
+                    sampled_token_probs[output_indices_to_retain] if
+                    pard_draft_out.sampled_token_probs is not None else None),
+                logprobs=(pard_draft_out.logprobs[output_indices_to_retain]
+                          if pard_draft_out.logprobs is not None else None),
+                sampled_token_ids=(
+                    pard_draft_out.sampled_token_ids[output_indices_to_retain]
+                    if pard_draft_out.sampled_token_ids is not None else None))
+            for output_indices_to_retain in output_indices
+        ]
+        return filtered_model_outputs
 
     @staticmethod
     def _maybe_update_previous_hidden_states(
