@@ -354,6 +354,9 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
                                 prefix=maybe_prefix(prefix, "model"))
         self.prefix = prefix
         self.num_labels = getattr(config, "num_labels", 2)
+        if self.num_labels == 2:
+            self.num_labels = 1
+
         self.classifier = RowParallelLinear(config.hidden_size,
                                             self.num_labels,
                                             quant_config=quant_config,
@@ -385,10 +388,14 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
         hidden_states = self._pooler.extract_states(hidden_states,
                                                     pooling_metadata)
         logits, _ = self.classifier(hidden_states)
-        batch_scores = torch.nn.functional.log_softmax(logits.to(
-            torch.float32),
-                                                       dim=1)
-        scores = batch_scores[:, 1].exp()
+
+        if self.num_labels == 1:
+            scores = logits.squeeze(-1).to(torch.float32).sigmoid()
+        else:
+            batch_scores = torch.nn.functional.log_softmax(logits.to(
+                torch.float32),
+                                                           dim=1)
+            scores = batch_scores[:, 1].exp()
 
         pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]
         return PoolerOutput(outputs=pooled_outputs)
@@ -420,7 +427,8 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
         if tokens is None:
             return loaded_weights
 
-        assert len(tokens) == self.num_labels
+        assert len(tokens) == self.num_labels or (len(tokens) == 2
+                                                  and self.num_labels == 1)
 
         from vllm.transformers_utils.tokenizer import get_tokenizer
         tokenizer = get_tokenizer(
@@ -429,9 +437,16 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
             tokenizer_mode=self.model_config.tokenizer_mode,
             trust_remote_code=self.model_config.trust_remote_code)
 
-        for i, token in enumerate(tokens):
-            token_id = tokenizer.convert_tokens_to_ids(token)
-            self.classifier.weight.data[i] = self.lm_head.weight.data[token_id]
+        if len(tokens) == 2:
+            a = tokenizer.convert_tokens_to_ids(tokens[0])
+            b = tokenizer.convert_tokens_to_ids(tokens[1])
+            self.classifier.weight.data = self.lm_head.weight.data[
+                b] - self.lm_head.weight.data[a]
+        else:
+            for i, token in enumerate(tokens):
+                token_id = tokenizer.convert_tokens_to_ids(token)
+                self.classifier.weight.data[i] = self.lm_head.weight.data[
+                    token_id]
 
         del self.lm_head
         loaded_weights.add("classifier.weight")
