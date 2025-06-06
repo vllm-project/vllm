@@ -385,7 +385,9 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
         hidden_states = self._pooler.extract_states(hidden_states,
                                                     pooling_metadata)
         logits, _ = self.classifier(hidden_states)
-        batch_scores = torch.nn.functional.log_softmax(logits, dim=1)
+        batch_scores = torch.nn.functional.log_softmax(logits.to(
+            torch.float32),
+                                                       dim=1)
         scores = batch_scores[:, 1].exp()
 
         pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]

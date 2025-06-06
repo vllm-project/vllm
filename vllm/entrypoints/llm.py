@@ -1130,6 +1130,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        process_inputs: Optional[Callable] = None,
     ) -> list[ScoringRequestOutput]:
 
         if isinstance(tokenizer, MistralTokenizer):
@@ -1150,12 +1151,17 @@ class LLM:
         parsed_prompts = []
 
         for q, t in input_pairs:
-            prompt_inputs = tokenizer(text=q,
-                                      text_pair=t,
-                                      **tokenization_kwargs)
+            if process_inputs is not None:
+                text = process_inputs(q, t)
+                prompt_inputs = tokenizer(text=text, **tokenization_kwargs)
+            else:
+                prompt_inputs = tokenizer(text=q,
+                                          text_pair=t,
+                                          **tokenization_kwargs)
             engine_prompt = TokensPrompt(
                 prompt_token_ids=prompt_inputs["input_ids"],
                 token_type_ids=prompt_inputs.get("token_type_ids"))
+
             parsed_prompts.append(engine_prompt)
 
         self._validate_and_add_requests(
@@ -1182,6 +1188,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        process_inputs: Optional[Callable] = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>`.
 
@@ -1258,11 +1265,9 @@ class LLM:
         _validate_score_input_lens(input_text_1, input_text_2)
 
         if self.llm_engine.model_config.is_cross_encoder:
-            return self._cross_encoding_score(tokenizer, input_text_1,
-                                              input_text_2,
-                                              truncate_prompt_tokens, use_tqdm,
-                                              lora_request,
-                                              prompt_adapter_request)
+            return self._cross_encoding_score(
+                tokenizer, input_text_1, input_text_2, truncate_prompt_tokens,
+                use_tqdm, lora_request, prompt_adapter_request, process_inputs)
         else:
             return self._embedding_score(
                 tokenizer,
