@@ -248,8 +248,7 @@ class Qwen3Model(Qwen2Model):
                          decoder_layer_type=Qwen3DecoderLayer)
 
 
-class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
-                       SupportsCrossEncoding):
+class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -292,12 +291,6 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-        if vllm_config.model_config.task == "score":
-            pooler_config = vllm_config.model_config.pooler_config
-            assert pooler_config is not None
-
-            self._pooler = LastPool(normalize=False, softmax=False)
-
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
@@ -321,6 +314,81 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                                        sampling_metadata)
         return logits
 
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)
+
+
+class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
+                                     SupportsCrossEncoding):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
+        self.config = config
+        self.lora_config = lora_config
+
+        self.quant_config = quant_config
+        self.model = Qwen3Model(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
+
+        if get_pp_group().is_last_rank:
+            if config.tie_word_embeddings:
+                self.lm_head = self.model.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(config.vocab_size,
+                                              config.hidden_size,
+                                              quant_config=quant_config,
+                                              prefix=maybe_prefix(
+                                                  prefix, "lm_head"))
+        else:
+            self.lm_head = PPMissingLayer()
+
+        self.score = RowParallelLinear(config.hidden_size,
+                                       getattr(config, "num_labels", 2),
+                                       quant_config=quant_config,
+                                       input_is_parallel=False,
+                                       bias=False,
+                                       prefix=maybe_prefix(prefix, "score"))
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self._pooler = LastPool(normalize=False, softmax=False)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
+        return hidden_states
+
     def pooler(
         self,
         hidden_states: torch.Tensor,
@@ -328,18 +396,8 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
     ) -> PoolerOutput:
         hidden_states = self._pooler.extract_states(hidden_states,
                                                     pooling_metadata)
-        logits = self.logits_processor._get_logits(hidden_states=hidden_states,
-                                                   lm_head=self.lm_head,
-                                                   embedding_bias=None)
-
-        token_false_id = 2152
-        token_true_id = 9693
-
-        true_vector = logits[:, token_true_id]
-        false_vector = logits[:, token_false_id]
-        batch_scores = torch.stack([false_vector, true_vector], dim=1)
-
-        batch_scores = torch.nn.functional.log_softmax(batch_scores, dim=1)
+        logits, _ = self.score(hidden_states)
+        batch_scores = torch.nn.functional.log_softmax(logits, dim=1)
         scores = batch_scores[:, 1].exp()
 
         pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]
@@ -352,4 +410,16 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+
+        loaded_weights = loader.load_weights(weights)
+
+        TOKEN_FALSE_ID = 2152
+        TOKEN_TRUE_ID = 9693
+
+        self.score.weight.data[0] = self.lm_head.weight.data[TOKEN_FALSE_ID]
+        self.score.weight.data[1] = self.lm_head.weight.data[TOKEN_TRUE_ID]
+
+        del self.lm_head
+
+        loaded_weights.add("score.weight")
+        return loaded_weights
