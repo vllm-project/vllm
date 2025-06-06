@@ -338,18 +338,24 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
+            logger.exception("AsyncLLM generate failed. request_id %s",
+                             request_id)
             raise
 
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:
             if self.log_requests:
                 logger.info("Request %s failed (engine dead).", request_id)
+            logger.exception("AsyncLLM generate failed. request_id %s",
+                             request_id)
             raise
 
         # Request validation error.
         except ValueError:
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
+            logger.exception("AsyncLLM generate failed. request_id %s",
+                             request_id)
             raise
 
         # Unexpected error in the generate() task (possibly recoverable).
@@ -357,6 +363,8 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
+            logger.exception("AsyncLLM generate failed. request_id %s",
+                             request_id)
             raise EngineGenerateError() from e
 
     def _run_output_handler(self):
