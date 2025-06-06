@@ -263,7 +263,7 @@ class InputBatch:
         return cast(list[str], self._req_ids)
 
     def _get_next_add_index(self) -> int:
-        if req_index := self.batch_update.pop_removed_if_can():
+        if (req_index := self.batch_update.pop_removed_if_can()) is not None:
             # Fill the empty index.
             return req_index
         # Append to end
