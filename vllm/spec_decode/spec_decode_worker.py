@@ -785,6 +785,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             proposals = self.proposer_worker.get_spec_proposals(
                 execute_model_req, self._seq_with_bonus_token_in_last_step)
 
+        if self._vocab_size_delta > 0:
+            proposals.proposal_probs = torch.nn.functional.pad(
+                proposals.proposal_probs, (0, self._vocab_size_delta))
+
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
             raise RuntimeError("Cannot handle cases where distributed draft "
@@ -1253,12 +1257,23 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         """Get the vocab size of the model and make sure it's consistent between
         draft and target workers.
         """
-        vocab_sizes = [
-            worker.vocab_size
-            for worker in [self.proposer_worker, self.scorer_worker]
-        ]
-        assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
-        return vocab_sizes[0]
+        proposer_vocab_size = self.proposer_worker.vocab_size
+        scorer_vocab_size = self.scorer_worker.vocab_size
+
+        has_small_delta = proposer_vocab_size < scorer_vocab_size and \
+            self._vocab_size_delta <= 128
+
+        if proposer_vocab_size != scorer_vocab_size and not has_small_delta:
+            raise ValueError(
+                f"Vocab size mismatch between draft and target models: "
+                f"{proposer_vocab_size} != {scorer_vocab_size}")
+
+        return scorer_vocab_size
+
+    @cached_property
+    def _vocab_size_delta(self) -> int:
+        """Get the vocab size difference between target and draft workers."""
+        return self.scorer_worker.vocab_size - self.proposer_worker.vocab_size
 
     @property
     def rank(self):
