@@ -162,6 +162,7 @@ _EMBEDDING_MODELS = {
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
     "PrithviGeoSpatialMAE": ("prithvi_geospatial_mae", "PrithviGeoSpatialMAE"),
+    "GPTBigCodeForEmbedding": ("gpt_bigcode_embedding", "GPTBigCodeForEmbedding"),
 }
 
 _CROSS_ENCODER_MODELS = {
