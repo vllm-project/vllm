@@ -519,3 +519,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         cached in the block manager for the sequence.
         """
         return self._computed_blocks_tracker.get_num_cached_tokens(seq)
+    
+    def clear_computed_blocks_tracker(self, seq_group: SequenceGroup):
+        for seq in seq_group.get_seqs():
+            self._computed_blocks_tracker.remove_seq(seq.seq_id)
