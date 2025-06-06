@@ -566,8 +566,9 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
 
-        if isinstance(prepare_finalize,
-                      (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
+        if has_pplx and isinstance(
+                prepare_finalize,
+            (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
             # no expert_map support in this case
             self.disable_expert_map = True
         return experts

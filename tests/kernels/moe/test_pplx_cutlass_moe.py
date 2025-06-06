@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 import torch
@@ -11,8 +12,6 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
-from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-    PplxPrepareAndFinalize)
 from vllm.platforms import current_platform
 
 try:
@@ -66,6 +65,8 @@ def pplx_cutlass_moe(
     per_act_token: bool,
     per_out_ch: bool,
 ):
+    from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
+        PplxPrepareAndFinalize)
     assert torch.cuda.current_device() == pgi.local_rank
 
     num_tokens, hidden_dim = a.shape
