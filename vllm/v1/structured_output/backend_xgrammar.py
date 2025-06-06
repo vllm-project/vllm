@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -10,12 +8,14 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 import vllm.envs
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
-from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
-                                                     StructuredOutputGrammar,
+from vllm.v1.structured_output.backend_bitmasking import (
+    BitmaskGrammar, BitmaskStructuredOutputBackend)
+from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
                                                      StructuredOutputOptions)
 from vllm.v1.structured_output.utils import (choice_as_grammar,
                                              convert_lark_to_ebnf,
@@ -23,19 +23,26 @@ from vllm.v1.structured_output.utils import (choice_as_grammar,
 
 if TYPE_CHECKING:
     import xgrammar as xgr
+
+    from vllm.reasoning import ReasoningParser
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
+
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
 
 
-@dataclass
-class XgrammarBackend(StructuredOutputBackend):
+class XgrammarBackend(BitmaskStructuredOutputBackend):
 
-    def __post_init__(self):
+    def __init__(self, vllm_config: VllmConfig, tokenizer: "AnyTokenizer",
+                 vocab_size: int, reasoner: "ReasoningParser"):
+        super().__init__(vllm_config, tokenizer, vocab_size, reasoner)
+
         self.disable_any_whitespace = \
             self.vllm_config.decoding_config.disable_any_whitespace
 
+        self.vocab_size = vllm_config.model_config.get_vocab_size()
         if isinstance(self.tokenizer, MistralTokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
@@ -133,7 +140,7 @@ class XgrammarBackend(StructuredOutputBackend):
 
 
 @dataclass
-class XgrammarGrammar(StructuredOutputGrammar):
+class XgrammarGrammar(BitmaskGrammar):
     # NOTE: This would be a generic-enough class for
     # supporting different backends, in the future.
     # For now, just xgrammar.
