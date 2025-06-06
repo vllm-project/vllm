@@ -106,11 +106,16 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: Optional[int] = None
 
 
+class CompletionTokensDetails(OpenAIBaseModel):
+    reasoning_tokens: Optional[int] = None
+
+
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
+    completion_tokens_details: Optional[CompletionTokensDetails] = None
 
 
 class RequestResponseMetadata(BaseModel):
