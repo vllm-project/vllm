@@ -48,6 +48,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.streaming_params import StreamingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import Device, deprecate_kwargs
 
@@ -447,6 +448,7 @@ class MQLLMEngineClient(EngineClient):
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
+        streaming_params: StreamingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -462,6 +464,7 @@ class MQLLMEngineClient(EngineClient):
         *,
         inputs: PromptType,
         sampling_params: SamplingParams,
+        streaming_params: StreamingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -478,6 +481,7 @@ class MQLLMEngineClient(EngineClient):
         self,
         prompt: Optional[PromptType] = None,
         sampling_params: Optional[SamplingParams] = None,
+        streaming_params: Optional[StreamingParams] = None,
         request_id: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -512,8 +516,9 @@ class MQLLMEngineClient(EngineClient):
                 and request_id is not None)
 
         return self._process_request(prompt, sampling_params, request_id,
-                                     lora_request, trace_headers,
-                                     prompt_adapter_request, priority)
+                                     streaming_params, lora_request,
+                                     trace_headers, prompt_adapter_request,
+                                     priority)
 
     @overload
     def encode(
@@ -594,6 +599,7 @@ class MQLLMEngineClient(EngineClient):
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
+        streaming_params: Optional[StreamingParams] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -664,6 +670,8 @@ class MQLLMEngineClient(EngineClient):
             # queue after pulling them from the zmq socket.
             finished = False
             try:
+                buffer = None  # buffer of output tokens
+                buffer_token_count = 0
                 while not finished:
                     request_output = await queue.get()
 
@@ -671,7 +679,24 @@ class MQLLMEngineClient(EngineClient):
                         raise request_output
 
                     finished = request_output.finished
-                    yield request_output
+                    if buffer is None:
+                        buffer = request_output
+                    else:
+                        buffer.add(request_output, aggregate=True)
+
+                    if isinstance(request_output, RequestOutput):
+                        buffer_token_count += sum(
+                            len(o.token_ids) for o in request_output.outputs)
+                    else:
+                        buffer_token_count += 1
+                    if streaming_params is None or \
+                        buffer_token_count >= streaming_params.stream_n or \
+                        finished:
+
+                        yield buffer
+                        buffer = None
+                        buffer_token_count = 0
+
             finally:
                 # Request was canceled by the client.
                 if not finished and not self.errored:
