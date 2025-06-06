@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import subprocess
 import sys
 from typing import Union
@@ -31,14 +32,6 @@ EXPECTED_LORA_OUTPUT = [
     "  SELECT pick FROM table_name_60 WHERE former_wnba_team = 'Minnesota Lynx' ",  # noqa: E501
     "  SELECT womens_doubles FROM table_28138035_4 WHERE mens_singles = 'Werner Schlager' "  # noqa: E501
 ]
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def do_sample(llm: vllm.LLM,
@@ -207,7 +200,7 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
     try:
         result = subprocess.run([
             sys.executable,
-            f"{VLLM_PATH}/examples/other/tensorize_vllm_model.py", "--model",
+            f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py", "--model",
             MODEL_PATH, "--lora-path", lora_path, "--tensor-parallel-size",
             str(tp_size), "serialize", "--serialized-directory",
             str(tmp_path), "--suffix", suffix

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-import re
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import subprocess
 import sys
+
+import regex as re
 
 FORBIDDEN_IMPORT_RE = re.compile(r"^(from|import)\s+triton(\s|\.|$)")
 

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import platform
 import sys
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
@@ -21,6 +23,15 @@ else:
     VllmConfig = None
 
 
+def get_max_threads(pid=0):
+    if hasattr(os, 'sched_getaffinity'):
+        return len(os.sched_getaffinity(pid))
+    elif platform.system() == 'Darwin':
+        return os.cpu_count()
+    else:
+        raise NotImplementedError("Unsupported OS")
+
+
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
     device_name: str = "cpu"
@@ -28,7 +39,7 @@ class CpuPlatform(Platform):
     dispatch_key: str = "CPU"
 
     @property
-    def supported_dtypes(self) -> list:
+    def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
         elif sys.platform.startswith(
@@ -56,7 +67,10 @@ class CpuPlatform(Platform):
             logger.info("Using CPU MLA backend.")
             return "vllm.attention.backends.cpu_mla.CPUMLABackend"
         logger.info("Using Torch SDPA backend.")
-        return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
+        if use_v1:
+            return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
+        else:
+            return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -79,6 +93,8 @@ class CpuPlatform(Platform):
         # If the feature combo become valid
         if not model_config.enforce_eager:
             model_config.enforce_eager = True
+
+        model_config.disable_cascade_attn = True
 
         cache_config = vllm_config.cache_config
 
@@ -127,7 +143,8 @@ class CpuPlatform(Platform):
                 f" {kv_cache_space}, expect a positive integer value.")
 
         parallel_config = vllm_config.parallel_config
-        if (parallel_config.distributed_executor_backend is not None
+        if (parallel_config.world_size > 1
+                and parallel_config.distributed_executor_backend is not None
                 and parallel_config.distributed_executor_backend != "mp"):
             logger.warning(("%s is not supported on CPU, fallback to mp "
                             "distributed executor backend."),
@@ -140,13 +157,50 @@ class CpuPlatform(Platform):
                 parallel_config.sd_worker_cls = \
                     "vllm.worker.cpu_worker.CPUWorker"
             else:
-                parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
+                if envs.VLLM_USE_V1:
+                    parallel_config.worker_cls = \
+                        "vllm.v1.worker.cpu_worker.CPUWorker"
+                else:
+                    parallel_config.worker_cls = \
+                        "vllm.worker.cpu_worker.CPUWorker"
+
+        # Note: workaround for v1 gpu_model_runner
+        from vllm.config import CompilationLevel
+        vllm_config.compilation_config.cudagraph_capture_sizes = []
+
+        compilation_config = vllm_config.compilation_config
+        if (envs.VLLM_USE_V1 and vllm_config.compilation_config.level
+                == CompilationLevel.PIECEWISE):
+            compilation_config.level = CompilationLevel.DYNAMO_ONCE
+            compilation_config.backend = "eager"
+            compilation_config.custom_ops += ["none"]
+            compilation_config.inductor_compile_config.update({
+                "dce":
+                True,
+                "size_asserts":
+                False,
+                "nan_asserts":
+                False,
+                "memory_planning":
+                True,
+                "epilogue_fusion":
+                True,
+            })
+
+        if vllm_config.lora_config is not None:
+            compilation_config.level = CompilationLevel.NO_COMPILATION
 
         assert vllm_config.device_config.device_type == "cpu"
 
         #
         # Environment variables for CPU executor
         #
+
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        # Note: to avoid the error 'nthreads cannot be larger than environment
+        #  variable "NUMEXPR_MAX_THREADS" (64)'.
+        os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
         # Set default threads num for OpenMP parallel
         os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
@@ -170,13 +224,6 @@ class CpuPlatform(Platform):
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size)
-        if sys.platform == "darwin" and \
-                envs.VLLM_WORKER_MULTIPROC_METHOD == "fork":
-            if os.environ.get('VLLM_WORKER_MULTIPROC_METHOD', None) is None:
-                logger.warning(
-                    "Default to spawn method on MacOS. If this is not desired,"
-                    " set VLLM_WORKER_MULTIPROC_METHOD to fork explicitly.")
-                os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
 
         if vllm_config.model_config and vllm_config.model_config.use_mla:
             logger.info(
@@ -203,3 +250,14 @@ class CpuPlatform(Platform):
         Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa
+
+    @classmethod
+    def supports_structured_output(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_v1(cls, model_config) -> bool:
+        """Returns whether the current platform can support v1 for the supplied
+        model configuration.
+        """
+        return True

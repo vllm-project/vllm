@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import copy
@@ -441,6 +442,7 @@ class _AsyncLLMEngine(LLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        data_parallel_rank: Optional[int] = None,
     ) -> None:
         ...
 
@@ -455,6 +457,7 @@ class _AsyncLLMEngine(LLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        data_parallel_rank: Optional[int] = None,
     ) -> None:
         ...
 
@@ -472,10 +475,12 @@ class _AsyncLLMEngine(LLMEngine):
             trace_headers: Optional[Mapping[str, str]] = None,
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
             priority: int = 0,
+            data_parallel_rank: Optional[int] = None,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> None:
-        """Async version of {meth}`add_request`."""
+        """Async version of
+        [`add_request`][vllm.engine.llm_engine.LLMEngine.add_request]."""
         if inputs is not None:
             prompt = inputs
         assert prompt is not None and params is not None
@@ -582,20 +587,21 @@ async def build_guided_decoding_logits_processor_async(
 
 
 class AsyncLLMEngine(EngineClient):
-    """An asynchronous wrapper for {class}`LLMEngine`.
+    """An asynchronous wrapper for [`LLMEngine`][vllm.LLMEngine].
 
-    This class is used to wrap the {class}`LLMEngine` class to make it
-    asynchronous. It uses asyncio to create a background loop that keeps
-    processing incoming requests. The {class}`LLMEngine` is kicked by the
-    generate method when there are requests in the waiting queue. The generate
-    method yields the outputs from the {class}`LLMEngine` to the caller.
+    This class is used to wrap the [`LLMEngine`][vllm.LLMEngine] class to
+    make it asynchronous. It uses asyncio to create a background loop that keeps
+    processing incoming requests. The [`LLMEngine`][vllm.LLMEngine] is kicked
+    by the generate method when there are requests in the waiting queue. The
+    generate method yields the outputs from the [`LLMEngine`][vllm.LLMEngine]
+    to the caller.
 
     Args:
         log_requests: Whether to log the requests.
         start_engine_loop: If True, the background task to run the engine
             will be automatically started in the generate call.
-        *args: Arguments for {class}`LLMEngine`.
-        **kwargs: Arguments for {class}`LLMEngine`.
+        *args: Arguments for [`LLMEngine`][vllm.LLMEngine].
+        **kwargs: Arguments for [`LLMEngine`][vllm.LLMEngine].
     """
 
     _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
@@ -899,6 +905,7 @@ class AsyncLLMEngine(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        data_parallel_rank: Optional[int] = None,
     ) -> Coroutine[None, None, AsyncGenerator[Union[
             RequestOutput, PoolingRequestOutput], None]]:
         ...
@@ -914,6 +921,7 @@ class AsyncLLMEngine(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        data_parallel_rank: Optional[int] = None,
     ) -> Coroutine[None, None, AsyncGenerator[Union[
             RequestOutput, PoolingRequestOutput], None]]:
         ...
@@ -932,6 +940,7 @@ class AsyncLLMEngine(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        data_parallel_rank: Optional[int] = None,
         *,
         inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
@@ -964,6 +973,7 @@ class AsyncLLMEngine(EngineClient):
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
             priority=priority,
+            data_parallel_rank=data_parallel_rank,
         )
 
         return stream.generator()
@@ -977,6 +987,7 @@ class AsyncLLMEngine(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        data_parallel_rank: Optional[int] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
 
@@ -985,8 +996,9 @@ class AsyncLLMEngine(EngineClient):
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See {class}`~vllm.inputs.PromptType`
-                for more details about the format of each input.
+            prompt: The prompt to the LLM. See
+                [`PromptType`][vllm.inputs.PromptType] for more details about
+                the format of each input.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
@@ -995,7 +1007,8 @@ class AsyncLLMEngine(EngineClient):
                                             for generation, if any.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
-
+            data_parallel_rank: The (global) data parallel rank that must
+                handle this request. Only applicable if DP is enabled.
         Yields:
             The output `RequestOutput` objects from the LLMEngine
             for the request.
@@ -1003,7 +1016,7 @@ class AsyncLLMEngine(EngineClient):
         Details:
             - If the engine is not running, start the background loop,
               which iteratively invokes
-              {meth}`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
+              [`engine_step`][vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step]
               to process the waiting requests.
             - Add the request to the engine's `RequestTracker`.
               On the next background loop, this request will be sent to
@@ -1053,6 +1066,7 @@ class AsyncLLMEngine(EngineClient):
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
+                    data_parallel_rank=data_parallel_rank,
             ):
                 yield LLMEngine.validate_output(output, RequestOutput)
         except asyncio.CancelledError:
@@ -1075,8 +1089,9 @@ class AsyncLLMEngine(EngineClient):
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt to the LLM. See {class}`~vllm.inputs.PromptType`
-                for more details about the format of each input.
+            prompt: The prompt to the LLM. See
+                [`PromptType`][vllm.inputs.PromptType] for more details about
+                the format of each input.
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
@@ -1089,15 +1104,15 @@ class AsyncLLMEngine(EngineClient):
             for the request.
 
         Details:
-        - If the engine is not running, start the background loop,
-            which iteratively invokes
-            {meth}`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
-            to process the waiting requests.
-        - Add the request to the engine's `RequestTracker`.
-            On the next background loop, this request will be sent to
-            the underlying engine.
-            Also, a corresponding `AsyncStream` will be created.
-        - Wait for the request outputs from `AsyncStream` and yield them.
+            - If the engine is not running, start the background loop,
+                which iteratively invokes
+                [`vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`][]
+                to process the waiting requests.
+            - Add the request to the engine's `RequestTracker`.
+                On the next background loop, this request will be sent to
+                the underlying engine.
+                Also, a corresponding `AsyncStream` will be created.
+            - Wait for the request outputs from `AsyncStream` and yield them.
 
         Example:
         ```
