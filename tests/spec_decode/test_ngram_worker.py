@@ -6,6 +6,7 @@ import torch
 from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
+from vllm.platforms import current_platform
 
 from .utils import create_seq_group_metadata_from_prompts, create_worker
 
@@ -20,7 +21,8 @@ def test_ngram_algo_correctness_for_single_no_match():
     seed = 100
     model_name = 'JackFram/llama-68m'
     vocab_size = 32_000
-    device = 'cuda:0'
+    local_rank = 0
+    device = f'{current_platform.device_type}:{local_rank}'
 
     ngram_worker = create_worker(
         NGramWorker,
@@ -78,7 +80,8 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
     seed = 100
     model_name = 'JackFram/llama-68m'
     vocab_size = 32_000
-    device = 'cuda:0'
+    local_rank = 0
+    device = f'{current_platform.device_type}:{local_rank}'
 
     ngram_worker = create_worker(
         NGramWorker,
@@ -159,7 +162,8 @@ def test_ngram_algo_correctness_for_batches_match_all():
     seed = 100
     model_name = 'JackFram/llama-68m'
     vocab_size = 32_000
-    device = 'cuda:0'
+    local_rank = 0
+    device = f'{current_platform.device_type}:{local_rank}'
 
     ngram_worker = create_worker(
         NGramWorker,
