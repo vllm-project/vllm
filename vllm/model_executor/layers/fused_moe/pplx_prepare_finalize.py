@@ -121,25 +121,21 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape)
 
-        # pplx requires 2-d scales even for scalars
         if a1q_scale is not None:
+            scalar_scales = a1q_scale.numel() == 1
+
+            # pplx requires 2-d scales even for scalar scales
             if a1q_scale.dim() <= 1:
-                assert a1q_scale.numel() == 1
+                assert scalar_scales
                 a1q_scale = a1q_scale.view(1, 1)
 
-            #print(f"ORIG {a1q_scale.shape}, {a1q_scale}")
+            # pad out scales if needed. TODO (bnell): do for non-scalar scales?
+            if scalar_scales:
+                a1q_scale = a1q_scale.repeat(a1q.shape[1], torch.float32.itemsize)
 
-            orig_scale = a1q_scale
-            orig_a1q_scale_shape = a1q_scale.shape
+            orig_a_scale_block_shape = a1q_scale.shape[-1]
 
-            # pad out scales if needed
-            if a1q_scale.numel() == 1:
-                a1q_scale = a1q_scale.repeat(a1q.shape[1], 4)
-
-            assert a1q_scale.shape[0] == a1q.shape[1]
-
-            #print(f"FINAL {a1q_scale.shape}, {a1q_scale}")
-
+            #assert a1_scale is None or a1_scale.shape[0] == a1q.shape[1], f"{a1_scale.shape}, {a1q_scale.shape}"
 
         assert a1q_scale is None or a1q_scale.ndim == 2, \
             f"{0 if a1q_scale is None else (a1q_scale.ndim, a1q_scale.shape)}"
@@ -173,19 +169,14 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_x_scale_shape = (
                 num_local_experts,
                 expert_x.size(1),
-                #(expert_x.size(2) + block_size - 1) // block_size,
-                orig_a1q_scale_shape[-1],
+                (expert_x.size(2) + block_size - 1) // block_size if not scalar_scales else 1,
             )
-
-            #print(f"XXXXXXXXXX {block_size} {expert_x_scale_shape}")
 
             expert_x_scale = torch.zeros(
                 expert_x_scale_shape,
                 dtype=torch.float32,
                 device=expert_x.device,
             )
-
-            #print(f"YYYYYYYYYYYYYYY {expert_x.shape}")
 
         # This argument is optional, defaults to indices.size(0)
         # There's not much point setting this unless it is != indices.size(0)
@@ -203,22 +194,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
 
-        #print(f"ZZZZZZZZZZZZZZ {expert_x_scale.shape}")
         if expert_x_scale is not None:
-            expert_x_scale = expert_x_scale[:, :, :orig_a1q_scale_shape[-1]]
-            from math import prod
-            if prod(orig_a1q_scale_shape) == 1:
-                expert_x_scale = expert_x_scale[:, :1, :1]
-                #print(f"EPT {expert_num_tokens.flatten()}")
-                #print(f"SCALARIZING!!! {expert_x_scale.shape}, {expert_x_scale.flatten()}")
-                idx = expert_num_tokens.flatten() != 0
-                assert torch.all(expert_x_scale.flatten()[idx] != 0)
-                #zidx = expert_num_tokens.flatten() == 0
-                #assert torch.all(expert_x_scale.flatten()[zidx] == 0)
-                assert expert_x_scale.ndim == 3
-                #expert_x_scale = orig_scale.view(1)
-
-            assert expert_x_scale.ndim == 1 or expert_x_scale.ndim == 3
+            expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
+            assert expert_x_scale.ndim == 3
 
         return expert_x, expert_x_scale, expert_num_tokens, None, None
 
