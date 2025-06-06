@@ -7,8 +7,7 @@ import os
 from typing import Any, Optional
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from starlette.background import BackgroundTask, BackgroundTasks
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from vllm.logger import init_logger
 
@@ -81,53 +80,47 @@ def with_cancellation(handler_func):
     return wrapper
 
 
-def decrement_server_load(request: Request):
-    request.app.state.server_load_metrics -= 1
+class LoadTrackingMiddleware:
 
+    def __init__(self, app: ASGIApp):
+        self.app = app
 
-def load_aware_call(func):
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
 
-    @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
-        raw_request = kwargs.get("raw_request",
-                                 args[1] if len(args) > 1 else None)
+        path = scope.get("path", "")
+        if not path.startswith("/v1"):
+            return await self.app(scope, receive, send)
 
-        if raw_request is None:
-            raise ValueError(
-                "raw_request required when server load tracking is enabled")
+        state = scope["app"].state
 
-        if not raw_request.app.state.enable_server_load_tracking:
-            return await func(*args, **kwargs)
+        state.server_load_metrics += 1
+        done = False
 
-        raw_request.app.state.server_load_metrics += 1
+        async def send_wrapper(message):
+            nonlocal done
+            if (message["type"] == "http.response.body"
+                    and not message.get("more_body", False) and not done):
+                state.server_load_metrics -= 1
+                done = True
+            await send(message)
+
+        async def receive_wrapper():
+            nonlocal done
+            msg = await receive()
+            if msg["type"] == "http.disconnect" and not done:
+                state.server_load_metrics -= 1
+                done = True
+            return msg
+
         try:
-            response = await func(*args, **kwargs)
+            await self.app(scope, receive_wrapper, send_wrapper)
         except Exception:
-            raw_request.app.state.server_load_metrics -= 1
+            if not done:
+                state.server_load_metrics -= 1
+                done = True
             raise
-
-        if isinstance(response, (JSONResponse, StreamingResponse)):
-            if response.background is None:
-                response.background = BackgroundTask(decrement_server_load,
-                                                     raw_request)
-            elif isinstance(response.background, BackgroundTasks):
-                response.background.add_task(decrement_server_load,
-                                             raw_request)
-            elif isinstance(response.background, BackgroundTask):
-                # Convert the single BackgroundTask to BackgroundTasks
-                # and chain the decrement_server_load task to it
-                tasks = BackgroundTasks()
-                tasks.add_task(response.background.func,
-                               *response.background.args,
-                               **response.background.kwargs)
-                tasks.add_task(decrement_server_load, raw_request)
-                response.background = tasks
-        else:
-            raw_request.app.state.server_load_metrics -= 1
-
-        return response
-
-    return wrapper
 
 
 def cli_env_setup():
