@@ -60,8 +60,8 @@ class TestSharedStorageConnector(SharedStorageConnector):
                     if isinstance(arg, int):
                         to_log.append(str(arg))
                     elif isinstance(arg, KVCacheBlocks):
-                        to_log.append(f"num_blocks={
-                        [len(b) for b in arg.blocks]}")
+                        to_log.append(
+                            f"num_blocks={[len(b) for b in arg.blocks]}")
 
                 # Log the event as a line to the file
                 try:
