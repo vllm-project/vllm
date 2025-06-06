@@ -388,4 +388,3 @@ class KVCacheManager:
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""
         return KVCacheBlocks([[] for _ in range(self.num_kv_cache_groups)])
-
