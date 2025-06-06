@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 These types are defined in this file to avoid importing vllm.engine.metrics
 and therefore importing prometheus_client.

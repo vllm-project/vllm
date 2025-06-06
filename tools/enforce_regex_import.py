@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import subprocess
@@ -56,6 +57,9 @@ def main() -> int:
 
     for filepath in files:
         if not Path(filepath).exists():
+            continue
+
+        if filepath == "setup.py":
             continue
 
         violations = check_file(filepath)
