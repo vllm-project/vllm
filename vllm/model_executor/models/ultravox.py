@@ -367,9 +367,6 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         embed_pos = self.embed_positions.weight[:inputs_embeds.size(-2)]
 
         hidden_states = inputs_embeds + embed_pos
-        hidden_states = nn.functional.dropout(hidden_states,
-                                              p=self.dropout,
-                                              training=self.training)
 
         attention_mask = self.get_attention_mask_by_audio_len(
             audio_lens, hidden_states)
