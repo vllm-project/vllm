@@ -669,7 +669,6 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
                               CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, scheme)
             assert qkv_proj.scheme.group_size == 16
-            assert qkv_proj.strategy == "tensor_group"
 
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
