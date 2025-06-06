@@ -651,10 +651,9 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
         assert output
 
 
-@pytest.mark.skip(reason="Skip until the model config is updated")
 def test_compressed_tensors_nvfp4a16(vllm_runner):
     # run weight only example
-    model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP4"
+    model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16"
     with vllm_runner(model, enforce_eager=True) as llm:
 
         def check_model(model):
