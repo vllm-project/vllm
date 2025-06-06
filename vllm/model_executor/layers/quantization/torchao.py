@@ -19,11 +19,12 @@ logger = init_logger(__name__)
 
 def should_skip(prefix: str, skip_modules: list[str]) -> bool:
     """
-    Robust skipping logic: 
-    should_skip("model.model.layers.1.q_proj", ["model.model.layers.1.q_proj"]) #True
-    should_skip("model.model.layers.10.o_proj", ["o_proj"]) -> True
-    should_skip("visual.model.layers.1.q_proj", ["visual"]) -> True
-    should_skip("model.model.layers.1.q_proj", ["layers.1"]) -> True
+    Robust skipping logic:
+    should_skip("model.model.layers.1.q_proj",
+                ["model.model.layers.1.q_proj"])  # True
+    should_skip("model.model.layers.10.o_proj", ["o_proj"])  -> True
+    should_skip("visual.model.layers.1.q_proj", ["visual"])   -> True
+    should_skip("model.model.layers.1.q_proj", ["layers.1"])  -> True
     should_skip("model.model.layers.11.q_proj", ["layers.1"]) -> False
     """
     for s in skip_modules:
@@ -96,7 +97,12 @@ class TorchAOConfig(QuantizationConfig):
         skip_modules = config.get("modules_to_not_convert", []) or []
 
         # adds skipped modules defined in "module_fqn_to_config"
-        module_fqn = quant_type["_data"].get("module_fqn_to_config", []) or []
+        _data = quant_type.get("_data", {})
+        if not isinstance(_data, dict):
+            _data = {}
+
+        module_fqn = _data.get("module_fqn_to_config", []) or []
+
         for layer in module_fqn:
             if module_fqn.get(layer, None) is None:
                 skip_modules.append(layer)
