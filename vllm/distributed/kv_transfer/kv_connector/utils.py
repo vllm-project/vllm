@@ -3,18 +3,6 @@
 """
 KV cache helper for store.
 """
-<<<<<<< HEAD
-<<<<<<< HEAD
-
-=======
-<<<<<<< Updated upstream
-=======
-
-import functools
->>>>>>> Stashed changes
->>>>>>> b6feef56c (wip)
-=======
->>>>>>> 0236d5e3b (flashinfer hnd)
 import torch
 
 import vllm.envs as envs
@@ -109,7 +97,7 @@ def get_kv_connector_cache_layout():
     # used for faster transfer.
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
-    if vllm_config.model_config is None:
+    if vllm_config.model_config is None or kv_config is None:
         logger.warning("Unable to detect current VLLM config. " \
         "Defaulting to NHD kv cache layout.")
     else:
