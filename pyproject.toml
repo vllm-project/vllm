@@ -129,6 +129,7 @@ files = [
     "vllm/transformers_utils",
     "vllm/triton_utils",
     "vllm/usage",
+    "vllm/v1",
 ]
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 exclude = [
