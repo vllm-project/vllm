@@ -101,6 +101,7 @@ class ModelRunnerOutput:
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
 
+    # [num_reqs, hidden_size]
     pooler_output: list[Optional[torch.Tensor]]
 
     # [req_ids]

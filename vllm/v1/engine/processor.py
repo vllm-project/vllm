@@ -257,6 +257,23 @@ class Processor:
         if encoder_inputs is not None:
             raise NotImplementedError
 
+        sampling_params = None
+        pooling_params = None
+        if isinstance(params, SamplingParams):
+            # TODO: can we avoid cloning here in multiproc case?
+            sampling_params = params.clone()
+            # If unset max tokens, then generate up to the max_model_len.
+            if sampling_params.max_tokens is None:
+                sampling_params.max_tokens = (
+                    self.model_config.max_model_len -
+                    len(decoder_inputs["prompt_token_ids"]))
+            sampling_params.update_from_generation_config(
+                self.generation_config_fields, eos_token_id)
+            sampling_params.update_from_tokenizer(
+                self.tokenizer.get_lora_tokenizer(lora_request))
+        else:
+            pooling_params = params.clone()
+
         # Multimodal related.
         sorted_mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
@@ -304,23 +321,6 @@ class Processor:
                     orig_sorted_mm_inputs, sorted_mm_hashes)
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
-
-        sampling_params = None
-        pooling_params = None
-        if isinstance(params, SamplingParams):
-            # TODO: can we avoid cloning here in multiproc case?
-            sampling_params = params.clone()
-            # If unset max tokens, then generate up to the max_model_len.
-            if sampling_params.max_tokens is None:
-                sampling_params.max_tokens = (
-                    self.model_config.max_model_len -
-                    len(decoder_inputs["prompt_token_ids"]))
-            sampling_params.update_from_generation_config(
-                self.generation_config_fields, eos_token_id)
-            sampling_params.update_from_tokenizer(
-                self.tokenizer.get_lora_tokenizer(lora_request))
-        else:
-            pooling_params = params.clone()
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,

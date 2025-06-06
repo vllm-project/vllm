@@ -114,13 +114,8 @@ class PoolingModelRunner(
         if model_input.token_types is not None:
             cross_enc_kwargs["token_type_ids"] = model_input.token_types
 
-        assert model_input.seq_lens is not None
-        seq_lens_tensor = torch.tensor(model_input.seq_lens, dtype=torch.int32)
-
-        with set_forward_context(model_input.attn_metadata,
-                                 self.vllm_config,
-                                 virtual_engine,
-                                 seq_lens=seq_lens_tensor):
+        with set_forward_context(model_input.attn_metadata, self.vllm_config,
+                                 virtual_engine):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,

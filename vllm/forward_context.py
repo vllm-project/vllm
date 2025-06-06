@@ -94,7 +94,6 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
-    seq_lens: Optional[torch.Tensor] = None
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -113,8 +112,7 @@ def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
                         virtual_engine: int = 0,
                         num_tokens: Optional[int] = None,
-                        num_tokens_across_dp: Optional[torch.Tensor] = None,
-                        seq_lens: Optional[torch.Tensor] = None):
+                        num_tokens_across_dp: Optional[torch.Tensor] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -137,8 +135,7 @@ def set_forward_context(attn_metadata: Any,
         static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
-        dp_metadata=dp_metadata,
-        seq_lens=seq_lens)
+        dp_metadata=dp_metadata)
 
     try:
         yield

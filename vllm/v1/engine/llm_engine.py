@@ -198,7 +198,9 @@ class LLMEngine:
             tokenization_kwargs, trace_headers, prompt_adapter_request,
             priority)
 
-        if not isinstance(params, SamplingParams) or (n := params.n) == 1:
+        n = params.n if isinstance(params, SamplingParams) else 1
+
+        if n == 1:
             # Make a new RequestState and queue.
             self.output_processor.add_request(request, prompt_str, None, 0)
             # Add the request to EngineCore.
@@ -219,7 +221,7 @@ class LLMEngine:
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
-    def step(self) -> list[Union[RequestOutput, PoolingRequestOutput]]:
+    def step(self) -> Union[list[RequestOutput], list[PoolingRequestOutput]]:
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False

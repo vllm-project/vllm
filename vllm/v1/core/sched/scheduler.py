@@ -893,7 +893,6 @@ class Scheduler(SchedulerInterface):
         For example, the API server can abort a request when the client
         disconnects.
         """
-        print("finish requests")
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
             request_ids = (request_ids, )
