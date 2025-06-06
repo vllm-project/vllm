@@ -219,6 +219,7 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
     tmax = fmaxf(tmax, v);
   }
 
+  // This is used for BlockReduce
   struct MinMax {
     float mn, mx;
   };
