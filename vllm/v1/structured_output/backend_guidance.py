@@ -171,6 +171,10 @@ class GuidanceGrammar(StructuredOutputGrammar):
         # This method may be not needed anymore? TODO
         self.ll_matcher.reset()
 
+    def find_jump_string(self) -> str | None:
+        ff_string = self.ll_matcher.compute_ff_bytes()
+        return ff_string.decode() if ff_string else None
+
 
 def serialize_guidance_grammar(
     request_type: StructuredOutputOptions,

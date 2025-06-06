@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import itertools
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
@@ -189,6 +190,76 @@ class StructuredOutputManager:
         # np.ndarray, because that is much more efficient for serialization
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
+
+    def jump_forward_tokens(self, request: Request) -> list[int] | None:
+        """
+        For structured output requests, we will perform
+        jump_and_retokenize possible divergence based on grammar state
+        """
+        so_request = request.structured_output_request
+        if TYPE_CHECKING:
+            assert so_request is not None
+            assert so_request.grammar is not None
+            assert self.backend is not None
+
+        jf_string = so_request.grammar.find_jump_string()
+        if not jf_string:
+            return None
+
+        # NOTE: max_rollback_window determines the size
+        # of the tokenes from all_token_ids to be used for retokenization.
+        # Note that we don't need to whole token_ids
+        # for performance reason (tokenizer is blocking)
+        max_rollback_window = 10
+
+        rollback_text_str = self.tokenizer.decode(
+            request.all_token_ids[-max_rollback_window:])
+        retokenized_output_ids = self.tokenizer.encode(
+            rollback_text_str + jf_string,
+            add_special_tokens=False,
+        )
+        if request.prompt_token_ids[-1] in retokenized_output_ids:
+            prompt_boundary = retokenized_output_ids.index(
+                request.prompt_token_ids[-1]) + 1
+            retokenized_output_ids = retokenized_output_ids[prompt_boundary:]
+
+        original_output_ids = request.output_token_ids[
+            max(0,
+                len(request.output_token_ids) - len(retokenized_output_ids)):]
+
+        # Find the prefix match length
+        k = sum(1 for _ in itertools.takewhile(
+            lambda pair: pair[0] == pair[1],
+            zip(original_output_ids, retokenized_output_ids),
+        ))
+        retokenized_suffix = retokenized_output_ids[k:]
+        if k < len(original_output_ids):
+            so_request.grammar.rollback(len(original_output_ids) - k)
+
+        # Validate tokens one by one
+        accepted_tokens: list[int] = []
+        num_validated_in_suffix = 0
+        validation_ok = True
+        for token in retokenized_suffix:
+            if so_request.grammar.accept_tokens(request.request_id, [token]):
+                accepted_tokens.append(token)
+                num_validated_in_suffix += 1
+            else:
+                if num_validated_in_suffix > 0:
+                    so_request.grammar.rollback(num_validated_in_suffix)
+                validation_ok = False
+                break
+
+        if validation_ok:
+            return accepted_tokens
+
+        original_suffix_tokens = original_output_ids[num_validated_in_suffix:]
+        if original_suffix_tokens and not so_request.grammar.accept_tokens(
+                request.request_id,
+                original_suffix_tokens,
+        ):
+            so_request.grammar.rollback(len(original_suffix_tokens))
+        return None
 
     def should_advance(self, request: Request) -> bool:
         if not request.use_structured_output:
