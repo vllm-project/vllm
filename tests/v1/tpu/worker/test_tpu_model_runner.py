@@ -502,8 +502,10 @@ def test_init_kv_cache_without_kv_sharing():
     assert len(model_runner.shared_kv_cache_layers) == 0
 
     available_memory = 20 * GiB_bytes
-    # page size for layer 0's kv_cache_spec is 128KB
-    num_expected_blocks = 81920  # 20GB / 128KB / 2 (num layers)
+    # page size for each layer KV can be calculated as
+    # 2 (non-MLA) * 8 (num_heads) * 128 (head_dim)
+    # * 2 (bfloat16, kv_cache dtype) * 128 (block_size) = 512KB
+    num_expected_blocks = 20480  # 20GB / 512KB / 2 (num layers)
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                           available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
@@ -514,7 +516,7 @@ def test_init_kv_cache_without_kv_sharing():
     max_context_len =\
         estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
-    assert max_context_len == 327680
+    assert max_context_len == 81920
 
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 2 block worth of memory (2 * 32kb)
@@ -571,10 +573,10 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert model_runner.shared_kv_cache_layers[layer_1] == layer_0
 
     available_memory = 20 * GiB_bytes
-    # page size for layer 0's kv_cache_spec is 128KB
+    # page size for layer 0's kv_cache_spec is 512KB
     # with KV sharing, we can allocate (available_mem//page_size//1) blocks
     # which is twice as many as without KV sharing
-    num_expected_blocks = 163840  # 20GB / 128KB
+    num_expected_blocks = 2 * 20480  # 20GB / 512KB
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                           available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
@@ -586,7 +588,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
     max_context_len =\
         estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
-    assert max_context_len == 2 * 327680
+    assert max_context_len == 2 * 81920
 
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 1 block worth of memory (32kb)
