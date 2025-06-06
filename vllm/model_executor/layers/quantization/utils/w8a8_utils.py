@@ -219,7 +219,7 @@ def torch_per_token_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                    scale_a: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
-                                   output_shape: list) -> torch.Tensor:
+                                   output_shape: list[int]) -> torch.Tensor:
     # Note: Callers of this function should check USE_ROWWISE_TORCH_SCALED_MM
     #  when using it.
     #  For now it has only been validated on ROCm platform.
@@ -340,7 +340,7 @@ class Fp8LinearOp:
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        output_shape: Optional[tuple[int, ...]],
+        output_shape: Optional[list[int]] = None,
         out_dtype: Optional[torch.dtype] = None,
         input_scale: Optional[torch.Tensor] = None,
         input_scale_ub: Optional[torch.Tensor] = None,
