@@ -210,7 +210,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             ) == 1, "Currently only supporting one sequence per request group"
             seq_id = seq_ids[0]
             seq_groups.append(seq_id)
-            if self.dp_kv_cache
+            if self.dp_kv_cache:
                 self.req_id_to_seq_id[seq_group_metadata.request_id] = seq_id
 
             multi_modal_data = seq_group_metadata.multi_modal_data
