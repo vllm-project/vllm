@@ -131,7 +131,7 @@ class KVConnectorBase(ABC):
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForHPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
