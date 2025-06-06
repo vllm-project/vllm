@@ -40,12 +40,13 @@ def initialize_kv_cache(runner: GPUModelRunner):
     tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
-        tensors={
-            "layer.0": KVCacheTensor(size=tensor_size),
-        },
+        kv_cache_tensors=[
+            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
+        ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
-        ])
+        ],
+    )
     runner.kv_cache_config = kv_cache_config
     runner.input_batch = InputBatch(
         max_num_reqs=runner.max_num_reqs,
@@ -518,9 +519,9 @@ def test_init_kv_cache_without_kv_sharing():
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                           available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
-    assert len(kv_cache_config.tensors) == 2
-    assert kv_cache_config.tensors[layer_0].size == available_memory // 2
-    assert kv_cache_config.tensors[layer_1].size == available_memory // 2
+    assert len(kv_cache_config.kv_cache_tensors) == 2
+    assert kv_cache_config.kv_cache_tensors[0].size == available_memory // 2
+    assert kv_cache_config.kv_cache_tensors[1].size == available_memory // 2
 
     max_context_len =\
         estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
@@ -530,9 +531,9 @@ def test_init_kv_cache_without_kv_sharing():
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 2 block worth of memory (2 * 32kb)
     kv_cache_config.num_blocks = 1
-    for layer in kv_cache_config.tensors:
-        kv_cache_config.tensors[layer].size =\
-            kv_cache_spec[layer].page_size_bytes
+    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+        kv_cache_tensor.size = (
+            kv_cache_spec[kv_cache_tensor.shared_by[0]].page_size_bytes)
 
     runner.initialize_kv_cache(kv_cache_config)
 
@@ -589,10 +590,10 @@ def test_init_kv_cache_with_kv_sharing_valid():
     kv_cache_config = get_kv_cache_config(vllm_config, kv_cache_spec,
                                           available_memory)
     assert kv_cache_config.num_blocks == num_expected_blocks
-    assert len(kv_cache_config.tensors) == 1
+    assert len(kv_cache_config.kv_cache_tensors) == 1
     # Each layer now has twice the available memory for KV cache
     # compared to no KV sharing
-    assert kv_cache_config.tensors[layer_0].size == available_memory
+    assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len =\
         estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
@@ -602,7 +603,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
     # important: override tensor size to prevent large mem alloc during test
     # this will only allocate 1 block worth of memory (32kb)
     kv_cache_config.num_blocks = 1
-    kv_cache_config.tensors[layer_0].size =\
+    kv_cache_config.kv_cache_tensors[0].size =\
         kv_cache_spec[layer_0].page_size_bytes
 
     runner.initialize_kv_cache(kv_cache_config)

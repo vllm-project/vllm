@@ -494,6 +494,10 @@ class _AsyncLLMEngine(LLMEngine):
         if arrival_time is None:
             arrival_time = time.time()
 
+        if data_parallel_rank is not None:
+            raise ValueError("Targeting data_parallel_rank only supported "
+                             "in v1 client.")
+
         if (isinstance(prompt, dict)
                 and prompt.get("prompt_embeds", None) is not None
                 and not prompt.get("prompt_token_ids", None)):
