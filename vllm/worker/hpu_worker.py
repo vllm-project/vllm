@@ -18,7 +18,8 @@ from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
+                              init_distributed_environment,
+                              is_tp_state_patched)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -438,9 +439,11 @@ def init_worker_distributed_environment(
         )
 
     # A small all_reduce for warmup & checking conformance.
-    dummy_tensor_hpu = torch.ones(1).to('hpu')
-    torch.distributed.all_reduce(dummy_tensor_hpu)
-    assert dummy_tensor_hpu.item() == parallel_config.world_size
+    # Skip warmup when using SmallerTpProposerWorker to avoid blocking.
+    if not is_tp_state_patched():
+        dummy_tensor_hpu = torch.ones(1).to('hpu')
+        torch.distributed.all_reduce(dummy_tensor_hpu)
+        assert dummy_tensor_hpu.item() == parallel_config.world_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
