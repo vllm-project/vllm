@@ -647,6 +647,12 @@ class Scheduler:
         self._finished_requests_ids = list()
         return finished_requests_ids
 
+    def get_async_stopped_request_ids(self):
+        if self._async_stopped:
+            return [seq_group.request_id for seq_group in self._async_stopped]
+        else:
+            return []
+
     def _schedule_running(
         self,
         budget: SchedulingBudget,
