@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
 from abc import abstractmethod
@@ -275,6 +276,7 @@ class ReplicatedLinear(LinearBase):
         quant_config: Quantization configure.
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(
@@ -538,6 +540,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         quant_config: Quantization configure.
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(
@@ -600,8 +603,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param.shard_id.append(loaded_shard_id)
                 param.shard_id_map[loaded_shard_id] = len(param.data_container)
                 param.data_container.append(loaded_weight)
-                if len(param.data_container) == 2:
-                    self.qweight = param.materialize_nested()
                 return
 
         param_data = param.data
@@ -820,6 +821,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         quant_config: Quantization configure.
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(
@@ -994,8 +996,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 param.shard_id.append(loaded_shard_id)
                 param.shard_id_map[loaded_shard_id] = len(param.data_container)
                 param.data_container.append(loaded_weight)
-                if len(param.data_container) == 3:
-                    self.qweight = param.materialize_nested()
                 return
 
         param_data = param.data
@@ -1237,7 +1237,13 @@ class RowParallelLinear(LinearBase):
                        bias can be fused with other element-wise operations.
                        We skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
+        reduce_results: If true, call all-reduce on output and make Y available
+                       to all GPUs, otherwise, every GPU will have its output
+                       which is Y = X_iA_i
         quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.down_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(

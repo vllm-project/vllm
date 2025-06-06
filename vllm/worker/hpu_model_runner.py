@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
@@ -1342,6 +1343,29 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     ([_PAD_BLOCK_ID] * (max_num_block - len(bt)))
                     for bt in prefix_block_tables))
 
+            pad_len = len(prefix_block_list)
+            prefix_block_list = pad_list(prefix_block_list, pad_len,
+                                         _PAD_BLOCK_ID)
+
+            prefix_block_list_tensor = torch.tensor(prefix_block_list,
+                                                    dtype=torch.long,
+                                                    device=self.device)
+        else:
+            prefix_block_list_tensor = None
+
+        input_tokens = make_tensor_with_pad(input_tokens,
+                                            max_len=max_prompt_len,
+                                            pad=0,
+                                            dtype=torch.long,
+                                            device=self.device)
+
+            max_num_block = max(len(bt) for bt in prefix_block_tables)
+            prefix_block_list = list(
+                itertools.chain.from_iterable(
+                    bt if len(bt) == max_num_block else bt +
+                    ([_PAD_BLOCK_ID] * (max_num_block - len(bt)))
+                    for bt in prefix_block_tables))
+
             # TODO: pad to proper len
             pad_len = len(prefix_block_list)
             prefix_block_list = pad_list(prefix_block_list, pad_len,
@@ -1420,6 +1444,14 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             block_size=self.block_size,
+        context_lens_tensor = torch.tensor(context_lens,
+                                           dtype=torch.long,
+                                           device=self.device)
+
+        block_indices, block_offsets = precompute_indices_and_offsets(
+            self.block_size, slot_mapping, True)
+        attn_metadata = self.attn_backend.make_metadata(
+            is_prompt=True,
             block_list=prefix_block_list_tensor,
             block_mapping=None,
             block_usage=None,
@@ -2033,6 +2065,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             'block_size',
             'block_groups',
             'input_positions',
+            'block_indices',
+            'block_offsets',
         ])
         return attention_metadata
 
@@ -2713,6 +2747,119 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                    sampling_metadata=sampling_metadata,
                                    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
+
+    def finish_measurements(self):
+        from neural_compressor.torch.quantization import finalize_calibration
+        finalize_calibration(self.model.model)
+
+    def _num_blocks(self, attn_metadata):
+        if attn_metadata.block_list is None:
+            return 0
+        return attn_metadata.block_list.numel()
+
+    def _phase(self, attn_metadata):
+        phase_type: PhaseType
+        is_prompt = attn_metadata.is_prompt
+        is_prefix_prefill = is_prompt and attn_metadata.block_list is not None
+        if is_prompt and is_prefix_prefill:
+            phase_type = PhaseType.PREFIX_PREFILL
+        elif is_prompt and not is_prefix_prefill:
+            phase_type = PhaseType.PREFILL
+        elif not is_prompt:
+            phase_type = PhaseType.DECODE
+        else:
+            raise ValueError("Unrecognized pass type, likely due to malformed "
+                             "attention metadata")
+        return phase_type
+
+    def _check_config(self, batch_size, seq_len, attn_metadata, warmup_mode):
+        is_prefix_caching = self.vllm_config.cache_config.enable_prefix_caching
+        cfg: Optional[tuple] = None
+        assert cfg is None, "Configs changed between 2D and 3D"
+        if is_prefix_caching:
+            phase = self._phase(attn_metadata)
+            num_blocks = self._num_blocks(attn_metadata)
+            cfg = (batch_size, seq_len, num_blocks, phase)
+        else:
+            phase = 'prompt' if attn_metadata.is_prompt else 'decode'
+            cfg = (batch_size, seq_len, phase)
+        seen = cfg in self.seen_configs
+        self.seen_configs.add(cfg)
+        if not seen and not warmup_mode:
+            logger.warning("Configuration: %s was not warmed-up!",
+                           (phase.value, batch_size, seq_len,
+                            num_blocks) if is_prefix_caching else
+                           (phase, batch_size, seq_len))
+
+    def create_lora_mask(self, input_tokens: torch.Tensor, lora_ids: List[int],
+                         is_prompt: bool):
+        '''
+        This is a helper function to create the mask for lora computations.
+        Lora Mask is needed to ensure we match the correct lora weights for the
+        for the request.
+        For Prompt phase we have 
+        lora_mask with shape (batch_size * seq_len, max_loras * max_rank)
+        lora_logits_mask with shape (batch_size, max_loras * max_rank)
+        For Decode phase we have both
+        lora_mask and lora_logits_mask with shape
+        (batch_size, max_loras * max_rank)
+        '''
+        lora_mask: torch.Tensor = None
+        lora_logits_mask: torch.Tensor = None
+        lora_index = 0
+
+        if self.lora_config:
+            if is_prompt:
+                lora_mask = torch.zeros(
+                    input_tokens.shape[0] * input_tokens.shape[1],
+                    (self.lora_config.max_loras) *\
+                        self.lora_config.max_lora_rank,
+                    dtype=self.lora_config.lora_dtype)
+                lora_logits_mask = torch.zeros(
+                    input_tokens.shape[0], (self.lora_config.max_loras) *
+                    self.lora_config.max_lora_rank,
+                    dtype=self.lora_config.lora_dtype)
+
+                ones = torch.ones(input_tokens.shape[1],
+                                  self.lora_config.max_lora_rank,
+                                  dtype=self.lora_config.lora_dtype)
+                logit_ones = torch.ones(1,
+                                        self.lora_config.max_lora_rank,
+                                        dtype=self.lora_config.lora_dtype)
+
+                for i in range(len(lora_ids)):
+                    if lora_ids[i] == 0:
+                        continue
+                    lora_index = self.lora_manager._adapter_manager.\
+                        lora_index_to_id.index(lora_ids[i])
+                    start_row = i * input_tokens.shape[1]
+                    end_row = start_row + input_tokens.shape[1]
+                    start_col = lora_index * self.lora_config.max_lora_rank
+                    end_col = start_col + self.lora_config.max_lora_rank
+                    lora_mask[start_row:end_row, start_col:end_col] = ones
+                    lora_logits_mask[i, start_col:end_col] = logit_ones
+                lora_mask = lora_mask.to('hpu')
+                lora_logits_mask = lora_logits_mask.to('hpu')
+            else:
+                lora_mask = torch.zeros(input_tokens.shape[0],
+                                        (self.lora_config.max_loras) *
+                                        self.lora_config.max_lora_rank,
+                                        dtype=self.lora_config.lora_dtype)
+                ones = torch.ones(1,
+                                  self.lora_config.max_lora_rank,
+                                  dtype=self.lora_config.lora_dtype)
+                for i in range(len(lora_ids)):
+                    if lora_ids[i] == 0:
+                        continue
+                    lora_index = self.lora_manager._adapter_manager.\
+                        lora_index_to_id.index(lora_ids[i])
+                    start_pos = lora_index * self.lora_config.max_lora_rank
+                    end_pos = start_pos + self.lora_config.max_lora_rank
+                    lora_mask[i, start_pos:end_pos] = ones
+                lora_mask = lora_mask.to('hpu')
+                lora_logits_mask = lora_mask
+
+        return lora_mask, lora_logits_mask
 
     def _get_seq_ids(self, model_input):
         return ([

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
@@ -17,6 +18,20 @@ logger = init_logger(__name__)
 
 def is_fp8_marlin_supported():
     return current_platform.has_device_capability(80)
+
+
+def fp8_fused_exponent_bias_into_scales(scales):
+    fp8_exponent = 4
+    if scales.dtype == torch.half:
+        target_exponent = 5
+    elif scales.dtype == torch.bfloat16:
+        target_exponent = 8
+    # exponent_bias_fp16 = 2 ** 4 - 2 ** 3 = 8
+    # exponent_bias_bf16 = 2 ** 7 - 2 ** 3 = 120
+    exponent_bias = 2**(target_exponent - 1) - 2**(fp8_exponent - 1)
+    s = torch.ones_like(scales) * 2
+    s = s**exponent_bias
+    return scales * s
 
 
 def apply_fp8_marlin_linear(
@@ -44,6 +59,7 @@ def apply_fp8_marlin_linear(
                                   c=None,
                                   b_q_weight=weight,
                                   b_scales=weight_scale,
+                                  global_scale=None,
                                   b_zeros=None,
                                   g_idx=None,
                                   perm=None,
@@ -71,6 +87,7 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
 
     part_size_n = layer.output_size_per_partition
     part_size_k = layer.input_size_per_partition
+    weight_block_size = getattr(layer, "weight_block_size", None)
 
     if size_k_first:
         assert layer.weight.shape == (part_size_k, part_size_n)
@@ -104,14 +121,11 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
         scales = layer.weight_scale_inv.to(layer.orig_dtype)
         del layer.weight_scale_inv
 
-    if layer.weight_block_size is None:
-        group_size = -1
-    else:
-        group_size = layer.weight_block_size[1]
+    group_size = -1 if weight_block_size is None else weight_block_size[1]
 
     # marlin kernel only support channel-wise and group-wise quantization
     # we need to convert the scales
-    if layer.weight_block_size is None:
+    if weight_block_size is None:
         if scales.nelement() == 1:
             # tensor-wise quantization -> channel-wise quantization
             # (1, 1) =>(repeat)=> (1, size_n)
@@ -132,8 +146,10 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
         # block-wise quantization -> group-wise quantization
         # (size_k // block_size[1], ceil(size_n / block_size[0]))
         #  =>(repeat)=> (size_k // block_size[1], size_n)
-        block_n = layer.weight_block_size[0]
-        scales = scales.T.repeat_interleave(block_n, 1)
+        if not size_k_first:
+            scales = scales.T.contiguous()
+        block_n = weight_block_size[0]
+        scales = scales.repeat_interleave(block_n, 1)
         # size_n may not divisible by block_size[0]
         scales = scales[:, :part_size_n]
 
@@ -141,6 +157,7 @@ def prepare_fp8_layer_for_marlin(layer: torch.nn.Module,
                                           size_k=part_size_k,
                                           size_n=part_size_n,
                                           group_size=group_size)
+    marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
     layer.weight_scale = torch.nn.Parameter(marlin_scales, requires_grad=False)
 
 
@@ -155,6 +172,7 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
     e = layer.num_experts
     k = layer.hidden_size
     n = layer.intermediate_size_per_partition
+    weight_block_size = getattr(layer, "weight_block_size", None)
 
     # WORKSPACE
     device = layer.w13_weight.device
@@ -195,10 +213,7 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
 
     # WEIGHT SCALES
     # Permute scales
-    if layer.weight_block_size is None:
-        group_size = -1
-    else:
-        group_size = layer.weight_block_size[1]
+    group_size = -1 if weight_block_size is None else weight_block_size[1]
 
     for name in ["w13", "w2"]:
         if name + "_weight_scale" in dir(layer):
@@ -218,7 +233,7 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
 
         # marlin kernel only support channel-wise and group-wise quantization
         # we need to convert the scales
-        if layer.weight_block_size is None:
+        if weight_block_size is None:
             if scales.nelement() == e:
                 # tensor-wise quantization -> channel-wise quantization
                 # (e, 1, 1) =>(repeat)=> (e, 1, size_n)
@@ -239,8 +254,10 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
             # block-wise quantization -> group-wise quantization
             # (e, size_k // block_size[1], ceil(size_n / block_size[0]))
             #  =>(repeat)=> (e, size_k // block_size[1], size_n)
-            block_n = layer.weight_block_size[0]
-            scales = scales.permute(0, 2, 1).repeat_interleave(block_n, 2)
+            if not size_k_first:
+                scales = scales.permute(0, 2, 1)
+            block_n = weight_block_size[0]
+            scales = scales.repeat_interleave(block_n, 2)
             # size_n may not divisible by block_size[0]
             scales = scales[..., :size_n].contiguous()
 
@@ -252,6 +269,7 @@ def prepare_moe_fp8_layer_for_marlin(layer: torch.nn.Module,
             tensor_list.append(marlin_scales)
 
         scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        scales = fp8_fused_exponent_bias_into_scales(scales)
         scales = torch.nn.Parameter(scales, requires_grad=False)
 
         setattr(layer, name + "_weight_scale", scales)
@@ -301,5 +319,7 @@ def marlin_quant_fp8_torch(weight, group_size):
                                           size_k=size_k,
                                           size_n=size_n,
                                           group_size=group_size)
+
+    marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
 
     return weight_ref.T, marlin_qweight, marlin_scales

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/ssd_combined.py
@@ -40,7 +41,6 @@ def _mamba_chunk_scan_combined_fwd(x,
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
     assert B.shape == (batch, seqlen, ngroups, dstate)
-    assert x.shape == (batch, seqlen, nheads, headdim)
     assert dt.shape == (batch, seqlen, nheads)
     assert A.shape == (nheads, )
     assert C.shape == B.shape

@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Any, Dict, List, Optional
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
+
+logger = init_logger(__name__)
 
 
 class TorchAOConfig(QuantizationConfig):
@@ -17,6 +22,20 @@ class TorchAOConfig(QuantizationConfig):
 
     def __init__(self, torchao_config) -> None:
         self.torchao_config = torchao_config
+        """
+        # TorchAO quantization relies on tensor subclasses. In order,
+        # to enable proper caching this needs standalone compile
+        if is_torch_equal_or_newer("2.8.0"):
+            os.environ["VLLM_TEST_STANDALONE_COMPILE"] = "1"
+            logger.info(
+                "Using TorchAO: Setting VLLM_TEST_STANDALONE_COMPILE=1")
+
+        # TODO: remove after the torch dependency is updated to 2.8
+        if is_torch_equal_or_newer(
+                "2.7.0") and not is_torch_equal_or_newer("2.8.0"):
+            os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
+            logger.info("Using TorchAO: Setting VLLM_DISABLE_COMPILE_CACHE=1")
+        """
 
     def __repr__(self) -> str:
         return f"TorchAOConfig({self.torchao_config})"
@@ -24,7 +43,7 @@ class TorchAOConfig(QuantizationConfig):
     def get_name(self) -> QuantizationMethods:
         return "torchao"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.float32, torch.float16, torch.bfloat16]
 
     @classmethod
@@ -32,11 +51,11 @@ class TorchAOConfig(QuantizationConfig):
         return 75
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return ["config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "TorchAOConfig":
+    def from_config(cls, config: dict[str, Any]) -> "TorchAOConfig":
         """Create the quant config from an hf model config"""
         try:
             from torchao.core.config import config_from_dict
@@ -55,12 +74,26 @@ class TorchAOConfig(QuantizationConfig):
         return cls(ao_config)
 
     def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["TorchAOLinearMethod"]:
-        if isinstance(layer, LinearBase):
-            return TorchAOLinearMethod(self)
-        return None
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
+        if not isinstance(layer, LinearBase):
+            return None
 
-    def get_scaled_act_names(self) -> List[str]:
+        from torchao.quantization import ModuleFqnToConfig
+
+        module_fqn = prefix
+        if isinstance(self.torchao_config, ModuleFqnToConfig):
+            module_fqn_to_config = self.torchao_config.module_fqn_to_config
+            c = module_fqn_to_config.get(
+                module_fqn) or module_fqn_to_config.get("_default", None)
+            if c is not None:
+                current_torchao_config = TorchAOConfig(c)
+                return TorchAOLinearMethod(current_torchao_config)
+            else:
+                return UnquantizedLinearMethod()
+
+        return TorchAOLinearMethod(self)
+
+    def get_scaled_act_names(self) -> list[str]:
         return []
 
 
@@ -75,7 +108,7 @@ def torchao_quantize_param_data(param: torch.Tensor,
     """
     from torchao.core.config import AOBaseConfig
     from torchao.quantization import quantize_
-    assert isinstance(torchao_config, AOBaseConfig)
+    assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
     dummy_linear = torch.nn.Linear(param.shape[1], param.shape[0], bias=False)
     dummy_linear.weight = param
     quantize_(dummy_linear, torchao_config)
@@ -97,7 +130,7 @@ class TorchAOLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

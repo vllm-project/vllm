@@ -1,15 +1,9 @@
-sphinx==7.4.7
-sphinx-argparse==0.5.2
-sphinx-autodoc2==0.5.0
-sphinx-book-theme==1.1.4
-sphinx-copybutton==0.5.2
-sphinx-design==0.6.1
-sphinx-togglebutton==0.3.2
-myst-parser==3.0.1  # `myst-parser==4.0.1` breaks inline code in titles
-msgspec
-commonmark # Required by sphinx-argparse when using :markdownhelp:
-
-# packages to install to build the documentation
-cachetools
--f https://download.pytorch.org/whl/cpu
-torch
+mkdocs
+mkdocs-api-autonav
+mkdocs-material
+mkdocstrings-python
+mkdocs-gen-files
+mkdocs-awesome-nav
+python-markdown-math
+regex
+ruff

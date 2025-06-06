@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -25,7 +26,7 @@ class ExllamaLinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls,
-                      c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+                      c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
         if c.has_g_idx and\
             c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return False, "Act reordering currently not supported by Exllama, "\

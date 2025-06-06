@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 
 import pytest
@@ -22,7 +23,7 @@ def test_bad_callable():
     pass_manager.configure(config)
 
     with pytest.raises(AssertionError):
-        pass_manager.add(simple_callable)  # noqa, type wrong on purpose
+        pass_manager.add(simple_callable)
 
 
 # Pass that inherits from InductorPass

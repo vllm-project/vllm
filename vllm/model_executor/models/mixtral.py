@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -22,7 +23,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -359,7 +361,7 @@ class MixtralModel(nn.Module):
             num_experts=self.config.num_local_experts)
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
@@ -510,7 +512,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["rotary_emb.inv_freq"])
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

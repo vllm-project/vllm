@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
 from vllm.utils import is_fake_hpu, migrate_to_cpu
 

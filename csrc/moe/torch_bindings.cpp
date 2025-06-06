@@ -10,7 +10,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   // Calculate the result of moe by summing up the partial results
   // from all selected experts.
-  m.def("moe_sum(Tensor! input, Tensor output) -> ()");
+  m.def("moe_sum(Tensor input, Tensor! output) -> ()");
   m.impl("moe_sum", torch::kCUDA, &moe_sum);
 
   // Aligning the number of tokens to be processed by each expert such
@@ -44,7 +44,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   m.def(
       "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"
-      "Tensor! b_q_weight, Tensor! b_scales, Tensor? b_zeros_or_none,"
+      "Tensor! b_q_weight, Tensor! b_scales, Tensor? global_scale, Tensor? "
+      "b_zeros_or_none,"
       "Tensor? g_idx_or_none, Tensor? perm_or_none, Tensor! workspace,"
       "Tensor sorted_token_ids,"
       "Tensor! expert_ids, Tensor! num_tokens_past_padded,"
@@ -76,7 +77,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor topk_ids,Tensor src_row_id2dst_row_id_map, Tensor "
       "expert_first_token_offset, int n_expert, int n_local_expert,int "
       "topk, Tensor! hidden_states)->()");
-  // conditionally compiled so impl registration is in source file
+
+  m.def("moe_permute_unpermute_supported() -> bool");
+  m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
+
+  // Row shuffle for MoE
+  m.def(
+      "shuffle_rows(Tensor input_tensor, Tensor dst2src_map, Tensor! "
+      "output_tensor) -> ()");
+  m.impl("shuffle_rows", torch::kCUDA, &shuffle_rows);
 
 #endif
 }
