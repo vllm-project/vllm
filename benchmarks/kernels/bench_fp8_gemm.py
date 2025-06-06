@@ -5,11 +5,11 @@ import copy
 import itertools
 
 import torch
-import triton
 from weight_shapes import WEIGHT_SHAPES
 
 from vllm._custom_ops import cutlass_scaled_mm as vllm_scaled_mm
 from vllm._custom_ops import scaled_fp8_quant as vllm_scaled_fp8_quant
+from vllm.triton_utils import triton
 
 
 @triton.testing.perf_report(
