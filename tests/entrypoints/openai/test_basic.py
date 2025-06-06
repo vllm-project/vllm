@@ -13,7 +13,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 
 @pytest.fixture(scope='module')

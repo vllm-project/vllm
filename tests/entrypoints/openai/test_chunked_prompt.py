@@ -8,7 +8,7 @@ import pytest_asyncio
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 
 @pytest.fixture(scope="module")
