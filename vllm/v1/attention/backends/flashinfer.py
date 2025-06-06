@@ -94,7 +94,7 @@ class FlashInferBackend(AttentionBackend):
         elif cache_layout == "HND":
             stride_order = (0, 1, 3, 2, 4)
         else:
-            raise ValueError("Unknown cache layout format %s.", cache_layout)
+            raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
 
 
