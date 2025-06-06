@@ -199,6 +199,33 @@ class Metrics:
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + [Metrics.labelname_finish_reason])
 
+        # FLOP counting stats
+        self.counter_total_flops = self._counter_cls(
+            name="vllm:total_flops",
+            documentation="Total floating point operations performed.",
+            labelnames=labelnames)
+        self.gauge_gflops_per_sec = self._gauge_cls(
+            name="vllm:gflops_per_second",
+            documentation="Floating point operations per second in GFLOPS.",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent")
+        self.counter_mm_flops = self._counter_cls(
+            name="vllm:matrix_multiplication_flops",
+            documentation="FLOPs from matrix multiplication operations.",
+            labelnames=labelnames)
+        self.counter_attention_flops = self._counter_cls(
+            name="vllm:attention_flops",
+            documentation="FLOPs from attention operations.",
+            labelnames=labelnames)
+        self.counter_activation_flops = self._counter_cls(
+            name="vllm:activation_flops",
+            documentation="FLOPs from activation function operations.",
+            labelnames=labelnames)
+        self.counter_normalization_flops = self._counter_cls(
+            name="vllm:normalization_flops",
+            documentation="FLOPs from normalization operations.",
+            labelnames=labelnames)
+        
         # Speculative decoding stats
         self.gauge_spec_decode_draft_acceptance_rate = self._gauge_cls(
             name="vllm:spec_decode_draft_acceptance_rate",

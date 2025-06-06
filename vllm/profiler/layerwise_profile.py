@@ -15,6 +15,8 @@ from torch.profiler import ProfilerActivity, profile
 from vllm.profiler.utils import (TablePrinter, event_has_module,
                                  event_is_torch_op, event_module_repr,
                                  event_torch_op_stack_trace, indent_string)
+from vllm.profiler.flop_counter import (DetailedFlopCount, FlopCounter,
+                                       format_flops)
 
 
 @dataclass
@@ -44,6 +46,8 @@ class SummaryStatsEntry:
     cuda_time_us: float
     pct_cuda_time: float
     invocations: int
+    flops: int = 0
+    gflops_per_sec: float = 0.0
 
 
 @dataclass
@@ -53,6 +57,8 @@ class ModelStatsEntry:
     cuda_time_us: float
     pct_cuda_time: float
     trace: str
+    flops: int = 0
+    gflops_per_sec: float = 0.0
 
 
 StatsEntry: TypeAlias = Union[ModelStatsEntry, SummaryStatsEntry]
@@ -77,6 +83,7 @@ class LayerwiseProfileResults(profile):
 
     # profile metadata
     num_running_seqs: Optional[int] = None
+    flop_counts: Optional[DetailedFlopCount] = None
 
     def __post_init__(self):
         self._build_correlation_map()
@@ -88,6 +95,8 @@ class LayerwiseProfileResults(profile):
                               cpu_time_us=12,
                               cuda_time_us=12,
                               pct_cuda_time=12,
+                              flops=15,
+                              gflops_per_sec=15,
                               trace=60)
         if column_widths:
             _column_widths.update(**column_widths)
@@ -105,7 +114,9 @@ class LayerwiseProfileResults(profile):
         _column_widths = dict(name=80,
                               cuda_time_us=12,
                               pct_cuda_time=12,
-                              invocations=15)
+                              invocations=15,
+                              flops=15,
+                              gflops_per_sec=15)
         if column_widths:
             _column_widths.update(**column_widths)
         filtered_summary_table = [(depth, row)
@@ -131,8 +142,32 @@ class LayerwiseProfileResults(profile):
         ])
         df.to_csv(filename)
 
+    def print_flop_summary(self):
+        """Print a summary of FLOP counts."""
+        if not self.flop_counts:
+            print("No FLOP data available")
+            return
+            
+        print(f"\n=== FLOP Summary ===")
+        print(f"Total FLOPs: {format_flops(self.flop_counts.total_flops)}")
+        
+        if self.flop_counts.operation_counts:
+            print(f"\nTop Operations by FLOP Count:")
+            sorted_ops = sorted(self.flop_counts.operation_counts.items(), 
+                              key=lambda x: x[1], reverse=True)
+            for op_name, flops in sorted_ops[:10]:  # Top 10
+                print(f"  {op_name}: {format_flops(flops)}")
+        
+        if self.flop_counts.layer_counts:
+            print(f"\nTop Layers by FLOP Count:")
+            layer_totals = [(layer, flop_count.total()) 
+                          for layer, flop_count in self.flop_counts.layer_counts.items()]
+            sorted_layers = sorted(layer_totals, key=lambda x: x[1], reverse=True)
+            for layer_name, total_flops in sorted_layers[:10]:  # Top 10
+                print(f"  {layer_name}: {format_flops(total_flops)}")
+
     def convert_stats_to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "metadata": {
                 "num_running_seqs": self.num_running_seqs
             },
@@ -141,6 +176,16 @@ class LayerwiseProfileResults(profile):
             "model_stats":
             self._convert_stats_tree_to_dict(self._model_stats_tree)
         }
+        
+        if self.flop_counts:
+            result["flop_summary"] = {
+                "total_flops": self.flop_counts.total_flops,
+                "operation_counts": self.flop_counts.operation_counts,
+                "layer_counts": {layer: flop_count.to_dict() 
+                               for layer, flop_count in self.flop_counts.layer_counts.items()}
+            }
+        
+        return result
 
     @staticmethod
     def _indent_row_names_based_on_depth(depths_rows: list[tuple[int,
@@ -228,6 +273,46 @@ class LayerwiseProfileResults(profile):
     def _total_cuda_time(self):
         return sum(
             [self._cumulative_cuda_time(root) for root in self._module_tree])
+    
+    def _get_flop_count_for_layer(self, layer_name: str) -> int:
+        """Get FLOP count for a specific layer from flop_counts.
+        
+        Args:
+            layer_name: Name of the layer to get FLOP counts for.
+        """
+        if not self.flop_counts or not self.flop_counts.layer_counts:
+            return 0
+        
+        for layer, flop_count in self.flop_counts.layer_counts.items():
+            if layer_name in layer or layer in layer_name:
+                return flop_count.total()
+        return 0
+    
+    def _get_flop_count_for_operation(self, op_name: str) -> int:
+        """Get FLOP count for a specific operation from flop_counts.
+        
+        Args:
+            op_name: Name of the operation to get FLOP counts for.
+        """
+        if not self.flop_counts or not self.flop_counts.operation_counts:
+            return 0
+        
+        for op, flops in self.flop_counts.operation_counts.items():
+            if op_name in op or op in op_name:
+                return flops
+        return 0
+    
+    def _calculate_gflops_per_sec(self, flops: int, time_us: float) -> float:
+        """Calculate GFLOPS/sec given FLOP count and time in microseconds.
+        
+        Args:
+            flops: Number of floating point operations.
+            time_us: Time in microseconds.
+        """
+        if time_us == 0:
+            return 0.0
+        time_sec = time_us / 1_000_000
+        return flops / (time_sec * 1e9)
 
     def _build_stats_trees(self):
         summary_dict: dict[str, _StatsTreeNode] = {}
@@ -244,24 +329,31 @@ class LayerwiseProfileResults(profile):
             if event_has_module(node.event):
                 name = event_module_repr(node.event)
                 cuda_time_us = self._cumulative_cuda_time(node)
+                flops = self._get_flop_count_for_layer(name)
             elif (gpu_kineto_event := self._get_kineto_gpu_event(node)):
                 name = gpu_kineto_event.name()
                 cuda_time_us = gpu_kineto_event.duration_ns() / 1000.0
+                flops = self._get_flop_count_for_operation(name)
             else:
                 return None
 
+            gflops_per_sec = self._calculate_gflops_per_sec(flops, cuda_time_us)
             summary_trace = summary_trace + (name, )
             if summary_trace in summary_dict:
                 entry = summary_dict[summary_trace].entry
                 entry.cuda_time_us += cuda_time_us
+                entry.flops += flops
                 entry.invocations += 1
                 entry.pct_cuda_time = pct_cuda_time(entry.cuda_time_us)
+                entry.gflops_per_sec = self._calculate_gflops_per_sec(entry.flops, entry.cuda_time_us)
             else:
                 new_node = _StatsTreeNode(entry=SummaryStatsEntry(
                     name=name,
                     cuda_time_us=cuda_time_us,
                     pct_cuda_time=pct_cuda_time(cuda_time_us),
-                    invocations=1),
+                    invocations=1,
+                    flops=flops,
+                    gflops_per_sec=gflops_per_sec),
                                           children=[],
                                           parent=parent)
                 if parent:
@@ -285,20 +377,25 @@ class LayerwiseProfileResults(profile):
                 cuda_time_us = self._cumulative_cuda_time(node)
                 cpu_time_us = node.event.duration_time_ns / 1000
                 trace = ""
+                flops = self._get_flop_count_for_layer(name)
             elif (gpu_kineto_event := self._get_kineto_gpu_event(node)):
                 name = gpu_kineto_event.name()
                 cuda_time_us = gpu_kineto_event.duration_ns() / 1000.0
                 cpu_time_us = 0
                 trace = node.trace
+                flops = self._get_flop_count_for_operation(name)
             else:
                 return None
 
+            gflops_per_sec = self._calculate_gflops_per_sec(flops, cuda_time_us)
             new_node = _StatsTreeNode(entry=ModelStatsEntry(
                 name=name,
                 cpu_time_us=cpu_time_us,
                 cuda_time_us=cuda_time_us,
                 pct_cuda_time=pct_cuda_time(cuda_time_us),
-                trace=trace),
+                trace=trace,
+                flops=flops,
+                gflops_per_sec=gflops_per_sec),
                                       parent=parent,
                                       children=[])
             if parent:
@@ -347,14 +444,14 @@ class LayerwiseProfileResults(profile):
 
 class layerwise_profile(profile):
 
-    def __init__(self, num_running_seqs: Optional[int] = None):
-        """
-        layerwise profile constructor.
+    def __init__(self, num_running_seqs: Optional[int] = None, enable_flop_counting: bool = False):
+        """Layerwise profile constructor.
 
         Args:
-            num_running_seqs (Optional[int], optional): When given,
-            num_running_seqs will be passed to LayerProfileResults for metadata
-            update. Defaults to None.
+            num_running_seqs: When given, num_running_seqs will be passed to 
+                LayerProfileResults for metadata update.
+            enable_flop_counting: Whether to enable FLOP counting during 
+                profiling.
         """
         super().__init__(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -364,12 +461,23 @@ class layerwise_profile(profile):
             experimental_config=_ExperimentalConfig(verbose=True))
 
         self.num_running_seqs = num_running_seqs
+        self.enable_flop_counting = enable_flop_counting
+        self.flop_counter: Optional[FlopCounter] = None
 
     def __enter__(self):
+        if self.enable_flop_counting:
+            self.flop_counter = FlopCounter()
+            self.flop_counter.__enter__()
         return super().__enter__()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        flop_counts = None
+        if self.flop_counter:
+            self.flop_counter.__exit__(exc_type, exc_val, exc_tb)
+            flop_counts = self.flop_counter.get_detailed_counts()
+            
         super().__exit__(exc_type, exc_val, exc_tb)
         self.results = LayerwiseProfileResults(
             self.profiler.kineto_results,
-            num_running_seqs=self.num_running_seqs)
+            num_running_seqs=self.num_running_seqs,
+            flop_counts=flop_counts)
