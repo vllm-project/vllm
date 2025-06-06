@@ -62,7 +62,7 @@ class PrithviGeoSpatialMAEInputBuilder(
         # The size of pixel_values might change in the cases where we resize
         # the input but never exceeds the dimensions below.
         return {
-            "pixel_values": torch.full((1, 6, 512, 512), 1.0, dtype=torch.float16),
+            "pixel_values": torch.full((6, 512, 512), 1.0, dtype=torch.float16),
             "location_coords": torch.full((1, 2), 1.0, dtype=torch.float16),
         }
 
@@ -178,7 +178,7 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModalWithRaw
         if not isinstance(pixel_values, torch.Tensor):
             raise ValueError(f"Incorrect type of pixel_values. "
                              f"Got type: {type(pixel_values)}")
-        pixel_values = torch.unbind(pixel_values, dim=0)[0]
+        # pixel_values = torch.unbind(pixel_values, dim=0)[0]
 
         location_coords = kwargs.pop("location_coords", None)
         if not isinstance(location_coords, torch.Tensor):
@@ -217,7 +217,7 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModalWithRaw
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        return PoolerOutput([PoolingSequenceGroupOutput(hidden_states[0])])
+        return PoolerOutput([PoolingSequenceGroupOutput(hidden_state) for hidden_state in hidden_states])
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
