@@ -39,7 +39,10 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               RowParallelLinear,
+                                               AttnRowParallelLinear,
+                                               AttnQKVParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -57,6 +60,7 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     extract_layer_index, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
+from vllm.forward_context import ForwardContext, get_forward_context
 
 logger = init_logger(__name__)
 
@@ -115,9 +119,75 @@ class Qwen2Attention(nn.Module):
         dual_chunk_attention_config: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__()
+        
+        from vllm.distributed import (
+                            get_lm_tensor_model_parallel_world_size,
+                            get_lm_tensor_model_parallel_rank)
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads_attn = num_heads
+        tp_size_attn = get_lm_tensor_model_parallel_world_size()
+        assert self.total_num_heads_attn % tp_size_attn == 0
+        self.num_heads_attn = self.total_num_heads_attn // tp_size_attn
+        self.total_num_kv_heads_attn = num_kv_heads
+        if self.total_num_kv_heads_attn >= tp_size_attn:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads_attn % tp_size_attn == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size_attn % self.total_num_kv_heads_attn == 0
+        self.num_kv_heads_attn = max(1, self.total_num_kv_heads_attn // tp_size_attn)
+        self.head_dim_attn = hidden_size // self.total_num_heads_attn
+        self.q_size_attn = self.num_heads_attn * self.head_dim_attn
+        self.kv_size_attn = self.num_kv_heads_attn * self.head_dim_attn
+        self.scaling_attn = self.head_dim_attn**-0.5
+        self.rope_theta_attn = rope_theta
+        self.dual_chunk_attention_config_attn = dual_chunk_attention_config
+
+        self.qkv_proj_attn = AttnQKVParallelLinear(
+            hidden_size,
+            self.head_dim_attn,
+            self.total_num_heads_attn,
+            self.total_num_kv_heads_attn,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+        self.o_proj_attn = AttnRowParallelLinear(
+            self.total_num_heads_attn * self.head_dim_attn,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        self.rotary_emb_attn = get_rope(
+            self.head_dim_attn,
+            rotary_dim=self.head_dim_attn,
+            max_position=max_position,
+            base=self.rope_theta_attn,
+            rope_scaling=rope_scaling,
+            dual_chunk_attention_config=dual_chunk_attention_config,
+        )
+        self.attn_attn = Attention(
+            self.num_heads_attn,
+            self.head_dim_attn,
+            self.scaling_attn,
+            num_kv_heads=self.num_kv_heads_attn,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            attn_type=attn_type,
+            prefix=f"{prefix}.attn2",
+            **{
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            } if dual_chunk_attention_config else {})
+        
+
+        self.hidden_size = hidden_size
         self.total_num_heads = num_heads
+        tp_size = get_tensor_model_parallel_world_size()
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
@@ -181,11 +251,28 @@ class Qwen2Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
+
+        forward_context: ForwardContext = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if attn_metadata is None:
+            # for profile run
+            is_prefill = True
+        else:
+            is_prefill = attn_metadata.num_prefills > 0
+            if hasattr(attn_metadata, 'with_prefill_across_dp'):
+                is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        if is_prefill:
+            qkv, _ = self.qkv_proj_attn(hidden_states)
+            q, k, v = qkv.split([self.q_size_attn, self.kv_size_attn, self.kv_size_attn], dim=-1)
+            q, k = self.rotary_emb_attn(positions, q, k)
+            attn_output = self.attn_attn(q, k, v)
+            output, _ = self.o_proj_attn(attn_output)
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
+            output, _ = self.o_proj(attn_output)
         return output
 
 

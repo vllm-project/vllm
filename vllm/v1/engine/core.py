@@ -686,9 +686,9 @@ class DPEngineCoreProc(EngineCoreProc):
         self.counter = 0
 
         # Initialize the engine.
-        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         super().__init__(vllm_config, on_head_node, input_address,
-                         executor_class, log_stats, dp_rank)
+                         executor_class, log_stats, self.dp_rank)
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
 
