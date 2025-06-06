@@ -428,8 +428,7 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
             trust_remote_code=self.model_config.trust_remote_code)
 
         for i, token in enumerate(tokens):
-            token_id = tokenizer(token, add_special_tokens=False).input_ids[0]
-            print(token_id)
+            token_id = tokenizer.convert_tokens_to_ids(token)
             self.classifier.weight.data[i] = self.lm_head.weight.data[token_id]
 
         del self.lm_head
