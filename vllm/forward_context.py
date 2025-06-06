@@ -43,7 +43,9 @@ class DPMetadata:
                                          device="cpu",
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
+        print("STARTING AR")
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
+        print("finishing")
         return num_tokens_tensor
 
     @staticmethod
@@ -54,7 +56,9 @@ class DPMetadata:
                                          device="cpu",
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
+        print("Starting AR")
         dist.all_reduce(should_ubatch_tensor, group=get_dp_group().cpu_group)
+        print("FINISHING AR")
         result: bool = bool(torch.all(should_ubatch_tensor == 1).item())
         return result
 
@@ -80,6 +84,7 @@ class DPMetadata:
 
         # If num_tokens_across_dp is None, it will be computed by all_reduce
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
+        # print(f"num_tokens_across_dp {num_tokens_across_dp} batchsize {batchsize}")
         assert (num_tokens_across_dp is None
                 or num_tokens_across_dp[dp_rank] == batchsize)
         if num_tokens_across_dp is None:

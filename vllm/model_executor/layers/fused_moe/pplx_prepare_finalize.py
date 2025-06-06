@@ -123,8 +123,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 do_recv=not send,
             )
 
-        ubatch_ctx = get_current_ubatch_context()
-        ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
         # yield_and_switch_from_compute_to_comm_impl(schedule="default")
         dispatch(True)  # Send
         # torch.cuda.synchronize()
