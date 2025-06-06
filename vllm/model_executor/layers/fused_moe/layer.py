@@ -340,8 +340,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             input_activations = get_quant_config_input_activations(
                 quant_config)
+            block_shape = quant_config.weight_block_size if quant_config is not None else None
 
             logger.debug("PplxPrepareAndFinalize")
+
+            # XXXXXXXXXXXXXXXXXXXXXXXXX TODO
+            # Remove quant flags from PrepareAndFinalize ctor and
+            # pass them in as arguments to prepare().  Get them
+            # from the FusedExperts as attributes or arguments
+
+
             prepare_finalize = PplxPrepareAndFinalize(
                 handle,
                 max_num_tokens=moe.max_num_tokens,
@@ -353,7 +361,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 per_act_token=(input_activations.strategy
                                == QuantizationStrategy.TOKEN
                                if input_activations is not None else False),
-                block_shape=None,           # TODO (bnell): quantization
+                block_shape=None, #block_shape
             )
         elif moe.use_deepep_ht_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size

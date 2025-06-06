@@ -926,6 +926,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         intermediate_cache1.fill_(0)
 
+        #print(f"A1_SCALES {a1q_scale.shape}")
+
         # MM1
         invoke_moe_batched_triton_kernel(A=hidden_states,
                                          B=w1,
