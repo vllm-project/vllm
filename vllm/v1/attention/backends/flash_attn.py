@@ -346,7 +346,7 @@ class FlashAttentionMetadataBuilder:
               max_query_len: int,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
-              for_cudagraph_capture: Optional[bool] = False):
+              for_cudagraph_capture: bool = False):
         max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens

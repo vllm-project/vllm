@@ -450,9 +450,13 @@ class MLACommonMetadataBuilder(Generic[M]):
             seq_lens=seq_lens,
         )
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+    def build(self,
+              num_reqs: int,
+              num_actual_tokens: int,
+              max_query_len: int,
               common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata) -> M:
+              common_attn_metadata: CommonAttentionMetadata,
+              for_cudagraph_capture: bool = False) -> M:
         assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
