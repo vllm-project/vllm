@@ -20,8 +20,9 @@ logger = init_logger(__name__)
 class TorchAOConfig(QuantizationConfig):
     """Config class for torchao."""
 
-    def __init__(self, torchao_config) -> None:
-        self.torchao_config = torchao_config
+    def __init__(self,
+                 torchao_config,
+                 skip_modules: Optional[list[str]] = None) -> None:
         """
         # TorchAO quantization relies on tensor subclasses. In order,
         # to enable proper caching this needs standalone compile
@@ -36,6 +37,8 @@ class TorchAOConfig(QuantizationConfig):
             os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
             logger.info("Using TorchAO: Setting VLLM_DISABLE_COMPILE_CACHE=1")
         """
+        self.torchao_config = torchao_config
+        self.skip_modules = skip_modules or []
 
     def __repr__(self) -> str:
         return f"TorchAOConfig({self.torchao_config})"
@@ -67,11 +70,21 @@ class TorchAOConfig(QuantizationConfig):
 
         hf_config = cls.get_from_keys_or(config, ["quant_type"], None)
         assert hf_config is not None, "quant_type must be specified"
-        assert (len(hf_config) == 1 and "default" in hf_config
-                ), "Expected only one key 'default' in quant_type dictionary"
+        assert len(hf_config) == 1 and "default" in hf_config, (
+            "Expected only one key 'default' in quant_type dictionary")
         quant_type = hf_config["default"]
         ao_config = config_from_dict(quant_type)
-        return cls(ao_config)
+
+        # Adds skipped modules defined in "modules_to_not_convert"
+        skip_modules = config.get("modules_to_not_convert", []) or []
+
+        # adds skipped modules defined in "module_fqn_to_config"
+        module_fqn = quant_type["_data"]["module_fqn_to_config"]
+        for layer in module_fqn:
+            if module_fqn.get(layer, None) is None:
+                skip_modules.append(layer)
+
+        return cls(ao_config, skip_modules)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
@@ -80,13 +93,16 @@ class TorchAOConfig(QuantizationConfig):
 
         from torchao.quantization import ModuleFqnToConfig
 
+        if any(s in prefix for s in self.skip_modules):
+            return UnquantizedLinearMethod()
+
         module_fqn = prefix
         if isinstance(self.torchao_config, ModuleFqnToConfig):
             module_fqn_to_config = self.torchao_config.module_fqn_to_config
             c = module_fqn_to_config.get(
                 module_fqn) or module_fqn_to_config.get("_default", None)
             if c is not None:
-                current_torchao_config = TorchAOConfig(c)
+                current_torchao_config = TorchAOConfig(c, self.skip_modules)
                 return TorchAOLinearMethod(current_torchao_config)
             else:
                 return UnquantizedLinearMethod()
@@ -108,8 +124,11 @@ def torchao_quantize_param_data(param: torch.Tensor,
     """
     from torchao.core.config import AOBaseConfig
     from torchao.quantization import quantize_
+
     assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
-    dummy_linear = torch.nn.Linear(param.shape[1], param.shape[0], bias=False)
+    dummy_linear = torch.nn.Linear(1, 1, bias=False)
+    dummy_linear.in_features = param.shape[1]
+    dummy_linear.out_features = param.shape[0]
     dummy_linear.weight = param
     quantize_(dummy_linear, torchao_config)
     return dummy_linear.weight
