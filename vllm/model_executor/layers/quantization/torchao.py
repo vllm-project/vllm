@@ -7,17 +7,11 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (
-    LinearBase,
-    LinearMethodBase,
-    UnquantizedLinearMethod,
-)
-
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-    QuantizeMethodBase,
-)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -26,9 +20,9 @@ logger = init_logger(__name__)
 class TorchAOConfig(QuantizationConfig):
     """Config class for torchao."""
 
-    def __init__(
-        self, torchao_config, skip_modules: Optional[list[str]] = None
-    ) -> None:
+    def __init__(self,
+                 torchao_config,
+                 skip_modules: Optional[list[str]] = None) -> None:
         """
         # TorchAO quantization relies on tensor subclasses. In order,
         # to enable proper caching this needs standalone compile
@@ -45,7 +39,6 @@ class TorchAOConfig(QuantizationConfig):
         """
         self.torchao_config = torchao_config
         self.skip_modules = skip_modules or []
-
 
     def __repr__(self) -> str:
         return f"TorchAOConfig({self.torchao_config})"
@@ -78,8 +71,7 @@ class TorchAOConfig(QuantizationConfig):
         hf_config = cls.get_from_keys_or(config, ["quant_type"], None)
         assert hf_config is not None, "quant_type must be specified"
         assert len(hf_config) == 1 and "default" in hf_config, (
-            "Expected only one key 'default' in quant_type dictionary"
-        )
+            "Expected only one key 'default' in quant_type dictionary")
         quant_type = hf_config["default"]
         ao_config = config_from_dict(quant_type)
 
@@ -94,9 +86,8 @@ class TorchAOConfig(QuantizationConfig):
 
         return cls(ao_config, skip_modules)
 
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         if not isinstance(layer, LinearBase):
             return None
 
@@ -109,8 +100,7 @@ class TorchAOConfig(QuantizationConfig):
         if isinstance(self.torchao_config, ModuleFqnToConfig):
             module_fqn_to_config = self.torchao_config.module_fqn_to_config
             c = module_fqn_to_config.get(
-                module_fqn
-            ) or module_fqn_to_config.get("_default", None)
+                module_fqn) or module_fqn_to_config.get("_default", None)
             if c is not None:
                 current_torchao_config = TorchAOConfig(c, self.skip_modules)
                 return TorchAOLinearMethod(current_torchao_config)
@@ -123,9 +113,8 @@ class TorchAOConfig(QuantizationConfig):
         return []
 
 
-def torchao_quantize_param_data(
-    param: torch.Tensor, torchao_config: Any
-) -> torch.nn.Parameter:
+def torchao_quantize_param_data(param: torch.Tensor,
+                                torchao_config: Any) -> torch.nn.Parameter:
     """Quantize a Tensor with torchao quantization specified by torchao_config
 
     Args:
@@ -174,9 +163,8 @@ class TorchAOLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        weight = torchao_quantize_param_data(
-            weight, self.quant_config.torchao_config
-        )
+        weight = torchao_quantize_param_data(weight,
+                                             self.quant_config.torchao_config)
 
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 
