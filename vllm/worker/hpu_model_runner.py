@@ -1419,15 +1419,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
-            block_size=self.block_size,
-        context_lens_tensor = torch.tensor(context_lens,
-                                           dtype=torch.long,
-                                           device=self.device)
-
-        block_indices, block_offsets = precompute_indices_and_offsets(
-            self.block_size, slot_mapping, True)
-        attn_metadata = self.attn_backend.make_metadata(
-            is_prompt=True,
             block_list=prefix_block_list_tensor,
             block_mapping=None,
             block_usage=None,
