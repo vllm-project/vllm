@@ -431,7 +431,8 @@ class NixlConnectorWorker:
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported.")
         self.device_kv_caches: dict[str, torch.Tensor] = {}
-        self.device = None
+        self.device: torch.device = None
+        self.device_index: int = -1
 
         # cpu kv buffer for xfer
         # used when xPU memory can not be registered under nixl
@@ -637,8 +638,8 @@ class NixlConnectorWorker:
             self.num_blocks = first_kv_cache.shape[0]
             block_rank = 3  # [block_size, kv_heads, head_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
-            block_size, n_kv_heads, head_dim = block_shape
-            self.slot_size_bytes = kv_elem_size * n_kv_heads * head_dim
+            block_size, n_kv_heads_x_2, head_dim = block_shape
+            self.slot_size_bytes = kv_elem_size * n_kv_heads_x_2 * head_dim
         elif self.device_type == "cuda":
             # TODO (NickLucche) not compatible with hybrid allocator.
             # Enforce check once it goes live, as a single kv layout
@@ -682,6 +683,13 @@ class NixlConnectorWorker:
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.device_kv_caches = kv_caches
         self.device = first_kv_cache.device
+        # if CPU device has no index
+        self.device_index = 0 if not hasattr(self.device, "index") else \
+                            self.device_index
+        assert self.device
+        assert self.device_index >= 0, \
+               f"cache device {self.device} index is invalid"
+
         kv_caches_base_addr = []
         caches_data = []
 
@@ -702,7 +710,7 @@ class NixlConnectorWorker:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
                 caches_data.append(
-                    (base_addr, region_len, self.device.index, ""))
+                    (base_addr, region_len, self.device_index, ""))
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
