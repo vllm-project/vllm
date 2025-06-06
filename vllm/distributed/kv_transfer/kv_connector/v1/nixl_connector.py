@@ -687,7 +687,7 @@ class NixlConnectorWorker:
         self.device = first_kv_cache.device
         # if CPU device has no index
         self.device_index = 0 if not hasattr(self.device, "index") else \
-                            self.device_index
+                            self.device.index
         assert self.device
         assert self.device_index >= 0, \
                f"cache device {self.device} index is invalid"
