@@ -11,6 +11,8 @@ repos:
   hooks:
   - id: yapf
     args: [--in-place, --verbose]
+    # Keep the same list from yapfignore here to avoid yapf failing without any inputs
+    exclude: '(.buildkite|benchmarks|build|examples)/.*'
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.11.7
   hooks:

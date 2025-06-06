@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_internvl_chat.py
 # --------------------------------------------------------
@@ -1018,15 +1019,6 @@ class InternVLMultiModalProcessor(
     dummy_inputs=InternVLDummyInputsBuilder)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                         SupportsLoRA):
-
-    packed_modules_mapping = {
-        "wqkv": ["wqkv"],
-        "qkv": ["qkv"],
-        "gate_up_proj": [
-            "w1",
-            "w3",
-        ],
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

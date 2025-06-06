@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
 
 import pytest
@@ -11,13 +12,11 @@ from vllm.utils import GiB_bytes, sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
-from vllm.v1.core.kv_cache_utils import (FreeKVCacheBlockQueue, KVCacheBlock,
-                                         PrefixCachingMetrics,
-                                         estimate_max_model_len,
-                                         generate_block_hash_extra_keys,
-                                         hash_block_tokens,
-                                         hash_request_tokens,
-                                         unify_kv_cache_configs)
+from vllm.v1.core.kv_cache_utils import (
+    FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
+    estimate_max_model_len, generate_block_hash_extra_keys,
+    get_kv_cache_config, get_max_concurrency_for_kv_cache_config,
+    hash_block_tokens, hash_request_tokens, unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         SlidingWindowSpec)
@@ -64,6 +63,20 @@ def new_kv_cache_spec(block_size=16,
                              sliding_window=sliding_window)
 
 
+def new_sliding_window_spec(block_size=16,
+                            num_kv_heads=2,
+                            head_size=64,
+                            dtype=torch.float32,
+                            use_mla=False,
+                            sliding_window=1):
+    return SlidingWindowSpec(block_size=block_size,
+                             num_kv_heads=num_kv_heads,
+                             head_size=head_size,
+                             dtype=dtype,
+                             use_mla=use_mla,
+                             sliding_window=sliding_window)
+
+
 def test_none_hash(monkeypatch):
     import vllm.v1.core.kv_cache_utils
 
@@ -100,8 +113,8 @@ def test_kv_cache_block():
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
-    block_hash = vllm.v1.core.kv_cache_utils.BlockHashType(hash_value=123,
-                                                           token_ids=(1, 2, 3))
+    block_hash = vllm.v1.core.kv_cache_utils.BlockHash(hash_value=123,
+                                                       token_ids=(1, 2, 3))
     block.block_hash = block_hash
     assert block.block_hash == block_hash
 
@@ -282,7 +295,7 @@ def test_hash_block_tokens(hash_fn):
 
     block_hash = hash_block_tokens(hash_fn, parent_block_hash,
                                    curr_block_token_ids, extra_keys)
-    assert isinstance(block_hash, vllm.v1.core.kv_cache_utils.BlockHashType)
+    assert isinstance(block_hash, vllm.v1.core.kv_cache_utils.BlockHash)
     assert block_hash.hash_value == hash_fn(
         (parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
@@ -306,10 +319,8 @@ def test_hash_request_tokens(hash_fn):
     block_hashes = hash_request_tokens(hash_fn, block_size, request)
 
     assert len(block_hashes) == 2
-    assert isinstance(block_hashes[0],
-                      vllm.v1.core.kv_cache_utils.BlockHashType)
-    assert isinstance(block_hashes[1],
-                      vllm.v1.core.kv_cache_utils.BlockHashType)
+    assert isinstance(block_hashes[0], vllm.v1.core.kv_cache_utils.BlockHash)
+    assert isinstance(block_hashes[1], vllm.v1.core.kv_cache_utils.BlockHash)
 
     # Check the first block
     assert block_hashes[0].token_ids == (0, 1, 2)
@@ -406,10 +417,10 @@ def test_unify_kv_cache_configs():
     same_kv_cache_config = [
         KVCacheConfig(
             num_blocks=10,
-            tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
                 KVCacheGroupSpec(["layer2"],
@@ -418,10 +429,10 @@ def test_unify_kv_cache_configs():
         ),
         KVCacheConfig(
             num_blocks=20,
-            tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
                 KVCacheGroupSpec(["layer2"],
@@ -436,10 +447,10 @@ def test_unify_kv_cache_configs():
     need_sort_kv_cache_config = [
         KVCacheConfig(
             num_blocks=10,
-            tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
                 KVCacheGroupSpec(["layer2"],
@@ -448,10 +459,10 @@ def test_unify_kv_cache_configs():
         ),
         KVCacheConfig(
             num_blocks=20,
-            tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer2"],
                                  new_kv_cache_spec(num_kv_heads=4)),
@@ -467,10 +478,10 @@ def test_unify_kv_cache_configs():
     diff_kv_cache_config = [
         KVCacheConfig(
             num_blocks=10,
-            tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
                 KVCacheGroupSpec(["layer2"],
@@ -479,10 +490,10 @@ def test_unify_kv_cache_configs():
         ),
         KVCacheConfig(
             num_blocks=20,
-            tensors={
-                "layer1": KVCacheTensor(100),
-                "layer2": KVCacheTensor(100),
-            },
+            kv_cache_tensors=[
+                KVCacheTensor(size=100, shared_by=["layer1"]),
+                KVCacheTensor(size=100, shared_by=["layer2"]),
+            ],
             kv_cache_groups=[
                 KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
                 KVCacheGroupSpec(["layer2"],
@@ -598,14 +609,92 @@ def test_estimate_max_model_len(model_id, max_model_len,
     assert estimated_max_len == want_estimated_max_len
 
 
+def test_get_max_concurrency_for_kv_cache_config():
+    # Create a VllmConfig
+    model_id = "Qwen/Qwen1.5-7B"
+    max_model_len = 16384
+    model_config = ModelConfig(
+        model_id,
+        task="generate",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        max_model_len=max_model_len,
+    )
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=1024,
+                                       enable_chunked_prefill=True)
+
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    full_attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=32,
+        head_size=128,
+        dtype=torch.float16,
+        use_mla=False,
+    )
+
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=32,
+        head_size=128,
+        dtype=torch.float16,
+        use_mla=False,
+        sliding_window=1024,
+    )
+
+    kv_cache_config_full_attention = KVCacheConfig(
+        num_blocks=int(1024 * 1.5),
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
+                             full_attention_spec),
+        ],
+    )
+    max_concurrency_full_attention = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_full_attention)
+    assert max_concurrency_full_attention == 1.5
+
+    kv_cache_config_sliding_window = KVCacheConfig(
+        num_blocks=129 * 3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
+                             sliding_window_spec),
+        ],
+    )
+    max_concurrency_sliding_window = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_sliding_window)
+    assert max_concurrency_sliding_window == 3
+
+    kv_cache_config_hybrid_model = KVCacheConfig(
+        num_blocks=(1024 + 129) * 3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
+                             full_attention_spec),
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32, 64)],
+                             sliding_window_spec),
+        ],
+    )
+    max_concurrency_hybrid_model = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_hybrid_model)
+    assert max_concurrency_hybrid_model == 3
+
+
 def test_allocate_with_lookahead():
     """Verify that lookahead tokens correctly affect block allocation"""
     block_size = 4
     config = KVCacheConfig(
         num_blocks=10,
-        tensors={
-            "layer1": KVCacheTensor(100),
-        },
+        kv_cache_tensors=[
+            KVCacheTensor(size=100, shared_by=["layer1"]),
+        ],
         kv_cache_groups=[
             KVCacheGroupSpec(["layer1"],
                              new_kv_cache_spec(block_size=block_size)),
@@ -627,7 +716,7 @@ def test_allocate_with_lookahead():
         num_new_tokens=3,
         num_lookahead_tokens=2,  # Total required: 3+2=5 tokens
     )
-    assert len(blocks.blocks) == 2  # ceil(5/4)=2 blocks
+    assert len(blocks.get_block_ids()[0]) == 2  # ceil(5/4)=2 blocks
 
     # Test case 2: With precomputed blocks
     kv_cache_manager = KVCacheManager(kv_cache_config=config,
@@ -638,7 +727,7 @@ def test_allocate_with_lookahead():
         num_new_tokens=3,
         num_lookahead_tokens=2,
     )
-    assert len(blocks.blocks) == 2
+    assert len(blocks.get_block_ids()[0]) == 2
 
     # Test case 3: With precomputed blocks
     # required_blocks = ceil((3 + 4) / 4) = 2
@@ -649,4 +738,165 @@ def test_allocate_with_lookahead():
         num_new_tokens=3,
         num_lookahead_tokens=4,
     )
-    assert len(blocks.blocks) == 2
+    assert len(blocks.get_block_ids()[0]) == 2
+
+
+def test_get_kv_cache_config():
+    # pass max_model_len to pass check_enough_kv_cache_memory
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    # all layers are full attention -> single group
+    kv_cache_specs_full = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_kv_cache_spec(),
+    }
+    kv_cache_config_full = get_kv_cache_config(
+        vllm_config, kv_cache_specs_full, mem_per_block_per_layer * 2 * 32)
+    assert kv_cache_config_full == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_1"]),
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_2"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec())
+        ])
+
+    # all layers are sliding window -> single group
+    kv_cache_specs_sliding = {
+        'layer_1': new_sliding_window_spec(),
+        'layer_2': new_sliding_window_spec(),
+    }
+    kv_cache_config_sliding = get_kv_cache_config(
+        vllm_config, kv_cache_specs_sliding, mem_per_block_per_layer * 2 * 32)
+    assert kv_cache_config_sliding == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_1"]),
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_2"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"], new_sliding_window_spec())
+        ])
+
+    # full + sliding, but disable_hybrid_kv_cache_manager
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
+    kv_cache_specs_hybrid = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_sliding_window_spec(),
+    }
+    kv_cache_config_hybrid = get_kv_cache_config(
+        vllm_config, kv_cache_specs_hybrid, mem_per_block_per_layer * 2 * 32)
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_1"]),
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_2"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"],
+                             new_kv_cache_spec(sliding_window=1)),
+        ],
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+
+    # full + sliding, with hybrid_kv_cache_manager
+    kv_cache_specs_hybrid = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_sliding_window_spec(),
+    }
+    kv_cache_config_hybrid = get_kv_cache_config(
+        vllm_config, kv_cache_specs_hybrid, mem_per_block_per_layer * 2 * 32)
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[
+            KVCacheTensor(size=mem_per_block_per_layer * 64,
+                          shared_by=["layer_1", "layer_2"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1"], new_kv_cache_spec()),
+            KVCacheGroupSpec(["layer_2"], new_sliding_window_spec()),
+        ],
+    )
+
+    # 2 full + 4 sliding, 2 layers per group
+    kv_cache_specs_hybrid = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_kv_cache_spec(),
+        'layer_3': new_sliding_window_spec(),
+        'layer_4': new_sliding_window_spec(),
+        'layer_5': new_sliding_window_spec(),
+        'layer_6': new_sliding_window_spec(),
+    }
+    kv_cache_config_hybrid = get_kv_cache_config(
+        vllm_config, kv_cache_specs_hybrid, mem_per_block_per_layer * 2 * 32)
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_1", "layer_3", "layer_5"]),
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_2", "layer_4", "layer_6"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec()),
+            KVCacheGroupSpec(["layer_3", "layer_4"],
+                             new_sliding_window_spec()),
+            KVCacheGroupSpec(["layer_5", "layer_6"],
+                             new_sliding_window_spec()),
+        ],
+    )
+
+    # 3 full + 7 sliding, pad to 3 full + 9 sliding
+    kv_cache_specs_hybrid = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_kv_cache_spec(),
+        'layer_3': new_kv_cache_spec(),
+        'layer_4': new_sliding_window_spec(),
+        'layer_5': new_sliding_window_spec(),
+        'layer_6': new_sliding_window_spec(),
+        'layer_7': new_sliding_window_spec(),
+        'layer_8': new_sliding_window_spec(),
+        'layer_9': new_sliding_window_spec(),
+        'layer_10': new_sliding_window_spec(),
+    }
+    kv_cache_config_hybrid = get_kv_cache_config(
+        vllm_config, kv_cache_specs_hybrid, mem_per_block_per_layer * 3 * 32)
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_1", "layer_4", "layer_7", "layer_10"]),
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_2", "layer_5", "layer_8"]),
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_3", "layer_6", "layer_9"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2", "layer_3"],
+                             new_kv_cache_spec()),
+            KVCacheGroupSpec(["layer_4", "layer_5", "layer_6"],
+                             new_sliding_window_spec()),
+            KVCacheGroupSpec(["layer_7", "layer_8", "layer_9"],
+                             new_sliding_window_spec()),
+            KVCacheGroupSpec(["layer_10"], new_sliding_window_spec()),
+        ],
+    )
+
+    # different hidden size, unimplemented
+    kv_cache_specs_hybrid = {
+        'layer_1': new_kv_cache_spec(head_size=128),
+        'layer_2': new_kv_cache_spec(),
+    }
+    with pytest.raises(NotImplementedError):
+        get_kv_cache_config(vllm_config, kv_cache_specs_hybrid,
+                            mem_per_block_per_layer * 2 * 32)
