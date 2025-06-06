@@ -911,7 +911,6 @@ class EngineArgs:
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
-            using_tensorizer=self.load_format == LoadFormat.TENSORIZER,
         )
 
     def create_load_config(self) -> LoadConfig:
