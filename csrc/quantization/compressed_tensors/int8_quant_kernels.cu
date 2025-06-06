@@ -1,16 +1,17 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
+
 #include <cmath>
 
 #include "../../dispatch_utils.h"
-#include "../vectorization.cuh"
+#include "../vectorization_utils.cuh"
 
 #ifndef USE_ROCM
-  #include <cub/util_type.cuh>
   #include <cub/cub.cuh>
+  #include <cub/util_type.cuh>
 #else
-  #include <hipcub/util_type.hpp>
   #include <hipcub/hipcub.hpp>
+  #include <hipcub/util_type.hpp>
 #endif
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
@@ -104,249 +105,164 @@ static inline __device__ int8_t int32_to_int8(int32_t x) {
 
 namespace vllm {
 
-template <typename scalar_t, typename scale_type>
+template <typename scalar_t, typename scale_t>
 __global__ void static_scaled_int8_quant_kernel(
-    scalar_t const* __restrict__ input, int8_t* __restrict__ out,
-    scale_type const* scale_ptr, const int hidden_size) {
-  int const VEC_SIZE = 16;
-  using in_vec_t = vec_n_t<scalar_t, VEC_SIZE>;
-  using out_vec_t = vec_n_t<int8_t, VEC_SIZE>;
+    const scalar_t* __restrict__ input, int8_t* __restrict__ output,
+    const scale_t* scale_ptr, const int hidden_size) {
+  int tid = threadIdx.x;
+  int stride = blockDim.x;
+  float scale = *scale_ptr;
 
-  int const tid = threadIdx.x;
-  int64_t const token_idx = blockIdx.x;
-  scale_type const scale_val = *scale_ptr;
+  const scalar_t* row_in = input + blockIdx.x * hidden_size;
+  int8_t* row_out = output + blockIdx.x * hidden_size;
 
-  // Must be performed using 64-bit math to avoid integer overflow.
-  out += token_idx * hidden_size;
-  input += token_idx * hidden_size;
-
-  auto const* vectorized_in = reinterpret_cast<in_vec_t const*>(input);
-  auto* vectorized_out = reinterpret_cast<out_vec_t*>(out);
-  int64_t const num_vec_elements = hidden_size / VEC_SIZE;
-
-  // vectorized quantization
-  for (int i = tid; i < num_vec_elements; i += blockDim.x) {
-    in_vec_t in_vec = vectorized_in[i];
-    out_vec_t out_vec;
+  vectorize_with_alignment(
+      row_in, row_out, hidden_size, tid, stride,
+      [=] __device__(vec_n_t<int8_t, 16> & dst,
+                     const vec_n_t<scalar_t, 16>& src) {
 #pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      out_vec.val[j] =
-          float_to_int8_rn(static_cast<float>(in_vec.val[j]) / scale_val);
-    }
-    vectorized_out[i] = out_vec;
-  }
-  // handle the rest
-  int64_t const remainder_start = num_vec_elements * VEC_SIZE;
-  for (int64_t i = remainder_start + tid; i < hidden_size; i += blockDim.x) {
-    out[i] = float_to_int8_rn(static_cast<float>(input[i]) / scale_val);
-  }
+        for (int k = 0; k < 16; ++k)
+          dst.val[k] = float_to_int8_rn(float(src.val[k]) / scale);
+      },
+      [=] __device__(int8_t& dst, const scalar_t& src) {
+        dst = float_to_int8_rn(float(src) / scale);
+      });
 }
 
-template <typename scalar_t, typename scale_type, typename azp_type>
+template <typename scalar_t, typename scale_t, typename azp_t>
 __global__ void static_scaled_int8_azp_quant_kernel(
-    scalar_t const* __restrict__ input, int8_t* __restrict__ out,
-    scale_type const* scale_ptr, azp_type const* azp_ptr,
-    const int hidden_size) {
-  constexpr int VEC_SIZE = 16;
-  using in_vec_t = vec_n_t<scalar_t, VEC_SIZE>;
-  using out_vec_t = vec_n_t<int8_t, VEC_SIZE>;
-  int const tid = threadIdx.x;
-  int64_t const token_idx = blockIdx.x;
-  scale_type const scale_val = *scale_ptr;
-  azp_type const azp_val = *azp_ptr;
+    const scalar_t* __restrict__ input, int8_t* __restrict__ output,
+    const scale_t* scale_ptr, const azp_t* azp_ptr, const int hidden_size) {
+  int tid = threadIdx.x;
+  int stride = blockDim.x;
+  float scale = *scale_ptr;
+  azp_t azp = *azp_ptr;
+  float inv_s = 1.0f / scale;
 
-  // Must be performed using 64-bit math to avoid integer overflow.
-  out += token_idx * hidden_size;
-  input += token_idx * hidden_size;
+  const scalar_t* row_in = input + blockIdx.x * hidden_size;
+  int8_t* row_out = output + blockIdx.x * hidden_size;
 
-  auto const* vectorized_in = reinterpret_cast<in_vec_t const*>(input);
-  auto* vectorized_out = reinterpret_cast<out_vec_t*>(out);
-  int64_t const num_vec_elements = hidden_size / VEC_SIZE;
-
-  // vectorized quantization
-  float const inv_scale = 1.0f / static_cast<float>(scale_val);
-  for (int64_t i = tid; i < num_vec_elements; i += blockDim.x) {
-    in_vec_t in_vec = vectorized_in[i];
-    out_vec_t out_vec;
-
+  vectorize_with_alignment(
+      row_in, row_out, hidden_size, tid, stride,
+      [=] __device__(vec_n_t<int8_t, 16> & dst,
+                     const vec_n_t<scalar_t, 16>& src) {
 #pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      float const val = static_cast<float>(in_vec.val[j]);
-      out_vec.val[j] =
-          int32_to_int8(float_to_int32_rn(val * inv_scale) + azp_val);
-    }
-
-    vectorized_out[i] = out_vec;
-  }
-
-  // handle the rest
-  int64_t const remainder_start = num_vec_elements * VEC_SIZE;
-  for (int64_t i = remainder_start + tid; i < hidden_size; i += blockDim.x) {
-    float const val = static_cast<float>(input[i]);
-    out[i] = int32_to_int8(float_to_int32_rn(val * inv_scale) + azp_val);
-  }
+        for (int k = 0; k < 16; ++k) {
+          float v = float(src.val[k]) * inv_s;
+          dst.val[k] = int32_to_int8(float_to_int32_rn(v) + azp);
+        }
+      },
+      [=] __device__(int8_t& dst, const scalar_t& src) {
+        float v = float(src) * inv_s;
+        dst = int32_to_int8(float_to_int32_rn(v) + azp);
+      });
 }
 
-template <typename scalar_t, typename scale_type>
+template <typename scalar_t, typename scale_t>
 __global__ void dynamic_scaled_int8_quant_kernel(
-    scalar_t const* __restrict__ input, int8_t* __restrict__ out,
-    scale_type* scale, const int hidden_size) {
-  constexpr int VEC_SIZE = 16;
-  using in_vec_t = vec_n_t<scalar_t, VEC_SIZE>;
-  using out_vec_t = vec_n_t<int8_t, VEC_SIZE>;
-  int const tid = threadIdx.x;
-  int64_t const token_idx = blockIdx.x;
+    const scalar_t* __restrict__ input, int8_t* __restrict__ output,
+    scale_t* scale_out, const int hidden_size) {
+  int tid = threadIdx.x;
+  int stride = blockDim.x;
 
-  // Must be performed using 64-bit math to avoid integer overflow.
-  out += token_idx * hidden_size;
-  input += token_idx * hidden_size;
-  auto const* vectorized_in = reinterpret_cast<in_vec_t const*>(input);
-  auto* vectorized_out = reinterpret_cast<out_vec_t*>(out);
-  int64_t const num_vec_elements = hidden_size / VEC_SIZE;
+  const scalar_t* row_in = input + blockIdx.x * hidden_size;
+  int8_t* row_out = output + blockIdx.x * hidden_size;
 
-  // vectorized scan for absmax
-  float thread_absmax = 0.0f;
-  for (int64_t i = tid; i < num_vec_elements; i += blockDim.x) {
-    in_vec_t in_vec = vectorized_in[i];
-#pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      thread_absmax =
-          fmaxf(thread_absmax, fabsf(static_cast<float>(in_vec.val[j])));
-    }
+  // calculate for absmax
+  float thread_max = 0.f;
+  for (int i = tid; i < hidden_size; i += stride) {
+    float v = fabsf(float(row_in[i]));
+    thread_max = fmaxf(thread_max, v);
   }
-
-  // handle the rest
-  int64_t const remainder_start = num_vec_elements * VEC_SIZE;
-  for (int64_t i = remainder_start + tid; i < hidden_size; i += blockDim.x) {
-    thread_absmax = fmaxf(thread_absmax, fabsf(static_cast<float>(input[i])));
-  }
-
-  // reduce the absmax across the block
-  using BlockReduce = cub::BlockReduce<float, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduce_storage;
-  float block_absmax_val_maybe =
-      BlockReduce(reduce_storage).Reduce(thread_absmax, cub::Max());
-  __shared__ float block_absmax_val;
+  using BlockReduce = cub::BlockReduce<float, 256>;
+  __shared__ typename BlockReduce::TempStorage tmp;
+  float block_max = BlockReduce(tmp).Reduce(thread_max, cub::Max{}, blockDim.x);
+  __shared__ float absmax;
   if (tid == 0) {
-    block_absmax_val = block_absmax_val_maybe;
-    scale[token_idx] = block_absmax_val / 127.0f;
+    absmax = block_max;
+    scale_out[blockIdx.x] = absmax / 127.f;
   }
   __syncthreads();
 
-  // vectorized quantization
-  float const tmp_scale = 127.0f / block_absmax_val;
-  for (int64_t i = tid; i < num_vec_elements; i += blockDim.x) {
-    in_vec_t in_vec = vectorized_in[i];
-    out_vec_t out_vec;
+  float inv_s = (absmax == 0.f) ? 0.f : 127.f / absmax;
+
+  // 2. quantize
+  vectorize_with_alignment(
+      row_in, row_out, hidden_size, tid, stride,
+      [=] __device__(vec_n_t<int8_t, 16> & dst,
+                     const vec_n_t<scalar_t, 16>& src) {
 #pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      out_vec.val[j] =
-          float_to_int8_rn(static_cast<float>(in_vec.val[j]) * tmp_scale);
-    }
-    vectorized_out[i] = out_vec;
-  }
-  // handle the rest
-  for (int64_t i = remainder_start + tid; i < hidden_size; i += blockDim.x) {
-    out[i] = float_to_int8_rn(static_cast<float>(input[i]) * tmp_scale);
-  }
+        for (int k = 0; k < 16; ++k)
+          dst.val[k] = float_to_int8_rn(float(src.val[k]) * inv_s);
+      },
+      [=] __device__(int8_t& dst, const scalar_t& src) {
+        dst = float_to_int8_rn(float(src) * inv_s);
+      });
 }
 
-struct MinMax {
-  float min;
-  float max;
-};
-
-struct MinMaxOp {
-  __device__ MinMax operator()(const MinMax& a, const MinMax& b) const {
-    return {fminf(a.min, b.min), fmaxf(a.max, b.max)};
-  }
-};
-
-template <typename scalar_t, typename scale_type, typename azp_type>
+template <typename scalar_t, typename scale_t, typename azp_t>
 __global__ void dynamic_scaled_int8_azp_quant_kernel(
-    scalar_t const* __restrict__ input, int8_t* __restrict__ out,
-    scale_type* scale, azp_type* azp, const int hidden_size) {
-  constexpr int VEC_SIZE = 16;
-  using in_vec_t = vec_n_t<scalar_t, VEC_SIZE>;
-  using out_vec_t = vec_n_t<int8_t, VEC_SIZE>;
-  int const tid = threadIdx.x;
-  int64_t const token_idx = blockIdx.x;
+    const scalar_t* __restrict__ input, int8_t* __restrict__ output,
+    scale_t* scale_out, azp_t* azp_out, const int hidden_size) {
+  int tid = threadIdx.x;
+  int stride = blockDim.x;
 
-  // Must be performed using 64-bit math to avoid integer overflow.
-  out += token_idx * hidden_size;
-  input += token_idx * hidden_size;
+  const scalar_t* row_in = input + blockIdx.x * hidden_size;
+  int8_t* row_out = output + blockIdx.x * hidden_size;
 
-  auto const* vectorized_in = reinterpret_cast<in_vec_t const*>(input);
-  auto* vectorized_out = reinterpret_cast<out_vec_t*>(out);
-  int64_t const num_vec_elements = hidden_size / VEC_SIZE;
+  // 1. calculate min & max
+  float tmin = FLT_MAX;
+  float tmax = -FLT_MAX;
+  for (int i = tid; i < hidden_size; i += stride) {
+    float v = float(row_in[i]);
+    tmin = fminf(tmin, v);
+    tmax = fmaxf(tmax, v);
+  }
 
-  // Scan for the min and max value for this token
-  MinMax thread_min_max = {std::numeric_limits<float>::max(),
-                           std::numeric_limits<float>::min()};
-
-  for (int64_t i = tid; i < num_vec_elements; i += blockDim.x) {
-    in_vec_t in_vec = vectorized_in[i];
-#pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      float const val = static_cast<float>(in_vec.val[j]);
-      thread_min_max.max = fmaxf(thread_min_max.max, val);
-      thread_min_max.min = fminf(thread_min_max.min, val);
+  struct MinMax {
+    float mn, mx;
+  };
+  struct ReduceMinMax {
+    __device__ MinMax operator()(const MinMax& a, const MinMax& b) const {
+      return {fminf(a.mn, b.mn), fmaxf(a.mx, b.mx)};
     }
-  }
+  };
 
-  // handle the rest
-  int64_t const remainder_start = num_vec_elements * VEC_SIZE;
-  for (int64_t i = remainder_start + tid; i < hidden_size; i += blockDim.x) {
-    float const val = static_cast<float>(input[i]);
-    thread_min_max.max = fmaxf(thread_min_max.max, val);
-    thread_min_max.min = fminf(thread_min_max.min, val);
-  }
+  using BlockReduce = cub::BlockReduce<MinMax, 256>;
+  __shared__ typename BlockReduce::TempStorage tmp;
 
-  // reduce the min and max values across the block in one go
-  using BlockReduce = cub::BlockReduce<MinMax, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduce_storage;
-  MinMax block_min_max =
-      BlockReduce(reduce_storage).Reduce(thread_min_max, MinMaxOp());
-
-  __shared__ scale_type scale_sh;
-  __shared__ azp_type azp_sh;
-
-  // Compute the scale and zero point and store them, only on the first thread
+  MinMax thread_mm{tmin, tmax};
+  MinMax mm = BlockReduce(tmp).Reduce(thread_mm, ReduceMinMax(), blockDim.x);
+  __shared__ float scale_sh;
+  __shared__ azp_t azp_sh;
   if (tid == 0) {
-    float const scale_val = (block_min_max.max - block_min_max.min) / 255.0f;
-    // rounding to even (same as torch.round)
-    auto const azp_float =
-        std::nearbyint(-128.0f - block_min_max.min / scale_val);
-    auto const azp_val = static_cast<azp_type>(azp_float);
-
-    scale[token_idx] = scale_sh = scale_val;
-    azp[token_idx] = azp_sh = azp_val;
+    float s = (mm.mx - mm.mn) / 255.f;
+    float zp = nearbyintf(-128.f - mm.mn / s);  // round-to-even
+    scale_sh = s;
+    azp_sh = azp_t(zp);
+    scale_out[blockIdx.x] = s;
+    azp_out[blockIdx.x] = azp_sh;
   }
-
-  // Wait for the scale and azp to be computed
   __syncthreads();
 
-  float const scale_val = scale_sh;
-  azp_type const azp_val = azp_sh;
-  float const inv_scale = 1.0f / scale_val;
+  float inv_s = 1.f / scale_sh;
+  azp_t azp = azp_sh;
 
-  // vectorized quantization
-  for (int64_t i = tid; i < num_vec_elements; i += blockDim.x) {
-    in_vec_t in_vec = vectorized_in[i];
-    out_vec_t out_vec;
+  // 2. quantize
+  vectorize_with_alignment(
+      row_in, row_out, hidden_size, tid, stride,
+      [=] __device__(vec_n_t<int8_t, 16> & dst,
+                     const vec_n_t<scalar_t, 16>& src) {
 #pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      float const val = static_cast<float>(in_vec.val[j]);
-      out_vec.val[j] =
-          int32_to_int8(float_to_int32_rn(val * inv_scale) + azp_val);
-    }
-    vectorized_out[i] = out_vec;
-  }
-  // handle the rest
-  for (int64_t i = remainder_start + tid; i < hidden_size; i += blockDim.x) {
-    float const val = static_cast<float>(input[i]);
-    out[i] = int32_to_int8(float_to_int32_rn(val * inv_scale) + azp_val);
-  }
+        for (int k = 0; k < 16; ++k) {
+          float v = float(src.val[k]) * inv_s;
+          dst.val[k] = int32_to_int8(float_to_int32_rn(v) + azp);
+        }
+      },
+      [=] __device__(int8_t& dst, const scalar_t& src) {
+        float v = float(src) * inv_s;
+        dst = int32_to_int8(float_to_int32_rn(v) + azp);
+      });
 }
 
 }  // namespace vllm
@@ -363,7 +279,7 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
   int const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
-  dim3 const block(std::min(hidden_size, 1024));
+  dim3 const block(std::min(hidden_size, 256));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "static_scaled_int8_quant_kernel", [&] {
@@ -394,7 +310,7 @@ void dynamic_scaled_int8_quant(
   int const hidden_size = input.size(-1);
   int const num_tokens = input.numel() / hidden_size;
   dim3 const grid(num_tokens);
-  dim3 const block(std::min(hidden_size, 1024));
+  dim3 const block(std::min(hidden_size, 256));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "dynamic_scaled_int8_quant_kernel", [&] {
