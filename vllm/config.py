@@ -563,6 +563,7 @@ class ModelConfig:
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
+            defer_to_worker=envs.VLLM_USE_V1,
         )
 
         # Workaround for Gemma 2 which uses interleaved sliding window
@@ -3237,6 +3238,7 @@ def _get_and_verify_dtype(
     *,
     is_pooling_model: bool,
     revision: Optional[str] = None,
+    defer_to_worker: bool = False,
 ) -> Union[torch.dtype, ModelDType]:
     config_dtype = _find_dtype(model_id, config, revision=revision)
     model_type = config.model_type
@@ -3244,7 +3246,7 @@ def _get_and_verify_dtype(
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":
-            if envs.VLLM_USE_V1:
+            if defer_to_worker:
                 # Don't resolve here - let the worker handle it
                 # This avoids using current_platform which might be incorrect
                 # in distributed setups or during config initialization
