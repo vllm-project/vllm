@@ -1353,30 +1353,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         else:
             prefix_block_list_tensor = None
 
-        input_tokens = make_tensor_with_pad(input_tokens,
-                                            max_len=max_prompt_len,
-                                            pad=0,
-                                            dtype=torch.long,
-                                            device=self.device)
-
-            max_num_block = max(len(bt) for bt in prefix_block_tables)
-            prefix_block_list = list(
-                itertools.chain.from_iterable(
-                    bt if len(bt) == max_num_block else bt +
-                    ([_PAD_BLOCK_ID] * (max_num_block - len(bt)))
-                    for bt in prefix_block_tables))
-
-            # TODO: pad to proper len
-            pad_len = len(prefix_block_list)
-            prefix_block_list = pad_list(prefix_block_list, pad_len,
-                                         _PAD_BLOCK_ID)
-
-            prefix_block_list_tensor = torch.tensor(prefix_block_list,
-                                                    dtype=torch.long,
-                                                    device='cpu')
-        else:
-            prefix_block_list_tensor = None
-
         input_tokens_tensor = make_cpu_tensor(input_tokens,
                                               max_len=max_prompt_len,
                                               pad=0,
