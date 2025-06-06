@@ -79,7 +79,7 @@ class TorchAOConfig(QuantizationConfig):
         skip_modules = config.get("modules_to_not_convert", []) or []
 
         # adds skipped modules defined in "module_fqn_to_config"
-        module_fqn = quant_type["_data"]["module_fqn_to_config"]
+        module_fqn = quant_type["_data"].get("module_fqn_to_config", []) or []
         for layer in module_fqn:
             if module_fqn.get(layer, None) is None:
                 skip_modules.append(layer)
