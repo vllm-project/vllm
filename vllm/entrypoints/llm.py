@@ -1259,9 +1259,11 @@ class LLM:
         _validate_score_input_lens(input_text_1, input_text_2)
 
         if self.llm_engine.model_config.is_cross_encoder:
-            return self._cross_encoding_score(
-                tokenizer, input_text_1, input_text_2, truncate_prompt_tokens,
-                use_tqdm, lora_request, prompt_adapter_request)
+            return self._cross_encoding_score(tokenizer, input_text_1,
+                                              input_text_2,
+                                              truncate_prompt_tokens, use_tqdm,
+                                              lora_request,
+                                              prompt_adapter_request)
         else:
             return self._embedding_score(
                 tokenizer,
