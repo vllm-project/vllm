@@ -6,7 +6,6 @@ import enum
 import hashlib
 import inspect
 import json
-import os
 import textwrap
 import uuid
 import warnings
@@ -26,7 +25,6 @@ from torch.distributed import ProcessGroup, ReduceOp
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
 
-import vllm
 import vllm.envs as envs
 from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
@@ -406,9 +404,6 @@ class ModelConfig:
     available.\n
     - "vllm" will use the vLLM model implementation.\n
     - "transformers" will use the Transformers model implementation."""
-    using_tensorizer: bool = False
-    """Indicates that model loading is done using CoreWeave's Tensorizer, 
-    which will be used to load the hf_config."""
 
     def compute_hash(self) -> str:
         """
@@ -519,8 +514,7 @@ class ModelConfig:
 
         hf_config = get_config(self.hf_config_path or self.model,
                                self.trust_remote_code, self.revision,
-                               self.code_revision, self.config_format,
-                               using_tensorizer=self.using_tensorizer)
+                               self.code_revision, self.config_format)
 
         if hf_overrides_kw:
             logger.info("Overriding HF config with %s", hf_overrides_kw)
@@ -621,19 +615,6 @@ class ModelConfig:
     def architectures(self) -> list[str]:
         return getattr(self.hf_config, "architectures", [])
 
-
-    @staticmethod
-    def maybe_wrap_tensorizer(func):
-        def wrapper(self, *args, **kwargs):
-            if self.using_tensorizer:
-                from vllm.model_executor.model_loader.tensorizer import \
-                    TensorizerS3Wrapper
-                vllm.config.S3Model = TensorizerS3Wrapper
-            return func(self, *args, **kwargs)
-
-        return wrapper
-
-    @maybe_wrap_tensorizer
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
         """Pull model/tokenizer from S3 to temporary directory when needed.
@@ -655,7 +636,8 @@ class ModelConfig:
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
                 s3_model.pull_files(
-                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"
+                                            "*.tensors"])
                 self.tokenizer = s3_model.dir
                 return
 

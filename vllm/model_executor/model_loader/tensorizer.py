@@ -1,31 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import atexit
 import contextlib
 import contextvars
 import dataclasses
 import io
 import json
 import os
-import shutil
 import tempfile
 import threading
 import time
-import zipfile
 from collections.abc import Generator
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, BinaryIO, Optional, Union
 
 import regex as re
 import torch
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
-from transformers import (
-    AutoTokenizer,
-)
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -35,7 +28,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding
 )
-from vllm.transformers_utils.s3_utils import S3Model
+from huggingface_hub import snapshot_download
 from vllm.utils import FlexibleArgumentParser, PlaceholderModule
 
 try:
@@ -71,70 +64,6 @@ __all__ = [
 
 logger = init_logger(__name__)
 
-class TensorizerS3Wrapper(S3Model):
-    """
-    A shim for S3Model that implements `pull_files` using
-    Tensorizer.
-
-    Attributes:
-        dir: The temporary created directory.
-
-    Methods:
-        pull_files(): Pull model from S3 to the temporary directory.
-    """
-
-    def __init__(self) -> None:
-        # Intentionally not calling super's initializer
-        # since it does certain things we want to suppress for now
-        # (such as initializing a boto3 client, which Tensorizer handles)
-        self.dir = tempfile.mkdtemp()
-        atexit.register(self.guaranteed_cleanup, self.dir)
-        self.files_pulled = False
-
-    def guaranteed_cleanup(self, dirname: str) -> None:
-        shutil.rmtree(dirname, ignore_errors=True)
-
-    def deserialize_tokenizer_files(self, path: str):
-        with io.BytesIO() as downloaded:
-            # Download to a BytesIO object first, because ZipFile doesn't play nice
-            # with streams that don't fully support random access
-            with _read_stream(f"{path}/tokenizer.zip") as stream:
-                downloaded.write(stream.read())
-            downloaded.seek(0)
-            with zipfile.ZipFile(
-                downloaded, mode="r"
-            ) as file:
-                file.extractall(path=self.dir)
-
-    def deserialize_config_files(self, path: str) -> None:
-        with open(f"{self.dir}/config.json", "wb") as temp_config:
-            with _read_stream(
-                f"{path}/config.json",
-            ) as hf_config_file:
-                temp_config.write(hf_config_file.read())
-
-
-    def pull_files(
-        self,
-        s3_model_path: str = "",
-        allow_pattern: Optional[list[str]] = None,
-        ignore_pattern: Optional[list[str]] = None
-        ) -> None:
-        """
-        Pull files from S3 storage into the temporary directory.
-
-        Args:
-            s3_model_path: The S3 path of the model.
-            allow_pattern: A list of patterns of which files to pull.
-            ignore_pattern: A list of patterns of which files not to pull.
-
-        """
-        if not self.files_pulled:
-            self.deserialize_config_files(s3_model_path)
-            self.deserialize_tokenizer_files(s3_model_path)
-            self.files_pulled = True
-
-        return
 
 
 def is_valid_path_string(path_str: str) -> bool:
@@ -225,15 +154,6 @@ class _NoInitOrTensorImpl:
 
         return wrapper
 
-@dataclass
-class ExtraSerializationMetadata:
-    """
-    Extra parameters needed to serialize all model artifacts
-    needed for loading a HuggingFace-style model. This allows
-    TensorDeserializer to handle the loading of a model entirely,
-    not merely the tensors.
-    """
-    model_config: Optional[ModelConfig] = None
 
 @dataclass
 class TensorizerConfig:
@@ -324,12 +244,6 @@ class TensorizerConfig:
         assert is_valid_path_or_s3_uri(self.tensorizer_uri), ("tensorizer_uri must be a "
                                                               "valid S3 URI or local path")
         self.lora_dir = self.tensorizer_dir
-
-        self._extra_serialization_metadata: Union[ExtraSerializationMetadata, None] = None
-        if self._extra_serialization_attrs:
-            self._extra_serialization_metadata = ExtraSerializationMetadata(
-                **self._extra_serialization_attrs
-            )
 
     @classmethod
     def as_dict(cls, *args, **kwargs) -> dict[str, Any]:
@@ -627,30 +541,30 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
 
 def serialize_extra_artifacts(tensorizer_args: TensorizerArgs,
                               model_config: ModelConfig) -> None:
-    with _write_stream(f"{tensorizer_args.tensorizer_dir}/config.json",
-                       **tensorizer_args.stream_params) as stream:
-        stream.write(
-            model_config.hf_config
-            .to_json_string()
-            .encode("utf-8")
-            )
 
-    # get_tokenizer returns a CachedTokenizer, which despite being a
-    # PreTrainedTokenizer is unable to implement
-    # PreTrainedTokenizer.from_pretrained as it doesn't have a resolveable
-    # tokenizer class for HuggingFace, so we must load this uncached.
-    tokenizer = AutoTokenizer.from_pretrained(model_config.tokenizer)
+    # TODO: New pseudocode:
+    #       1. snapshot_download model_ref to tmpdir, EXCLUDE TENSORS,
+    #       so if there's some *.pt, *.safetensors, *.bin exclude pattern
+    #       I can pass, great. -- there's a ignore_patterns thing
+    #       2. Write that entire tmpdir to S3
 
-    save_path: str = f"{tensorizer_args.tensorizer_dir}/tokenizer.zip"
-    with _write_stream(save_path) as stream:
-        with zipfile.ZipFile(
-        stream, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=5
-        ) as file, tempfile.TemporaryDirectory() as directory:
-            tokenizer.save_pretrained(directory)
-            for path in Path(directory).iterdir():
-                file.write(filename=path, arcname=path.name)
+    exclusion_suffixes = [".cache", ".gitattributes", ".md"]
+    should_exclude = lambda file: any(suffix in file for suffix in exclusion_suffixes)
 
-    logger.info("Serialized tokenizer artifacts")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        snapshot_download(
+            model_config.served_model_name,
+            local_dir=tmpdir,
+            ignore_patterns=["*.pt", "*.safetensors", "*.bin"]
+        )
+        for artifact in [file for file in os.listdir(tmpdir) if not should_exclude(file)]:
+            with open(f"{tmpdir}/{artifact}", "rb") as f:
+                with _write_stream(
+                    f"{tensorizer_args.tensorizer_dir}/{artifact}",
+                    **tensorizer_args.stream_params
+                ) as stream:
+                    logger.info("Writing artifact %s", artifact)
+                    stream.write(f.read())
 
 
 def serialize_vllm_model(
