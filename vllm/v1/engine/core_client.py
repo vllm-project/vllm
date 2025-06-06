@@ -1000,9 +1000,6 @@ class DPAsyncMPClient(AsyncMPClient):
                                     ) -> CoreEngine:
         if dp_rank is not None:
             # engines are already in rank order
-            if dp_rank < 0 or dp_rank >= len(self.core_engines):
-                raise ValueError(f"Requested DP rank {dp_rank} is out of "
-                                 f"range [0, {len(self.core_engines)})")
             return self.core_engines[dp_rank]
 
         if not self.lb_engines:
