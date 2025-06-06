@@ -293,11 +293,12 @@ class NixlConnectorScheduler:
             return False, None
 
         if params.get("do_remote_prefill"):
-            # Decode-side request has been aborted before we've allocated
-            # blocks locally and transferred from or notified the prefill
-            # instance.
-            # Add empty block_ids to _reqs_need_recv so that our worker side
-            # will notify and free blocks in the prefill instance.
+            # If do_remote_prefill is still True when the request is finished,
+            # update_state_after_alloc must not have been called (the request
+            # must have been aborted before it was scheduled).
+            # To avoid stranding the prefill blocks in the prefill instance,
+            # we must add empty block_ids to _reqs_need_recv so that our
+            # worker side will notify and free blocks in the prefill instance.
             self._reqs_need_recv[request.request_id] = (request, [])
             params["do_remote_prefill"] = False
             return False, None
