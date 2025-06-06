@@ -142,7 +142,7 @@ class KVConnectorBase(ABC):
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForHPUWithSamplingMetadata",
         attn_metadata: object, kv_caches: list[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForHPUWithSamplingMetadata"]:
         raise NotImplementedError
 
