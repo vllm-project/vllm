@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import dataclasses
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import Optional
@@ -24,6 +23,7 @@ MovedRequestType = tuple[int, int]
 # Batch indices of any removed requests.
 RemovedRequestType = int
 
+
 class BatchUpdate:
     # The current number of requests in the batch.
     batch_size: int = 0  # Must be updated
@@ -33,7 +33,7 @@ class BatchUpdate:
     swapped: list[SwappedRequestType] = []
     added: list[AddedRequestType] = []
 
-    def __init__(self, 
+    def __init__(self,
                  removed: Optional[list[RemovedRequestType]] = None,
                  moved: Optional[list[MovedRequestType]] = None,
                  swapped: Optional[list[SwappedRequestType]] = None,
@@ -50,7 +50,6 @@ class BatchUpdate:
         if batch_size is not None:
             self.batch_size = batch_size
 
-
     def _sort_removed(self) -> None:
         """Sort removed request indices in
         descending order.
@@ -66,6 +65,9 @@ class BatchUpdate:
     def removed(self) -> list[RemovedRequestType]:
         self._sort_removed()
         return self._removed
+
+    def removed_append(self, index: int) -> None:
+        self._removed.append(index)
 
     def has_removed(self) -> bool:
         return bool(self._removed)

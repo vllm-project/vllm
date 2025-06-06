@@ -413,7 +413,7 @@ class InputBatch:
             return None
         if not is_tpu:
             # TODO(andy): TPU implementation does not support this path
-            self.batch_update.removed.append(req_index)
+            self.batch_update.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
@@ -528,6 +528,8 @@ class InputBatch:
         else:
             assert empty_req_indices is None
             empty_req_indices = self.batch_update.removed
+            print("\n\n\n", f"empty_req_indices: {empty_req_indices}",
+                  "\n\n\n")
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
@@ -546,6 +548,8 @@ class InputBatch:
             # Find the smallest empty index.
             empty_index = (empty_req_indices.pop()
                            if is_tpu else self.batch_update.peek_removed())
+            print("\n\n\n", f"- empty: {empty_index} last: {last_req_index}",
+                  "\n\n\n")
             if empty_index >= last_req_index:
                 break
 
@@ -553,6 +557,8 @@ class InputBatch:
             # index.
             if not is_tpu:
                 self.batch_update.pop_removed_if_can()
+                print("\n\n\n", f"- empty_req_indices: {empty_req_indices}",
+                      "\n\n\n")
                 self.batch_update.moved.append((last_req_index, empty_index))
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
