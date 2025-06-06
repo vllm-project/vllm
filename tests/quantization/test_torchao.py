@@ -59,6 +59,7 @@ def test_opt_125m_int4wo_model_per_module_quant(vllm_runner):
         assert output
         print(output)
 
+
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
 def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
     torch._dynamo.reset()
@@ -72,6 +73,7 @@ def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
 
         assert output
         print(output)
+
 
 if __name__ == "__main__":
     pytest.main([__file__])
