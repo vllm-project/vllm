@@ -227,7 +227,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     model: Optional[str] = None
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[dict[str, float]] = None
-    allowed_token_ids: Optional[list[int]] = None
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = 0
     # TODO(#9845): remove max_tokens when field is removed from OpenAI API
@@ -258,6 +257,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
 
     # --8<-- [start:chat-completion-sampling-params]
+    allowed_token_ids: Optional[list[int]] = None
     best_of: Optional[int] = None
     use_beam_search: bool = False
     top_k: Optional[int] = None
