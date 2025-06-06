@@ -48,7 +48,6 @@ class Attention(nn.Module):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
-        use_irope: bool = False,
         use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
@@ -101,7 +100,6 @@ class Attention(nn.Module):
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
 
-        self.use_irope = use_irope
         self.use_mla = use_mla
         self.num_heads = num_heads
         self.head_size = head_size
