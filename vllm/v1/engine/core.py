@@ -180,7 +180,9 @@ class EngineCore:
             num_gpu_blocks = kv_cache_configs[0].num_blocks
         else:
             kv_cache_configs = [
-                KVCacheConfig(num_blocks=1, tensors={}, kv_cache_groups=[])
+                KVCacheConfig(num_blocks=1,
+                              kv_cache_tensors=[],
+                              kv_cache_groups=[])
                 for kv_cache_spec_one_worker in kv_cache_specs
             ]
 
