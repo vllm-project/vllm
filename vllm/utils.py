@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -37,8 +38,8 @@ from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
                       _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
-from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
-                             Iterable, Iterator, KeysView, Mapping)
+from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
+                             Hashable, Iterable, Iterator, KeysView, Mapping)
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
@@ -107,7 +108,7 @@ STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "currently not supported for encoder/decoder "
     "models.")
 
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is currently not currently "
+STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
                              "supported with encoder/decoder "
                              "models.")
 
@@ -979,6 +980,53 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
+# bool = 0, int = 1, float = 2, complex = 3
+def _get_precision_level(dtype: torch.dtype) -> int:
+    # NOTE: Complex dtypes return `is_floating_point=False`
+    return ((dtype != torch.bool) + dtype.is_floating_point +
+            dtype.is_complex * 2)
+
+
+def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
+    """
+    Test whether it is lossless to cast a tensor from
+    `src_dtype` to `tgt_dtype`.
+    """
+    if src_dtype == tgt_dtype:
+        return True
+
+    src_level = _get_precision_level(src_dtype)
+    tgt_level = _get_precision_level(tgt_dtype)
+
+    if src_level < tgt_level:
+        return True
+    if src_level > tgt_level:
+        return False
+
+    # Compare integral types
+    if not src_dtype.is_floating_point and not src_dtype.is_complex:
+        src_info = torch.iinfo(src_dtype)
+        tgt_info = torch.iinfo(tgt_dtype)
+        return src_info.min >= tgt_info.min and src_info.max <= tgt_info.max
+
+    # Compare floating-point types
+    src_info = torch.finfo(src_dtype)
+    tgt_info = torch.finfo(tgt_dtype)
+    return (src_info.min >= tgt_info.min and src_info.max <= tgt_info.max
+            and src_info.resolution >= tgt_info.resolution)
+
+
+def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
+    """
+    Get the common `dtype` where all of the other `dtypes` can be
+    cast to it without losing any information.
+    """
+    return max(
+        dtypes,
+        key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
+    )
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1409,17 +1457,24 @@ class FlexibleArgumentParser(ArgumentParser):
         if '--config' in args:
             args = self._pull_args_from_config(args)
 
+        def repl(match: re.Match) -> str:
+            """Replaces underscores with dashes in the matched string."""
+            return match.group(0).replace("_", "-")
+
+        # Everything between the first -- and the first .
+        pattern = re.compile(r"(?<=--)[^\.]*")
+
         # Convert underscores to dashes and vice versa in argument names
         processed_args = []
         for arg in args:
             if arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
-                    key = '--' + key[len('--'):].replace('_', '-')
+                    key = pattern.sub(repl, key, count=1)
                     processed_args.append(f'{key}={value}')
                 else:
-                    processed_args.append('--' +
-                                          arg[len('--'):].replace('_', '-'))
+                    key = pattern.sub(repl, arg, count=1)
+                    processed_args.append(key)
             elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
                 # allow -O flag to be used without space, e.g. -O3
                 processed_args.append('-O')
@@ -2420,6 +2475,7 @@ def make_zmq_socket(
     socket_type: Any,
     bind: Optional[bool] = None,
     identity: Optional[bytes] = None,
+    linger: Optional[int] = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2439,7 +2495,7 @@ def make_zmq_socket(
         buf_size = -1  # Use system default buffer size
 
     if bind is None:
-        bind = socket_type != zmq.PUSH
+        bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
 
     if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.RCVHWM, 0)
@@ -2451,6 +2507,9 @@ def make_zmq_socket(
 
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
+
+    if linger is not None:
+        socket.setsockopt(zmq.LINGER, linger)
 
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
