@@ -542,12 +542,6 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
 def serialize_extra_artifacts(tensorizer_args: TensorizerArgs,
                               model_config: ModelConfig) -> None:
 
-    # TODO: New pseudocode:
-    #       1. snapshot_download model_ref to tmpdir, EXCLUDE TENSORS,
-    #       so if there's some *.pt, *.safetensors, *.bin exclude pattern
-    #       I can pass, great. -- there's a ignore_patterns thing
-    #       2. Write that entire tmpdir to S3
-
     exclusion_suffixes = [".cache", ".gitattributes", ".md"]
     should_exclude = lambda file: any(suffix in file for suffix in exclusion_suffixes)
 
