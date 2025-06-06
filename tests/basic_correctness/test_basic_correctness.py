@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.
@@ -60,7 +61,6 @@ def _fix_prompt_embed_outputs(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
-@pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
@@ -69,7 +69,6 @@ def test_models(
     hf_runner,
     model: str,
     backend: str,
-    dtype: str,
     max_tokens: int,
     enforce_eager: bool,
     enable_prompt_embeds: bool,
@@ -97,7 +96,7 @@ def test_models(
             str(i) for i in range(1024)) + " are:"
         example_prompts = [prompt]
 
-        with hf_runner(model, dtype=dtype) as hf_model:
+        with hf_runner(model) as hf_model:
             hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
             if enable_prompt_embeds:
                 with torch.no_grad():
@@ -106,7 +105,6 @@ def test_models(
 
         with VllmRunner(model,
                         max_model_len=8192,
-                        dtype=dtype,
                         enforce_eager=enforce_eager,
                         enable_prompt_embeds=enable_prompt_embeds,
                         gpu_memory_utilization=0.7) as vllm_model:
@@ -130,15 +128,21 @@ def test_models(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, "
-    "test_suite", [
-        ("distilbert/distilgpt2", "ray", "", "L4"),
-        ("distilbert/distilgpt2", "mp", "", "L4"),
-        ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4"),
-        ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4"),
-        ("distilbert/distilgpt2", "ray", "", "A100"),
-        ("distilbert/distilgpt2", "mp", "", "A100"),
-        ("distilbert/distilgpt2", "mp", "FLASHINFER", "A100"),
-        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
+    "test_suite, extra_env", [
+        ("distilbert/distilgpt2", "ray", "", "L4", {}),
+        ("distilbert/distilgpt2", "mp", "", "L4", {}),
+        ("distilbert/distilgpt2", "ray", "", "L4", {
+            "VLLM_SLEEP_WHEN_IDLE": "1"
+        }),
+        ("distilbert/distilgpt2", "mp", "", "L4", {
+            "VLLM_SLEEP_WHEN_IDLE": "1"
+        }),
+        ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4", {}),
+        ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
+        ("distilbert/distilgpt2", "ray", "", "A100", {}),
+        ("distilbert/distilgpt2", "mp", "", "A100", {}),
+        ("distilbert/distilgpt2", "mp", "FLASHINFER", "A100", {}),
+        ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100", {}),
     ])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
 def test_models_distributed(
@@ -150,6 +154,7 @@ def test_models_distributed(
     distributed_executor_backend: str,
     attention_backend: str,
     test_suite: str,
+    extra_env: dict[str, str],
     enable_prompt_embeds: bool,
 ) -> None:
 
@@ -174,6 +179,9 @@ def test_models_distributed(
                 "VLLM_ATTENTION_BACKEND",
                 attention_backend,
             )
+
+        for k, v in extra_env.items():
+            monkeypatch_context.setenv(k, v)
 
         dtype = "half"
         max_tokens = 5

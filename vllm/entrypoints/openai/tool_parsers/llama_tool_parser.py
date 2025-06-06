@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import re
 from collections.abc import Sequence
 from json import JSONDecoder
 from typing import Union
 
 import partial_json_parser
+import regex as re
 from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 

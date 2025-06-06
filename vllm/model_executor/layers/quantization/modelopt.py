@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any, Callable, Optional, Union
 
@@ -228,7 +229,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
                    exclude_modules, group_size)
 
     def is_layer_excluded(self, prefix: str, exclude_modules: list):
-        import re
+        import regex as re
         for pattern in exclude_modules:
             regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
             if re.fullmatch(regex_str, prefix):
@@ -585,9 +586,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
         # GEMM 1
-        assert torch.allclose(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]), (
-                "w1_weight_scale_2 must match w3_weight_scale_2")
+        if not torch.allclose(layer.w13_weight_scale_2[:, 0],
+                              layer.w13_weight_scale_2[:, 1]):
+            logger.warning_once(
+                "w1_weight_scale_2 must match w3_weight_scale_2. "
+                "Accuracy may be affected.")
 
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,

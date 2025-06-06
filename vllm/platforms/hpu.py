@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from typing import TYPE_CHECKING, Optional
@@ -39,8 +40,8 @@ class HpuPlatform(Platform):
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return True
 
-    @staticmethod
-    def inference_mode():
+    @classmethod
+    def inference_mode(cls):
         return torch.no_grad()
 
     @classmethod

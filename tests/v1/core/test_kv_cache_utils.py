@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
 
 import pytest
@@ -11,15 +12,14 @@ from vllm.utils import GiB_bytes, sha256
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
-from vllm.v1.core.kv_cache_utils import (FreeKVCacheBlockQueue, KVCacheBlock,
-                                         PrefixCachingMetrics,
-                                         estimate_max_model_len,
-                                         generate_block_hash_extra_keys,
-                                         hash_block_tokens,
-                                         hash_request_tokens,
-                                         unify_kv_cache_configs)
+from vllm.v1.core.kv_cache_utils import (
+    FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
+    estimate_max_model_len, generate_block_hash_extra_keys,
+    get_max_concurrency_for_kv_cache_config, hash_block_tokens,
+    hash_request_tokens, unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheTensor)
+                                        KVCacheGroupSpec, KVCacheTensor,
+                                        SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -44,7 +44,6 @@ def make_request(request_id,
         multi_modal_placeholders=mm_positions,
         sampling_params=SamplingParams(max_tokens=17),
         eos_token_id=100,
-        arrival_time=0,
         lora_request=None,
         cache_salt=cache_salt,
     )
@@ -54,12 +53,14 @@ def new_kv_cache_spec(block_size=16,
                       num_kv_heads=2,
                       head_size=64,
                       dtype=torch.float32,
-                      use_mla=False):
+                      use_mla=False,
+                      sliding_window=None):
     return FullAttentionSpec(block_size=block_size,
                              num_kv_heads=num_kv_heads,
                              head_size=head_size,
                              dtype=dtype,
-                             use_mla=use_mla)
+                             use_mla=use_mla,
+                             sliding_window=sliding_window)
 
 
 def test_none_hash(monkeypatch):
@@ -98,8 +99,8 @@ def test_kv_cache_block():
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
-    block_hash = vllm.v1.core.kv_cache_utils.BlockHashType(hash_value=123,
-                                                           token_ids=(1, 2, 3))
+    block_hash = vllm.v1.core.kv_cache_utils.BlockHash(hash_value=123,
+                                                       token_ids=(1, 2, 3))
     block.block_hash = block_hash
     assert block.block_hash == block_hash
 
@@ -280,7 +281,7 @@ def test_hash_block_tokens(hash_fn):
 
     block_hash = hash_block_tokens(hash_fn, parent_block_hash,
                                    curr_block_token_ids, extra_keys)
-    assert isinstance(block_hash, vllm.v1.core.kv_cache_utils.BlockHashType)
+    assert isinstance(block_hash, vllm.v1.core.kv_cache_utils.BlockHash)
     assert block_hash.hash_value == hash_fn(
         (parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
@@ -304,10 +305,8 @@ def test_hash_request_tokens(hash_fn):
     block_hashes = hash_request_tokens(hash_fn, block_size, request)
 
     assert len(block_hashes) == 2
-    assert isinstance(block_hashes[0],
-                      vllm.v1.core.kv_cache_utils.BlockHashType)
-    assert isinstance(block_hashes[1],
-                      vllm.v1.core.kv_cache_utils.BlockHashType)
+    assert isinstance(block_hashes[0], vllm.v1.core.kv_cache_utils.BlockHash)
+    assert isinstance(block_hashes[1], vllm.v1.core.kv_cache_utils.BlockHash)
 
     # Check the first block
     assert block_hashes[0].token_ids == (0, 1, 2)
@@ -492,6 +491,68 @@ def test_unify_kv_cache_configs():
         unify_kv_cache_configs(diff_kv_cache_config)
 
 
+def test_merge_kv_cache_spec():
+    same_layer_specs = [
+        new_kv_cache_spec(num_kv_heads=32),
+        new_kv_cache_spec(num_kv_heads=32),
+    ]
+    merged_layer_spec = same_layer_specs[0].merge(same_layer_specs)
+    assert merged_layer_spec.block_size == 16
+    assert merged_layer_spec.num_kv_heads == 32
+    assert merged_layer_spec.head_size == 64
+    assert merged_layer_spec.dtype == torch.float32
+    assert merged_layer_spec.sliding_window is None
+
+    different_layer_specs = [
+        new_kv_cache_spec(num_kv_heads=32),
+        new_kv_cache_spec(num_kv_heads=16),
+    ]
+    with pytest.raises(AssertionError):
+        different_layer_specs[0].merge(different_layer_specs)
+
+    full_spec = new_kv_cache_spec(num_kv_heads=32)
+    different_type_layer_specs = [
+        full_spec,
+        SlidingWindowSpec(
+            block_size=full_spec.block_size,
+            num_kv_heads=full_spec.num_kv_heads,
+            head_size=full_spec.head_size,
+            dtype=full_spec.dtype,
+            use_mla=full_spec.use_mla,
+            sliding_window=1,
+        ),
+    ]
+    with pytest.raises(AssertionError):
+        different_type_layer_specs[0].merge(different_type_layer_specs)
+    with pytest.raises(AssertionError):
+        different_type_layer_specs[1].merge(different_type_layer_specs)
+
+    different_sliding_window_layer_specs = [
+        new_kv_cache_spec(num_kv_heads=32),
+        new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
+        new_kv_cache_spec(num_kv_heads=32, sliding_window=2),
+    ]
+    with pytest.raises(ValueError):
+        different_sliding_window_layer_specs[0].merge(
+            different_sliding_window_layer_specs)
+
+    same_sliding_window_layer_specs = [
+        new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
+        new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
+    ]
+    merged_layer_spec = same_sliding_window_layer_specs[0].merge(
+        same_sliding_window_layer_specs)
+    assert merged_layer_spec.sliding_window == 1
+
+    same_sliding_window_layer_spec_with_none = [
+        new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
+        new_kv_cache_spec(num_kv_heads=32, sliding_window=None),
+    ]
+    merged_layer_spec = same_sliding_window_layer_spec_with_none[0].merge(
+        same_sliding_window_layer_spec_with_none)
+    assert merged_layer_spec.sliding_window == 1
+
+
 @pytest.mark.parametrize(
     ("model_id", "max_model_len", "want_estimated_max_len"), [
         ("Qwen/Qwen1.5-7B", 16385, 16384),
@@ -532,6 +593,84 @@ def test_estimate_max_model_len(model_id, max_model_len,
     estimated_max_len = estimate_max_model_len(vllm_config, kv_cache_spec,
                                                8 * GiB_bytes)
     assert estimated_max_len == want_estimated_max_len
+
+
+def test_get_max_concurrency_for_kv_cache_config():
+    # Create a VllmConfig
+    model_id = "Qwen/Qwen1.5-7B"
+    max_model_len = 16384
+    model_config = ModelConfig(
+        model_id,
+        task="generate",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        max_model_len=max_model_len,
+    )
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=1024,
+                                       enable_chunked_prefill=True)
+
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    full_attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=32,
+        head_size=128,
+        dtype=torch.float16,
+        use_mla=False,
+    )
+
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=32,
+        head_size=128,
+        dtype=torch.float16,
+        use_mla=False,
+        sliding_window=1024,
+    )
+
+    kv_cache_config_full_attention = KVCacheConfig(
+        num_blocks=int(1024 * 1.5),
+        tensors={},
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
+                             full_attention_spec),
+        ],
+    )
+    max_concurrency_full_attention = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_full_attention)
+    assert max_concurrency_full_attention == 1.5
+
+    kv_cache_config_sliding_window = KVCacheConfig(
+        num_blocks=129 * 3,
+        tensors={},
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
+                             sliding_window_spec),
+        ],
+    )
+    max_concurrency_sliding_window = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_sliding_window)
+    assert max_concurrency_sliding_window == 3
+
+    kv_cache_config_hybrid_model = KVCacheConfig(
+        num_blocks=(1024 + 129) * 3,
+        tensors={},
+        kv_cache_groups=[
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32)],
+                             full_attention_spec),
+            KVCacheGroupSpec([f"layer_{i}" for i in range(32, 64)],
+                             sliding_window_spec),
+        ],
+    )
+    max_concurrency_hybrid_model = get_max_concurrency_for_kv_cache_config(
+        vllm_config, kv_cache_config_hybrid_model)
+    assert max_concurrency_hybrid_model == 3
 
 
 def test_allocate_with_lookahead():

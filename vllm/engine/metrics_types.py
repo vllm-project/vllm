@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 These types are defined in this file to avoid importing vllm.engine.metrics
 and therefore importing prometheus_client.
@@ -53,9 +54,6 @@ class Stats:
     time_inference_requests: List[float]
     time_prefill_requests: List[float]
     time_decode_requests: List[float]
-    time_in_queue_requests: List[float]
-    model_forward_time_requests: List[float]
-    model_execute_time_requests: List[float]
     #   Metadata
     num_prompt_tokens_requests: List[int]
     num_generation_tokens_requests: List[int]

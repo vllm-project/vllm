@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
 import mimetypes
@@ -138,6 +139,19 @@ async def test_fetch_image_local_files(image_url: str):
         with pytest.raises(RuntimeError, match="Cannot load local files"):
             connector.fetch_image(
                 f"file://{temp_dir}/../{os.path.basename(image_url)}")
+
+
+@pytest.mark.asyncio
+async def test_fetch_image_error_conversion():
+    connector = MediaConnector()
+    broken_img = "data:image/png;base64,aGVsbG9fdmxsbV9jb21tdW5pdHkK"
+
+    # PIL.UnidentifiedImageError should be converted to ValueError
+    with pytest.raises(ValueError):
+        await connector.fetch_image_async(broken_img)
+
+    with pytest.raises(ValueError):
+        connector.fetch_image(broken_img)
 
 
 @pytest.mark.asyncio

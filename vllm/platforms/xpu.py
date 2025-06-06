@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import TYPE_CHECKING, Optional
 
@@ -37,15 +38,17 @@ class XPUPlatform(Platform):
         logger.info("Using IPEX attention backend.")
         return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
-    @staticmethod
+    @classmethod
     def get_device_capability(
-            device_id: int = 0) -> Optional[DeviceCapability]:
+        cls,
+        device_id: int = 0,
+    ) -> Optional[DeviceCapability]:
         # capacity format differs from cuda's and will cause unexpected
         # failure, so use None directly
         return None
 
-    @staticmethod
-    def get_device_name(device_id: int = 0) -> str:
+    @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
         return torch.xpu.get_device_name(device_id)
 
     @classmethod
@@ -57,8 +60,8 @@ class XPUPlatform(Platform):
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return True
 
-    @staticmethod
-    def inference_mode():
+    @classmethod
+    def inference_mode(cls):
         return torch.no_grad()
 
     @classmethod

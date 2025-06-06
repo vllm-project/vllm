@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import json
@@ -556,6 +557,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "(<audio>./</audio>)"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
+            if model_type == "internvl_chat":
+                return "<video>"
             if model_type in ("qwen2_vl", "qwen2_5_vl"):
                 return "<|vision_start|><|video_pad|><|vision_end|>"
             if model_type == "qwen2_5_omni":
@@ -1250,7 +1253,7 @@ def apply_hf_chat_template(
         # investigation.
         logger.exception(
             "An error occurred in `transformers` while applying chat template")
-        raise ValueError from e
+        raise ValueError(str(e)) from e
 
 def apply_mistral_chat_template(
     tokenizer: MistralTokenizer,
@@ -1279,7 +1282,7 @@ def apply_mistral_chat_template(
     # We convert those assertion errors to ValueErrors so they can be
     # are properly caught in the preprocessing_input step
     except (AssertionError, MistralCommonException) as e:
-        raise ValueError from e
+        raise ValueError(str(e)) from e
 
     # External library exceptions can sometimes occur despite the framework's
     # internal exception management capabilities.
@@ -1290,7 +1293,7 @@ def apply_mistral_chat_template(
         logger.exception(
             "An error occurred in `mistral_common` while applying chat "
             "template")
-        raise ValueError from e
+        raise ValueError(str(e)) from e
 
 def random_tool_call_id() -> str:
     return f"chatcmpl-tool-{random_uuid()}"

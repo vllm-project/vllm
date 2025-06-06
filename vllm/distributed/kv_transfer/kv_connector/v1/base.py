@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 KVConnectorBase_V1 Class for Distributed KV Cache & Hidden State
 communication in vLLM v1
@@ -210,10 +211,11 @@ class KVConnectorBase_V1(ABC):
                 computed tokens for this request
 
         Returns:
-            * the number of tokens that can be loaded from the 
-              external KV cache beyond what is already computed.
-            * true if external KV cache tokens will be loaded
-              asynchronously (between scheduler steps).
+            A tuple with the following elements:
+                - The number of tokens that can be loaded from the 
+                  external KV cache beyond what is already computed.
+                - `True` if external KV cache tokens will be loaded
+                  asynchronously (between scheduler steps).
         """
         pass
 

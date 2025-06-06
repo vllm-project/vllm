@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
 from typing import Callable, List, cast
@@ -56,8 +57,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         scheduled computation.
 
         Args:
-          seq_group: the outputs are associated with this {class}`SequenceGroup`
-          outputs: the {class}`SequenceGroupOutput`s for all scheduler steps
+          seq_group: the outputs are associated with this
+              [`SequenceGroup`][vllm.sequence.SequenceGroup]
+          outputs: the
+              [`SequenceGroupOutput`][vllm.sequence.SequenceGroupOutput]s
+              for all scheduler steps
         """
         for output in outputs:
             # Concatenate single-step prompt logprob processing results.
@@ -67,7 +71,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     @staticmethod
     @functools.lru_cache
     def _log_prompt_logprob_unsupported_warning_once():
-        # Reminder: Please update docs/source/features/compatibility_matrix.md
+        # Reminder: Please update docs/features/compatibility_matrix.md
         # If the feature combo become valid
         logger.warning(
             "Prompt logprob is not supported by multi step workers. "

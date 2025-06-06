@@ -516,13 +516,25 @@ void topk_softmax(
             topk,
             stream);
     }
-    else
+    else if (topk_indices.scalar_type() == at::ScalarType::UInt32)
     {
-        assert(topk_indices.scalar_type() == at::ScalarType::UInt32);
         vllm::moe::topkGatingSoftmaxKernelLauncher(
             gating_output.data_ptr<float>(),
             topk_weights.data_ptr<float>(),
             topk_indices.data_ptr<uint32_t>(),
+            token_expert_indices.data_ptr<int>(),
+            softmax_workspace.data_ptr<float>(),
+            num_tokens,
+            num_experts,
+            topk,
+            stream);
+    }
+    else {
+        assert(topk_indices.scalar_type() == at::ScalarType::Int64);
+        vllm::moe::topkGatingSoftmaxKernelLauncher(
+            gating_output.data_ptr<float>(),
+            topk_weights.data_ptr<float>(),
+            topk_indices.data_ptr<int64_t>(),
             token_expert_indices.data_ptr<int>(),
             softmax_workspace.data_ptr<float>(),
             num_tokens,

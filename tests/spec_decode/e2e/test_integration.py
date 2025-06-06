@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests which cover integration of the speculative decoding framework with
 other features, e.g. cuda graphs.
 """

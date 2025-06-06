@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import cache
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -10,7 +10,6 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_mi250_mi300
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
@@ -23,11 +22,6 @@ TORCH_DEVICE_IDENTITY = None
 USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
                                and torch.__version__[0:3] >= "2.7"
                                and current_platform.has_device_capability(94))
-
-
-@cache
-def use_rocm_skinny_gemm():
-    return envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi250_mi300()
 
 
 def sparse_cutlass_supported() -> bool:
@@ -89,7 +83,7 @@ def all_close_1d(x: torch.Tensor) -> bool:
 
 def convert_to_channelwise(
         weight_scale: torch.Tensor,
-        logical_widths: list[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Create channelwise buffer
     weight_scale_channel = torch.empty((sum(logical_widths), 1),
                                        dtype=torch.float32,
@@ -107,7 +101,7 @@ def convert_to_channelwise(
 
 def requantize_with_max_scale(
         weight: torch.Tensor, weight_scale: torch.Tensor,
-        logical_widths: list[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
 
@@ -178,9 +172,11 @@ def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
         pad_dim0_bias = (16 - (bias.shape[0] % 16)) % 16
         bias = F.pad(bias, (0, pad_dim0_bias), mode='constant', value=0.0)
 
-    if use_rocm_skinny_gemm() and qinput.shape[0] == 1:
-        output = ops.wvSplitKQ(weight.t(), qinput_padded, out_dtype, scale_a,
-                               scale_b, current_platform.get_cu_count())
+    from vllm.platforms.rocm import on_mi3xx
+    if envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi3xx(
+    ) and qinput.shape[0] == 1 and qinput.shape[1] % 16 == 0:
+        output = ops.wvSplitKQ(weight.t(), qinput, out_dtype, scale_a, scale_b,
+                               current_platform.get_cu_count())
     else:
 
         output = torch._scaled_mm(qinput_padded,
@@ -191,8 +187,7 @@ def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                   bias=bias)
     # remove excess padding
     output = output[:, :output_shape[-1]].contiguous()
-    x = torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
-    return x
+    return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
 
 
 def torch_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
@@ -343,7 +338,7 @@ class Fp8LinearOp:
         input: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        output_shape: Optional[Tuple[int, ...]],
+        output_shape: Optional[tuple[int, ...]],
         out_dtype: Optional[torch.dtype] = None,
         input_scale: Optional[torch.Tensor] = None,
         input_scale_ub: Optional[torch.Tensor] = None,
@@ -414,7 +409,7 @@ def normalize_e4m3fn_to_e4m3fnuz(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     assert weight.dtype == torch.float8_e4m3fn
     # The bits pattern 10000000(-128) represents zero in e4m3fn
     # but NaN in e4m3fnuz. So here we set it to 0.

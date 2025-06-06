@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import LLM, SamplingParams
 
@@ -12,8 +13,7 @@ def test_mistral():
               override_neuron_config={
                   "sequence_parallel_enabled": False,
                   "skip_warmup": True
-              },
-              device="neuron")
+              })
 
     # Send more prompts than the compiled batch size (4) and request
     # varying generation lengths to test accuracy related to Neuron
@@ -59,4 +59,7 @@ def test_mistral():
 
     for expected_output, output in zip(expected_outputs, outputs):
         generated_text = output.outputs[0].text
+        print(f"Prompt: {output.prompt!r}, Generated text: {generated_text!r}")
         assert (expected_output == generated_text)
+
+    print("Neuron Mistral test passed.")
