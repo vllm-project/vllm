@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 import os
-import re
+import regex as re
 import sys
 
 try:

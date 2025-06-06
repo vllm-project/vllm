@@ -149,7 +149,7 @@ repos:
     language: python
     types: [python]
     pass_filenames: false
-    additional_dependencies: [pathspec]
+    additional_dependencies: [pathspec regex]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
