@@ -2,7 +2,7 @@
 - [ ] The purpose of the PR, such as "Fix some issue (link existing issues this PR will resolve)".
 - [ ] The test plan, such as providing test command.
 - [ ] The test results, such as pasting the results comparison before and after, or e2e results
-- [ ] The documentation update, such as updating `supported_models.md` and `examples` for a new model.
+- [ ] (Optional) The necessary documentation update, such as updating `supported_models.md` and `examples` for a new model.
 
 PLEASE FILL IN THE PR DESCRIPTION HERE ENSURING ALL CHECKLIST ITEMS ABOVE HAVE BEEN CONSIDERED.
 
