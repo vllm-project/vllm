@@ -787,8 +787,15 @@ class Scheduler(SchedulerInterface):
                 # NOTE: structured_output_request
                 # should not be None if use_structured_output, we have
                 # check above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids)
+                if not request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                        req_id, new_token_ids):
+                    # Grammar FSM failed to advance - mark request as finished with error
+                    logger.error(
+                        "Structured output FSM failed to advance for request %s. "
+                        "Terminating request.", req_id)
+                    request.status = RequestStatus.FINISHED_ABORTED
+                    stopped = True
+                    self._free_request(request)
 
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
