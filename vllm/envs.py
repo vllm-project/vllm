@@ -849,9 +849,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SLEEP_WHEN_IDLE":
     lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
 
-    # Control the max chunk bytes (in MB) for the rpc message queue. 
-    # Object larger than this threshold will be broacast to worker
-    # processes via zmq. 
+    # Control the max chunk bytes (in MB) for the rpc message queue.
+    # Object larger than this threshold will be broadcast to worker
+    # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB":
     lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
 }
