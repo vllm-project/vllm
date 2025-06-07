@@ -26,12 +26,12 @@ RemovedRequestType = int
 
 class BatchUpdate:
     # The current number of requests in the batch.
-    batch_size: int = 0  # Must be updated
-    _removed: list[RemovedRequestType] = []
-    _is_removed_sorted: bool = False
-    moved: list[MovedRequestType] = []
-    swapped: list[SwappedRequestType] = []
-    added: list[AddedRequestType] = []
+    batch_size: int
+    _removed: list[RemovedRequestType]
+    _is_removed_sorted: bool
+    moved: list[MovedRequestType]
+    swapped: list[SwappedRequestType]
+    added: list[AddedRequestType]
 
     def __init__(self,
                  removed: Optional[list[RemovedRequestType]] = None,
@@ -39,16 +39,12 @@ class BatchUpdate:
                  swapped: Optional[list[SwappedRequestType]] = None,
                  added: Optional[list[AddedRequestType]] = None,
                  batch_size: Optional[int] = None) -> None:
-        if removed is not None:
-            self._removed = removed
-        if moved is not None:
-            self.moved = moved
-        if swapped is not None:
-            self.swapped = swapped
-        if added is not None:
-            self.added = added
-        if batch_size is not None:
-            self.batch_size = batch_size
+        self._removed = removed or []
+        self.moved = moved or []
+        self.swapped = swapped or []
+        self.added = added or []
+        self.batch_size = 0 if batch_size is None else batch_size
+        self._is_removed_sorted = False
 
     def _sort_removed(self) -> None:
         """Sort removed request indices in
