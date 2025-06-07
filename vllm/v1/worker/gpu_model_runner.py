@@ -496,6 +496,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
+            if (req_state.num_prompt_tokens > req_state.num_computed_tokens >=
+                    num_computed_tokens):
+                # The request was rescheduled after a KV load failure. Clear
+                # any cached sampled tokens
+                req_state.output_token_ids.clear()
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                if req_index is None:
+                    self.input_batch.num_tokens[req_index] = (
+                        req_state.num_tokens)
+                    self.input_batch.num_tokens_no_spec[req_index] = (
+                        req_state.num_tokens)
+
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
@@ -1381,6 +1393,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=pooler_output,
             finished_sending=kv_connector_output.finished_sending,
             finished_recving=kv_connector_output.finished_recving,
+            invalid_block_ids=kv_connector_output.invalid_block_ids,
         )
 
     @torch.inference_mode()
@@ -1517,6 +1530,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     kv_connector_output.finished_sending)
                 hidden_states.finished_recving = (
                     kv_connector_output.finished_recving)
+                hidden_states.invalid_block_ids = (
+                    kv_connector_output.invalid_block_ids)
                 return hidden_states
             assert isinstance(hidden_states, IntermediateTensors)
             get_pp_group().send_tensor_dict(hidden_states.tensors,
@@ -1677,6 +1692,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=[],
             finished_sending=kv_connector_output.finished_sending,
             finished_recving=kv_connector_output.finished_recving,
+            invalid_block_ids=kv_connector_output.invalid_block_ids,
             num_nans_in_logits=num_nans_in_logits,
         )
 

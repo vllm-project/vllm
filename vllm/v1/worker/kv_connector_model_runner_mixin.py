@@ -28,6 +28,7 @@ class KVConnectorOutput:
     # [req_ids]
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
+    invalid_block_ids: Optional[set[int]] = None
 
 
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
@@ -74,10 +75,12 @@ class KVConnectorModelRunnerMixin:
             pass
 
         if any((kv_connector_output.finished_sending,
-                kv_connector_output.finished_recving)):
+                kv_connector_output.finished_recving,
+                kv_connector_output.invalid_block_ids)):
             output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
             output.finished_sending = kv_connector_output.finished_sending
             output.finished_recving = kv_connector_output.finished_recving
+            output.invalid_block_ids = kv_connector_output.invalid_block_ids
             return output
 
         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -116,5 +119,7 @@ class KVConnectorModelRunnerMixin:
 
             output.finished_sending, output.finished_recving = (
                 kv_connector.get_finished(scheduler_output.finished_req_ids))
+            output.invalid_block_ids = (
+                kv_connector.get_block_ids_with_load_errors())
 
             kv_connector.clear_connector_metadata()

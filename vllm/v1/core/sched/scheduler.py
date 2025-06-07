@@ -757,9 +757,17 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        invalid_block_ids = model_runner_output.invalid_block_ids
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
+        # If an invalid block is shared across multiple requests in the batch,
+        # all the requests must be rescheduled, but only the first request will
+        # recompute the invalid blocks. marked_invalid_block_ids tracks the
+        # invalid blocks marked for recomputation.
+        marked_invalid_block_ids = set()
+        num_requests_to_reschedule = 0
+        num_tokens_to_reschedule = 0
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -774,6 +782,42 @@ class Scheduler(SchedulerInterface):
                 # request is aborted while the model is executing it (e.g.,
                 # in pipeline parallelism).
                 continue
+
+            # Loop through running requests and mark those with invalid blocks
+            # for rescheduling.
+            if invalid_block_ids:
+                reschedule_request = False
+                req_block_ids = self.kv_cache_manager.get_block_ids(req_id)[0]
+                req_num_computed_tokens = (request.num_computed_tokens -
+                                           num_tokens_scheduled)
+                req_num_computed_blocks = (req_num_computed_tokens +
+                                           self.block_size -
+                                           1) // self.block_size
+                marked_invalid_block = False
+                for idx, block_id in enumerate(req_block_ids):
+                    if idx >= req_num_computed_blocks:
+                        break
+                    if block_id in invalid_block_ids:
+                        reschedule_request = True
+                        if block_id in marked_invalid_block_ids:
+                            continue
+                        marked_invalid_block_ids.add(block_id)
+                        if marked_invalid_block:
+                            continue
+                        marked_invalid_block = True
+                        num_tokens_to_reschedule += request.num_computed_tokens
+                        request.num_computed_tokens = idx * self.block_size
+                        num_tokens_to_reschedule -= request.num_computed_tokens
+                if reschedule_request:
+                    if not marked_invalid_block:
+                        # All the invalid blocks of this request are shared
+                        # with previous requests in the batch and will be
+                        # recomputed by them. We should only consider the new
+                        # tokens scheduled for this request as not computed.
+                        num_tokens_to_reschedule += num_tokens_scheduled
+                        request.num_computed_tokens -= num_tokens_scheduled
+                    num_requests_to_reschedule += 1
+                    continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[
@@ -882,6 +926,12 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
+
+        if num_requests_to_reschedule:
+            logger.info(
+                "Recovered from KV load failure: "
+                "%d request(s) rescheduled (%d tokens affected).",
+                num_requests_to_reschedule, num_tokens_to_reschedule)
 
         # KV Connector: update state for finished KV Transfers.
         self._update_from_kv_xfer_finished(model_runner_output)

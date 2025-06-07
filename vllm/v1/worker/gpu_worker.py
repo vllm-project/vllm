@@ -358,15 +358,18 @@ class Worker(WorkerBase):
 
             # In case of PP with kv transfer, we need to pass through the
             # finished_sending and finished_recving buffers.
-            new_output = EMPTY_MODEL_RUNNER_OUTPUT
-            if output.finished_sending or output.finished_recving:
-                new_output = copy.copy(new_output)
+            if any((output.finished_sending, output.finished_recving,
+                    output.invalid_block_ids)):
+                new_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
                 new_output.finished_sending = output.finished_sending
                 new_output.finished_recving = output.finished_recving
-            output = new_output
+                new_output.invalid_block_ids = output.invalid_block_ids
+                return new_output
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
         assert isinstance(output, ModelRunnerOutput)
-        return output
+        return_output = self.is_driver_worker or has_kv_transfer_group()
+        return output if return_output else None
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
