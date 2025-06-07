@@ -1542,6 +1542,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                       use_int4_w4a16=use_int4_w4a16)
         self.per_channel_quant = per_channel_quant
 
+    def supports_chunking(self) -> bool:
+        return True
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -1550,11 +1553,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
-        factor = num_experts if a.dim() == 3 else 1
-        workspace1 = M * topk * max(N * 2, K) * factor
-        workspace2 = M * topk * N * factor
-        return (workspace1, workspace2, a.dtype)
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        workspace1 = (M, topk, max(N * 2, K))
+        workspace2 = (M, topk, N)
+        output = (M, topk, K)
+        return (workspace1, workspace2, output, a.dtype)
 
     def apply(
         self,

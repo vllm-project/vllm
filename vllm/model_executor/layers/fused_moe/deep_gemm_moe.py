@@ -70,6 +70,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         super().__init__()
         self.block_shape = deep_gemm_block_shape()
 
+    def supports_chunking(self) -> bool:
+        return True
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -78,13 +81,14 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         K: int,
         topk: int,
         num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
-        workspace1 = M_sum * max(N * 2, K)
-        workspace2 = M_sum * N
-        return (workspace1, workspace2, a.dtype)
+        workspace1 = (M_sum, max(N * 2, K))
+        workspace2 = (M_sum, N)
+        output = (M * topk, K)
+        return (workspace1, workspace2, output, a.dtype)
 
     def apply(
         self,
