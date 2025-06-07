@@ -572,8 +572,12 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 "increase this limit if the model supports it.")
 
         self._items_by_modality[modality].append(item)
-
-        return self._placeholder_str(modality, current_count)
+        try:
+            return self._placeholder_str(modality, current_count)
+        except TypeError as e:
+            logger.warning(f"Skipping unsupported modality '{modality}' for model "\
+                           f"'{self._model_config.hf_config.model_type}': {e}")
+            return None
 
     @abstractmethod
     def create_parser(self) -> "BaseMultiModalContentParser":
