@@ -1409,6 +1409,7 @@ class EngineArgs:
             "FLASHINFER_VLLM_V1",
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
+            "FLEX_ATTENTION",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
