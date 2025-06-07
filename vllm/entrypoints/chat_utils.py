@@ -601,7 +601,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                                               hf_config.video_token_index)
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "timeseries":
-            if model_type == "chatts":
+            if model_type == "chatts" or model_type == "qwen3ts":
                 return "<ts><ts/>"
             else:
                 raise TypeError(f"Unknown {modality} model type: {model_type}")
