@@ -234,8 +234,13 @@ def _per_token_group_quant_fp8(
     row = g_id // groups_per_row
     row_g_id = g_id % groups_per_row
 
-    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
-    y_q_ptr += g_id * group_size
+    # Ensure offset calculations use int64 to prevent overflow
+    y_ptr_offset = (row.to(tl.int64) * y_row_stride) + (row_g_id.to(tl.int64) *
+                                                        group_size)
+    y_ptr += y_ptr_offset
+
+    y_q_ptr_offset = g_id.to(tl.int64) * group_size
+    y_q_ptr += y_q_ptr_offset
     y_s_ptr += g_id
 
     cols = tl.arange(0, BLOCK)  # N <= BLOCK
@@ -282,15 +287,23 @@ def _per_token_group_quant_fp8_colmajor(
     row = g_id // groups_per_row
     row_g_id = g_id % groups_per_row
 
-    y_ptr += (row * y_row_stride) + (row_g_id * group_size)
-    y_q_ptr += g_id * group_size
+    # Ensure offset calculations use int64 to prevent overflow
+    y_ptr_offset = (row.to(tl.int64) * y_row_stride) + (row_g_id.to(tl.int64) *
+                                                        group_size)
+    y_ptr += y_ptr_offset
+
+    y_q_ptr_offset = g_id.to(tl.int64) * group_size
+    y_q_ptr += y_q_ptr_offset
 
     # Convert g_id the flattened block coordinate to 2D so we can index
     # into the output y_scales matrix
     blocks_per_row = y_num_columns // group_size
     scale_col = g_id % blocks_per_row
     scale_row = g_id // blocks_per_row
-    y_s_ptr += scale_col * y_s_col_stride + scale_row
+    # Ensure offset calculation uses int64 for y_s_ptr
+    y_s_ptr_offset = (scale_col.to(tl.int64) * y_s_col_stride) + scale_row.to(
+        tl.int64)
+    y_s_ptr += y_s_ptr_offset
 
     cols = tl.arange(0, BLOCK)  # group_size <= BLOCK
     mask = cols < group_size
