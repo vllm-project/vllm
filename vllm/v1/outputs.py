@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from typing import Any, NamedTuple, Optional
 
 import torch
 
@@ -85,7 +85,7 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]]
+    sampled_token_ids: Optional[list[list[int]]]
 
     # num_reqs x num_spec_tokens
     spec_token_ids: Optional[list[list[int]]]
@@ -101,6 +101,10 @@ class ModelRunnerOutput:
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
 
+    # For pooling/embedding models - pooled outputs per request
+    # This can include embeddings, classification outputs, etc.
+    pooled_outputs: Optional[Any] = None
+
     # [req_ids]
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
@@ -112,5 +116,6 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               spec_token_ids=None,
                                               logprobs=None,
                                               prompt_logprobs_dict={},
+                                              pooled_outputs=None,
                                               finished_sending=None,
                                               finished_recving=None)

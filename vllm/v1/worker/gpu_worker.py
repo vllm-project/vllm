@@ -141,9 +141,15 @@ class Worker(WorkerBase):
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
-        # Construct the model runner
-        self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device)
+        # Construct the model runner based on runner type
+        if self.model_config.runner_type == "pooling":
+            from vllm.v1.worker.gpu_pooling_model_runner import (
+                GPUPoolingModelRunner)
+            self.model_runner = GPUPoolingModelRunner(self.vllm_config,
+                                                      self.device)
+        else:
+            self.model_runner: GPUModelRunner = GPUModelRunner(
+                self.vllm_config, self.device)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
