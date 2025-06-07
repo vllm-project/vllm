@@ -141,12 +141,15 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
+        invalid_block_ids = set[int]()
         for output in outputs:
             output = output.kv_connector_output
             update_finished_set(output.finished_sending,
                                 self._send_remaining_count, finished_sending)
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
+            if output.invalid_block_ids:
+                invalid_block_ids |= output.invalid_block_ids
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -154,6 +157,7 @@ class KVOutputAggregator:
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
+            invalid_block_ids=invalid_block_ids or None,
         )
 
         return output
