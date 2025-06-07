@@ -86,6 +86,8 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             } if model_info.speculative_model else None,
             trust_remote_code=model_info.trust_remote_code,
             max_model_len=model_info.max_model_len,
+            # these tests seem to produce leftover memory
+            gpu_memory_utilization=0.80,
             load_format="dummy",
             hf_overrides=hf_overrides,
         )
