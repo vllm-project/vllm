@@ -521,6 +521,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def workspace_shapes(
         self,
         a: torch.Tensor,
+        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -632,6 +633,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def workspace_shapes(
         self,
         a: torch.Tensor,
+        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
