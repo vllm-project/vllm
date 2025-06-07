@@ -6,7 +6,9 @@ from typing import Optional, Union
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
@@ -241,6 +243,7 @@ class MambaMixer2(CustomOp):
         activation: str = "silu",
         use_rms_norm: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -273,6 +276,7 @@ class MambaMixer2(CustomOp):
         ), "Tensor parallel currently not supported for quantized models."
 
         self.ssm_state_size = ssm_state_size
+        self.conv_kernel_size = conv_kernel_size
         self.activation = activation
 
         self.intermediate_size = intermediate_size
@@ -411,6 +415,17 @@ class MambaMixer2(CustomOp):
                                        self.use_rms_norm,
                                        eps=rms_norm_eps)
 
+        if envs.VLLM_USE_V1:
+            compilation_config = get_current_vllm_config().compilation_config
+            if prefix in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            compilation_config.static_forward_context[prefix] = self
+            # The outer list is for v0 PP virtual engine. Though this code path
+            # only runs for v1, we have to do this to unify with the interface
+            # of Attention + v0 PP.
+            # The inner tuple is (conv_state, ssm_state)
+            self.kv_cache = [(torch.tensor([]), torch.tensor([]))]
+
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -426,19 +441,34 @@ class MambaMixer2(CustomOp):
         mamba2_metadata: Mamba2Metadata,
         mup_vector: Optional[torch.Tensor] = None,
     ):
+        forward_context = get_forward_context()
         # mamba2_metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
-        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
+        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        if envs.VLLM_USE_V1:
+            if attn_metadata is not None:
+                assert isinstance(attn_metadata, dict)
+                attn_metadata = attn_metadata[self.prefix]
+                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                conv_state = self_kv_cache[0]
+                ssm_state = self_kv_cache[1]
+        else:
+            conv_state = mamba_cache_params.conv_state
+            ssm_state = mamba_cache_params.ssm_state
 
-        num_prefills = attn_metadata.num_prefills  # request count
-        num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
-        num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
-        has_prefill = num_prefills > 0
-        has_decode = num_decodes > 0
-
+        # - get hidden_states, B and C after depthwise convolution.
         groups_time_state_size = self.n_groups * self.ssm_state_size
+        split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
+            hidden_states_B_C,
+            [
+                self.intermediate_size // self.tp_size,
+                groups_time_state_size // self.tp_size,
+                groups_time_state_size // self.tp_size,
+            ],
+            dim=-1,
+        )
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -458,6 +488,22 @@ class MambaMixer2(CustomOp):
 
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
+
+        if envs.VLLM_USE_V1 and attn_metadata is None:
+            # V1 profile run
+            hidden_states_B_C = (hidden_states_B_C.transpose(
+                0, 1).clone().transpose(0, 1)).contiguous()
+            hidden_states, _B, _C = split_hidden_states_B_C_fn(
+                hidden_states_B_C)
+            hidden_states = self.norm(hidden_states, gate)
+            out, _ = self.out_proj(hidden_states)
+            return out
+
+        num_prefills = attn_metadata.num_prefills  # request count
+        num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
+        num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
+        has_prefill = num_prefills > 0
+        has_decode = num_decodes > 0
 
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
@@ -480,17 +526,6 @@ class MambaMixer2(CustomOp):
         query_start_loc_p = (attn_metadata.query_start_loc[:num_prefills + 1]
                              if has_prefill else None)
 
-        # - get hidden_states, B and C after depthwise convolution.
-        split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
-            hidden_states_B_C,
-            [
-                self.intermediate_size // self.tp_size,
-                groups_time_state_size // self.tp_size,
-                groups_time_state_size // self.tp_size,
-            ],
-            dim=-1,
-        )
-
         ssd_output_list = []
 
         # Process prefill requests
@@ -503,7 +538,7 @@ class MambaMixer2(CustomOp):
                 conv_weights,
                 self.conv1d.bias,
                 activation=self.activation,
-                conv_states=mamba_cache_params.conv_state,
+                conv_states=conv_state,
                 has_initial_state=mamba2_metadata.has_initial_states,
                 cache_indices=state_indices_tensor_p,
                 query_start_loc=query_start_loc_p).transpose(
@@ -521,7 +556,7 @@ class MambaMixer2(CustomOp):
                 # making a copy of the states
                 initial_states = torch.where(
                     mamba2_metadata.has_initial_states[:, None, None, None],
-                    mamba_cache_params.ssm_state[state_indices_tensor_p], 0)
+                    ssm_state[state_indices_tensor_p], 0)
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
                 hidden_states_p.view(1, num_prefill_tokens,
@@ -550,7 +585,7 @@ class MambaMixer2(CustomOp):
 
             # update ssm states
             # - varlen state is a (num_prefills, nheads, headdim, dstate) tensor
-            mamba_cache_params.ssm_state[state_indices_tensor_p] = varlen_state
+            ssm_state[state_indices_tensor_p] = varlen_state
 
             # - reshape
             ssd_output_list.append(scan_output.view(num_prefill_tokens, -1))
@@ -560,7 +595,7 @@ class MambaMixer2(CustomOp):
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
                 hidden_states_B_C_d,
-                mamba_cache_params.conv_state,
+                conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
@@ -586,7 +621,7 @@ class MambaMixer2(CustomOp):
             #   using state_indices_tensor_d
 
             hidden_states_d = selective_state_update(
-                mamba_cache_params.ssm_state,
+                ssm_state,
                 hidden_states_d,
                 dt_d,
                 A_d,
@@ -614,3 +649,31 @@ class MambaMixer2(CustomOp):
         # 5. Final linear projection
         out, _ = self.out_proj(hidden_states)
         return out
+
+    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        world_size = get_tensor_model_parallel_world_size()
+
+        conv_state_shape, temporal_state_shape = None, None
+
+        # if n_groups is not divisible by world_size, need to extend the shards
+        # to ensure all groups needed by a head is sharded along with it
+        n_groups = (self.n_groups +
+                    extra_groups_for_head_shards(self.n_groups, world_size))
+
+        # - heads and n_groups are TP-ed
+        conv_dim = (self.intermediate_size +
+                    2 * n_groups * self.ssm_state_size)
+        conv_state_shape = (
+            divide(conv_dim, world_size),
+            self.conv_kernel_size - 1,
+        )
+
+        # These are not TP-ed as they depend on A, dt_bias, D
+        # - they are typically small
+        #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
+        temporal_state_shape = (
+            divide(self.num_heads, world_size),
+            self.head_dim,
+            self.ssm_state_size,
+        )
+        return conv_state_shape, temporal_state_shape
