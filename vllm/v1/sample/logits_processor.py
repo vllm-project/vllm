@@ -91,11 +91,6 @@ class BatchUpdate:
 
 
 class LogitsProcessor(ABC):
-    batch_update: BatchUpdate
-
-    def __init__(self):
-        # Empty batch update
-        self.batch_update = BatchUpdate()
 
     @abstractmethod
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
@@ -112,7 +107,7 @@ class LogitsProcessor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _update_state(
+    def update_state(
         self,
         batch_update: BatchUpdate,
     ) -> None:
@@ -124,23 +119,6 @@ class LogitsProcessor(ABC):
             changes to the batch makeup.
         """
         raise NotImplementedError
-
-    def register_add_request(self, request_info: AddedRequestType) -> None:
-        self.batch_update.added.append(request_info)
-
-    def register_remove_request(self,
-                                request_index: RemovedRequestType) -> None:
-        self.batch_update.removed.append(request_index)
-
-    def register_move_request(self, from_index: int, to_index: int) -> None:
-        self.batch_update.moved.append((from_index, to_index))
-
-    def register_swap_requests(self, a_index: int, b_index: int) -> None:
-        self.batch_update.swapped.append((a_index, b_index))
-
-    def update_state(self, batch_size: int) -> None:
-        self.batch_update.batch_size = batch_size
-        self._update_state(self.batch_update)
 
 
 ###### ----- LogitsProcessor impls below here
@@ -172,7 +150,7 @@ class MinPLogitsProcessor(LogitsProcessor):
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
-    def _update_state(self, batch_update: BatchUpdate):
+    def update_state(self, batch_update: BatchUpdate):
         if not batch_update:
             return
 
@@ -250,7 +228,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
     def requires_nongreedy(cls) -> bool:
         return False
 
-    def _update_state(self, batch_update: BatchUpdate):
+    def update_state(self, batch_update: BatchUpdate):
         if not batch_update:
             return
 
@@ -328,7 +306,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     def requires_nongreedy(cls) -> bool:
         return False
 
-    def _update_state(self, batch_update: BatchUpdate):
+    def update_state(self, batch_update: BatchUpdate):
         needs_update = False
         if batch_update:
             # Process added requests.

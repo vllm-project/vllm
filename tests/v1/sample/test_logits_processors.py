@@ -66,6 +66,7 @@ def _create_logit_bias(
     for i in range(batch_size):
         logit_bias = {min(i, vocab_size - 1): bias_value}
         res.append(logit_bias)
+    print("\n\n\n", f"logit_bias: {logit_bias}", "\n\n\n")
     return res
 
 
