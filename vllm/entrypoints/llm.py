@@ -604,13 +604,19 @@ class LLM:
                     **mm_kwargs,
                 ), )
 
-        token_iter = tqdm(range(max_tokens), desc="Beam search", unit="token", unit_scale=False)
-        warnings.warn(
-            "The progress bar shows the upper bound on token steps and "
-            "may finish early due to stopping conditions. It does not "
-            "reflect instance-level progress.",
-            stacklevel=2,
-        )          
+        token_iter = range(max_tokens)
+        if use_tqdm:
+            token_iter = tqdm(range(max_tokens),
+                              desc="Beam search",
+                              unit="token",
+                              unit_scale=False)
+            warnings.warn(
+                "The progress bar shows the upper bound on token steps and "
+                "may finish early due to stopping conditions. It does not "
+                "reflect instance-level progress.",
+                stacklevel=2,
+            )
+
         for _ in token_iter:
             all_beams: list[BeamSearchSequence] = list(
                 sum((instance.beams for instance in instances), []))
