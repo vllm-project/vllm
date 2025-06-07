@@ -36,7 +36,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -148,23 +148,6 @@ class EngineCore:
             for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
             zip(kv_cache_specs, available_gpu_memory)
         ]
-
-        for kv_cache_spec_one_worker in kv_cache_specs:
-            for _, spec in kv_cache_spec_one_worker.items():
-                if isinstance(spec, AttentionSpec) and \
-                    spec.attn_type != "decoder":
-
-                    logger.info("Found non-decoder layer. Disabling "
-                                "prefix cache and chunked prefill")
-                    self.vllm_config.cache_config.\
-                        enable_prefix_caching = False
-                    self.vllm_config.scheduler_config.\
-                        enable_chunked_prefill = False
-                    self.vllm_config.scheduler_config.\
-                        chunked_prefill_enabled = False
-                    self.vllm_config.scheduler_config.\
-                        long_prefill_token_threshold = 0
-                    break
 
         # Since we use a shared centralized controller, we need the
         # `kv_cache_config` to be consistent across all workers to make sure
