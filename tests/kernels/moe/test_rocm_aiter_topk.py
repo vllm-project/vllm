@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # This is a test for the AITER ops.
 # It tests if the AITER ops are
 # 1. correctly registered as custom ops

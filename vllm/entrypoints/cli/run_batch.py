@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
 import asyncio
@@ -9,6 +10,8 @@ from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.logger import logger
 from vllm.entrypoints.openai.run_batch import main as run_batch_main
 from vllm.entrypoints.openai.run_batch import make_arg_parser
+from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
+                                    show_filtered_argument_or_group_from_help)
 from vllm.utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -48,7 +51,11 @@ class RunBatchSubcommand(CLISubcommand):
             usage=
             "vllm run-batch -i INPUT.jsonl -o OUTPUT.jsonl --model <model>",
         )
-        return make_arg_parser(run_batch_parser)
+        run_batch_parser = make_arg_parser(run_batch_parser)
+        show_filtered_argument_or_group_from_help(run_batch_parser,
+                                                  "run-batch")
+        run_batch_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
+        return run_batch_parser
 
 
 def cmd_init() -> list[CLISubcommand]:

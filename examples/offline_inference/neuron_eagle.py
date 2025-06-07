@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This example shows how to run offline inference with an EAGLE speculative
 decoding model on neuron. To use EAGLE speculative decoding, you must use

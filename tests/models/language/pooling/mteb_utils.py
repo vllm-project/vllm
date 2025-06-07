@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 
 import mteb
@@ -6,7 +7,6 @@ import numpy as np
 import pytest
 
 from tests.models.utils import EmbedModelInfo
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 
 # Most models on the STS12 task (See #17175):
 # - Model implementation and minor changes in tensor dtype
@@ -103,17 +103,18 @@ def mteb_test_embed_models(hf_runner,
                                               MTEB_EMBED_TASKS)
         vllm_dtype = vllm_model.model.llm_engine.model_config.dtype
 
-    with set_default_torch_dtype(vllm_dtype) and hf_runner(
-            model_info.name, is_sentence_transformer=True,
-            dtype=vllm_dtype) as hf_model:
+    with hf_runner(model_info.name,
+                   is_sentence_transformer=True,
+                   dtype="float32") as hf_model:
 
         if hf_model_callback is not None:
             hf_model_callback(hf_model)
 
         st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
+        st_dtype = next(hf_model.model.parameters()).dtype
 
-    print("VLLM:", vllm_main_score)
-    print("SentenceTransformers:", st_main_score)
+    print("VLLM:", vllm_dtype, vllm_main_score)
+    print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
     assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_EMBED_TOL)
