@@ -519,27 +519,46 @@ class Scheduler(SchedulerInterface):
                                         req_to_new_block_ids[req.request_id])
             for req in scheduled_new_reqs
         ]
-        resumed_reqs_data = [
-            self._make_cached_request_data(
+        # A decode job typically schedules 1 real token + speculative tokens.
+        # If num_spec_tokens is 0, this threshold is 1.
+        decode_job_token_threshold = 1 + self.num_spec_tokens
+        # Split scheduled_resumed_reqs into prefill/chunked-prefill and decode jobs
+        resumed_prefill_reqs_data_list: list[CachedRequestData] = []
+        resumed_decode_reqs_data_list: list[CachedRequestData] = []
+        for req in scheduled_resumed_reqs:
+            num_tokens_for_req = num_scheduled_tokens[req.request_id]
+            data = self._make_cached_request_data(
                 req,
-                num_scheduled_tokens[req.request_id],
+                num_tokens_for_req,
                 len(scheduled_spec_decode_tokens.get(req.request_id, ())),
                 req_to_new_block_ids[req.request_id],
                 resumed_from_preemption=True,
-            ) for req in scheduled_resumed_reqs
-        ]
-        running_reqs_data = [
-            self._make_cached_request_data(
+                )
+            if num_tokens_for_req <= decode_job_token_threshold:
+                resumed_decode_reqs_data_list.append(data)
+            else:
+                resumed_prefill_reqs_data_list.append(data)
+
+        # Split scheduled_running_reqs into prefill/chunked-prefill and decode jobs
+        running_prefill_reqs_data_list: list[CachedRequestData] = []
+        running_decode_reqs_data_list: list[CachedRequestData] = []
+        for req in scheduled_running_reqs:
+            num_tokens_for_req = num_scheduled_tokens[req.request_id]
+            data = self._make_cached_request_data(
                 req,
-                num_scheduled_tokens[req.request_id],
+                num_tokens_for_req,
                 len(scheduled_spec_decode_tokens.get(req.request_id, ())),
                 req_to_new_block_ids[req.request_id],
                 resumed_from_preemption=False,
-            ) for req in scheduled_running_reqs
-        ]
+                )
+            if num_tokens_for_req <= decode_job_token_threshold:
+                running_decode_reqs_data_list.append(data)
+            else:
+                running_prefill_reqs_data_list.append(data)
+        
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
-            scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,
+            scheduled_cached_reqs=(resumed_prefill_reqs_data_list + running_prefill_reqs_data_list + resumed_decode_reqs_data_list + running_decode_reqs_data_list),
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
@@ -554,6 +573,15 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
+        
+        logger.info(
+            f"Scheduling cycle finished. Scheduled: {len(new_reqs_data)} new, "
+            f"{len(resumed_prefill_reqs_data_list)} resumed (prefill/chunked), "
+            f"{len(resumed_decode_reqs_data_list)} resumed (decode), "
+            f"{len(running_prefill_reqs_data_list)} running (prefill/chunked), "
+            f"{len(running_decode_reqs_data_list)} running (decode). "
+            f"Total tokens: {total_num_scheduled_tokens}. Preempted: {len(preempted_reqs)}."
+         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
