@@ -10,6 +10,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
 
 import cloudpickle
 import torch.nn as nn
+from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
@@ -196,9 +197,6 @@ class LLM:
 
         if "kv_transfer_config" in kwargs and isinstance(
                 kwargs["kv_transfer_config"], dict):
-            from pydantic import (
-                ValidationError)  # Ensure ValidationError is imported
-
             from vllm.config import KVTransferConfig
             raw_config_dict = kwargs["kv_transfer_config"]
             try:
