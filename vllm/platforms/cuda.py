@@ -226,6 +226,9 @@ class CudaPlatformBase(Platform):
             if selected_backend == _Backend.FLASHINFER:
                 logger.info_once("Using FlashInfer backend on V1 engine.")
                 return "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
+            if selected_backend == _Backend.FLEX_ATTENTION:
+                logger.info("Using FlexAttenion backend on V1 engine.")
+                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
             if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
                 logger.info_once("Using Triton backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
