@@ -12,7 +12,6 @@ On the client side, run:
         --model <your_model> \
         --dataset json \
         --structured-output-ratio 1.0 \
-        --structured-output-backend auto \
         --request-rate 10 \
         --num-prompts 1000
 
