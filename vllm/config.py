@@ -1864,10 +1864,7 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        if self.data_parallel_size_local > self.data_parallel_size:
-            raise ValueError(
-                f"data_parallel_size_local ({self.data_parallel_size_local}) "
-                f"must be <= data_parallel_size ({self.data_parallel_size})")
+        self._validate_data_parallel_sizes()
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
@@ -1885,58 +1882,57 @@ class ParallelConfig:
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
-        ray_only_devices: list[str] = []
-        from vllm.platforms import current_platform
-        if (current_platform.device_type in ray_only_devices
-                and self.world_size > 1):
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "ray"
-            if self.distributed_executor_backend != "ray":
-                raise ValueError(
-                    f"{current_platform.device_type.upper()} backend only "
-                    "supports Ray for distributed inference.")
-
-        if self.distributed_executor_backend is None and self.world_size > 1:
-            # We use multiprocessing by default if world_size fits on the
-            # current node and we aren't in a ray placement group.
-
-            from vllm.executor import ray_utils
-            backend: DistributedExecutorBackend = "mp"
-            ray_found = ray_utils.ray_is_available()
-            if current_platform.is_neuron():
-                # neuron uses single process to control multiple devices
-                backend = "uni"
-            elif current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
-                backend = "uni"
-            elif (current_platform.is_cuda()
-                  and cuda_device_count_stateless() < self.world_size):
-                if not ray_found:
-                    raise ValueError("Unable to load Ray which is "
-                                     "required for multi-node inference, "
-                                     "please install Ray with `pip install "
-                                     "ray`.") from ray_utils.ray_import_err
-                backend = "ray"
-            elif self.data_parallel_backend == "ray":
-                logger.info("Using ray distributed inference because "
-                            "data_parallel_backend is ray")
-                backend = "ray"
-            elif ray_found:
-                if self.placement_group:
-                    backend = "ray"
-                else:
-                    from ray import is_initialized as ray_is_initialized
-                    if ray_is_initialized():
-                        from ray.util import get_current_placement_group
-                        if get_current_placement_group():
-                            backend = "ray"
-            self.distributed_executor_backend = backend
-            logger.info("Defaulting to use %s for distributed inference",
-                        backend)
-
-        if self.distributed_executor_backend is None and self.world_size == 1:
-            self.distributed_executor_backend = "uni"
-
+        # Auto-select executor backend if not specified
+        if self.distributed_executor_backend is None:
+            self.distributed_executor_backend = \
+                self._auto_select_distributed_backend()
         self._verify_args()
+
+    def _validate_data_parallel_sizes(self):
+        if self.data_parallel_size_local > self.data_parallel_size:
+            raise ValueError(
+                f"data_parallel_size_local ({self.data_parallel_size_local}) "
+                f"must be <= data_parallel_size ({self.data_parallel_size})")
+
+    def _auto_select_distributed_backend(self) -> DistributedExecutorBackend:
+        # If world_size == 1, use single process mode directly
+        if self.world_size == 1:
+            return "uni"
+        # We use multiprocessing by default if world_size fits on the
+        # current node and we aren't in a ray placement group.
+        from vllm.executor import ray_utils
+        backend: DistributedExecutorBackend = "mp"
+        ray_found = ray_utils.ray_is_available()
+
+        if current_platform.is_neuron():
+            # neuron uses single process to control multiple devices
+            backend = "uni"
+        elif current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
+            backend = "uni"
+        elif current_platform.is_cuda() and cuda_device_count_stateless(
+        ) < self.world_size:
+            if not ray_found:
+                raise ValueError("Unable to load Ray which is "
+                                 "required for multi-node inference, "
+                                 "please install Ray with `pip install "
+                                 "ray`.") from ray_utils.ray_import_err
+            backend = "ray"
+        elif self.data_parallel_backend == "ray":
+            logger.info("Using ray distributed inference because "
+                        "data_parallel_backend is ray")
+            backend = "ray"
+        elif ray_found:
+            if self.placement_group:
+                backend = "ray"
+            else:
+                from ray import is_initialized as ray_is_initialized
+                if ray_is_initialized():
+                    from ray.util import get_current_placement_group
+                    if get_current_placement_group():
+                        backend = "ray"
+
+        logger.info("Defaulting to use %s for distributed inference", backend)
+        return backend
 
     @property
     def use_ray(self) -> bool:
