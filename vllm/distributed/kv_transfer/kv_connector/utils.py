@@ -117,7 +117,7 @@ def get_kv_connector_cache_layout():
 
 
 class KVOutputAggregator:
-    """Utility class to aggregate the output of all workers into a single 
+    """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""
 
     def __init__(self, world_size: int):
@@ -142,6 +142,7 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
+        invalid_block_ids = set[int]()
         aggregated_kv_connector_stats = None
         for model_runner_output in outputs:
             output = model_runner_output.kv_connector_output
@@ -151,6 +152,8 @@ class KVOutputAggregator:
                                 self._send_remaining_count, finished_sending)
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
+            if output.invalid_block_ids:
+                invalid_block_ids |= output.invalid_block_ids
 
             # Aggregate kv_connector_stats from all workers.
             if aggregated_kv_connector_stats is None:
@@ -171,6 +174,7 @@ class KVOutputAggregator:
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
+            invalid_block_ids=invalid_block_ids or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
         )
 

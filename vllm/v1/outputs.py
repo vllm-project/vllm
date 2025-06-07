@@ -92,6 +92,10 @@ class KVConnectorOutput:
         return (not self.finished_sending and not self.finished_recving
                 and not self.kv_connector_stats)
 
+    # IDs of externally computed KV blocks that failed to load.
+    # Requests referencing these blocks should be rescheduled to recompute them.
+    invalid_block_ids: Optional[set[int]] = None
+
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
