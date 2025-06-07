@@ -42,7 +42,8 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", None),
     ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", NGRAM_SPEC_CONFIG),
+    ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto",
+     NGRAM_SPEC_CONFIG),
     #FIXME: This test is flaky on CI thus disabled
     #("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
     ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto",
