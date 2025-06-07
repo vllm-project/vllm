@@ -769,7 +769,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-    def select_gemm_impl(self, prepare_finalize):
+    def select_gemm_impl(self, prepare_finalize, moe):
 
         from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
             BatchedTritonOrDeepGemmExperts)
