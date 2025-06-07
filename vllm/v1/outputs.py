@@ -111,6 +111,10 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
+    # IDs of externally computed KV blocks that failed to load.
+    # Requests referencing these blocks should be rescheduled to recompute them.
+    invalid_block_ids: Optional[set[int]] = None
+
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},
@@ -121,4 +125,5 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               pooler_output=[],
                                               finished_sending=None,
                                               finished_recving=None,
-                                              num_nans_in_logits=None)
+                                              num_nans_in_logits=None,
+                                              invalid_block_ids=None)

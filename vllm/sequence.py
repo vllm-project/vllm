@@ -1167,6 +1167,7 @@ class IntermediateTensors:
     # [req_ids]
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
+    invalid_block_ids: Optional[set[int]] = None
 
     def __init__(self, tensors):
         # manually define this function, so that
