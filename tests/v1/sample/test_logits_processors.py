@@ -66,7 +66,6 @@ def _create_logit_bias(
     for i in range(batch_size):
         logit_bias = {min(i, vocab_size - 1): bias_value}
         res.append(logit_bias)
-    print("\n\n\n", f"logit_bias: {logit_bias}", "\n\n\n")
     return res
 
 
@@ -288,7 +287,8 @@ def test_logit_bias(device: str, batch_size: int, bias_value: float):
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
     sampling_metadata, logitproc_dict = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
-    logit_bias_logitproc = logitproc_dict["logit_bias"]
+    logit_bias_logitproc: LogitBiasLogitsProcessor = logitproc_dict[
+        "logit_bias"]
     # Create batch update where each request demands a
     # different logit bias
     logit_bias_list = _create_logit_bias(
@@ -386,19 +386,24 @@ def test_min_tokens_penalty(device: str, batch_size: int):
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
     sampling_metadata, logitproc_dict = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
-    min_tokens_logitproc = logitproc_dict["min_tokens"]
-    batch_indices_for_min_token_penalty = np.random.randint(
-        0, batch_size - 1, size=np.random.randint(0, batch_size)).tolist()
+    min_tokens_logitproc: MinTokensLogitsProcessor = logitproc_dict[
+        "min_tokens"]
+    batch_indices_for_min_token_penalty = (
+        [0] if batch_size == 1 else np.random.randint(
+            0, batch_size - 1, size=np.random.randint(1, batch_size)).tolist())
     min_tokens_dict = _generate_min_token_penalties_and_stop_tokens(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE,
         batch_indices_for_min_token_penalty)
 
     # Create batch update where each request demands
     # a different min_tokens value
-    added: BatchAddType = [(rdx,
-                            SamplingParams(min_tokens=min_tokens_dict[rdx][0],
-                                           max_tokens=None), [])
-                           for rdx in range(batch_size)]
+    added: BatchAddType = [
+        (rdx,
+         SamplingParams(min_tokens=min_tokens_dict[rdx][0],
+                        max_tokens=None,
+                        stop_token_ids=list(min_tokens_dict[rdx][1])), [])
+        for rdx in range(batch_size)
+    ]
     batch_update = BatchUpdate(
         removed=[],
         moved=[],

@@ -308,36 +308,36 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
     def update_state(self, batch_update: BatchUpdate):
         needs_update = False
-        if batch_update:
-            # Process added requests.
-            for index, sampling_params, output_tok_ids in batch_update.added:
-                if ((min_tokens := sampling_params.min_tokens)
-                        and len(output_tok_ids) < min_tokens):
-                    self.min_toks[index] = (min_tokens, output_tok_ids,
-                                            sampling_params.all_stop_token_ids)
+
+        # Process added requests.
+        for index, sampling_params, output_tok_ids in batch_update.added:
+            if ((min_tokens := sampling_params.min_tokens)
+                    and len(output_tok_ids) < min_tokens):
+                self.min_toks[index] = (min_tokens, output_tok_ids,
+                                        sampling_params.all_stop_token_ids)
+                needs_update = True
+
+        if self.min_toks:
+            # Process removed requests.
+            for index in batch_update.removed:
+                if self.min_toks.pop(index, None):
                     needs_update = True
 
-            if self.min_toks:
-                # Process removed requests.
-                for index in batch_update.removed:
-                    if self.min_toks.pop(index, None):
-                        needs_update = True
+            # Process moved requests.
+            for from_index, to_index in batch_update.moved:
+                if entry := self.min_toks.pop(from_index, None):
+                    self.min_toks[to_index] = entry
+                    needs_update = True
 
-                # Process moved requests.
-                for from_index, to_index in batch_update.moved:
-                    if entry := self.min_toks.pop(from_index, None):
-                        self.min_toks[to_index] = entry
-                        needs_update = True
-
-                # Process swapped requests.
-                for a_index, b_index in batch_update.swapped:
-                    a_entry = self.min_toks.pop(a_index, None)
-                    b_entry = self.min_toks.pop(b_index, None)
-                    needs_update |= bool(a_entry or b_entry)
-                    if a_entry:
-                        self.min_toks[b_index] = a_entry
-                    if b_entry:
-                        self.min_toks[a_index] = b_entry
+            # Process swapped requests.
+            for a_index, b_index in batch_update.swapped:
+                a_entry = self.min_toks.pop(a_index, None)
+                b_entry = self.min_toks.pop(b_index, None)
+                needs_update |= bool(a_entry or b_entry)
+                if a_entry:
+                    self.min_toks[b_index] = a_entry
+                if b_entry:
+                    self.min_toks[a_index] = b_entry
 
         if self.min_toks:
             # Check for any requests that have attained their min tokens.
