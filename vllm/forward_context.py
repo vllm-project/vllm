@@ -43,9 +43,9 @@ class DPMetadata:
                                          device="cpu",
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
-        print("STARTING AR")
+        # print("STARTING AR num_tokens_across_dp")
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
-        print("finishing")
+        # print("finishing num_tokens_across_dp")
         return num_tokens_tensor
 
     @staticmethod
@@ -56,10 +56,9 @@ class DPMetadata:
                                          device="cpu",
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
-        print("Starting AR")
         dist.all_reduce(should_ubatch_tensor, group=get_dp_group().cpu_group)
-        print("FINISHING AR")
         result: bool = bool(torch.all(should_ubatch_tensor == 1).item())
+        # print(f"FINISHING AR should_ubatch_across_dp {result} {should_ubatch_tensor}")
         return result
 
     @staticmethod
