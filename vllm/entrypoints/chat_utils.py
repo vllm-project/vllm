@@ -28,6 +28,7 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
+from PIL import Image
 from pydantic import TypeAdapter
 # yapf: enable
 from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
@@ -89,6 +90,20 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
     """The type of the content part."""
 
 
+class PILImage(TypedDict, total=False):
+    image: Required[Image.Image]
+    """
+    A PIL.Image.Image object.
+    """
+
+
+class ChatCompletionContentPartPILImageParam(TypedDict, total=False):
+    image: Required[PILImage]
+
+    type: Required[Literal["image"]]
+    """The type of the content part."""
+
+
 class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain image_url.
     This is supported by OpenAI API, although it is not documented.
@@ -126,6 +141,7 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartInputAudioParam,
+    ChatCompletionContentPartPILImageParam,
     ChatCompletionContentPartVideoParam, ChatCompletionContentPartRefusalParam,
     CustomChatCompletionContentSimpleImageParam,
     ChatCompletionContentPartImageEmbedsParam,
@@ -697,6 +713,10 @@ class BaseMultiModalContentParser(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def parse_pil_image(self, image: Image.Image) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def parse_audio(self, audio_url: str) -> None:
         raise NotImplementedError
 
@@ -723,6 +743,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def parse_image(self, image_url: str) -> None:
         image = self._connector.fetch_image(image_url)
 
+        placeholder = self._tracker.add("image", image)
+        self._add_placeholder(placeholder)
+
+    def parse_pil_image(self, image: Image.Image) -> None:
         placeholder = self._tracker.add("image", image)
         self._add_placeholder(placeholder)
 
@@ -775,6 +799,10 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         image_coro = self._connector.fetch_image_async(image_url)
 
         placeholder = self._tracker.add("image", image_coro)
+        self._add_placeholder(placeholder)
+
+    def parse_pil_image(self, image: Image.Image) -> None:
+        placeholder = self._tracker.add("image", image)
         self._add_placeholder(placeholder)
 
     def parse_image_embeds(self,
@@ -918,6 +946,8 @@ _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 _ImageParser = TypeAdapter(ChatCompletionContentPartImageParam).validate_python
 _AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam).validate_python
 _VideoParser = TypeAdapter(ChatCompletionContentPartVideoParam).validate_python
+# Parser for supporting raw multimodal data format
+_PILImageParser = TypeAdapter(ChatCompletionContentPartPILImageParam).validate_python # noqa: E501
 
 _ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio]
 
@@ -928,6 +958,8 @@ MM_PARSER_MAP: dict[
 ] = {
     "text":
     lambda part: _TextParser(part).get("text", None),
+    "image":
+    lambda part: _PILImageParser(part).get("image", None),
     "image_url":
     lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
@@ -1001,7 +1033,7 @@ def _parse_chat_message_content_mm_part(
 
 
 VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
-                                       "image_embeds",
+                                       "image_embeds", "image",
                                        "audio_url", "input_audio", "video_url")
 
 
@@ -1072,6 +1104,10 @@ def _parse_chat_message_content_part(
         else:
             return str_content
 
+    if part_type == "image":
+        image = cast(Image.Image, content)
+        mm_parser.parse_pil_image(image)
+        return {'type': 'image'} if wrap_dicts else None
     if part_type == "image_url":
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
