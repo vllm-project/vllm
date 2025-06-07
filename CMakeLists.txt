@@ -11,7 +11,18 @@ cmake_minimum_required(VERSION 3.26)
 # If you want to only build one target, make sure to install it manually:
 # cmake --build . --target _C
 # cmake --install . --component _C
-project(vllm_extensions LANGUAGES CXX)
+project(vllm_extensions LANGUAGES CXX C)
+
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Add include paths for macOS
+if(APPLE)
+    include_directories(/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1)
+    include_directories(/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib/clang/*/include)
+    include_directories(/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include)
+endif()
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
