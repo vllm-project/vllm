@@ -38,7 +38,7 @@ function cpu_tests() {
     pytest -v -s tests/models/language/generation/test_common.py::test_models[False-5-32-facebook/opt-125m]
     pytest -v -s tests/models/language/generation/test_common.py::test_models[False-5-32-google/gemma-1.1-2b-it]
     pytest -v -s tests/models/language/pooling/test_classification.py::test_models[float-jason9693/Qwen2.5-1.5B-apeach]
-    pytest -v -s tests/models/language/pooling/test_embedding.py::test_models[half-BAAI/bge-base-en-v1.5]"
+    pytest -v -s tests/models/language/pooling/test_embedding.py -m cpu_model"
 }
 
 # All of CPU tests are expected to be finished less than 40 mins.
