@@ -87,10 +87,10 @@ tail -525 ci_build.log | wl-copy
 
 CI test failures may be flaky. Use a bash loop to run repeatedly:
 
-<gh-file:.buildkite/scripts/ci-clean-log.sh>
+<gh-file:.buildkite/scripts/rerun-test.sh>
 
 ```bash
-./rerun_test.sh tests/v1/engine/test_engine_core_client.py::test_kv_cache_events[True-tcp]
+./rerun-test.sh tests/v1/engine/test_engine_core_client.py::test_kv_cache_events[True-tcp]
 ```
 
 ## Submitting a PR
