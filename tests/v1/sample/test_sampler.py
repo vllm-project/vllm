@@ -213,7 +213,7 @@ def test_sampler_presence_penalty(device: str, batch_size: int,
     # Create fake logits where each token is assigned the same
     # logit value.
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
-    sampling_metadata, _ = _create_default_sampling_metadata(
+    sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
     output_token_ids = sampling_metadata.output_token_ids
     sampling_metadata.presence_penalties = _create_penalty_tensor(
@@ -258,7 +258,7 @@ def test_sampler_frequency_penalty(device: str, batch_size: int,
     # Create fake logits where each token is assigned the same
     # logit value.
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
-    sampling_metadata, _ = _create_default_sampling_metadata(
+    sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
     sampling_metadata.frequency_penalties = _create_penalty_tensor(
         batch_size, frequency_penalty, torch.device(device))
@@ -312,7 +312,7 @@ def test_sampler_repetition_penalty(device: str, batch_size: int,
     # Create fake logits where each token is assigned the same
     # logit value.
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
-    sampling_metadata, _ = _create_default_sampling_metadata(
+    sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
     sampling_metadata.repetition_penalties = _create_penalty_tensor(
         batch_size, repetition_penalty, torch.device(device))
@@ -358,7 +358,7 @@ def test_sampler_allowed_token_ids(device: str, batch_size: int,
     # Create fake logits where each token is assigned the same
     # logit value.
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
-    sampling_metadata, _ = _create_default_sampling_metadata(
+    sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
     mask = _create_allowed_token_ids(
         batch_size=batch_size,
@@ -398,7 +398,7 @@ def test_sampler_bad_words(device: str, batch_size: int,
     # Create fake logits where each token is assigned the same
     # logit value.
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
-    sampling_metadata, _ = _create_default_sampling_metadata(
+    sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
     sampling_metadata.bad_words_token_ids = _create_bad_words_token_ids(
         batch_size, VOCAB_SIZE, bad_words_lengths)
