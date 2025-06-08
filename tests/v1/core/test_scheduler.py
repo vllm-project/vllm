@@ -1326,7 +1326,7 @@ def create_scheduler_with_priority(
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
-        tensors={},
+        kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(block_size, 1, 1, torch.float32,
