@@ -407,7 +407,7 @@ class CoreEngineActorManager:
             # For now, each DP rank can only be assigned to one node
             # TODO(rui): support allocating a single DP rank
             # to multiple nodes
-            available_engine_count = node_resources["GPU"] // world_size
+            available_engine_count = int(node_resources["GPU"]) // world_size
             if node_ip == dp_master_ip:
                 assert available_engine_count >= local_engine_count, (
                     "Not enough resources to allocate DP ranks "
