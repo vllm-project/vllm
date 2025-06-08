@@ -320,8 +320,10 @@ class EagleProposer:
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
-        self.model = get_model(vllm_config=self.vllm_config,
-                               model_config=draft_model_config)
+        from vllm.compilation.backends import set_model_tag
+        with set_model_tag("eagle_head"):
+            self.model = get_model(vllm_config=self.vllm_config,
+                                   model_config=draft_model_config)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
