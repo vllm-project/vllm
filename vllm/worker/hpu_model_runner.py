@@ -2032,6 +2032,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             'is_prompt',
             'block_size',
             'block_groups',
+            'input_positions',
         ])
         return attention_metadata
 
