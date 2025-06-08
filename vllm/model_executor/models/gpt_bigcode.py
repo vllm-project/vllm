@@ -345,7 +345,7 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (new_name, orig_name, shard_id)
