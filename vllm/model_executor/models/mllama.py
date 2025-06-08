@@ -942,7 +942,7 @@ class MllamaTextCrossAttention(CustomOp):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
+        kv_range_for_decode: Optional[List[tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
         return self.forward_native(hidden_states, attention_mask,
@@ -952,7 +952,7 @@ class MllamaTextCrossAttention(CustomOp):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
+        kv_range_for_decode: Optional[List[tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
         q, k, v = self.qkv_proj(hidden_states, cross_attention_states)
@@ -1057,7 +1057,7 @@ class MllamaTextCrossAttention(CustomOp):
         k: torch.Tensor,
         v: torch.Tensor,
         attention_mask: torch.Tensor,
-        kv_range_for_decode: List[Tuple[int, int]],
+        kv_range_for_decode: List[tuple[int, int]],
     ) -> torch.Tensor:
         kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
@@ -1190,7 +1190,7 @@ class MllamaCrossAttentionDecoderLayer(CustomOp):
         hidden_states: torch.Tensor,
         cross_attention_states: torch.Tensor,
         cross_attention_mask: torch.Tensor,
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
+        kv_range_for_decode: Optional[List[tuple[int, int]]],
         full_text_row_masked_out_mask: torch.Tensor,
     ) -> torch.Tensor:
         return self.forward_native(hidden_states, cross_attention_states,
@@ -1202,7 +1202,7 @@ class MllamaCrossAttentionDecoderLayer(CustomOp):
         hidden_states: torch.Tensor,
         cross_attention_states: torch.Tensor,
         cross_attention_mask: torch.Tensor,
-        kv_range_for_decode: Optional[List[Tuple[int, int]]],
+        kv_range_for_decode: Optional[List[tuple[int, int]]],
         full_text_row_masked_out_mask: torch.Tensor,
     ) -> torch.Tensor:
         residual = hidden_states
@@ -1567,7 +1567,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         num_tiles: list[list[int]],
         num_tokens_per_tile: int,
         dtype: torch.dtype,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if is_hpu:
             # input_ids is not flatten yet for hpu
             token_ids = input_ids.flatten().tolist()
