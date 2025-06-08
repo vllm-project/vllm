@@ -12,7 +12,7 @@ PLEASE FILL IN THE PR DESCRIPTION HERE ENSURING ALL CHECKLIST ITEMS ABOVE HAVE B
 
 ## Test Result
 
-## Documentation Update
+## (Optional) Documentation Update
 
 <!--- pyml disable-next-line no-emphasis-as-heading -->
 **BEFORE SUBMITTING, PLEASE READ <https://docs.vllm.ai/en/latest/contributing>** (anything written below this line will be removed by GitHub Actions)
