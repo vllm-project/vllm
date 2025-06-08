@@ -248,10 +248,6 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
-        # TODO in this PR: default to v0 but allows v1
-        # TODO in this PR: check whether the kernel is cuda graph compatible
-        # TODO in this PR: current design for mamba seems incompatible with spec
-        # decode
         if not envs.VLLM_USE_V1:
             if self.mamba_cache is None:
                 num_mamba_layers = (

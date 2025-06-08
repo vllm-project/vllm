@@ -480,17 +480,7 @@ class MambaMixer2(CustomOp):
             chunk_indices_p = mamba2_metadata.chunk_indices
             chunk_offsets_p = mamba2_metadata.chunk_offsets
 
-        # - get hidden_states, B and C after depthwise convolution.
         groups_time_state_size = self.n_groups * self.ssm_state_size
-        split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
-            hidden_states_B_C,
-            [
-                self.intermediate_size // self.tp_size,
-                groups_time_state_size // self.tp_size,
-                groups_time_state_size // self.tp_size,
-            ],
-            dim=-1,
-        )
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -510,6 +500,17 @@ class MambaMixer2(CustomOp):
 
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
+
+        # - get hidden_states, B and C after depthwise convolution.
+        split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
+            hidden_states_B_C,
+            [
+                self.intermediate_size // self.tp_size,
+                groups_time_state_size // self.tp_size,
+                groups_time_state_size // self.tp_size,
+            ],
+            dim=-1,
+        )
 
         if envs.VLLM_USE_V1 and attn_metadata is None:
             # V1 profile run
@@ -578,18 +579,6 @@ class MambaMixer2(CustomOp):
             # 2. Convolution sequence transformation
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
-            # if ".0." in self.prefix:
-            #     print("hidden_states_B_C_p", hidden_states_B_C_p.shape)
-            #     print("conv_weights", conv_weights.shape)
-            #     print("conv_state", conv_state.shape)
-            #     print("state_indices_tensor_p", state_indices_tensor_p)
-            #     print("query_start_loc_p", query_start_loc_p.shape)
-            #     print("query_start_loc_p", query_start_loc_p)
-            #     print("chunk_size", chunk_size)
-            #     print("chunk_indices_p", chunk_indices_p)
-            #     print("chunk_offsets_p", chunk_offsets_p)
-            #     print("has_initial_states_p", has_initial_states_p)
-            #     print("prep_initial_states", prep_initial_states)
             hidden_states_B_C_p = causal_conv1d_fn(
                 hidden_states_B_C_p.transpose(0, 1),
                 conv_weights,
