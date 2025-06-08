@@ -261,7 +261,7 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         from habana_frameworks.torch.hpex.kernels import (
             RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
@@ -806,7 +806,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         from habana_frameworks.torch.hpex.kernels import (
             RotaryPosEmbeddingMode, apply_rotary_pos_emb)
 
@@ -1084,7 +1084,7 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
         self,
         query: torch.Tensor,
         key: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Ensure the cache is on the right device.
         self.cos_sin_cache = self.cos_sin_cache.to(query.device)
         cos_cache, sin_cache = self.cos_sin_cache.chunk(2, dim=-1)
