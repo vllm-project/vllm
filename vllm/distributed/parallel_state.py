@@ -98,34 +98,6 @@ def _get_unique_name(name: str) -> str:
 
 _groups: dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
 
-
-def _to_concurrent_future(result: torch.Future) -> Future:
-    """
-    Convert a PyTorch Future to a concurrent.futures.Future.
-    
-    Args:
-        torch_future: The PyTorch Future to convert
-        timeout: Optional timeout for the wait operation
-        
-    Returns:
-        concurrent.futures.Future that will complete when the PyTorch Future 
-        completes
-    """
-    concurrent_future: Future = Future()
-
-    def _complete_torch_future(fut: torch.Future):
-        try:
-            # Get the result from the PyTorch future
-            result = fut.wait()
-            if not concurrent_future.done():
-                concurrent_future.set_result(result)
-        except Exception as e:
-            raise e
-
-    result.add_done_callback(_complete_torch_future)
-    return concurrent_future
-
-
 def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
@@ -487,11 +459,11 @@ class GroupCoordinator:
 
     def broadcast_object_async(self,
                                obj: Optional[Any] = None,
-                               src: int = 0) -> Future:
+                               src: int = 0) -> torch.futures.Future:
         """Broadcast the input object.
         NOTE: `src` is the local rank of the source rank.
         """
-        assert src < self.world_size, f"Invalid src rank ({src})"
+        assert src < self.world_size, f"Invalid src rank ({src}), world size is {self.world_size}"
         assert self.world_size > 1, \
             "call broadcast_object_async when world size > 1"
 
@@ -510,7 +482,7 @@ class GroupCoordinator:
             assert work is not None
             work.get_future().then(lambda x: torch.distributed.broadcast(
                 object_tensor, src=self.ranks[src], group=self.device_group))
-            future: Future = Future()
+            future = torch.futures.Future()
             future.set_result(obj)
             return future
         else:
@@ -531,9 +503,8 @@ class GroupCoordinator:
                                                group=self.device_group,
                                                async_op=True)
             assert work is not None
-            result = work.get_future().then(
+            return work.get_future().then(
                 lambda x: broadcast_object_tensor(x.value()[0]))
-            return _to_concurrent_future(result)
 
     def broadcast_object_list(self,
                               obj_list: list[Any],

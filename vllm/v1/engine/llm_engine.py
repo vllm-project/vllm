@@ -233,23 +233,21 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         iteration_stats = IterationStats() if self.log_stats else None
-        if outputs is not None:
-            processed_outputs = self.output_processor.process_outputs(
-                outputs.outputs,
-                engine_core_timestamp=outputs.timestamp,
+        processed_outputs = self.output_processor.process_outputs(
+            outputs.outputs,
+            engine_core_timestamp=outputs.timestamp,
+            iteration_stats=iteration_stats)
+
+        # 3) Abort any reqs that finished due to stop strings.
+        self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
+        # 4) Record stats
+        if self.stat_logger is not None:
+            assert outputs.scheduler_stats is not None
+            self.stat_logger.record(
+                scheduler_stats=outputs.scheduler_stats,
                 iteration_stats=iteration_stats)
 
-            # 3) Abort any reqs that finished due to stop strings.
-            self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
-            # 4) Record stats
-            if self.stat_logger is not None:
-                assert outputs.scheduler_stats is not None
-                self.stat_logger.record(
-                    scheduler_stats=outputs.scheduler_stats,
-                    iteration_stats=iteration_stats)
-
-            return processed_outputs.request_outputs
-        return []
+        return processed_outputs.request_outputs
 
     def get_vllm_config(self):
         return self.vllm_config

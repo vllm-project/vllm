@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import torch
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -193,7 +194,8 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         # First, schedule the RUNNING requests.
-        req_index = 0
+        req_index = 0 
+
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
@@ -219,7 +221,6 @@ class Scheduler(SchedulerInterface):
                  new_encoder_budget) = self._try_schedule_encoder_inputs(
                      request, request.num_computed_tokens, num_new_tokens,
                      encoder_budget)
-
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
@@ -355,6 +356,7 @@ class Scheduler(SchedulerInterface):
                         not in scheduled_loras):
                     # Scheduling would exceed max_loras, skip.
                     self.waiting.popleft()
+
                     skipped_waiting_requests.appendleft(request)
                     continue
 
@@ -486,7 +488,6 @@ class Scheduler(SchedulerInterface):
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
             self.waiting.extendleft(skipped_waiting_requests)
-
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -579,7 +580,7 @@ class Scheduler(SchedulerInterface):
         #    computed tokens will be adjusted in update_from_output.
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             self.requests[req_id].num_computed_tokens += num_scheduled_token
-
+        
         self.finished_req_ids = set()
         return scheduler_output
 
