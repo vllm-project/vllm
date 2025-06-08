@@ -25,7 +25,7 @@ pull_request_rules:
   actions:
     label:
       add:
-        - ci/build
+        - documentation
 
 - name: label-frontend
   description: Automatically apply frontend label
