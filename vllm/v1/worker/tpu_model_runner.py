@@ -41,6 +41,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
+from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -116,6 +117,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
+        self.structured_output_worker = StructuredOutputManager.\
+                                            get_worker_backend(
+                                                vllm_config)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -250,20 +254,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
-
-        # tensors for structured decoding
-        self.grammar_bitmask_cpu = torch.zeros(
-            (self.max_num_reqs, cdiv(self.vocab_size, 32)),
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=self.pin_memory)
-        self.require_structured_out_cpu = torch.zeros(
-            (self.max_num_reqs, 1),
-            dtype=torch.bool,
-            device="cpu",
-            pin_memory=self.pin_memory)
-        self.structured_decode_arange = torch.arange(
-            0, 32, device="cpu", pin_memory=self.pin_memory)
 
         # Get maximum number of mm items per modality (batch size).
         self.max_num_mm_items_by_modality = dict()
@@ -868,12 +858,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         logits = self.compute_logits(hidden_states)
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, padded_num_reqs, self.device)
-        if scheduler_output.grammar_bitmask is not None:
-            require_struct_decoding, grammar_bitmask_padded, arange = \
-                self.prepare_structured_decoding_input(logits, scheduler_output)
-            logits = self.structured_decode(require_struct_decoding,
-                                            grammar_bitmask_padded, logits,
-                                            arange)
+        if scheduler_output.structured_output_meta is not None:
+            self.structured_output_worker.filter_logits(
+                self.input_batch,
+                self.device,
+                scheduler_output,
+                logits,
+                hidden_states,
+                max_num_reqs=self.max_num_reqs)
         selected_token_ids = self.sample_from_logits_func(
             logits, tpu_sampling_metadata)
         # NOTE (NickLucche) Use the original logits (before any penalties or
@@ -1209,16 +1201,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             dummy_logits = torch.zeros((num_reqs, self.vocab_size),
                                        device=self.device,
                                        dtype=self._hidden_states_dtype)
-            dummy_require_struct_decoding = \
-                self.require_structured_out_cpu[:num_reqs].to(self.device)
-            dummy_grammar_bitmask = \
-                self.grammar_bitmask_cpu[:num_reqs].to(self.device)
-            # The first dimension of the above 3 dummy tensors cannot be
-            # mark_dynamic because some operations in structured_decode require
-            # them to be static.
-            arange = self.structured_decode_arange.to(self.device)
-            self.structured_decode(dummy_require_struct_decoding,
-                                   dummy_grammar_bitmask, dummy_logits, arange)
+            self.structured_output_worker.precompile(
+                dummy_logits, max_num_reqs=self.max_num_reqs)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -1481,70 +1465,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.model_config.max_logprobs,
             token_ids=sampled_tokens.squeeze(-1))
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
-    def structured_decode(self, require_struct_decoding: torch.Tensor,
-                          grammar_bitmask: torch.Tensor, logits: torch.Tensor,
-                          arange: torch.Tensor) -> torch.Tensor:
-        return torch.where(
-            require_struct_decoding,
-            self.apply_grammar_bitmask(logits, grammar_bitmask, arange),
-            logits)
-
-    def apply_grammar_bitmask(self, logits: torch.Tensor,
-                              grammar_bitmask: torch.Tensor,
-                              arange: torch.Tensor):
-        assert (logits.shape[0] == grammar_bitmask.shape[0])
-        logits_cloned = logits.clone()
-        for i in range(logits.shape[0]):
-            unpacked_bitmask = (torch.bitwise_right_shift(
-                grammar_bitmask[i][:, None], arange[None, :]) & 1) == 0
-            unpacked_bitmask = unpacked_bitmask.reshape(-1)[:self.vocab_size]
-            logits_cloned[i] = logits_cloned[i].masked_fill(
-                unpacked_bitmask, -float("inf"))
-        return logits_cloned
-
     def get_multimodal_embeddings(self, *args, **kwargs):
         return self.model.get_multimodal_embeddings(*args, **kwargs)
 
     def get_input_embeddings(self, *args, **kwargs):
         return self.model.get_input_embeddings(*args, **kwargs)
-
-    def prepare_structured_decoding_input(
-        self, logits: torch.Tensor, scheduler_output: "SchedulerOutput"
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        grammar_bitmask = scheduler_output.grammar_bitmask
-        assert grammar_bitmask is not None
-        num_reqs, _ = logits.shape
-
-        # Reset pre-allocated tensors
-        self.grammar_bitmask_cpu.zero_()
-        self.require_structured_out_cpu.zero_()
-
-        # We receive the structured output bitmask from the scheduler, but the
-        # indices of the requests in the batch may not match the indices of
-        # the bitmask since the scheduler doesn't know how the tpu runner is
-        # ordering the requests in the batch. We need to match the order of
-        # bitmask with the order of requests
-        struct_out_indices: list[int] = []
-        mask_indices: list[int] = []
-        for req_id in self.input_batch.req_ids:
-            mask_index = scheduler_output.structured_output_request_ids.get(
-                req_id)
-            if mask_index is None:
-                continue
-            batch_index = self.input_batch.req_id_to_index[req_id]
-            struct_out_indices.append(batch_index)
-            mask_indices.append(mask_index)
-        self.grammar_bitmask_cpu[struct_out_indices] = torch.from_numpy(
-            grammar_bitmask[mask_indices])
-        # It's not guaranteed that all requests in this batch require
-        # structured output, so create a bool tensor to represent
-        # the requests that need structured output.
-        struct_out_indices = torch.tensor(struct_out_indices, dtype=torch.long)
-        self.require_structured_out_cpu[struct_out_indices] = True
-        return self.require_structured_out_cpu[:num_reqs].to(logits.device), \
-            self.grammar_bitmask_cpu[:num_reqs].to(logits.device), \
-            self.structured_decode_arange.to(logits.device)
 
     def _get_mm_dummy_batch(self, modality: str,
                             batch_size: int) -> BatchedTensorInputs:

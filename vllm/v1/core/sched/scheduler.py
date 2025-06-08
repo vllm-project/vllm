@@ -508,11 +508,15 @@ class Scheduler(SchedulerInterface):
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
-        grammar_bitmask = self.structured_output_manager.grammar_bitmask(
-            self.requests,
-            structured_output_request_ids,
-            scheduled_spec_decode_tokens,
-        )
+        if self.structured_output_manager.backend is not None:
+            structured_output_meta = self.structured_output_manager.init_batch(
+                self.requests,
+                structured_output_request_ids,
+                scheduled_spec_decode_tokens,
+            )
+        else:
+            structured_output_meta = None
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -551,9 +555,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            structured_output_request_ids=structured_output_request_ids,
-            grammar_bitmask=grammar_bitmask,
-        )
+            structured_output_meta=structured_output_meta)
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -787,8 +789,8 @@ class Scheduler(SchedulerInterface):
                 # NOTE: structured_output_request
                 # should not be None if use_structured_output, we have
                 # check above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids)
+                self.structured_output_manager.accept_tokens(
+                    request, req_id, new_token_ids)
 
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
