@@ -1344,12 +1344,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No Embedding Models so far.
-        if model_config.task not in ["generate"]:
-            _raise_or_fallback(feature_name=f"--task {model_config.task}",
-                               recommend_to_remove=False)
-            return False
-
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
             _raise_or_fallback(feature_name=model_config.architectures,
