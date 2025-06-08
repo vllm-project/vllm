@@ -507,16 +507,21 @@ class Glm4vVisionEmbeddings(nn.Module):
                                 h_coords: torch.Tensor,
                                 w_coords: torch.Tensor):
         """
-        Using 2D interpolation to adapt position encoding
+        Adapt position encoding using 2D interpolation.
 
         Args:
-            lengths: List or Tensor of sequence lengths for each image [batch_size]
-            image_shapes: Image shape Tensor [batch_size, 3] (t h w) where index 1 is H, index 2 is W
-            h_coords: h coordinate for each patch Tensor [total_seq]
-            w_coords: w coordinate for each patch Tensor [total_seq]
+            lengths (torch.Tensor): Sequence lengths for each image in
+            the batch.
+            image_shapes (torch.Tensor): Tensor of shape [batch_size, 3]
+            representing the image shapes (t, h, w).
+            h_coords (torch.Tensor): Tensor of shape [total_seq]
+            representing the h coordinate for each patch.
+            w_coords (torch.Tensor): Tensor of shape [total_seq]
+            representing the w coordinate for each patch.
 
         Returns:
-            adapted_pos_embed: Adapted position encoding Tensor [total_seq, hidden_size]
+            torch.Tensor: Adapted position encoding tensor
+            of shape [total_seq, hidden_size].
         """
         pos_embed_weight = self.position_embedding.weight
 
@@ -1229,13 +1234,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
-            # FIXME： 用于保存image embed，适配 transformers时可用
-            # if image_embeds.shape[0] == 1250:
-            #     from safetensors.torch import save_file
-            #     save_file({"image_embeds": image_embeds}, "/mnt/image_embed.safetensors")
-            #     print("save with:\n", image_embeds)
 
-        # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
         return image_embeds.split(sizes.tolist())

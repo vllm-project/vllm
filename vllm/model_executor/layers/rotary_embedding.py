@@ -25,7 +25,7 @@
 """Rotary Positional Embeddings."""
 import itertools
 import math
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -1140,23 +1140,21 @@ class MRotaryEmbedding(RotaryEmbedding):
 
     @classmethod
     def _glm4v_get_input_positions_tensor(
-        cls,
-        input_tokens: List[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: Union[List[List[int]], torch.Tensor],
-        video_grid_thw: Union[List[List[int]], torch.Tensor],
-        context_len: int = 0,
-        seq_len: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, int]:
+            cls,
+            input_tokens: list[int],
+            hf_config: PretrainedConfig,
+            image_grid_thw: Union[list[list[int]], torch.Tensor],
+            video_grid_thw: Union[list[list[int]], torch.Tensor],
+            context_len: int = 0,
+            seq_len: Optional[int] = None,
+    ) -> tuple[torch.Tensor, int]:
         """Get mrope input positions and delta value for GLM4V."""
 
         image_token_id = hf_config.image_token_id
         vision_start_token_id = hf_config.vision_start_token_id
         vision_end_token_id = hf_config.vision_end_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
-
-        # 统一在开头声明变量，避免重复定义
-        llm_pos_ids_list: list[torch.Tensor] = []
+        llm_pos_ids_list: list = []
 
         if not (image_grid_thw is None and video_grid_thw is None):
             if isinstance(image_grid_thw, torch.Tensor):
@@ -1170,9 +1168,9 @@ class MRotaryEmbedding(RotaryEmbedding):
                 elif token == vision_end_token_id:
                     video_check_flg = False
 
-                if (token == image_token_id) and (video_check_flg == False):
+                if (token == image_token_id) and (video_check_flg is False):
                     input_token_type.append("image")
-                elif (token == image_token_id) and (video_check_flg == True):
+                elif (token == image_token_id) and (video_check_flg is True):
                     input_token_type.append("video")
                 else:
                     input_token_type.append("text")
