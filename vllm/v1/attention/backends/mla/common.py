@@ -325,6 +325,13 @@ class MLACommonMetadata(Generic[D]):
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
 
+    @property
+    def cuda_graph_supported(self):
+        """
+        Full CUDA Graphs (including attention) only supported for pure decode.
+        """
+        return self.num_prefills == 0
+
 
 M = TypeVar("M", bound=MLACommonMetadata)
 
@@ -450,6 +457,22 @@ class MLACommonMetadataBuilder(Generic[M]):
             seq_lens=seq_lens,
         )
 
+    def build_for_cudagraph_capture(
+            self, num_reqs: int, num_tokens: int,
+            common_attn_metadata: CommonAttentionMetadata) -> M:
+        """
+        This method builds the metadata for full cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with MLA.
+        """
+        assert num_reqs == num_tokens, \
+            "MLA only supports decode-only full CUDAGraph capture. " \
+            "Make sure all cudagraph capture sizes <= max_num_seq."
+        self._num_decodes = num_tokens
+        self._num_decode_tokens = num_tokens
+        self._num_prefills = 0
+        self._num_prefill_tokens = 0
+        return self.build(num_tokens, num_tokens, 1, 0, common_attn_metadata)
+
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata) -> M:
@@ -461,8 +484,11 @@ class MLACommonMetadataBuilder(Generic[M]):
         device = self.runner.device
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-        slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(
-            device, non_blocking=True).long()
+        block_table.slot_mapping[:num_actual_tokens].copy_(
+            block_table.slot_mapping_cpu[:num_actual_tokens],
+            non_blocking=True)
+        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
+        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
 
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
