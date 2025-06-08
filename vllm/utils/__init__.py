@@ -507,6 +507,123 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
+class AsyncMicrobatchTokenizer:
+
+    def __init__(
+        self,
+        tokenizer,
+        max_batch_size: int = 32,
+        batch_wait_timeout_s: float = 0.002,
+    ):
+        self.tokenizer = tokenizer
+        self.max_batch_size = max_batch_size
+        self.batch_wait_timeout_s = batch_wait_timeout_s
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.requests_available_event = asyncio.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        """Run tokenizer event loop in a dedicated background thread"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self._batch_loop())
+
+    async def wait_for_batch(self):
+        """Wait for batch of operations respecting timeout 
+        and batch size limits"""
+        batch = []
+        batch.append(await self.queue.get())
+
+        max_batch_size = self.max_batch_size
+        batch_wait_timeout_s = self.batch_wait_timeout_s
+
+        batch_start_time = time.time()
+        while True:
+            remaining_time = max(
+                batch_wait_timeout_s - (time.time() - batch_start_time), 0)
+
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.requests_available_event.wait(),
+                                       timeout=remaining_time)
+
+            while len(batch) < max_batch_size and not self.queue.empty():
+                batch.append(self.queue.get_nowait())
+
+            if self.queue.empty():
+                self.requests_available_event.clear()
+
+            if (time.time() - batch_start_time >= batch_wait_timeout_s
+                    or len(batch) >= max_batch_size):
+                break
+
+        return batch
+
+    async def _batch_loop(self):
+        """Main event loop for batching tokenization requests"""
+        while True:
+            batch = await self.wait_for_batch()
+
+            # Process by operation type
+            encode_items = []
+            decode_items = []
+
+            for item in batch:
+                op_type = item[0]
+                if op_type == "encode":
+                    encode_items.append(item[1:])
+                elif op_type == "decode":
+                    decode_items.append(item[1:])
+
+            if encode_items:
+                prompts = [item[0] for item in encode_items]
+                futures = [item[2] for item in encode_items]
+                # Use first request's kwargs for the whole batch
+                batch_kwargs = encode_items[0][1]
+
+                try:
+                    results = self.tokenizer(prompts, **batch_kwargs)
+                    if len(prompts) == 1:
+                        results = [results]
+                    # Set results on futures
+                    for fut, res in zip(futures, results):
+                        fut.set_result(res)
+                except Exception as e:
+                    # Propagate exceptions to all waiting clients
+                    for fut in futures:
+                        fut.set_exception(e)
+
+            if decode_items:
+                token_ids_batch = [item[0] for item in decode_items]
+                futures = [item[2] for item in decode_items]
+                kwargs = decode_items[0][1]
+
+                try:
+                    # Use batch_decode for better performance
+                    results = self.tokenizer.batch_decode(
+                        token_ids_batch, **kwargs)
+                    # Set results on futures
+                    for fut, result in zip(futures, results):
+                        fut.set_result(result)
+                except Exception as e:
+                    for fut in futures:
+                        fut.set_exception(e)
+
+    async def __call__(self, prompt, **kwargs):
+        """Submit a tokenization request and wait for result"""
+        fut = asyncio.get_event_loop().create_future()
+        await self.queue.put(("encode", prompt, kwargs, fut))
+        self.requests_available_event.set()
+        return await fut
+
+    async def decode(self, token_ids, **kwargs):
+        """Submit a decoding request and wait for result"""
+        fut = asyncio.get_event_loop().create_future()
+        await self.queue.put(("decode", token_ids, kwargs, fut))
+        self.requests_available_event.set()
+        return await fut
+
+
 def make_async(
     func: Callable[P, T],
     executor: Optional[concurrent.futures.Executor] = None
