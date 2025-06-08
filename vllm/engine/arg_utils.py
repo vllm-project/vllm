@@ -326,6 +326,8 @@ class EngineArgs:
     long_prefill_token_threshold: int = \
         SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
+    max_num_reqs: Optional[int] = None
+    max_pending_context_tokens: Optional[int] = None
     max_logprobs: int = ModelConfig.max_logprobs
     disable_log_stats: bool = False
     revision: Optional[str] = ModelConfig.revision
@@ -885,6 +887,19 @@ class EngineArgs:
                             action='store_true',
                             help='Disable logging statistics.')
 
+        parser.add_argument(
+            "--max-num-reqs",
+            type=int,
+            default=EngineArgs.max_num_reqs,
+            help="Maximum number of requests that can live in the queue.",
+        )
+        parser.add_argument(
+            "--max-pending-context-tokens",
+            type=int,
+            default=EngineArgs.max_pending_context_tokens,
+            help="Maximum number of pending context tokens in the prefill queue.",
+        )
+
         return parser
 
     @classmethod
@@ -1163,6 +1178,8 @@ class EngineArgs:
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
+            max_num_reqs=self.max_num_reqs,
+            max_pending_context_tokens=self.max_pending_context_tokens,
             max_model_len=model_config.max_model_len,
             cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,

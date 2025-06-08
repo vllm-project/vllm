@@ -553,6 +553,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        tier: float = 1,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
@@ -587,7 +588,8 @@ class MQLLMEngineClient(EngineClient):
                                   request_id,
                                   lora_request,
                                   trace_headers,
-                                  priority=priority))
+                                  priority=priority,
+                                  tier=tier))
 
     async def _process_request(
         self,
@@ -598,6 +600,7 @@ class MQLLMEngineClient(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        tier: float = 1,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
             PoolingRequestOutput, None]]:
         """Send an RPCGenerateRequest to the RPCServer and stream responses."""
@@ -652,6 +655,7 @@ class MQLLMEngineClient(EngineClient):
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
+                    tier=tier,
                 ))
 
             # 3) Send the RPCGenerateRequest to the MQLLMEngine.
