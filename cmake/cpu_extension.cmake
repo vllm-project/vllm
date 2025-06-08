@@ -75,6 +75,7 @@ if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
 else()
     find_isa(${CPUINFO} "avx2" AVX2_FOUND)
     find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
+    find_isa(${CPUINFO} "Power11" POWER11_FOUND)
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
@@ -106,13 +107,19 @@ elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
     
-elseif (POWER9_FOUND OR POWER10_FOUND)
+elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     message(STATUS "PowerPC detected")
-    # Check for PowerPC VSX support
-    list(APPEND CXX_COMPILE_FLAGS
-        "-mvsx"
-        "-mcpu=native"
-        "-mtune=native")
+    if (POWER9_FOUND)
+        list(APPEND CXX_COMPILE_FLAGS
+            "-mvsx"
+            "-mcpu=power9"
+            "-mtune=power9")
+    elseif (POWER10_FOUND OR POWER11_FOUND)
+        list(APPEND CXX_COMPILE_FLAGS
+            "-mvsx"
+            "-mcpu=power10"
+            "-mtune=power10")
+    endif()
 
 elseif (ASIMD_FOUND)
     message(STATUS "ARMv8 or later architecture detected")
