@@ -19,17 +19,19 @@ from vllm.attention.layer import Attention
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
+from vllm.distributed.eplb.states import EplbState
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
-    get_pp_group, get_tp_group, graph_capture,
+    get_ep_group, get_pp_group, get_tp_group, graph_capture,
     prepare_communication_buffer_for_model)
 from vllm.forward_context import (DPMetadata, get_forward_context,
                                   set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -73,6 +75,17 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+
+    enable_eplb: bool = False
+    """
+    Whether the expert parallelism load balancer is enabled.
+    """
+    eplb_state: EplbState
+    """
+    State of the expert parallelism load balancer.
+
+    Will be lazily initialized when the model is loaded.
+    """
 
     def __init__(
         self,
@@ -1136,6 +1149,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for k, v in self.intermediate_tensors.items()
         })
 
+    def eplb_step(self, is_dummy: bool = False) -> None:
+        """
+        Step for the EPLB (Expert Parallelism Load Balancing) state.
+        """
+        if not self.parallel_config.enable_eplb:
+            return
+
+        assert is_mixture_of_experts(self.model)
+        avg_tokens, max_tokens, balancedness = \
+            self.eplb_state.step(self.model, is_dummy)
+
+        if get_ep_group().is_first_rank:
+            logger.debug(
+                "Model step: avg_tokens=%.2f, max_tokens=%d, "
+                "balancedness=%.4f", avg_tokens, max_tokens, balancedness)
+
     def get_dp_padding(self,
                        num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
@@ -1490,6 +1519,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
 
+        self.eplb_step()
+
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1619,6 +1650,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
+
+        if is_mixture_of_experts(
+                self.model) and self.parallel_config.enable_eplb:
+            self.enable_eplb = True
+            logger.info("EPLB is enabled for model %s.",
+                        self.model_config.model)
+            self.eplb_state = EplbState.build(
+                self.model,
+                self.device,
+                self.parallel_config,
+            )
 
     def save_tensorized_model(
         self,
@@ -1823,6 +1865,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
                 self.drafter.dummy_run(num_tokens)
+
+        # This is necessary to avoid blocking DP
+        self.eplb_step(is_dummy=True)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]
