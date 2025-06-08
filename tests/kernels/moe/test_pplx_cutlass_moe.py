@@ -113,7 +113,10 @@ def pplx_cutlass_moe(
     )
 
     experts = CutlassExpertsFp8((num_experts + world_size - 1) // world_size,
-                                out_dtype, per_act_token, per_out_ch)
+                                out_dtype,
+                                per_act_token,
+                                per_out_ch,
+                                use_batched_format=True)
 
     fused_cutlass_experts = FusedMoEModularKernel(
         prepare_finalize,
