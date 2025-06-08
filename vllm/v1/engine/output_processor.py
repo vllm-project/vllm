@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
+from vllm.config import ObservabilityConfig
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
+from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
+                          init_tracer)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -65,7 +69,6 @@ class RequestOutputCollector:
 
 @dataclass
 class OutputProcessorOutput:
-
     request_outputs: list[RequestOutput]
     reqs_to_abort: list[str]
 
@@ -232,16 +235,26 @@ class RequestState:
 class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
-    def __init__(
-        self,
-        tokenizer: TokenizerGroup,
-        log_stats: bool,
-    ):
+    def __init__(self,
+                 tokenizer: TokenizerGroup,
+                 log_stats: bool,
+                 observability_config: Optional[ObservabilityConfig] = None):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
+        self.observability_config = observability_config
+
+        self.tracer = None
+        if (self.observability_config is not None
+                and self.observability_config.otlp_traces_endpoint):
+            self.tracer = init_tracer(
+                "vllm.llm_engine",
+                self.observability_config.otlp_traces_endpoint)
+
+    def is_tracing_enabled(self) -> bool:
+        return self.tracer is not None
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -383,13 +396,72 @@ class OutputProcessor:
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,
                                                  iteration_stats)
-
+                self.do_tracing(engine_core_output, req_state, iteration_stats)
         self.lora_states.update_iteration_stats(iteration_stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    def do_tracing(self, engine_core_output: EngineCoreOutput,
+                   req_state: RequestState,
+                   iteration_stats: Optional[IterationStats]):
+        if (engine_core_output.finish_reason is None or iteration_stats is None
+                or req_state is None or req_state.stats is None
+                or self.tracer is None):
+            return
+        arrival_time_nano_seconds = int(req_state.stats.arrival_time * 1e9)
+
+        trace_context = extract_trace_context(engine_core_output.trace_headers)
+        with self.tracer.start_as_current_span(
+                "llm_request",
+                kind=SpanKind.SERVER,
+                context=trace_context,
+                start_time=arrival_time_nano_seconds) as span:
+            metrics = req_state.stats
+            ttft = metrics.first_token_ts - metrics.arrival_time
+            e2e_time = time.time() - metrics.arrival_time
+            # Queued interval is from first QUEUED event to first SCHEDULED
+            queued_time = metrics.scheduled_ts - metrics.queued_ts
+
+            # Prefill interval is from first SCHEDULED to first NEW_TOKEN
+            # Any preemptions during prefill is included in the interval
+            prefill_time = metrics.first_token_ts - metrics.scheduled_ts
+
+            # Decode interval is from first NEW_TOKEN to last NEW_TOKEN
+            # Any preemptions during decode are included
+            decode_time = metrics.last_token_ts - metrics.first_token_ts
+
+            # Inference interval is from first SCHEDULED to last NEW_TOKEN
+            # Any preemptions during prefill or decode are included
+            inference_time = metrics.last_token_ts - metrics.scheduled_ts
+            span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL,
+                               self.tokenizer.tokenizer_id)
+            span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID,
+                               req_state.request_id)
+            span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS,
+                               req_state.max_tokens_param)
+            span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS,
+                               len(req_state.prompt_token_ids))
+            span.set_attribute(SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
+                               metrics.num_generation_tokens)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
+                               metrics.queued_ts - metrics.arrival_time)
+            span.set_attribute(
+                SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
+                               queued_time)
+            span.set_attribute(
+                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL,
+                prefill_time)
+            span.set_attribute(
+                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE,
+                decode_time)
+            span.set_attribute(
+                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE,
+                inference_time)
 
     def _update_stats_from_output(self, req_state: RequestState,
                                   engine_core_output: EngineCoreOutput,
