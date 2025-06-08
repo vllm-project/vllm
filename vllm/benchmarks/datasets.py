@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This module defines a framework for sampling benchmark requests from various
 datasets. Each dataset subclass of BenchmarkDataset must implement sample
@@ -23,7 +24,6 @@ from io import BytesIO
 from typing import Any, Callable, Optional, Union
 
 import numpy as np
-import pandas as pd
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
@@ -32,6 +32,23 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
+from vllm.utils import PlaceholderModule
+
+try:
+    from datasets import load_dataset
+except ImportError:
+    datasets = PlaceholderModule("datasets")
+    load_dataset = datasets.placeholder_attr("load_dataset")
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
+
+try:
+    import librosa
+except ImportError:
+    librosa = PlaceholderModule("librosa")
 
 logger = logging.getLogger(__name__)
 
@@ -328,9 +345,9 @@ class RandomDataset(BenchmarkDataset):
         output_high = int(output_len * (1 + range_ratio))
 
         # Add logging for debugging
-        logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
-        logger.info("Sampling output_len from [%s, %s]", output_low,
-                    output_high)
+        logger.info(
+            "Sampling input_len from [%s, %s] and output_len from [%s, %s]",
+            input_low, input_high, output_low, output_high)
 
         input_lens = np.random.randint(input_low,
                                        input_high + 1,
@@ -635,13 +652,6 @@ class BurstGPTDataset(BenchmarkDataset):
         if self.dataset_path is None:
             raise ValueError("dataset_path must be provided for loading data.")
 
-        try:
-            import pandas as pd
-        except ImportError as e:
-            raise ImportError(
-                "Pandas is required for BurstGPTDataset. Please install it "
-                "using `pip install pandas`.") from e
-
         df = pd.read_csv(self.dataset_path)
         # Filter to keep only GPT-4 rows.
         gpt4_df = df[df["Model"] == "GPT-4"]
@@ -716,13 +726,6 @@ class HuggingFaceDataset(BenchmarkDataset):
 
     def load_data(self) -> None:
         """Load data from HuggingFace datasets."""
-        try:
-            from datasets import load_dataset
-        except ImportError as e:
-            raise ImportError(
-                "Hugging Face datasets library is required for this dataset. "
-                "Please install it using `pip install datasets`.") from e
-
         self.data = load_dataset(
             self.dataset_path,
             name=self.dataset_subset,
@@ -879,7 +882,19 @@ class InstructCoderDataset(HuggingFaceDataset):
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
-            prompt = f"{item['instruction']}:\n{item['input']}"
+            prompt = f"{item['input']}\n\n{item['instruction']} Just output \
+            the code, do not include any explanation."
+
+            # apply template
+            prompt = tokenizer.apply_chat_template(
+                [{
+                    "role": "user",
+                    "content": prompt
+                }],
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+
             prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(
@@ -1134,13 +1149,6 @@ class ASRDataset(HuggingFaceDataset):
         output_len: Optional[int] = None,
         **kwargs,
     ) -> list:
-        try:
-            import librosa
-        except ImportError as e:
-            raise ImportError(
-                "librosa is required for ASRDataset. Please install it "
-                "using `pip install librosa`.") from e
-
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         prompt = ASRDataset.TRANSCRIPTION_PREAMBLE

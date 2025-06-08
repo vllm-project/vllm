@@ -2,7 +2,7 @@
 -r common.txt
 
 # Dependencies for TPU
-cmake>=3.26
+cmake>=3.26.1
 packaging>=24.2
 setuptools-scm>=8
 wheel
@@ -18,9 +18,9 @@ setuptools==78.1.0
 --find-links https://storage.googleapis.com/libtpu-releases/index.html
 --find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
 --find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-torch==2.8.0.dev20250529
-torchvision==0.22.0.dev20250529
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250529-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250529-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250529-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
+torch==2.8.0.dev20250605
+torchvision==0.23.0.dev20250605
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250605-cp39-cp39-linux_x86_64.whl ; python_version == "3.9"
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250605-cp310-cp310-linux_x86_64.whl ; python_version == "3.10"
+torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.8.0.dev20250605-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
 

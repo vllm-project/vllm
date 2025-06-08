@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from itertools import groupby
 from pathlib import Path
@@ -8,7 +9,7 @@ from urllib.parse import ParseResult, urlparse
 import numpy as np
 import numpy.typing as npt
 import torch
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
@@ -184,11 +185,15 @@ class MediaConnector:
         """
         image_io = ImageMediaIO(image_mode=image_mode)
 
-        return self.load_from_url(
-            image_url,
-            image_io,
-            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
+        try:
+            return self.load_from_url(
+                image_url,
+                image_io,
+                fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+            )
+        except UnidentifiedImageError as e:
+            # convert to ValueError to be properly caught upstream
+            raise ValueError(str(e)) from e
 
     async def fetch_image_async(
         self,
@@ -203,11 +208,15 @@ class MediaConnector:
         """
         image_io = ImageMediaIO(image_mode=image_mode)
 
-        return await self.load_from_url_async(
-            image_url,
-            image_io,
-            fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
+        try:
+            return await self.load_from_url_async(
+                image_url,
+                image_io,
+                fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+            )
+        except UnidentifiedImageError as e:
+            # convert to ValueError to be properly caught upstream
+            raise ValueError(str(e)) from e
 
     def fetch_video(
         self,
