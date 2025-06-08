@@ -429,6 +429,7 @@ class EngineArgs:
     override_generation_config: dict[str, Any] = \
         get_field(ModelConfig, "override_generation_config")
     model_impl: str = ModelConfig.model_impl
+    override_attention_dtype: str = ModelConfig.override_attention_dtype
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
 
@@ -549,6 +550,8 @@ class EngineArgs:
         model_group.add_argument("--model-impl",
                                  choices=[f.value for f in ModelImpl],
                                  **model_kwargs["model_impl"])
+        model_group.add_argument("--override-attention-dtype",
+                                 **model_kwargs["override_attention_dtype"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -946,6 +949,7 @@ class EngineArgs:
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
+            override_attention_dtype=self.override_attention_dtype,
         )
 
     def create_load_config(self) -> LoadConfig:

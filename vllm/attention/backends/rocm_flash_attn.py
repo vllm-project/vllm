@@ -17,6 +17,7 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
@@ -584,6 +585,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 logger.debug("Using naive (SDPA) attention in ROCmBackend")
 
         self.aiter_kv_scales_initialized = False
+        self.force_fp8_attention = (
+            get_current_vllm_config() is not None
+            and get_current_vllm_config().model_config.override_attention_dtype
+            == "fp8")
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
@@ -770,9 +775,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             query.dtype,
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
+
                     use_fp8_scales = (layer._q_scale and layer._k_scale
                                       and layer._v_scale and layer._prob_scale
-                                      and self.kv_cache_dtype == "fp8")
+                                      and (self.kv_cache_dtype == "fp8"
+                                           or self.force_fp8_attention))
+
                     full_scales = (
                         layer._q_scale.item(), layer._k_scale.item(),
                         layer._v_scale.item(),
