@@ -1419,6 +1419,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
+            block_size=self.block_size,
             block_list=prefix_block_list_tensor,
             block_mapping=None,
             block_usage=None,
