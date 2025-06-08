@@ -1,0 +1,246 @@
+list:
+    @just --list
+
+leader_address := "10.96.0.64" # nb1-h100-60
+
+# Prefill
+# hosts := "nb1-h100-60 nb1-h100-61 nb1-h100-62 nb1-h100-63"
+# num_nodes := "4"
+
+# Decode
+# hosts := "nb1-h100-60 nb1-h100-1 nb1-h100-2 nb1-h100-3 nb1-h100-4 nb1-h100-5 nb1-h100-6 nb1-h100-7 nb1-h100-8 nb1-h100-10 nb1-h100-11 nb1-h100-12 nb1-h100-13 nb1-h100-14 nb1-h100-15 nb1-h100-16 nb1-h100-45 nb1-h100-61"
+# num_nodes := "18"
+hosts := "nb1-h100-60 nb1-h100-1 nb1-h100-2 nb1-h100-3 nb1-h100-4 nb1-h100-5 nb1-h100-6 nb1-h100-7 nb1-h100-8 nb1-h100-10 nb1-h100-11 nb1-h100-12 nb1-h100-13 nb1-h100-14 nb1-h100-15 nb1-h100-16"
+num_nodes := "16"
+
+
+
+# Helper function to run commands on all hosts with proper signal handling
+_run-on-all-hosts cmd:
+    #!/usr/bin/env bash
+    # Array to store background process PIDs
+    pids=()
+    
+    # Function to cleanup background processes
+    cleanup() {
+        echo "Received interrupt signal. Terminating all SSH processes..."
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null
+            fi
+        done
+        # Wait a bit for graceful termination, then force kill if needed
+        sleep 2
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null
+            fi
+        done
+        exit 1
+    }
+    
+    # Set up trap for SIGINT (Ctrl+C) and SIGTERM
+    trap cleanup INT TERM
+    
+    for host in {{hosts}}; do
+        ssh $host "bash --login -c '{{cmd}}'" &
+        pids+=($!)  # Store the PID of the background process
+    done
+    
+    # Wait for all background processes
+    wait
+    echo "All processes completed successfully."
+
+# Helper function to run indexed commands on all hosts with proper signal handling
+_run-indexed-on-all-hosts cmd:
+    #!/usr/bin/env bash
+    # Array to store background process PIDs
+    pids=()
+    
+    # Function to cleanup background processes
+    cleanup() {
+        echo "Received interrupt signal. Terminating all SSH processes..."
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null
+            fi
+        done
+        # Wait a bit for graceful termination, then force kill if needed
+        sleep 2
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null
+            fi
+        done
+        exit 1
+    }
+    
+    # Set up trap for SIGINT (Ctrl+C) and SIGTERM
+    trap cleanup INT TERM
+    
+    i=0
+    for host in {{hosts}}; do
+        # Replace INDEX_PLACEHOLDER with actual index and HOST_PLACEHOLDER with actual host
+        cmd_with_index="{{cmd}}"
+        cmd_with_index="${cmd_with_index//INDEX_PLACEHOLDER/$i}"
+        cmd_with_index="${cmd_with_index//HOST_PLACEHOLDER/$host}"
+        ssh $host "bash --login -c '$cmd_with_index'" &
+        pids+=($!)  # Store the PID of the background process
+        ((i++))
+    done
+    
+    # Wait for all background processes
+    wait
+    echo "All processes completed successfully."
+
+run-commands-on-all-nodes:
+    #!/usr/bin/env bash
+    for host in {{hosts}}; do
+        # ssh $host "bash -l -c 'hostname'" &
+        # ssh $host "bash -l -c 'nvcc --version'" &
+        # ssh $host "bash -l -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'" &
+        # ssh $host "bash -l -c 'cargo install just'" &
+        ssh $host "bash -l -c 'HF_TRANSFER=1 /mnt/data/home/smo/vllm/.venv/bin/huggingface-cli download deepseek-ai/DeepSeek-R1'" &
+    done
+    wait 
+
+env_sh := "~/vllm/benchmarks/large-scale-benchmarks/env.sh"
+pwd := "~/vllm/benchmarks/large-scale-benchmarks"
+
+_worker-run-gdr-copy-test:
+    #!/usr/bin/env bash
+    source {{env_sh}}
+    $WORKSPACE/gdrcopy_install/bin/gdrcopy_copybw
+
+run-gdr-copy-test:
+    @just _run-on-all-hosts "cd {{pwd}} && just _worker-run-gdr-copy-test"
+
+_worker-run-deepep-intranode-test host:
+    #!/usr/bin/env bash
+    source {{env_sh}}
+    cd ~/vllm
+    source .venv/bin/activate
+    python $WORKSPACE/DeepEP/tests/test_intranode.py | tee {{pwd}}/logs/deepep-intranode-test-{{host}}.log
+
+run-deepep-intranode-test:
+    @just _run-indexed-on-all-hosts "cd {{pwd}} && just _worker-run-deepep-intranode-test HOST_PLACEHOLDER"
+
+_worker-run-deepep-internode-test i host test_file:
+    #!/usr/bin/env bash
+    # set -ex
+    source {{env_sh}}
+    cd ~/vllm
+    source .venv/bin/activate
+
+    export RANK={{i}}
+    export WORLD_SIZE={{num_nodes}}
+    export MASTER_ADDR={{leader_address}}
+
+    # export NCCL_DEBUG=INFO
+    python $WORKSPACE/DeepEP/tests/{{test_file}} 2>&1 | tee {{pwd}}/logs/deepep-internode-test-{{host}}.log
+
+run-deepep-internode-test test_file="test_internode.py": # other option is test_low_latency.py
+    @just _run-indexed-on-all-hosts "cd {{pwd}} && just _worker-run-deepep-internode-test INDEX_PLACEHOLDER HOST_PLACEHOLDER {{test_file}}"
+
+# Kill any existing vLLM processes across all nodes
+kill-vllm-processes:
+    #!/usr/bin/env bash
+    echo "Killing vLLM processes on all nodes..."
+    for host in {{hosts}}; do
+        ssh $host "pkill -f 'vllm serve' || true; pkill -f 'python.*' || true" &
+    done
+    wait
+    echo "All vLLM processes killed."
+    sleep 3
+
+
+_worker-run-r1 i:
+    #!/usr/bin/env bash
+    source {{env_sh}}
+    cd ~/vllm
+    source .venv/bin/activate
+
+    set -ex
+
+    # Enhanced timeout and network configuration for DeepEP
+    # export VLLM_ALL2ALL_BACKEND="deepep_high_throughput" 
+    export VLLM_ALL2ALL_BACKEND="deepep_low_latency" 
+    export VLLM_USE_DEEP_GEMM=1
+    export DP_SIZE=$(({{num_nodes}} * 8))
+    export DP_SIZE_LOCAL=8
+    export START_RANK=$(({{i}} * 8))
+
+    # Get the actual IP address of this node
+    export HOST=$(hostname -I | awk '{print $1}')
+    
+    # This is needed to prevent gloo from using ib0.
+    export GLOO_SOCKET_IFNAME=eth0
+    
+    # Network timeouts, we shouldn't need these but in case of slow network.
+    # export VLLM_RPC_TIMEOUT=600000  # 10 minutes in milliseconds
+    # export DEEPEP_TIMEOUT=300  # 5 minutes timeout for DeepEP operations
+    # export TORCH_DISTRIBUTED_TIMEOUT=1800  # 30 minutes for torch distributed
+
+    # Memory control
+    export VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1
+
+    # Debugging for illegal memory access or other issues
+    # export CUDA_LAUNCH_BLOCKING=1
+    # export VLLM_LOGGING_LEVEL=DEBUG
+    
+    if [ {{i}} -eq 0 ]; then
+        LEADER_OR_WORKER_ARGS=""
+    else
+        LEADER_OR_WORKER_ARGS="--headless"
+    fi
+
+    # TUNING_ARGS="--enforce-eager --gpu-memory-utilization 0.95"
+    TUNING_ARGS="--gpu-memory-utilization 0.95"
+
+    vllm serve deepseek-ai/DeepSeek-R1 --trust-remote-code \
+        --no-enable-prefix-caching --disable-log-requests \
+        --tensor-parallel-size 1 \
+        --enable-expert-parallel \
+        --data-parallel-size $DP_SIZE \
+        --data-parallel-size-local $DP_SIZE_LOCAL \
+        --data-parallel-address {{leader_address}} \
+        --data-parallel-rpc-port 5555 \
+        --data-parallel-start-rank $START_RANK \
+        $TUNING_ARGS \
+        $LEADER_OR_WORKER_ARGS 2>&1 | tee {{pwd}}/logs/r1-rank-{{i}}.log
+
+run-r1:
+    @just kill-vllm-processes
+    @just _run-indexed-on-all-hosts "cd {{pwd}} && just _worker-run-r1 INDEX_PLACEHOLDER"
+
+bench-serving:
+    #!/usr/bin/env bash
+    source {{env_sh}}
+    cd ~/vllm
+    source .venv/bin/activate
+
+    pids=()
+
+    kill-pids() {
+        for pid in "${pids[@]}"; do
+            kill -9 $pid
+        done
+    }
+    trap kill-pids INT TERM
+
+    bench() {
+        vllm bench serve --model deepseek-ai/DeepSeek-R1 \
+            --dataset-name random --ignore-eos \
+            --num-prompts 10000 \
+            --request-rate inf \
+            --random-input-len 1 \
+            --random-output-len 256
+    }
+
+    num_benches=10
+    for i in $(seq 1 $num_benches); do
+        bench &
+        pids+=($!)
+    done
+
+    wait

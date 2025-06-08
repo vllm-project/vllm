@@ -13,6 +13,8 @@ fi
 # build and install gdrcopy system packages
 pushd $WORKSPACE
 cd gdrcopy_src/packages
-apt install devscripts -y
-CUDA=${CUDA_HOME:-/usr/local/cuda} ./build-deb-packages.sh
-dpkg -i *.deb
+if ! ls *.deb 1> /dev/null 2>&1; then
+    apt install devscripts -y
+    CUDA=${CUDA_HOME:-/usr/local/cuda} ./build-deb-packages.sh
+fi
+sudo dpkg -i *.deb
