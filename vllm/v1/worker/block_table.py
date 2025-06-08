@@ -112,11 +112,12 @@ class MultiGroupBlockTable:
             for block_size in block_sizes
         ]
 
-    def append_row(self, block_ids: list[list[int]], row_idx: int) -> None:
+    def append_row(self, block_ids: tuple[list[int], ...],
+                   row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
             block_table.append_row(block_ids[i], row_idx)
 
-    def add_row(self, block_ids: list[list[int]], row_idx: int) -> None:
+    def add_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
             block_table.add_row(block_ids[i], row_idx)
 
