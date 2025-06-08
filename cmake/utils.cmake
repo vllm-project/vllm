@@ -121,14 +121,18 @@ endfunction()
 #     NAME <name>
 #     [MIN_VERSION <version>]
 #     ARCHS <arch1;arch2;...>
-#     SRCS <static_source1> [<static_source2> ...]
+#     SRCS <source1> [<source2> ...]
 #     [FLAGS <flag1> ...]
 #     [VERSION_MSG <line1> [<line2> ...]]
 #     [NO_ARCH_MSG <line1> [<line2> ...]]
 #     [GEN_SCRIPT <path/to/generate_script.py>]
 #     [GEN_GLOB <glob_pattern_for_generated_sources>]
-# This will run GEN_SCRIPT once when version and arch checks pass, globbing
-# sources matching GEN_GLOB and appending them alongside SRCS.
+# This will add SRCS if `CMAKE_CUDA_COMPILER_VERSION` is greater than or equal
+#  to `MIN_VERSION` and the `cuda_archs_loose_intersection` of `ARCHS` and 
+#  `CUDA_ARCHS` (taken from global scope) is not empty.
+# This will also run GEN_SCRIPT (if supplied and the hash of the script does not
+#  match the latest in the cmake cache), before globbing sources matching 
+#  GEN_GLOB and appending them alongside SRCS.
 macro(optional_cuda_sources)
   set(oneValueArgs NAME MIN_VERSION GEN_SCRIPT GEN_GLOB OUT_SRCS_VAR)
   set(multiValueArgs ARCHS SRCS FLAGS VERSION_MSG NO_ARCH_MSG)
