@@ -13,6 +13,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
                          set_current_vllm_config)
+from vllm.envs import VLLM_USE_V1
 from vllm.utils import direct_register_custom_op
 
 global_counter = 0
@@ -76,6 +77,7 @@ class SillyModel(nn.Module):
 
 
 def _test_simple_piecewise_compile(*, use_inductor):
+    assert VLLM_USE_V1
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
