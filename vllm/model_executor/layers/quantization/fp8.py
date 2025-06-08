@@ -402,6 +402,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.block_quant:
             assert self.quant_config.weight_block_size is not None
+
             return torch.ops.vllm.apply_w8a8_block_fp8_linear(
                 input=x,
                 weight=layer.weight,
