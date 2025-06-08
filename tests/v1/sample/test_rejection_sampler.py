@@ -57,7 +57,6 @@ def create_sampling_metadata(
         all_random=not all_greedy,
         top_p=top_p,
         top_k=top_k,
-        min_p=torch.empty(1, ),
         generators=generators,
         max_num_logprobs=0,
         no_penalties=False,
@@ -66,10 +65,10 @@ def create_sampling_metadata(
         presence_penalties=torch.tensor([]),
         repetition_penalties=torch.tensor([]),
         output_token_ids=[],
-        min_tokens={},
-        logit_bias=[None],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
+        logits_procs=[],
+        nongreedy_logits_procs=[],
     )
 
 
