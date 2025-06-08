@@ -129,24 +129,37 @@ class SambaAttention(nn.Module):
 
         assert self.num_heads % 2 == 0, 'num_heads should be even'
         assert self.num_key_value_heads % 2 == 0, 'num_heads should be even'
-
-        self.attn = Attention(
-            self.num_heads//2,
-            self.head_dim,
-            self.head_dim**-0.5,
-            num_kv_heads=self.num_key_value_heads//2,
-            cache_config=cache_config,
-            per_layer_sliding_window=sliding_window,
-            prefix=f"{prefix}.attn",
-            attn_type=AttentionType.DECODER_DECODER if self.yoco_cross else AttentionType.DECODER
-        )
-        self.subln = nn.RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=True)
-
+        
         self.lambda_init = self.lambda_init_fn(layer_idx)
         self.lambda_q1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
         self.lambda_k1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
         self.lambda_q2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
         self.lambda_k2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0,std=0.1))
+        self.subln = nn.RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=True)
+
+        params = {'differential_flash_attention_config':
+            {
+                'used_shared_kv_cache': self.yoco_cross, 
+                'lambda_init': self.lambda_init,
+                'lambda_q1': self.lambda_q1,
+                'lambda_k1': self.lambda_k1,
+                'lambda_q2': self.lambda_q2,
+                'lambda_k2': self.lambda_k2,
+                "subln": self.subln,
+            }   
+        }
+        
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.head_dim**-0.5,
+            num_kv_heads=self.num_key_value_heads,
+            cache_config=cache_config,
+            per_layer_sliding_window=sliding_window,
+            prefix=f"{prefix}.attn",
+            attn_type=AttentionType.DECODER_DECODER if self.yoco_cross else AttentionType.DECODER,
+            **params
+        )
 
         self._k_scale = torch.tensor(1.0, dtype=torch.float32)
         self._v_scale = torch.tensor(1.0, dtype=torch.float32)
@@ -320,82 +333,89 @@ class SambaAttention(nn.Module):
         if not self.yoco_cross: # need to generate kv-cache
             qkv = self.Wqkv(hidden_states)
             q, k, v = qkv.split([self.hidden_size, self.num_key_value_heads * self.head_dim, self.num_key_value_heads * self.head_dim], dim=-1)
-            # q, k = self.rotary_emb(positions, q, k)
-            # reshape
-            q = q.view(-1, self.num_heads, self.head_dim)
-            k = k.view(-1, self.num_key_value_heads, self.head_dim)
-            v = v.view(-1, self.num_key_value_heads, self.head_dim)
+            reference_attn_output = self.attn(q, k, v)
+            # # q, k = self.rotary_emb(positions, q, k)
+            # # reshape
+            # q = q.view(-1, self.num_heads, self.head_dim)
+            # k = k.view(-1, self.num_key_value_heads, self.head_dim)
+            # v = v.view(-1, self.num_key_value_heads, self.head_dim)
 
-            q1, q2 = self.split_heads(q)
-            k1, k2 = self.split_heads(k)
-            v1, v2 = self.split_heads(v)
+            # q1, q2 = self.split_heads(q)
+            # k1, k2 = self.split_heads(k)
+            # v1, v2 = self.split_heads(v)
 
-            # kv_cache shape is (2, 2, num_blocks, block_size * num_kv_heads // 2 * head_size)
-            # Split by half along the first dimension.
-            kv_cache1, kv_cache2 = self.split_kv_cache(kv_cache)
-            assert kv_cache1.is_contiguous(), "kv_cache1 is not contiguous"
-            assert kv_cache2.is_contiguous(), "kv_cache2 is not contiguous"
+            # # kv_cache shape is (2, 2, num_blocks, block_size * num_kv_heads // 2 * head_size)
+            # # Split by half along the first dimension.
+            # kv_cache1, kv_cache2 = self.split_kv_cache(kv_cache)
+            # assert kv_cache1.is_contiguous(), "kv_cache1 is not contiguous"
+            # assert kv_cache2.is_contiguous(), "kv_cache2 is not contiguous"
             
-            if kv_cache1.numel() != 0:
-                self.populate_kv_cache(k1, v1, kv_cache1, attn_metadata)
-                self.populate_kv_cache(k2, v2, kv_cache2, attn_metadata)
+            # if kv_cache1.numel() != 0:
+            #     self.populate_kv_cache(k1, v1, kv_cache1, attn_metadata)
+            #     self.populate_kv_cache(k2, v2, kv_cache2, attn_metadata)
                 
-                key_cache1, value_cache1 = self.split_kv_cache(kv_cache1)
-                key_cache2, value_cache2 = self.split_kv_cache(kv_cache2)
-            else:
-                key_cache1, value_cache1 = torch.empty(0), torch.empty(0)
-                key_cache2, value_cache2 = torch.empty(0), torch.empty(0)
-            attn11 = self.forward_customized(q1, k1, v1, key_cache1, value_cache1, attn_metadata)
-            attn12 = self.forward_customized(q1, k1, v2, key_cache1, value_cache2, attn_metadata)
-            attn11 = attn11.view(q1.shape)
-            attn12 = attn12.view(q1.shape)
-            attn1 = torch.cat([attn11, attn12], dim=-1)
+            #     key_cache1, value_cache1 = self.split_kv_cache(kv_cache1)
+            #     key_cache2, value_cache2 = self.split_kv_cache(kv_cache2)
+            # else:
+            #     key_cache1, value_cache1 = torch.empty(0), torch.empty(0)
+            #     key_cache2, value_cache2 = torch.empty(0), torch.empty(0)
+            # attn11 = self.forward_customized(q1, k1, v1, key_cache1, value_cache1, attn_metadata)
+            # attn12 = self.forward_customized(q1, k1, v2, key_cache1, value_cache2, attn_metadata)
+            # attn11 = attn11.view(q1.shape)
+            # attn12 = attn12.view(q1.shape)
+            # attn1 = torch.cat([attn11, attn12], dim=-1)
 
-            attn21 = self.forward_customized(q2, k2, v1, key_cache2, value_cache1, attn_metadata)
-            attn22 = self.forward_customized(q2, k2, v2, key_cache2, value_cache2, attn_metadata)
-            attn21 = attn21.view(q2.shape)
-            attn22 = attn22.view(q2.shape)
-            attn2 = torch.cat([attn21, attn22], dim=-1)
+            # attn21 = self.forward_customized(q2, k2, v1, key_cache2, value_cache1, attn_metadata)
+            # attn22 = self.forward_customized(q2, k2, v2, key_cache2, value_cache2, attn_metadata)
+            # attn21 = attn21.view(q2.shape)
+            # attn22 = attn22.view(q2.shape)
+            # attn2 = torch.cat([attn21, attn22], dim=-1)
 
-            lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(q)
-            lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(q)
-            lambda_full = lambda_1 - lambda_2 + self.lambda_init
-            attn = attn1 - lambda_full * attn2
-            # attn shape (-1, self.num_heads // 2, 2 * self.head_dim)
-            attn = self.subln(attn)
-            attn = attn * (1 - self.lambda_init)
-            # reshape back to 2 * num_head
-            attn_output = rearrange(attn, "... H (two D) -> ... (H two) D", two=2)
-
+            # lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(q)
+            # lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(q)
+            # lambda_full = lambda_1 - lambda_2 + self.lambda_init
+            
+            # attn = attn1 - lambda_full * attn2
+            # # attn shape (-1, self.num_heads // 2, 2 * self.head_dim)
+            # attn = self.subln(attn)
+            # attn = attn * (1 - self.lambda_init)
+            # # reshape back to 2 * num_head
+            # attn_output = rearrange(attn, "... H (two D) -> ... (H two) D", two=2)
+            attn_output = self.attn(q, k, v)
         else: # re-use the kv cache, full attention
             q = self.Wqkv(hidden_states)
-            q = q.view(-1, self.num_heads, self.head_dim)
-            q1, q2 = self.split_heads(q)
-            # kv_cache shape is (2, num_blocks, block_size * num_kv_heads * head_size)
-            kv_cache1, kv_cache2 = self.split_kv_cache(kv_cache)
-            key_cache1, value_cache1 = kv_cache1[0], kv_cache1[1]
-            key_cache2, value_cache2 = kv_cache2[0], kv_cache2[1]
+            # q = q.view(-1, self.num_heads, self.head_dim)
+            # q1, q2 = self.split_heads(q)
+            # # kv_cache shape is (2, num_blocks, block_size * num_kv_heads * head_size)
+            # kv_cache1, kv_cache2 = self.split_kv_cache(kv_cache)
+            # key_cache1, value_cache1 = kv_cache1[0], kv_cache1[1]
+            # key_cache2, value_cache2 = kv_cache2[0], kv_cache2[1]
             
-            attn11 = self.forward_decode(q1, key_cache1, value_cache1, attn_metadata)
-            attn12 = self.forward_decode(q1, key_cache1, value_cache2, attn_metadata)
-            attn11 = attn11.view(q1.shape)
-            attn12 = attn12.view(q1.shape)
-            attn1 = torch.cat([attn11, attn12], dim=-1)
+            # attn11 = self.forward_decode(q1, key_cache1, value_cache1, attn_metadata)
+            # attn12 = self.forward_decode(q1, key_cache1, value_cache2, attn_metadata)
+            # attn11 = attn11.view(q1.shape)
+            # attn12 = attn12.view(q1.shape)
+            # attn1 = torch.cat([attn11, attn12], dim=-1)
 
-            attn21 = self.forward_decode(q2, key_cache2, value_cache1, attn_metadata)
-            attn22 = self.forward_decode(q2, key_cache2, value_cache2, attn_metadata)
-            attn21 = attn21.view(q2.shape)
-            attn22 = attn22.view(q2.shape)
-            attn2 = torch.cat([attn21, attn22], dim=-1)
+            # attn21 = self.forward_decode(q2, key_cache2, value_cache1, attn_metadata)
+            # attn22 = self.forward_decode(q2, key_cache2, value_cache2, attn_metadata)
+            # attn21 = attn21.view(q2.shape)
+            # attn22 = attn22.view(q2.shape)
+            # attn2 = torch.cat([attn21, attn22], dim=-1)
 
-            lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(q)
-            lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(q)
-            lambda_full = lambda_1 - lambda_2 + self.lambda_init
-            attn = attn1 - lambda_full * attn2
-            attn = self.subln(attn)
-            attn = attn * (1 - self.lambda_init)
-            # reshape back to 2 * num_head
-            attn_output = rearrange(attn, "... H (two D) -> ... (H two) D", two=2)
+            # lambda_1 = torch.exp(torch.sum(self.lambda_q1 * self.lambda_k1, dim=-1).float()).type_as(q)
+            # lambda_2 = torch.exp(torch.sum(self.lambda_q2 * self.lambda_k2, dim=-1).float()).type_as(q)
+            # lambda_full = lambda_1 - lambda_2 + self.lambda_init
+            # attn = attn1 - lambda_full * attn2
+            # attn = self.subln(attn)
+            # attn = attn * (1 - self.lambda_init)
+            # # reshape back to 2 * num_head
+            # attn_output = rearrange(attn, "... H (two D) -> ... (H two) D", two=2)
+            
+
+            if self.attn.kv_cache[0].numel() == 0:
+                 self.attn.kv_cache = [kv_cache]
+            attn_output = self.attn(q, None, None)
         attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
         return self.out_proj(attn_output)
 
