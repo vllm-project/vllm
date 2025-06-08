@@ -208,6 +208,9 @@ class CpuPlatform(Platform):
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
+        # Share the cpusets list among ranks by spawning process instead
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
         # Intel OpenMP setting
         ld_prealod_str = os.getenv("LD_PRELOAD", "")
         if "libiomp5.so" in ld_prealod_str:
