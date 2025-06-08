@@ -311,6 +311,7 @@ def per_token_group_quant_fp8(
     eps: float = 1e-10,
     dtype: Optional[torch.dtype] = None,
     column_major_scales: bool = False,
+    out_q: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
@@ -321,6 +322,8 @@ def per_token_group_quant_fp8(
         eps: The minimum to avoid dividing zero.
         dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn`
         is supported for now.
+        column_major_scales: Outputs scales in column major.
+        out_q: Optional output tensor. If not provided, function will create.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor for quantization.
@@ -335,7 +338,11 @@ def per_token_group_quant_fp8(
     fp8_min = finfo.min
     fp8_max = finfo.max
 
-    x_q = torch.empty_like(x, device=x.device, dtype=dtype)
+    assert out_q is None or out_q.shape == x.shape
+    x_q = out_q
+    if x_q is None:
+        x_q = torch.empty_like(x, device=x.device, dtype=dtype)
+
     M = x.numel() // group_size
     N = group_size
     if column_major_scales:
