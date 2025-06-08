@@ -105,6 +105,9 @@ class ModelRunnerOutput:
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
 
+    # req_id -> num_nans_in_logits
+    num_nans_in_logits: Optional[dict[str, int]] = None
+
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},
@@ -113,4 +116,5 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               finished_sending=None,
-                                              finished_recving=None)
+                                              finished_recving=None,
+                                              num_nans_in_logits=None)
