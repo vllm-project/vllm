@@ -51,6 +51,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -67,7 +68,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ):
         a1q = hidden_states
 
         assert w1_scale is not None
@@ -174,9 +175,9 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
                            expert_offsets[:-1], problem_sizes2,
                            self.ab_strides2, self.ab_strides2, self.c_strides2)
 
-        c3 = c3[c_map]
-
-        return c3
+        # We can't do this inplace because output may point to the same tensor
+        # as c3.
+        output.copy_(c3[c_map], non_blocking=True)
 
 
 #TODO make the grouped gemm kernel consistent with scaled gemm kernel

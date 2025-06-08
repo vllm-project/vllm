@@ -92,6 +92,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -108,7 +109,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ):
         import deep_gemm as dg
 
         a1q = hidden_states
@@ -155,9 +156,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
             (a2q, a2q_scale), (w2, w2_scale), workspace3, expert_ids)
 
-        workspace3 = workspace3[inv_perm, ...]
-
-        return workspace3
+        # We can't do this inplace because output may point to the same tensor
+        # as workspace3
+        output.copy_(workspace3[inv_perm], non_blocking=True)
 
 
 def deep_gemm_moe_fp8(
