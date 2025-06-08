@@ -12,6 +12,8 @@ import torch
 from fastapi import Request
 from typing_extensions import assert_never
 
+from vllm.beam.beam import BeamScorer
+from vllm.beam.penalty import MEOW_CLASSI_IDX, PenaltyComputer
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -50,6 +52,8 @@ from numba.np.old_arraymath import numpy_unwrap
 logger = init_logger(__name__)
 
 
+_CHUNK_SIZE = 16
+
 class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(
@@ -77,11 +81,14 @@ class OpenAIServingCompletion(OpenAIServing):
             source = "model" if source == "auto" else source
             logger.info("Using default completion sampling params from %s: %s",
                         source, self.default_sampling_params)
+            
+        self.beam_scorer = BeamScorer(classi_idx=MEOW_CLASSI_IDX)
 
     async def _get_beams(self, request: CompletionRequest, raw_request: Optional[Request] = None):
         request.stream = False
         n = request.n
         request.n = 1
+        request.max_tokens = _CHUNK_SIZE
         request.echo = True
         tasks = []
         for _ in range(n):
@@ -93,24 +100,6 @@ class OpenAIServingCompletion(OpenAIServing):
         request.n = n
         return res
 
-    async def _collapse_beams(self, responses: list[AsyncGenerator], chunk_num = 0, max_chunks = 4):
-        scores = torch.zeros(len(responses), dtype=torch.float)
-
-        is_done = torch.tensor([response.choices[0].finish_reason == 'stop'
-                                 for response in responses], dtype=torch.bool)
-
-        prefer_done = chunk_num > max_chunks // 2
-        scores += 100 * is_done * prefer_done
-        lengths = torch.tensor([len(response.choices[0].text) for response in responses],
-                               dtype=torch.float)
-
-        has_additional_heads = torch.tensor([response.choices[0].additional_heads is not None for response in responses], dtype=torch.bool)
-        print('has_additional_heads', has_additional_heads)
-        scores += 1 * lengths
-
-        print('scores', scores)
-        best_idx = torch.argmax(scores).item()
-        return responses[best_idx]
 
     async def create_completion_with_chunkwise_beam(
             self,
@@ -126,24 +115,28 @@ class OpenAIServingCompletion(OpenAIServing):
             og_n = request.n
             request.max_tokens = 1
             request.n = 1
-            await self.create_completion(
+            res = await self.create_completion(
                 request,
                 raw_request=raw_request,
             )
             request.max_tokens = og_max_tokens
             request.n =  og_n
-
-        await _process_prefix(request)
+            input_tokens_len = res.usage.prompt_tokens
+            return input_tokens_len
+        
+        input_tokens_len = await _process_prefix(request)
         num_chunks = 0
         eom = False
         final = None
-        while num_chunks < 4 or eom:
+        while num_chunks < 4 and not eom:
             num_chunks += 1
             beams = await self._get_beams(request=request, raw_request=raw_request)
-            final = await self._collapse_beams(beams, num_chunks)
+            final = await self.beam_scorer.collapse_beams(beams, num_chunks)
             request.prompt = final.choices[0].text
             eom = final.choices[0].finish_reason == "stop"
 
+        print('num_chunks', num_chunks)
+        print('input_tokens_len', input_tokens_len)
         return final
 
     async def create_completion(
