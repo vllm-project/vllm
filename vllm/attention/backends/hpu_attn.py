@@ -470,10 +470,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         ) if attn_metadata.slot_mapping is not None else None
         key_cache = None
         value_cache = None
-        if attn_metadata.is_prompt and self.attn_type \
-           is not AttentionType.ENCODER_ONLY:
-            key = key.unflatten(0, (block_indices.size(0), -1))
-            value = value.unflatten(0, (block_indices.size(0), -1))
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache = HPUPagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
