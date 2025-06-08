@@ -47,6 +47,19 @@ Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
 """
 
+HfTimeSeriesItem: TypeAlias = Union[list[float], list[list[float]], np.ndarray,
+                                    "torch.Tensor"]
+"""
+Represents a single time series
+item, which can be passed to a time series processor.
+
+Can be a list of values (univariate time series), list of lists 
+(multivariate time series), or numpy array.
+
+Alternatively, a tensor that is treated as time series embeddings;
+these are directly passed to the model without preprocessing.
+"""
+
 ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor"]
 """
 A `transformers.image_utils.ImageInput` representing a single image
@@ -82,6 +95,18 @@ which are treated as audio embeddings;
 these are directly passed to the model without HF processing.
 """
 
+TimeSeriesItem: TypeAlias = Union[HfTimeSeriesItem, torch.Tensor]
+"""
+Represents a single time series
+item, which can be passed to a time series processor.
+
+Can be a list of values (univariate time series), list of lists
+(multivariate time series), or numpy array.
+
+Alternatively, a tensor that is treated as time series embeddings;
+these are directly passed to the model without preprocessing.
+"""
+
 ModalityData: TypeAlias = Union[_T, list[_T]]
 """
 Either a single data item, or a list of data items.
@@ -103,6 +128,9 @@ class MultiModalDataBuiltins(TypedDict, total=False):
 
     audio: ModalityData[AudioItem]
     """The input audio(s)."""
+
+    timeseries: ModalityData[TimeSeriesItem]
+    """The input time series data."""
 
 
 MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]
@@ -170,7 +198,8 @@ Uses a list instead of a tensor if the dimensions of each element do not match.
 """
 
 
-def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
+def nested_tensors_equal(a: Union[NestedTensors, int, float, bool],
+                         b: Union[NestedTensors, int, float, bool]) -> bool:
     """Equality check between
     [`NestedTensors`][vllm.multimodal.inputs.NestedTensors] objects."""
     if isinstance(a, torch.Tensor):
@@ -178,11 +207,23 @@ def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
     elif isinstance(b, torch.Tensor):
         return isinstance(a, torch.Tensor) and torch.equal(b, a)
 
+    if isinstance(a, np.ndarray):
+        return isinstance(b, np.ndarray) and np.array_equal(a, b)
+    elif isinstance(b, np.ndarray):
+        return isinstance(a, np.ndarray) and np.array_equal(b, a)
+
     if isinstance(a, list):
         return (isinstance(b, list)
                 and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b)))
     if isinstance(b, list):
         return (isinstance(a, list)
+                and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a)))
+
+    if isinstance(a, tuple):
+        return (isinstance(b, tuple)
+                and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b)))
+    if isinstance(b, tuple):
+        return (isinstance(a, tuple)
                 and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a)))
 
     # Both a and b are scalars
