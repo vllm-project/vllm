@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.model_executor.layers.mamba.mamba2_metadata import (
+    _query_start_loc_to_chunk_indices_offsets)
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.block_table import BlockTable
@@ -14,6 +18,15 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
+def get_mamba2_chunk_size(vllm_config: VllmConfig) -> int:
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+    layers = get_layers_from_vllm_config(vllm_config, MambaMixer2)
+    chunk_sizes = set(layer.chunk_size for layer in layers.values())
+    assert len(
+        chunk_sizes) == 1, "All Mamba2 layers must have the same chunk size"
+    return chunk_sizes.pop()
+
+
 class Mamba2AttentionMetadataBuilder:
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: MambaSpec,
@@ -21,11 +34,12 @@ class Mamba2AttentionMetadataBuilder:
         self.runner = runner
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
+        self.chunk_size = get_mamba2_chunk_size(runner.vllm_config)
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
-        # NOTE (Chen): Copied from FlashInferMetadataBuilder. This is not
-        # elegant and should be refactored.
+        # NOTE (Chen): Copied from FlashInferMetadataBuilder. Should be
+        # refactored later to avoid code duplication.
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
         # swaps possible. (NOTE for now we loosely use "decode" to mean requests
@@ -86,7 +100,70 @@ class Mamba2AttentionMetadataBuilder:
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
-        raise NotImplementedError("Mamba2AttentionBackend is not implemented.")
+        # print("query_start_loc", common_attn_metadata.query_start_loc)
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
+
+        seq_idx = None
+        chunk_indices, chunk_offsets = None, None
+        # Need flags to indicate if there are initial states
+        # currently we really only support the FlashAttention backend
+        has_initial_states = None
+        prep_initial_states = False
+
+        state_indices_tensor = self.block_table.block_table[:num_reqs, 0]
+
+        # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
+        if self._num_prefills > 0:
+            #[batch,]
+            has_initial_states_cpu = (
+                self.runner.input_batch.
+                num_computed_tokens_cpu_tensor[num_reqs -
+                                               self._num_prefills:num_reqs]
+                > 0)
+            prep_initial_states = torch.any(has_initial_states_cpu).item()
+            has_initial_states = has_initial_states_cpu.to(
+                query_start_loc.device)
+
+            query_start_loc_p = common_attn_metadata.query_start_loc[
+                -self._num_prefills - 1:] - self._num_decode_tokens
+            # TODO: remove this debug check
+            assert query_start_loc_p[0] == 0
+            assert query_start_loc_p[-1] == self._num_prefill_tokens
+            seq_idx = torch.repeat_interleave(
+                torch.arange(self._num_prefills,
+                             dtype=torch.int32,
+                             device=query_start_loc_p.device),
+                query_start_loc_p.diff(),
+                output_size=self._num_prefill_tokens)
+            seq_idx.unsqueeze_(0)
+
+            # We compute metadata for chunked prefill once at the top level
+            # model forward and reuse them in mamba layers. If not needed,
+            # they will be ignored inside mamba kernels.
+            if prep_initial_states:
+                chunk_indices, chunk_offsets = (
+                    _query_start_loc_to_chunk_indices_offsets(
+                        query_start_loc_p, self.chunk_size,
+                        self._num_prefill_tokens))
+
+        attn_metadata = Mamba2AttentionMetadata(
+            num_prefills=self._num_prefills,
+            num_prefill_tokens=self._num_prefill_tokens,
+            num_decodes=self._num_decodes,
+            num_decode_tokens=self._num_decode_tokens,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            has_initial_states=has_initial_states,
+            prep_initial_states=prep_initial_states,
+            chunk_size=self.chunk_size,
+            seq_idx=seq_idx,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            state_indices_tensor=state_indices_tensor,
+        )
+        # print("attn_metadata", attn_metadata)
+        return attn_metadata
 
 
 class Mamba2AttentionBackend:
@@ -96,15 +173,20 @@ class Mamba2AttentionBackend:
         return Mamba2AttentionMetadataBuilder
 
 
+@dataclass
 class Mamba2AttentionMetadata:
+    num_prefills: int
+    num_prefill_tokens: int
+    num_decodes: int
+    num_decode_tokens: int
+    query_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
+
     has_initial_states: torch.Tensor
     prep_initial_states: bool
-
     chunk_size: int
     seq_idx: torch.Tensor
     chunk_indices: torch.Tensor
     chunk_offsets: torch.Tensor
 
-    def __init__(self, query_start_loc, context_lens_tensor):
-        self.query_start_loc = query_start_loc
-        self.context_lens_tensor = context_lens_tensor
+    state_indices_tensor: torch.Tensor  # shape: [batch,]

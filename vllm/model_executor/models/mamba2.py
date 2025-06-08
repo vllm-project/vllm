@@ -62,7 +62,8 @@ class Mamba2DecoderLayer(nn.Module):
                                  rms_norm_eps=config.layer_norm_epsilon,
                                  activation=config.hidden_act,
                                  quant_config=quant_config,
-                                 prefix=f"{prefix}.mixer")
+                                 prefix=f"{prefix}.mixer",
+                                 chunk_size=config.chunk_size)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
