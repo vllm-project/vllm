@@ -845,7 +845,7 @@ class Scheduler(SchedulerInterface):
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=len(scheduled_spec_token_ids),
-                    num_accepted_tokens=len(generated_token_ids) - 1,
+                    num_accepted_tokens=len(generated_token_ids) - 1
                 )
 
             cached_encoder_input_ids = (
