@@ -98,7 +98,7 @@ class FCFSWaitingQueue(WaitingQueue, deque[Request]):
 
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
-        return deque.__bool__(self)
+        return len(self) > 0
 
     def __len__(self) -> int:
         """Get number of requests in queue."""
@@ -106,7 +106,8 @@ class FCFSWaitingQueue(WaitingQueue, deque[Request]):
 
     def __iter__(self):
         """Iterate over the queue according to FCFS policy."""
-        return deque.__iter__(self)
+        # Cast to deque to access its iterator
+        return iter(deque[Request](self))
 
 
 class PriorityWaitingQueue(WaitingQueue):

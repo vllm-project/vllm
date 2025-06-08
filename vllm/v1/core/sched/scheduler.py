@@ -464,7 +464,8 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.push_request(
                             request, request.priority, request.arrival_time)
                     else:
-                        self.waiting.appendleft(request)
+                        self.waiting.push_request(request, request.priority,
+                                                  request.arrival_time)
                     break
 
                 # KVTransfer: the connector uses this info to determine
