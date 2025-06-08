@@ -30,14 +30,18 @@ def get_dummy_loaded_hf_model(repo: str, model_arch: str) -> PreTrainedModel:
     return model
 
 
-@pytest.mark.parametrize("model_arch", _MULTIMODAL_EXAMPLE_MODELS.keys())
+def model_architectures_for_test():
+    return [
+        model_arch for model_arch, info in _MULTIMODAL_EXAMPLE_MODELS.items()
+        if not info.trust_remote_code and hasattr(transformers, model_arch)
+    ]
+
+
+@pytest.mark.parametrize("model_arch", model_architectures_for_test())
 def test_hf_model_weights_mapper(model_arch: str):
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
-
-    if model_info.trust_remote_code:
-        pytest.skip("Skip testing weights mapper for custom model")
 
     model_id = model_info.default
     dummy_hf_model = get_dummy_loaded_hf_model(model_id, model_arch)
