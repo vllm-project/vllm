@@ -87,6 +87,25 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
 endfunction()
 
 #
+# Support for additional HIP compiler flags
+# Can be set via -DHIPCC_COMPILE_FLAGS_APPEND="flag1;flag2" or environment variable HIPCC_COMPILE_FLAGS_APPEND="flag1 flag2"
+# Example: -DHIPCC_COMPILE_FLAGS_APPEND="--offload-compress"
+#
+set(HIPCC_COMPILE_FLAGS_APPEND "" CACHE STRING "Additional HIP compiler flags for ROCm builds")
+
+# Allow environment variable to override/extend the CMake variable
+if(DEFINED ENV{HIPCC_COMPILE_FLAGS_APPEND})
+  string(REPLACE " " ";" ENV_HIPCC_COMPILE_FLAGS_APPEND_LIST "$ENV{HIPCC_COMPILE_FLAGS_APPEND}")
+  if(HIPCC_COMPILE_FLAGS_APPEND)
+    # Append environment flags to existing CMake flags
+    list(APPEND HIPCC_COMPILE_FLAGS_APPEND ${ENV_HIPCC_COMPILE_FLAGS_APPEND_LIST})
+  else()
+    # Use environment flags if no CMake flags are set
+    set(HIPCC_COMPILE_FLAGS_APPEND ${ENV_HIPCC_COMPILE_FLAGS_APPEND_LIST})
+  endif()
+endif()
+
+#
 # Get additional GPU compiler flags from torch.
 #
 function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
@@ -123,6 +142,11 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
       "-U__HIP_NO_HALF_CONVERSIONS__"
       "-U__HIP_NO_HALF_OPERATORS__"
       "-fno-gpu-rdc")
+
+    # Add any additional HIP flags specified by user
+    if(HIPCC_COMPILE_FLAGS_APPEND)
+      list(APPEND GPU_FLAGS ${HIPCC_COMPILE_FLAGS_APPEND})
+    endif()
 
   endif()
   set(${OUT_GPU_FLAGS} ${GPU_FLAGS} PARENT_SCOPE)
