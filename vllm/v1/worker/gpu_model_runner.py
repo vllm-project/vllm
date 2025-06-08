@@ -670,7 +670,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert should_ubatch
             num_pad_tokens, num_tokens_after_padding = self.get_dp_padding_ubatch(ubatch_slices)
             if num_pad_tokens > 0:
-                self.pad_out_ubatch_first_stage(ubatch_slices, num_pad_tokens)
+                if num_pad_tokens < scheduler_output.total_num_scheduled_tokens:
+                    self.pad_out_ubatch_first_stage(ubatch_slices, num_pad_tokens)
+                else:
+                    # We bail out of ubatching here. This accounts for the case where 
+                    # the padding would result in an "empty" second ubatch.
+                    # TODO: just make the second ubatch a dummy ubatch
+                    ubatch_slices = None
+        
+        # This AR is only necessary in the case described above where 
+        # the second ubatch ends up being empty. NOte if you delete this go delete 
+        # the second should_ubatch call in  _dummy_run
+        should_ubatch = self.should_ubatch(True if ubatch_slices else False)
+        if not should_ubatch:
+            num_pad_tokens = 0
+            num_tokens_after_padding = None
+            ubatch_slices = None
+
 
         
 
@@ -1273,8 +1289,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                 device="cpu",
                                                 dtype=torch.int32)
 
-        assert max_tokens_across_dp <= 2 * max_tokens_per_ubatch_local, \
-            f"max_tokens_across_dp: {max_tokens_across_dp} max_tokens_per_ubatch{max_tokens_per_ubatch_local}"
+        # assert max_tokens_across_dp <= 2 * max_tokens_per_ubatch_local, \
+        #     f"max_tokens_across_dp: {max_tokens_across_dp} max_tokens_per_ubatch{max_tokens_per_ubatch_local}"
         num_pad_tokens = (max_tokens_across_dp * 2) - \
             (first_ubatch_num_tokens + second_ubatch_num_tokens)
         return num_pad_tokens, num_tokens_after_padding
@@ -2181,6 +2197,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         should_microbatch = False
         # _dummy_run doesn't go through _prepare_inputs so 
         # we synchronize with other DP ranks here
+        self.should_ubatch(should_microbatch)
         self.should_ubatch(should_microbatch)
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
