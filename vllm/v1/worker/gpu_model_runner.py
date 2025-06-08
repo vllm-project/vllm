@@ -2313,8 +2313,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise NotImplementedError(
                     "Prefix caching is not supported for Mamba yet.")
             max_model_len = self.vllm_config.model_config.max_model_len
-            # NOTE(Chen): set block_size to max_model_len, so that mamba model
-            # will always have only one block in the KV cache.
+            # Set block_size to max_model_len, so that mamba model will always
+            # have only one block in the KV cache.
             for layer_name, mamba_module in mamba_layers.items():
                 kv_cache_spec[layer_name] = MambaSpec(
                     shapes=mamba_module.get_state_shape(),

@@ -408,8 +408,8 @@ class MambaManager(SingleTypeKVCacheManager):
         assert isinstance(
             kv_cache_spec,
             MambaSpec), ("MambaManager can only be used for mamba groups")
-        # NOTE(Chen): prefix caching is not supported for mamba now. Always
-        # return empty list.
+        # Prefix caching is not supported for mamba now. Always return empty
+        # list.
         computed_blocks: list[list[KVCacheBlock]] = [
             [] for _ in range(len(kv_cache_group_ids))
         ]
@@ -417,8 +417,8 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
-        # NOTE(Chen): each request will always have 1 block at this moment, so
-        # no need to remove blocks.
+        # Each request will always have 1 block at this moment, so no need to
+        # remove blocks.
         pass
 
     def get_num_common_prefix_blocks(self, request_id: str,
