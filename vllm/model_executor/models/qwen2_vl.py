@@ -343,6 +343,24 @@ class Qwen2VisionAttention(nn.Module):
             context_layer = rearrange(output,
                                       "(b s) ... -> b s ...",
                                       b=batch_size)
+        elif self.attn_backend == _Backend.FLASH_ATTN_VLLM_V1:
+            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+
+            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+
+            output = flash_attn_varlen_func(q,
+                                            k,
+                                            v,
+                                            cu_seqlens_q=cu_seqlens,
+                                            cu_seqlens_k=cu_seqlens,
+                                            max_seqlen_q=max_seqlen,
+                                            max_seqlen_k=max_seqlen,
+                                            dropout_p=0,
+                                            causal=False)
+
+            context_layer = rearrange(output,
+                                      "(b s) ... -> b s ...",
+                                      b=batch_size)
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             outputs = []
@@ -619,7 +637,7 @@ class Qwen2VisionTransformer(nn.Module):
             self, cu_seqlens: torch.Tensor
     ) -> tuple[Optional[int], Optional[list[int]]]:
         max_seqlen, seqlens = None, None
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if self.attn_backend == [_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1]:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
