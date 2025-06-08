@@ -41,25 +41,18 @@ def basic_flop_counting_example():
         "Explain quantum computing in simple terms:",
     ]
 
-    # Generate with FLOP counting
-    with FlopContextManager() as flop_counter:
-        start_time = time.time()
+    # Generate with FLOP counting (using enhanced offline counter)
+    with FlopContextManager(auto_print=True) as flop_counter:
         outputs = llm.generate(prompts, sampling_params)
-        end_time = time.time()
 
-    # Display results
-    total_flops = flop_counter.get_total_flops()
-    flop_breakdown = flop_counter.get_flop_breakdown()
-    elapsed_time = end_time - start_time
+    # Additional detailed analysis
+    detailed_counts = flop_counter.get_detailed_counts()
+    breakdown_percentages = detailed_counts.get_percentage_breakdown()
 
-    print(f"Total FLOPs: {format_flops(total_flops)}")
-    print(f"Elapsed time: {elapsed_time:.2f} seconds")
-    print(f"GFLOPS/sec: {total_flops / (elapsed_time * 1e9):.2f}")
-
-    print("\nTop operations by FLOP count:")
-    sorted_ops = sorted(flop_breakdown.items(), key=lambda x: x[1], reverse=True)
-    for op_name, flops in sorted_ops[:10]:
-        print(f"  {op_name}: {format_flops(flops)}")
+    print("\nDetailed FLOP Breakdown by Percentage:")
+    for category, percentage in breakdown_percentages.items():
+        if percentage > 0 and category != "total_flops":
+            print(f"  {category:20s}: {percentage:5.1f}%")
 
     print("\nGenerated outputs:")
     for i, output in enumerate(outputs):
@@ -122,20 +115,20 @@ def performance_analysis_example():
             llm = LLM(model=model_name, max_num_seqs=1)
             sampling_params = SamplingParams(temperature=0.0, max_tokens=10)
 
+            start_time = time.time()
             with FlopContextManager() as flop_counter:
-                start_time = time.time()
                 outputs = llm.generate(["Hello world"], sampling_params)
-                end_time = time.time()
+            elapsed_time = time.time() - start_time
 
             total_flops = flop_counter.get_total_flops()
-            elapsed_time = end_time - start_time
-            gflops_per_sec = (
-                total_flops / (elapsed_time * 1e9) if elapsed_time > 0 else 0
-            )
+            efficiency_metrics = flop_counter.get_efficiency_metrics(elapsed_time)
 
             print(f"  Total FLOPs: {format_flops(total_flops)}")
             print(f"  Time: {elapsed_time:.3f}s")
-            print(f"  GFLOPS/sec: {gflops_per_sec:.2f}")
+            gflops = efficiency_metrics["gflops_per_sec"]
+            tflops = efficiency_metrics["tflops_per_sec"]
+            print(f"  Performance: {gflops:.2f} GFLOPS/sec")
+            print(f"  Performance: {tflops:.4f} TFLOPS/sec")
             print(f"  Generated: {outputs[0].outputs[0].text}")
 
         except Exception as e:

@@ -349,11 +349,7 @@ class LLMEngine:
         ]
 
         # Metric Logging.
-        self.flop_counter = None
         if self.log_stats:
-            from vllm.profiler.flop_counter import FlopCounter
-            self.flop_counter = FlopCounter(display=False)
-
             if stat_loggers is not None:
                 self.stat_loggers = stat_loggers
             else:
@@ -1395,13 +1391,8 @@ class LLMEngine:
                     virtual_engine]
 
             try:
-                if self.flop_counter:
-                    with self.flop_counter:
-                        outputs = self.model_executor.execute_model(
-                            execute_model_req=execute_model_req)
-                else:
-                    outputs = self.model_executor.execute_model(
-                        execute_model_req=execute_model_req)
+                outputs = self.model_executor.execute_model(
+                    execute_model_req=execute_model_req)
                 self._skip_scheduling_next_step = False
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
@@ -1683,24 +1674,6 @@ class LLMEngine:
         num_preemption_iter = (0 if scheduler_outputs is None else
                                scheduler_outputs.preempted)
 
-        # FLOP stats
-        total_flops_iter = 0
-        mm_flops_iter = 0
-        attention_flops_iter = 0
-        activation_flops_iter = 0
-        normalization_flops_iter = 0
-
-        if self.flop_counter:
-            total_flops_iter = self.flop_counter.get_total_flops()
-            flop_breakdown = self.flop_counter.get_flop_breakdown()
-
-            mm_flops_iter = flop_breakdown['mm_flops']
-            attention_flops_iter = flop_breakdown['attention_flops']
-            activation_flops_iter = flop_breakdown['activation_flops']
-            normalization_flops_iter = flop_breakdown['normalization_flops']
-
-            self.flop_counter.reset()
-
         # Request stats
         #   Latency
         time_e2e_requests: List[float] = []
@@ -1875,13 +1848,6 @@ class LLMEngine:
             time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
             num_preemption_iter=num_preemption_iter,
-
-            # FLOP stats
-            total_flops_iter=total_flops_iter,
-            mm_flops_iter=mm_flops_iter,
-            attention_flops_iter=attention_flops_iter,
-            activation_flops_iter=activation_flops_iter,
-            normalization_flops_iter=normalization_flops_iter,
 
             # Request stats
             #   Latency
