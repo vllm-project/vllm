@@ -14,12 +14,16 @@ import requests
 import torch
 from openai import BadRequestError, OpenAI
 
+from ...conftest import AudioTestAssets
 from ...utils import RemoteOpenAIServer
 from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
 from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+# Contains a modality specific lora alongside the base model
+MULTIMODAL_MODEL_NAME = "ibm-granite/granite-speech-3.3-2b"
+ACTIVE_MM_LORA_RESPONSE = "the first words i spoke in the original chorus a little piece of practical poetry mary had a little lamb its fleece was white as"  # noqa: E501
 
 
 @pytest.fixture(scope="module")
@@ -64,6 +68,35 @@ def server(
         yield remote_server
 
 
+@pytest.fixture(scope="module", params=[False, True])
+def multimodal_server(request, monkeypatch_module):  # noqa: F811
+
+    use_v1 = request.param
+    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
+
+    args = [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        # lora config below
+        "--enable-lora",
+        "--lora-modules",
+        f"speech={MULTIMODAL_MODEL_NAME}",
+        "--max-lora-rank",
+        "64",
+        "--max-num-seqs",
+        "4",
+        "--default-mm-loras",
+        f"{{\"audio\": \"{MULTIMODAL_MODEL_NAME}\"}}",
+    ]
+
+    with RemoteOpenAIServer(MULTIMODAL_MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
 @pytest.fixture
 def is_v1_server(server):
     import os
@@ -75,6 +108,52 @@ def is_v1_server(server):
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+@pytest_asyncio.fixture
+async def multi_modal_client(multimodal_server):
+    async with multimodal_server.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    # base model with default lora should give the same response as lora model
+    "model_name",
+    [MULTIMODAL_MODEL_NAME, "speech"],
+)
+async def test_default_mm_lora_chat_completions(
+    model_name: str,
+    multi_modal_client: openai.AsyncOpenAI,
+    audio_assets: AudioTestAssets,
+):
+    messages = [{
+        "role":
+        "user",
+        "content": [{
+            "type":
+            "text",
+            "text":
+            "can you transcribe the speech into a written format?",
+        }, {
+            "type": "audio_url",
+            "audio_url": {
+                "url": audio_assets[0].url
+            },
+        }]
+    }]
+
+    chat_completion = await multi_modal_client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=32,
+        temperature=0.0)
+
+    assert len(chat_completion.choices) > 0
+
+    message = chat_completion.choices[0].message
+    assert message.content is not None and len(message.content) >= 0
+    assert message.content == ACTIVE_MM_LORA_RESPONSE
 
 
 @pytest.mark.asyncio
