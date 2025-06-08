@@ -1124,7 +1124,6 @@ class MRotaryEmbedding(RotaryEmbedding):
                 hf_config=hf_config,
                 image_grid_thw=image_grid_thw,
                 video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
                 context_len=context_len,
                 seq_len=seq_len,
             )
@@ -1146,7 +1145,6 @@ class MRotaryEmbedding(RotaryEmbedding):
         hf_config: PretrainedConfig,
         image_grid_thw: Union[List[List[int]], torch.Tensor],
         video_grid_thw: Union[List[List[int]], torch.Tensor],
-        second_per_grid_ts: Optional[List[float]] = None,
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[torch.Tensor, int]:
@@ -1156,6 +1154,9 @@ class MRotaryEmbedding(RotaryEmbedding):
         vision_start_token_id = hf_config.vision_start_token_id
         vision_end_token_id = hf_config.vision_end_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
+
+        # 统一在开头声明变量，避免重复定义
+        llm_pos_ids_list: list[torch.Tensor] = []
 
         if not (image_grid_thw is None and video_grid_thw is None):
             if isinstance(image_grid_thw, torch.Tensor):
@@ -1169,24 +1170,21 @@ class MRotaryEmbedding(RotaryEmbedding):
                 elif token == vision_end_token_id:
                     video_check_flg = False
 
-                if (token == image_token_id) and (video_check_flg
-                                                  == False):  # image token
+                if (token == image_token_id) and (video_check_flg == False):
                     input_token_type.append("image")
-                elif (token == image_token_id) and (video_check_flg
-                                                    == True):  # video token
+                elif (token == image_token_id) and (video_check_flg == True):
                     input_token_type.append("video")
                 else:
                     input_token_type.append("text")
 
-            input_type_group: list[tuple] = []
-            for key, group in itertools.groupby(enumerate(input_token_type),
-                                                lambda x: x[1]):
-                group = list(group)
-                start_index = group[0][0]
-                end_index = group[-1][0] + 1
+            input_type_group: list[tuple[str, int, int]] = []
+            for key, group_iter in itertools.groupby(
+                    enumerate(input_token_type), lambda x: x[1]):
+                group_list = list(group_iter)
+                start_index = group_list[0][0]
+                end_index = group_list[-1][0] + 1
                 input_type_group.append((key, start_index, end_index))
 
-            llm_pos_ids_list: list = []
             video_frame_num = 1
             mm_data_idx = 0
             for modality_type, start_idx, end_idx in input_type_group:
@@ -1209,11 +1207,8 @@ class MRotaryEmbedding(RotaryEmbedding):
                         llm_grid_t, llm_grid_h, -1).flatten()
                     llm_pos_ids_list.append(
                         torch.stack([t_index, h_index, w_index]) + st_idx)
-
                     mm_data_idx += 1
-                    video_frame_num = 1
 
-                # video
                 elif modality_type == "video":
                     t, h, w = (
                         video_frame_num,
@@ -1236,18 +1231,14 @@ class MRotaryEmbedding(RotaryEmbedding):
                     mm_data_idx += 1
                     video_frame_num += 1
 
-                # text
                 else:
                     text_len = end_idx - start_idx
-                    assert text_len > 0, "text length should be bigger than 0"
                     llm_pos_ids_list.append(
                         torch.arange(text_len).view(1, -1).expand(3, -1) +
                         st_idx)
-
                     video_frame_num = 1
 
         else:
-            llm_pos_ids_list: list = []
             text_len = len(input_tokens)
             llm_pos_ids_list.append(
                 torch.arange(text_len).view(1, -1).expand(3, -1))
