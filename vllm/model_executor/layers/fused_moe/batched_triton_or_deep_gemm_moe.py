@@ -122,6 +122,6 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                    self.batched_triton_experts)
         assert experts is not None
         experts.apply(output, hidden_states, w1, w2, topk_ids, activation,
-                      global_num_experts, expert_map, w1_scale,
-                      w2_scale, w1_zp, w2_zp, a1q_scale, a2_scale,
-                      workspace13, workspace2, expert_num_tokens)
+                      global_num_experts, expert_map, w1_scale, w2_scale,
+                      w1_zp, w2_zp, a1q_scale, a2_scale, workspace13,
+                      workspace2, expert_num_tokens)

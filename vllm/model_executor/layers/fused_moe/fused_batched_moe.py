@@ -561,7 +561,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert hidden_states.dim() == 3
         assert expert_num_tokens is not None
-        hidden_dim = hidden_states.size(-1)
 
         if self.max_num_tokens is None:
             max_num_tokens = hidden_states.size(1)
@@ -569,7 +568,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             max_num_tokens = self.max_num_tokens
 
         num_dp = self.world_size // self.dp_size
-        num_experts = global_num_experts
         num_local_experts = w1.size(0)
         assert num_local_experts == w1.size(0), (
             f"{num_local_experts} == {w1.size(0)}")

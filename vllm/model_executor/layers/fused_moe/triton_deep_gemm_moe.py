@@ -58,8 +58,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             return self.deep_gemm_expert.workspace_shapes(
                 a, aq, M, N, K, topk, num_experts)
         else:
-            return self.triton_expert.workspace_shapes(
-                a, aq, M, N, K, topk, num_experts)
+            return self.triton_expert.workspace_shapes(a, aq, M, N, K, topk,
+                                                       num_experts)
 
     def apply(
         self,
@@ -83,8 +83,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         N = w1.size(1)
 
-        use_deep_gemm =(self.allow_deep_gemm and self.use_fp8_w8a8 and N > 512
-                        and _valid_deep_gemm(hidden_states, w1, w2))
+        use_deep_gemm = (self.allow_deep_gemm and self.use_fp8_w8a8 and N > 512
+                         and _valid_deep_gemm(hidden_states, w1, w2))
 
         experts = self.deep_gemm_expert if use_deep_gemm else self.triton_expert
 
