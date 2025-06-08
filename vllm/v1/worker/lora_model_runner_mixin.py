@@ -15,7 +15,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.v1.worker.gpu_base_input_batch import BaseInputBatch
 
 logger = init_logger(__name__)
 
@@ -68,7 +68,7 @@ class LoRAModelRunnerMixin:
                                    is_prefill=True)
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
-    def set_active_loras(self, input_batch: InputBatch,
+    def set_active_loras(self, input_batch: BaseInputBatch,
                          num_scheduled_tokens: np.ndarray) -> None:
 
         prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs

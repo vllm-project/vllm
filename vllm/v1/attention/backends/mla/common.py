@@ -430,7 +430,7 @@ class MLACommonMetadataBuilder(Generic[M]):
             if decode_idx < num_decodes:
                 break
 
-            input_batch.swap_states(prefills[i - 1], decode_idx)
+            input_batch.swap_or_move_states(prefills[i - 1], decode_idx)
             modified_batch = True
 
         # Save for next `build` call

@@ -3,7 +3,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch.distributed
@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_pooling_model_runner import GPUPoolingModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
@@ -154,9 +155,13 @@ class Worker(WorkerBase):
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
+        self.model_runner: Union[GPUModelRunner, GPUPoolingModelRunner]
         # Construct the model runner
-        self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device)
+        if self.model_config.pooler_config is not None:
+            self.model_runner = GPUPoolingModelRunner(self.vllm_config,
+                                                      self.device)
+        else:
+            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -284,9 +289,13 @@ class Worker(WorkerBase):
         if get_pp_group().is_last_rank:
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
-            self.model_runner._dummy_sampler_run(
-                hidden_states=self.model_runner._dummy_run(
-                    num_tokens=max_num_reqs))
+
+            hidden_states, num_scheduled_tokens = self.model_runner._dummy_run(
+                num_tokens=max_num_reqs)
+
+            self.model_runner._dummy_task_run(hidden_states,
+                                              num_scheduled_tokens,
+                                              max_num_reqs)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

@@ -27,7 +27,7 @@ from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
+    from vllm.v1.worker.gpu_base_input_batch import BaseInputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if current_platform.is_cuda():
@@ -336,7 +336,7 @@ class FlashAttentionMetadataBuilder:
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
-    def reorder_batch(self, input_batch: "InputBatch",
+    def reorder_batch(self, input_batch: "BaseInputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
@@ -548,11 +548,13 @@ class FlashAttentionImpl(AttentionImpl):
                 f"Supported head sizes are: {support_head_sizes}. "
                 "Set VLLM_USE_V1=0 to use another attention backend.")
 
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
+        if attn_type not in [
+                AttentionType.DECODER, AttentionType.ENCODER_ONLY
+        ]:
+            raise NotImplementedError("Encoder/decoder cross-attention "
+                                      "is not implemented for "
                                       "FlashAttentionImpl")
+        self.attn_type = attn_type
         self.use_irope = use_irope
         self.vllm_flash_attn_version = get_flash_attn_version()
         if is_quantized_kv_cache(self.kv_cache_dtype) \
@@ -665,7 +667,7 @@ class FlashAttentionImpl(AttentionImpl):
                 seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.scale,
-                causal=True,
+                causal=_get_causal_option(self.attn_type),
                 alibi_slopes=self.alibi_slopes,
                 window_size=self.sliding_window,
                 block_table=block_table,
@@ -867,3 +869,21 @@ def cascade_attention(
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
                       suffix_lse)
+
+
+def _get_causal_option(attn_type: str) -> bool:
+    """
+    Determine whether the given attention type is suitable for causal 
+    attention mechanisms.
+
+    Args:
+        attn_type (AttentionType): The type of attention being evaluated
+
+    Returns:
+        bool: Returns `True` if the attention type is suitable for causal 
+        attention (i.e., not encoder, encoder-only, or encoder-decoder), 
+        otherwise returns `False`.
+    """
+    return not (attn_type == AttentionType.ENCODER
+                or attn_type == AttentionType.ENCODER_ONLY
+                or attn_type == AttentionType.ENCODER_DECODER)

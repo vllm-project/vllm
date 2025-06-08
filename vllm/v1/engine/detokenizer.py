@@ -42,6 +42,8 @@ class IncrementalDetokenizer:
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
 
+        assert request.sampling_params is not None
+
         if tokenizer is None:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
@@ -63,6 +65,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # Stop strings
         params = request.sampling_params
+        assert params is not None
         self.stop = stop = params.stop
         self.include_stop_str_in_output = params.include_stop_str_in_output
 
@@ -157,6 +160,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         super().__init__(request)
 
         sampling_params = request.sampling_params
+        assert sampling_params is not None
         self.stream = DecodeStream(
             skip_special_tokens=sampling_params.skip_special_tokens)
 
@@ -218,20 +222,20 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         super().__init__(request)
 
         self.tokenizer = tokenizer
+        params = request.sampling_params
+        assert params is not None
 
         # Metadata for incremental detokenization.
         self.tokens, self.prefix_offset, self.read_offset = (
             convert_prompt_ids_to_tokens(
                 tokenizer=tokenizer,
                 prompt_ids=request.prompt_token_ids,
-                skip_special_tokens=request.sampling_params.
-                skip_special_tokens,
+                skip_special_tokens=params.skip_special_tokens,
             ))
 
         self.token_ids.extend(request.prompt_token_ids)
         self.prompt_len = len(request.prompt_token_ids)
 
-        params = request.sampling_params
         self.skip_special_tokens = params.skip_special_tokens
         self.spaces_between_special_tokens = (
             params.spaces_between_special_tokens)

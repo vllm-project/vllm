@@ -12,7 +12,6 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -28,7 +27,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
+from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .utils import WeightsMapper, maybe_prefix
 
 
@@ -57,7 +56,6 @@ class BertEmbedding(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        seq_lens: torch.Tensor,
         position_ids: torch.Tensor,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -342,13 +340,9 @@ class BertModel(nn.Module, SupportsQuant):
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
-            attn_metadata = get_forward_context().attn_metadata
-            assert hasattr(attn_metadata, "seq_lens_tensor")
-            hidden_states = self.embeddings(
-                input_ids=input_ids,
-                seq_lens=attn_metadata.seq_lens_tensor,
-                position_ids=position_ids,
-                token_type_ids=token_type_ids)
+            hidden_states = self.embeddings(input_ids=input_ids,
+                                            position_ids=position_ids,
+                                            token_type_ids=token_type_ids)
         return self.encoder(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -388,7 +382,7 @@ class BertModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
+class BertEmbeddingModel(nn.Module, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -411,11 +405,13 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        token_type_ids: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids=input_ids,
                                    position_ids=positions,
+                                   token_type_ids=token_type_ids,
                                    inputs_embeds=inputs_embeds,
                                    intermediate_tensors=intermediate_tensors)
 

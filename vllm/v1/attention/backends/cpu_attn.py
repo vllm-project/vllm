@@ -114,7 +114,7 @@ class TorchSDPAMetadataBuilderV1:
         for idx in range(reorder_req_num):
             prompt_req_index = reorder_prompt_list[idx].item()
             decode_req_index = reorder_decode_list[idx].item()
-            input_batch.swap_states(prompt_req_index, decode_req_index)
+            input_batch.swap_or_move_states(prompt_req_index, decode_req_index)
 
         return True
 
