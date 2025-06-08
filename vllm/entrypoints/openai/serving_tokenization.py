@@ -137,6 +137,8 @@ class OpenAIServingTokenization(OpenAIServing):
         ) = self._maybe_get_adapters(request)
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
+        adapter_id = lora_request.lora_name if lora_request else None
+        self._set_tokenizer(tokenizer, adapter_id)
 
         self._log_inputs(request_id,
                          request.tokens,
@@ -149,7 +151,6 @@ class OpenAIServingTokenization(OpenAIServing):
 
         prompt_input = await self._tokenize_prompt_input_async(
             request,
-            tokenizer,
             request.tokens,
         )
         input_text = prompt_input["prompt"]
