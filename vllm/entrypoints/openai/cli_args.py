@@ -89,6 +89,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         help="Host name.")
     parser.add_argument("--port", type=int, default=8000, help="Port number.")
     parser.add_argument(
+        "--uds",
+        type=optional_type(str),
+        default=None,
+        help=
+        "Unix domain socket path. If set, host and port arguments are ignored."
+    )
+    parser.add_argument(
         "--uvicorn-log-level",
         type=str,
         default="info",
