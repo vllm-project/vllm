@@ -6,11 +6,9 @@ import copy
 import time
 import weakref
 from functools import partial
-from typing import (Any, AsyncGenerator, Callable, Coroutine, Dict, Iterable,
-                    List, Mapping, Optional, Set, Tuple, Type, Union, overload)
+from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
+                    Mapping, Optional, Set, Tuple, Type, Union)
 from weakref import ReferenceType
-
-from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
@@ -36,7 +34,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, deprecate_kwargs, weak_bind
+from vllm.utils import Device, weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -429,24 +427,6 @@ class _AsyncLLMEngine(LLMEngine):
         return await (
             self.get_tokenizer_group().get_lora_tokenizer_async(lora_request))
 
-    @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
-    async def add_request_async(
-        self,
-        request_id: str,
-        *,
-        inputs: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
-    ) -> None:
-        ...
-
-    @overload
     async def add_request_async(
         self,
         request_id: str,
@@ -459,32 +439,10 @@ class _AsyncLLMEngine(LLMEngine):
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
     ) -> None:
-        ...
-
-    @deprecate_kwargs(
-        "inputs",
-        additional_message="Please use the 'prompt' parameter instead.",
-    )
-    async def add_request_async(
-            self,
-            request_id: str,
-            prompt: Optional[PromptType] = None,
-            params: Optional[Union[SamplingParams, PoolingParams]] = None,
-            arrival_time: Optional[float] = None,
-            lora_request: Optional[LoRARequest] = None,
-            trace_headers: Optional[Mapping[str, str]] = None,
-            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-            priority: int = 0,
-            data_parallel_rank: Optional[int] = None,
-            *,
-            inputs: Optional[PromptType] = None,  # DEPRECATED
-    ) -> None:
-        """Async version of
-        [`add_request`][vllm.engine.llm_engine.LLMEngine.add_request]."""
-        if inputs is not None:
-            prompt = inputs
-        assert prompt is not None and params is not None
-
+        """
+        Async version of
+        [`add_request`][vllm.engine.llm_engine.LLMEngine.add_request].
+        """
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
@@ -521,8 +479,7 @@ class _AsyncLLMEngine(LLMEngine):
             params = await build_guided_decoding_logits_processor_async(
                 sampling_params=params,
                 tokenizer=await self.get_tokenizer_async(lora_request),
-                default_guided_backend=self.decoding_config.
-                guided_decoding_backend,
+                default_guided_backend=self.decoding_config.backend,
                 reasoning_backend=self.decoding_config.reasoning_backend,
                 model_config=self.model_config)
 
@@ -894,28 +851,7 @@ class AsyncLLMEngine(EngineClient):
                 raise
             await asyncio.sleep(0)
 
-    # This method does not need to be async, but kept that way
-    # for backwards compatibility.
-    @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
-    def add_request(
-        self,
-        request_id: str,
-        *,
-        inputs: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
-    ) -> Coroutine[None, None, AsyncGenerator[Union[
-            RequestOutput, PoolingRequestOutput], None]]:
-        ...
-
-    @overload
-    def add_request(
+    async def add_request(
         self,
         request_id: str,
         prompt: PromptType,
@@ -926,32 +862,7 @@ class AsyncLLMEngine(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
-    ) -> Coroutine[None, None, AsyncGenerator[Union[
-            RequestOutput, PoolingRequestOutput], None]]:
-        ...
-
-    @deprecate_kwargs(
-        "inputs",
-        additional_message="Please use the 'prompt' parameter instead.",
-    )
-    async def add_request(
-        self,
-        request_id: str,
-        prompt: Optional[PromptType] = None,
-        params: Optional[Union[SamplingParams, PoolingParams]] = None,
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
-        *,
-        inputs: Optional[PromptType] = None,  # DEPRECATED
     ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
-        if inputs is not None:
-            prompt = inputs
-        assert prompt is not None and params is not None
-
         if not self.is_running:
             if self.start_engine_loop:
                 self.start_background_loop()
