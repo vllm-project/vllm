@@ -345,7 +345,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm90_fp8.cu"
     FLAGS "-DENABLE_SCALED_MM_SM90=1"
     VERSION_MSG
-      "Not building scaled_mm_c3x_sm90: CUDA Compiler version is not >= 12.0.\n"
+      "Not building scaled_mm_c3x_sm90: CUDA Compiler version is not >= 12.0."
       "Please upgrade to CUDA 12.0 or later to run FP8 quantized models on Hopper."
   )
 
@@ -360,7 +360,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_blockwise_sm100_fp8.cu"
     FLAGS "-DENABLE_SCALED_MM_SM100=1"
     VERSION_MSG
-      "Not building scaled_mm_c3x_sm100: CUDA Compiler version is not >= 12.8.\n"
+      "Not building scaled_mm_c3x_sm100: CUDA Compiler version is not >= 12.8."
       "Please upgrade to CUDA 12.8 or later to run FP8 quantized models on Blackwell."
   )
 
@@ -370,8 +370,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     ARCHS "7.5;8.0;8.9+PTX"
     SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu"
     FLAGS "-DENABLE_SCALED_MM_C2X=1"
-    NO_ARCH_MSG "Not building scaled_mm_c2x as no compatible archs found in CUDA target architectures, "
-                "or is already covered by scaled_mm_c3x."
   )
 
   #
@@ -383,7 +381,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     SRCS "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu"
     FLAGS "-DENABLE_SPARSE_SCALED_MM_C3X=1"
     VERSION_MSG
-      "Not building sparse_scaled_mm_c3x: CUDA Compiler version is not >= 12.2.\n"
+      "Not building sparse_scaled_mm_c3x: CUDA Compiler version is not >= 12.2."
       "Please upgrade to CUDA 12.2 or later to run FP8 sparse quantized models on Hopper."
   )
 
@@ -423,7 +421,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
       "csrc/quantization/cutlass_w8a8/moe/moe_data.cu"
     FLAGS "-DENABLE_CUTLASS_MOE_SM90=1"
-    VERSION_MSG "Not building grouped_mm_c3x kernels as CUDA Compiler version is not >= 12.3, we recommend upgrading to CUDA 12.3 or later if you intend on running FP8 quantized MoE models on Hopper."
+    VERSION_MSG 
+      "Not building grouped_mm_c3x kernels as CUDA Compiler is less than 12.3."
+      "We recommend upgrading to CUDA 12.3 or later if you intend on running FP8 quantized MoE models on Hopper."
   )
 
   #
