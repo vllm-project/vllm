@@ -44,7 +44,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, try_get_safetensors_metadata, uses_mrope)
+    try_get_generation_config, try_get_safetensors_metadata,
+    try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
@@ -1427,6 +1428,18 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config)
+
+        tokenizer_config = try_get_tokenizer_config(
+            self.tokenizer,
+            trust_remote_code=self.trust_remote_code,
+            revision=self.tokenizer_revision)
+
+        if tokenizer_config is None:
+            return max_model_len
+
+        model_max_length = tokenizer_config.get("model_max_length",
+                                                max_model_len)
+        max_model_len = min(max_model_len, model_max_length)
         return max_model_len
 
 
