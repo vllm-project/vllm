@@ -60,6 +60,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -76,7 +77,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ):
         import deep_gemm as dg
         assert hidden_states.ndim == 3
 
@@ -93,7 +94,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
         workspace2 = _resize_cache(workspace2, (E, max_num_tokens, N // 2))
-        workspace3 = _resize_cache(workspace13, (E, max_num_tokens, K))
 
         # (from deepgemm docs) : A value hint (which is a value on CPU)
         # for the M expectation of each batch, correctly setting this value
@@ -122,8 +122,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a2q, a2q_scale),
                                                  (w2, w2_scale),
-                                                 out=workspace3,
+                                                 out=output,
                                                  masked_m=expert_num_tokens,
                                                  expected_m=expected_m)
-
-        return workspace3

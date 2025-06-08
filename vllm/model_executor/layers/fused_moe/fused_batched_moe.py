@@ -541,6 +541,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -557,7 +558,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ):
         assert hidden_states.dim() == 3
         assert expert_num_tokens is not None
         hidden_dim = hidden_states.size(-1)
@@ -569,8 +570,6 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         num_dp = self.world_size // self.dp_size
         num_experts = global_num_experts
-        out = _resize_cache(workspace13,
-                            (num_experts, max_num_tokens * num_dp, hidden_dim))
         num_local_experts = w1.size(0)
         assert num_local_experts == w1.size(0), (
             f"{num_local_experts} == {w1.size(0)}")
@@ -593,9 +592,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             tmp = _resize_cache(workspace2, (num, N))
             input = hidden_states[expert, :num, :] @ w1[expert].transpose(0, 1)
             self.activation(activation, tmp, input)
-            out[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
-
-        return out
+            output[expert, :num, :] = tmp @ w2[expert].transpose(0, 1)
 
 
 class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -656,6 +653,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -672,7 +670,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ):
         # Check constraints.
         if self.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), (
@@ -729,8 +727,6 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                             (E, max_num_tokens, N))
         intermediate_cache2 = _resize_cache(workspace2,
                                             (E, max_num_tokens, N // 2))
-        intermediate_cache3 = _resize_cache(workspace13,
-                                            (E, max_num_tokens, K))
 
         # MM1
         invoke_moe_batched_triton_kernel(A=hidden_states,
@@ -767,7 +763,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         invoke_moe_batched_triton_kernel(A=qintermediate_cache2,
                                          B=w2,
-                                         C=intermediate_cache3,
+                                         C=output,
                                          expert_num_tokens=expert_num_tokens,
                                          compute_type=compute_type,
                                          A_scale=a2q_scale,
@@ -778,4 +774,3 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                          use_int4_w4a16=self.use_int4_w4a16,
                                          config=config,
                                          block_shape=self.block_shape)
-        return intermediate_cache3
