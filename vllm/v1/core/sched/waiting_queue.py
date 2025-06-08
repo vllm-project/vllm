@@ -12,7 +12,7 @@ from vllm.v1.request import Request
 
 class WaitingQueue(ABC):
     """Abstract base class for request queues."""
-    
+
     @abstractmethod
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to the policy."""
@@ -32,7 +32,7 @@ class WaitingQueue(ABC):
         pass
 
     @abstractmethod
-    def extend_left_requests(self, requests: 'WaitingQueue') -> None:
+    def extend_left_requests(self, requests: WaitingQueue) -> None:
         """Extend left with requests from another WaitingQueue."""
         pass
 
@@ -142,7 +142,9 @@ class PriorityWaitingQueue(WaitingQueue):
         else:
             # Handle FCFS queue case
             for request in requests:
-                heapq.heappush(self._heap, (request.priority, request.arrival_time, request))
+                heapq.heappush(
+                    self._heap,
+                    (request.priority, request.arrival_time, request))
 
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
@@ -162,9 +164,9 @@ class PriorityWaitingQueue(WaitingQueue):
         return iter(self._heap)
 
 
-def create_waiting_queue(policy: str) -> WaitingQueue:
-    """Factory function to create the appropriate waiting queue based on policy."""
+def create_waiting_queue(policy: str, ) -> WaitingQueue:
+    """Create waiting queue based on scheduling policy."""
     if policy == "priority":
         return PriorityWaitingQueue()
     else:
-        return FCFSWaitingQueue() 
+        return FCFSWaitingQueue()
