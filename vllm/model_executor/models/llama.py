@@ -454,7 +454,7 @@ class LlamaModel(nn.Module):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         if not self.split_qkv:
             stacked_params_mapping = [
