@@ -149,19 +149,8 @@ def _create_default_sampling_metadata(
         no_penalties=True,
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
-        logits_procs=[
-            MinTokensLogitsProcessor(pin_memory=PIN_MEMORY_AVAILABLE,
-                                     device=device),
-            LogitBiasLogitsProcessor(pin_memory=PIN_MEMORY_AVAILABLE,
-                                     device=device),
-        ],
-        nongreedy_logits_procs=[
-            MinPLogitsProcessor(
-                pin_memory=PIN_MEMORY_AVAILABLE,
-                device=device,
-                # +1 for temporary swap space
-                max_num_reqs=MAX_NUM_REQS + 1)
-        ])
+        logits_procs=[],
+        nongreedy_logits_procs=[])
     return fake_sampling_metadata
 
 
