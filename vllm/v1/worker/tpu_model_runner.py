@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Optional, Union, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -19,6 +19,8 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -43,6 +45,8 @@ from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.kv_connector_model_runner_mixin import (
+    KVConnectorModelRunnerMixin)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (initialize_kv_cache_for_kv_sharing,
@@ -96,7 +100,7 @@ MIN_NUM_SEQS = 8
 # The dummy_run should be comprehensive, ensuring all potential input shapes and
 # branch predictions are included as subgraph inputs to facilitate
 # pre-compilation.
-class TPUModelRunner(LoRAModelRunnerMixin):
+class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def __init__(
         self,
@@ -836,8 +840,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            # Return empty ModelRunnerOutput if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            if not has_kv_transfer_group():
+                # Return empty ModelRunnerOutput if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            return self.kv_connector_no_forward(scheduler_output,
+                                                self.vllm_config)
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -858,11 +866,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=scheduler_output.total_num_scheduled_tokens):
+            self.maybe_setup_kv_connector(scheduler_output)
+
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
                 inputs_embeds=inputs_embeds,
             )
+            self.maybe_wait_for_kv_save()
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers(scheduler_output))
+
         hidden_states = self.select_hidden_states(hidden_states,
                                                   logits_indices)
         logits = self.compute_logits(hidden_states)
@@ -958,6 +972,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=None,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
 
         # Check there are no new graphs compiled - all the graphs should be
@@ -1430,6 +1446,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             for cache in self.kv_caches:
                 xs.mark_sharding(cache, self.mesh, (None, 'x', None, None))
 
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_kv_caches(kv_caches)
+            get_kv_transfer_group().set_host_xfer_buffer_ops(
+                d2h_copy_blocks, h2d_copy_blocks)
+
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:
             compiled_model = self.model.get_language_model().model
@@ -1642,6 +1663,93 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
+
+
+def _make_src_and_dst_indices(
+    src_block_ids: list[int],
+    dst_block_ids: list[int],
+    src_device: Union[torch.device, str],
+    dst_device: Union[torch.device, str],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    src_indices = torch.tensor(src_block_ids,
+                               device=src_device,
+                               dtype=torch.int64)
+    dst_indices = torch.tensor(dst_block_ids,
+                               device=dst_device,
+                               dtype=torch.int64)
+    return src_indices, dst_indices
+
+
+@torch.compile(backend="openxla")
+def _insert_blocks_to_tpu(
+    src_cache: torch.Tensor,
+    tpu_cache: torch.Tensor,
+    tpu_block_indices: torch.Tensor,
+) -> None:
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
+    tpu_cache[tpu_block_indices] = src_cache
+
+
+@torch.compile(backend="openxla")
+def _swap_out_tpu_blocks(
+    tpu_cache: torch.Tensor,
+    cpu_cache: torch.Tensor,
+    tpu_block_indices: torch.Tensor,
+    cpu_block_indices: torch.Tensor,
+) -> None:
+    """ tpu blocks to cpu blocks"""
+    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
+    _tpu_cache = tpu_cache[tpu_block_indices]
+    cpu_cache[cpu_block_indices] = _tpu_cache.cpu()
+
+
+def h2d_copy_blocks(
+    cpu_kv_caches: dict[str, torch.Tensor],
+    tpu_kv_caches: dict[str, torch.Tensor],
+    cpu_block_ids: list[int],
+    tpu_block_ids: list[int],
+    tpu_device: str,
+) -> None:
+    """Copy kv blocks from host xfer buffer to device."""
+    if not cpu_block_ids or not tpu_block_ids or len(cpu_block_ids) != len(
+            tpu_block_ids):
+        return
+    host_indices, device_indices = _make_src_and_dst_indices(
+        src_block_ids=cpu_block_ids,
+        dst_block_ids=tpu_block_ids,
+        src_device="cpu",
+        dst_device=tpu_device)
+    for layer_name in cpu_kv_caches:
+        host_tensor = cpu_kv_caches[layer_name]
+        device_tensor = tpu_kv_caches[layer_name]
+        sliced_device_tensor = host_tensor[host_indices].to(tpu_device)
+        _insert_blocks_to_tpu(sliced_device_tensor, device_tensor,
+                              device_indices)
+
+
+def d2h_copy_blocks(
+    cpu_kv_caches: dict[str, torch.Tensor],
+    tpu_kv_caches: dict[str, torch.Tensor],
+    cpu_block_ids: list[int],
+    tpu_block_ids: list[int],
+    tpu_device: str,
+) -> None:
+    """Copy kv blocks from device to host xfer buffer."""
+    if not cpu_block_ids or not tpu_block_ids or len(cpu_block_ids) != len(
+            tpu_block_ids):
+        return
+    device_indices, host_indices = _make_src_and_dst_indices(
+        src_block_ids=tpu_block_ids,
+        dst_block_ids=cpu_block_ids,
+        src_device=tpu_device,
+        dst_device="cpu")
+    for layer_name in cpu_kv_caches:
+        host_tensor = cpu_kv_caches[layer_name]
+        device_tensor = tpu_kv_caches[layer_name]
+        _swap_out_tpu_blocks(tpu_cache=device_tensor,
+                             cpu_cache=host_tensor,
+                             tpu_block_indices=device_indices,
+                             cpu_block_indices=host_indices)
 
 
 def replace_set_lora(model):
