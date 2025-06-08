@@ -139,9 +139,9 @@ class CudaPlatformBase(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
-        # TODO(lucas): handle this more gracefully
-        # Note: model_config may be None during testing
-        if model_config is not None and model_config.use_mla:
+        # TODO(seiji): remove after V0 deprecation
+        if (not envs.VLLM_USE_V1 and model_config is not None
+                and model_config.use_mla):
             # if `VLLM_ATTENTION_BACKEND` is not set and we are using MLA, then
             # we default to FlashMLA backend, so we need to force the blocksize
             # here

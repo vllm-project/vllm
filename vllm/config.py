@@ -99,6 +99,8 @@ _TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
     for task in tasks
 }
 
+V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
+
 HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
 
@@ -560,6 +562,7 @@ class ModelConfig:
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
+            defer_to_worker=envs.VLLM_USE_V1,
         )
 
         # Workaround for Gemma 2 which uses interleaved sliding window
@@ -3222,13 +3225,21 @@ def _get_and_verify_dtype(
     *,
     is_pooling_model: bool,
     revision: Optional[str] = None,
-) -> torch.dtype:
+    defer_to_worker: bool = False,
+) -> Union[torch.dtype, ModelDType]:
     config_dtype = _find_dtype(model_id, config, revision=revision)
     model_type = config.model_type
 
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":
+            if defer_to_worker:
+                # Don't resolve here - let the worker handle it
+                # This avoids using current_platform which might be incorrect
+                # in distributed setups or during config initialization
+                return "auto"
+
+            # TODO(seiji): remove after V0 deprecation
             # Set default dtype from model config
             torch_dtype = _resolve_auto_dtype(
                 model_type,

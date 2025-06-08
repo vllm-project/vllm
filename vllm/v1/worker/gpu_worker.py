@@ -112,6 +112,46 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+    def _resolve_hardware_dependent_config(self):
+        """Resolve configuration that depends on actual hardware capabilities.
+
+        This must be called after device initialization and distributed setup
+        to ensure current_platform is correctly set.
+        """
+        if self.model_config.dtype == "auto":
+            from vllm.config import (V1_SUPPORTED_DTYPES, _find_dtype,
+                                     _resolve_auto_dtype)
+
+            config_dtype = _find_dtype(self.model_config.model,
+                                       self.model_config.hf_config,
+                                       revision=self.model_config.revision)
+
+            self.model_config.dtype = _resolve_auto_dtype(
+                self.model_config.hf_config.model_type,
+                config_dtype,
+                is_pooling_model=(self.model_config.runner_type == "pooling"),
+            )
+
+        if self.model_config.dtype not in V1_SUPPORTED_DTYPES:
+            raise ValueError(
+                f"dtype 'auto' resolved to {self.model_config.dtype}, which is "
+                f"not supported in V1. "
+                f"Supported dtypes are {V1_SUPPORTED_DTYPES}.")
+
+        _check_if_gpu_supports_dtype(self.model_config.dtype)
+
+        # Configure FlashMLA backend if using MLA
+        if (self.vllm_config.model_config
+                and self.vllm_config.model_config.use_mla):
+            from vllm.attention.ops.flashmla import is_flashmla_supported
+            use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None
+                            or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
+            if (use_flashmla and is_flashmla_supported()[0]
+                    and self.vllm_config.cache_config.block_size != 64):
+                self.vllm_config.cache_config.block_size = 64
+                logger.info(
+                    "Forcing kv cache block size 64 for FlashMLA backend.")
+
     def init_device(self):
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
@@ -127,7 +167,6 @@ class Worker(WorkerBase):
             self.device = torch.device(f"cuda:{self.local_rank}")
             torch.cuda.set_device(self.device)
 
-            _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
             self.init_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
@@ -147,10 +186,14 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
+
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
+
+        self._resolve_hardware_dependent_config()
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
