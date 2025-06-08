@@ -127,12 +127,18 @@ endfunction()
 #     [NO_ARCH_MSG <line1> [<line2> ...]]
 #     [GEN_SCRIPT <path/to/generate_script.py>]
 #     [GEN_GLOB <glob_pattern_for_generated_sources>]
-# This will add SRCS if `CMAKE_CUDA_COMPILER_VERSION` is greater than or equal
-#  to `MIN_VERSION` and the `cuda_archs_loose_intersection` of `ARCHS` and 
-#  `CUDA_ARCHS` (taken from global scope) is not empty.
+# This will check if `CMAKE_CUDA_COMPILER_VERSION` is greater than or equal
+# to `MIN_VERSION` and the `cuda_archs_loose_intersection` of `ARCHS` and 
+# `CUDA_ARCHS` (taken from global scope) is not empty. If both these conditions
+# are met, it will:
+#  1) set the gencode flags of the sources in `SRCS` to be the 
+#     `cuda_archs_loose_intersection` of `ARCHS` and `CUDA_ARCHS`.
+#  2) append the sources in `SRCS` to the global `VLLM_EXT_SRC` variable.
+#  3) append the flags in `FLAGS` to the global `VLLM_GPU_FLAGS` variable.
+#
 # This will also run GEN_SCRIPT (if supplied and the hash of the script does not
-#  match the latest in the cmake cache), before globbing sources matching 
-#  GEN_GLOB and appending them alongside SRCS.
+# match the latest in the cmake cache), before globbing sources matching 
+# GEN_GLOB and appending them alongside SRCS (with the gencodes set)
 macro(optional_cuda_sources)
   set(oneValueArgs NAME MIN_VERSION GEN_SCRIPT GEN_GLOB OUT_SRCS_VAR)
   set(multiValueArgs ARCHS SRCS FLAGS VERSION_MSG NO_ARCH_MSG)
