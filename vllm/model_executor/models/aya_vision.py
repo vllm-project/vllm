@@ -1,4 +1,5 @@
-# SPDX-License-Identifier: Apache-2.0 Adapted from
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project Adapted from
 # https://github.com/huggingface/transformers/tree/main/src/transformers/models/aya_vision
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal, Optional, TypedDict, Union, cast
@@ -110,7 +111,13 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(AyaVisionConfig)
 
     def get_hf_processor(self, **kwargs: object) -> AyaVisionProcessor:
-        return self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
+        processor = self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
+
+        # Temporary workaround since this processor has multiple image tokens
+        # See https://github.com/huggingface/transformers/issues/38350
+        processor._check_special_mm_tokens = lambda *args, **kwargs: None
+
+        return processor
 
     def get_image_processor(self) -> GotOcr2ImageProcessor:
         return self.get_hf_processor().image_processor
@@ -187,9 +194,7 @@ class AyaVisionMultiModalProcessor(
         image_processor = hf_processor.image_processor
 
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
-        if (images :=
-                mm_data.get("images")) is not None and '<image>' in prompt:
-            assert isinstance(images, list)
+        if (images := mm_data.get("images")) is not None:
             parsed_images = (self._get_data_parser().parse_mm_data({
                 "image":
                 images

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
 import os
 import platform
@@ -46,8 +47,12 @@ class _Backend(enum.Enum):
     ROCM_AITER_MLA_VLLM_V1 = enum.auto()
     TORCH_SDPA = enum.auto()
     FLASHINFER = enum.auto()
+    FLASHINFER_VLLM_V1 = enum.auto()
     TRITON_MLA = enum.auto()  # Supported by V1
+    TRITON_MLA_VLLM_V1 = enum.auto()
+    FLASHMLA_VLLM_V1 = enum.auto()
     FLASHMLA = enum.auto()  # Supported by V1
+    CUTLASS_MLA_VLLM_V1 = enum.auto()
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
@@ -55,6 +60,7 @@ class _Backend(enum.Enum):
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
+    FLEX_ATTENTION = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
@@ -222,6 +228,30 @@ class Platform:
             return current_capability >= capability
 
         return current_capability.to_int() >= capability
+
+    @classmethod
+    def is_device_capability(
+        cls,
+        capability: Union[tuple[int, int], int],
+        device_id: int = 0,
+    ) -> bool:
+        """
+        Test whether this platform has exactly the specified device capability.
+
+        The `capability` argument can either be:
+
+        - A tuple `(major, minor)`.
+        - An integer `<major><minor>`. (See
+        [`DeviceCapability.to_int`][vllm.platforms.interface.DeviceCapability.to_int])
+        """
+        current_capability = cls.get_device_capability(device_id=device_id)
+        if current_capability is None:
+            return False
+
+        if isinstance(capability, tuple):
+            return current_capability == capability
+
+        return current_capability.to_int() == capability
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
