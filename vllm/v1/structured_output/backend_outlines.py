@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import json
-import re
 import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
+from regex import escape as regex_escape
 
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     OutlinesVocabulary, get_cache, get_vocabulary)
@@ -20,14 +21,21 @@ from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
 
 if TYPE_CHECKING:
     import outlines_core as oc
+    import outlines_core.json_schema as json_schema
 else:
     oc = LazyLoader("oc", globals(), "outlines_core")
+    json_schema = LazyLoader("json_schema", globals(),
+                             "outlines_core.json_schema")
 
 # Python 3.11+ sre_parse and sre_constants
 # are deprecated, so we must import them from re
 if sys.version_info >= (3, 11):
-    from re import _constants as sre_constants  # type: ignore[attr-defined]
-    from re import _parser as sre_parse  # type: ignore[attr-defined]
+    # Hack to get arround pre-commit regex module rule
+    # because going through re is the only way to get sre_parse
+    # and sre_constants in Python 3.11+
+    _re = importlib.import_module("re")
+    sre_parse = _re._parser
+    sre_constants = _re._constants
 else:
     import sre_constants
     import sre_parse
@@ -54,12 +62,12 @@ class OutlinesBackend(StructuredOutputBackend):
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
-            regex = oc.json_schema.build_regex_from_schema(grammar_spec)
+            regex = json_schema.build_regex_from_schema(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
             regex = grammar_spec
         elif request_type == StructuredOutputOptions.CHOICE:
             choices = ast.literal_eval(grammar_spec)
-            choices = [re.escape(c) for c in choices]
+            choices = [regex_escape(c) for c in choices]
             regex = "(" + "|".join(choices) + ")"
         else:
             raise ValueError(
@@ -161,10 +169,10 @@ def validate_structured_output_request_outlines(params: SamplingParams):
                 raise ValueError("Invalid JSON grammar specification.") from e
         else:
             schema = gd_params.json
-        pattern = oc.json_schema.build_regex_from_schema(schema)
+        pattern = json_schema.build_regex_from_schema(schema)
         validate_regex_is_buildable(pattern)
     elif gd_params.choice:
-        choices = [re.escape(str(choice)) for choice in gd_params.choice]
+        choices = [regex_escape(str(choice)) for choice in gd_params.choice]
         regex = "(" + "|".join(choices) + ")"
         validate_regex_is_buildable(regex)
     elif gd_params.grammar:
