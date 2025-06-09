@@ -11,15 +11,6 @@ from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
 from .piecewise.test_simple import SillyModel
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v1(monkeypatch):
-    """
-    TODO(rzou): The rest of tests/compile runs VLLM_USE_V1=0 right now,
-    I'll switch them over later.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '1')
-
-
 @pytest.mark.parametrize("enabled", [True, False])
 def test_use_cudagraphs(enabled):
     assert vllm.envs.VLLM_USE_V1
