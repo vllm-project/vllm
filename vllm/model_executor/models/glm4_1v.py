@@ -48,6 +48,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -68,6 +69,7 @@ from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 
+from ..layers.activation import SiluAndMul
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
 from .qwen2_vl import _qwen2vl_field_config, apply_rotary_pos_emb_vision
@@ -169,40 +171,28 @@ class Glm4vVisionMLP(nn.Module):
         in_features: int,
         hidden_features: int,
         bias: bool = False,
-        act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
     ):
         super().__init__()
-        self.gate_proj = ColumnParallelLinear(
-            in_features,
-            hidden_features,
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=in_features,
+            output_sizes=[hidden_features] * 2,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_proj",
-        )
-        self.up_proj = ColumnParallelLinear(
-            in_features,
-            hidden_features,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.up_proj",
         )
         self.down_proj = RowParallelLinear(
             hidden_features,
             in_features,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.down_proj",
         )
-        self.act_fn = act_fn
+        self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor):
-        x_gate, _ = self.gate_proj(x)
-        x_gate = self.act_fn(x_gate)
-        x_up, _ = self.up_proj(x)
-        x_down, _ = self.down_proj(x_gate * x_up)
-        return x_down
+        x, _ = self.gate_up_proj(x)
+        x = self.act_fn(x)
+        x, _ = self.down_proj(x)
+        return x
 
 
 def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
@@ -312,11 +302,6 @@ class Glm4vVisionAttention(nn.Module):
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
-        if x.shape[0] == 5000:
-            from safetensors.torch import save_file
-
-            save_file({"x": x}, "/mnt/x.safetensors")
-            print("save with:\n", x)
         x, _ = self.qkv(x)
 
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
@@ -394,7 +379,6 @@ class Glm4vVisionBlock(nn.Module):
         dim: int,
         num_heads: int,
         mlp_hidden_dim: int,
-        act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Optional[Callable[[int], nn.Module]] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -414,10 +398,8 @@ class Glm4vVisionBlock(nn.Module):
         self.mlp = Glm4vVisionMLP(
             dim,
             mlp_hidden_dim,
-            act_fn=act_fn,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
         )
 
     def forward(
@@ -479,7 +461,6 @@ class Glm4vPatchMerger(nn.Module):
         context_dim: int,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
-        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = d_model
@@ -488,39 +469,28 @@ class Glm4vPatchMerger(nn.Module):
                                          bias=bias,
                                          gather_output=True)
         self.post_projection_norm = nn.LayerNorm(self.hidden_size)
-        self.gate_proj = ColumnParallelLinear(
-            self.hidden_size,
-            context_dim,
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=self.hidden_size,
+            output_sizes=[context_dim] * 2,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_proj",
-        )
-        self.up_proj = ColumnParallelLinear(
-            self.hidden_size,
-            context_dim,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.up_proj",
         )
         self.down_proj = RowParallelLinear(
             context_dim,
             self.hidden_size,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.down_proj",
         )
-        self.act_fn = F.silu
+        self.act_fn = SiluAndMul()
         self.extra_activation_func = nn.GELU()
 
     def forward(self, x: torch.Tensor):
         x, _ = self.proj(x)
         x = self.extra_activation_func(self.post_projection_norm(x))
-        x_gate, _ = self.gate_proj(x)
-        x_up, _ = self.up_proj(x)
-        x_gate_activated = self.act_fn(x_gate)
-        x_multiplied = x_gate_activated * x_up
-        x_down, _ = self.down_proj(x_multiplied)
-        return x_down
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
 
 
 class Glm4vVisionEmbeddings(nn.Module):
@@ -707,7 +677,6 @@ class Glm4vVisionTransformer(nn.Module):
             d_model=vision_config.out_hidden_size,
             context_dim=vision_config.intermediate_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.merger",
             bias=False,
         )
         self.embeddings = Glm4vVisionEmbeddings(vision_config)
@@ -821,6 +790,8 @@ class Glm4vVisionTransformer(nn.Module):
             ("attn.qkv.", "attn.q.", "q"),
             ("attn.qkv.", "attn.k.", "k"),
             ("attn.qkv.", "attn.v.", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
