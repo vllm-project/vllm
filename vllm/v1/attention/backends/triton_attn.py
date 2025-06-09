@@ -68,9 +68,6 @@ class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
         if self.use_full_cuda_graph and for_cudagraph_capture:
-            assert envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION, \
-                "full_cuda_graph is only supported with " \
-                "VLLM_V1_USE_PREFILL_DECODE_ATTENTION enabled"
             seq_lens.fill_(1)
 
         block_table.slot_mapping[:num_actual_tokens].copy_(
