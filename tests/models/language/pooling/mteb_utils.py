@@ -284,7 +284,7 @@ def mteb_test_rerank_models(hf_runner,
         st_main_score = run_mteb_rerank(hf_model,
                                         tasks=MTEB_RERANK_TASKS,
                                         languages=MTEB_RERANK_LANGS)
-        st_dtype = next(hf_model.model.parameters()).dtype
+        st_dtype = next(hf_model.model.model.parameters()).dtype
 
     print("VLLM:", vllm_dtype, vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
