@@ -849,9 +849,10 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
         if do_resize:
             resized_height, resized_width = smart_resize(
+                num_frames=temporal_patch_size,
                 height=image_height,
                 width=image_width,
-                factor=patch_size * merge_size,
+                factor=patch_size * merge_size
             )
             preprocessed_size = ImageSize(width=resized_width,
                                           height=resized_height)
