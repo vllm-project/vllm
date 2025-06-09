@@ -133,6 +133,30 @@ If you do not see the table, please wait till the benchmark finish running.
 The json version of the table (together with the json version of the benchmark) will be also attached to the markdown file.
 The raw benchmarking results (in the format of json files) are in the `Artifacts` tab of the benchmarking.
 
+The `compare-json-results.py` helps to compare benchmark results json files converted using `convert-results-json-to-markdown.py`.
+Once users trigger the benchmark script manually, the results will be generated under benchmark/results folder along with the benchmark_results.md and benchmark_results.json.  
+This `compare-json-results.py` compares two benchmark_results.json files with performance ratio among Output Tput, Median TTFT and Median TPOT.
+
+Here is an example using the script to compare result_a and result_b without detail test name.
+`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json --ignore_test_name`
+
+|    | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
+|----|----------------------------------------|----------------------------------------|----------|
+| 0  | 142.633982                             | 156.526018                             | 1.097396 |
+| 1  | 241.620334                             | 294.018783                             | 1.216863 |
+| 2  | 218.298905                             | 262.664916                             | 1.203235 |
+| 3  | 242.743860                             | 299.816190                             | 1.235113 |
+
+Here is an example using the script to compare result_a and result_b with detail test name.
+`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`
+|   | results_a/benchmark_results.json_name | results_a/benchmark_results.json | results_b/benchmark_results.json_name | results_b/benchmark_results.json | perf_ratio        |
+|---|---------------------------------------------|----------------------------------------|---------------------------------------------|----------------------------------------|----------|
+| 0 | serving_llama8B_tp1_sharegpt_qps_1          | 142.633982                             | serving_llama8B_tp1_sharegpt_qps_1          | 156.526018                             | 1.097396 |
+| 1 | serving_llama8B_tp1_sharegpt_qps_16         | 241.620334                             | serving_llama8B_tp1_sharegpt_qps_16         | 294.018783                             | 1.216863 |
+| 2 | serving_llama8B_tp1_sharegpt_qps_4          | 218.298905                             | serving_llama8B_tp1_sharegpt_qps_4          | 262.664916                             | 1.203235 |
+| 3 | serving_llama8B_tp1_sharegpt_qps_inf        | 242.743860                             | serving_llama8B_tp1_sharegpt_qps_inf        | 299.816190                             | 1.235113 |
+| 4 | serving_llama8B_tp2_random_1024_128_qps_1   | 96.613390                              | serving_llama8B_tp4_random_1024_128_qps_1   | 108.404853                             | 1.122048 |
+
 ## Nightly test details
 
 See [nightly-descriptions.md](nightly-descriptions.md) for the detailed description on test workload, models and docker containers of benchmarking other llm engines.
