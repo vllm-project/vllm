@@ -391,7 +391,9 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
             return
 
         tokens = getattr(self.config, "classifier_from_token", None)
-        assert tokens is not None and len(tokens) == 2
+        assert tokens is not None and len(tokens) == 2, \
+            ("Load Qwen3 Reranker?, see: "
+             "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/qwen3_reranker.py")
 
         self.config.num_labels = 1
         model_config = self.vllm_config.model_config
