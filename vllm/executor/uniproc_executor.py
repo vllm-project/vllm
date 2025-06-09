@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
-import threading
 import torch.distributed as dist
 
-from concurrent.futures import ThreadPoolExecutor
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.executor.executor_base import ExecutorBase
@@ -128,22 +128,29 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         if self.max_concurrent_batches > 1:
             self.pp_lock = threading.Lock()
             self.excecute_model_thread_pool = ThreadPoolExecutor(
-                max_workers=self.max_concurrent_batches, thread_name_prefix="external_exec_")
+                max_workers=self.max_concurrent_batches,
+                thread_name_prefix="external_exec_")
 
     @property
     def max_concurrent_batches(self) -> int:
         return self.parallel_config.pipeline_parallel_size
-    
-    def execute_model_pp(self, device: int, args: Tuple = (),kwargs: Optional[Dict] = None):
+
+    def execute_model_pp(self,
+                         device: int,
+                         args: Tuple = (),
+                         kwargs: Optional[Dict] = None):
         assert self.pp_lock is not None, "self.pp_lock is not initialized."
         with self.pp_lock:
             device = torch.cuda.set_device(device)
-            answer = run_method(self.driver_worker, "execute_model", args, kwargs)
+            answer = run_method(self.driver_worker, "execute_model", args,
+                                kwargs)
             # transfer the answer from the last PP rank
             # to first PP rank with async torch.dist P2P
+
             answer = get_pp_group().broadcast_object_async(
                 answer, src=self.parallel_config.pipeline_parallel_size - 1)
-        return answer.wait()
+
+        return answer
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -160,7 +167,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
                 "self.excecute_model_thread_pool is not initialized."
             answer = self.excecute_model_thread_pool.submit(
                 self.execute_model_pp, device, args, kwargs)
-
+            answer = TorchFuture(answer)
         else:
             answer = run_method(self.driver_worker, method, args, kwargs)
 
@@ -184,3 +191,14 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         dist.all_reduce(a_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
         dist.all_reduce(b_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
         return a_tensor.item(), b_tensor.item()
+
+
+class TorchFuture(Future):
+
+    def __init__(self, _future: Future) -> None:
+        self.future = _future
+        super().__init__()
+
+    def result(self, timeout=None):
+        output = self.future.result(timeout)
+        return output.wait()

@@ -97,6 +97,7 @@ def _get_unique_name(name: str) -> str:
 
 _groups: dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
 
+
 def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 

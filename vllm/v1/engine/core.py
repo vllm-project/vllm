@@ -3,7 +3,6 @@
 import os
 import queue
 import signal
-import torch
 import sys
 import threading
 import time
