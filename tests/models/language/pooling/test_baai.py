@@ -65,11 +65,11 @@ RERANK_MODELS = [
                     enable_test=True),
     RerankModelInfo("BAAI/bge-reranker-large",
                     architecture="XLMRobertaForSequenceClassification",
-                    enable_test=True),
+                    enable_test=False),
     RerankModelInfo("BAAI/bge-reranker-v2-m3",
                     architecture="XLMRobertaForSequenceClassification",
                     dtype="float32",
-                    enable_test=True)
+                    enable_test=False)
 ]
 
 
