@@ -426,6 +426,9 @@ class SamplingParams(
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError("min_p must be in [0, 1], got "
                              f"{self.min_p}.")
+        if self.min_p > 0.0 and self.temperature == 0.0:
+            raise ValueError("min_p > 0.0 requires random sampling "
+                             "but temperature == 0.0")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.")
