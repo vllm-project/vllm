@@ -92,6 +92,51 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
     ]
 
 
+@pytest.fixture(scope="function")
+def server_return_token_ids(default_server_args):
+    # Enable --return_tokens_as_token_ids
+    args = default_server_args + ["--return_tokens_as_token_ids"]
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client_return_token_ids(server_return_token_ids):
+    async with server_return_token_ids.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest.mark.asyncio
+async def test_return_tokens_as_token_text_offset(
+        client_return_token_ids: openai.AsyncOpenAI):
+    prompt = "Hello, my name is"
+    completion = await client_return_token_ids.completions.create(
+        model=MODEL_NAME,
+        prompt=prompt,
+        max_tokens=10,
+        temperature=0.0,
+        logprobs=0,
+        seed=42,
+    )
+
+    choice = completion.choices[0]
+    returned_offsets = choice.logprobs.text_offset
+    generated_text = choice.text
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    expected_offsets = [0]
+    token_ids = []
+    for token in completion.choices[0].logprobs.tokens:
+        token_ids.append(int(token.removeprefix('token_id:')))
+    tokens = tokenizer.convert_ids_to_tokens(token_ids)
+    for i in range(len(token_ids) - 1):
+        expected_offsets.append(expected_offsets[-1] + len(tokens[i]))
+
+    assert returned_offsets == expected_offsets
+    # The largest offset should be smaller than the text length
+    assert max(returned_offsets) < len(generated_text)
+
+
 @pytest.fixture(scope="module",
                 params=["", "--disable-frontend-multiprocessing"])
 def server(default_server_args, request):
