@@ -271,6 +271,19 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             "KVCacheCoordinator assumes the block_size of full attention "
             "layers is divisible by other layers now.")
 
+        if max(self.full_attention_group_ids) < min(self.other_group_ids):
+            self.full_attn_first = True
+        elif max(self.other_group_ids) < min(self.full_attention_group_ids):
+            self.full_attn_first = False
+        else:
+            raise ValueError(
+                "HybridKVCacheCoordinator assumes the full "
+                "attention group ids and other attention group ids "
+                "do not interleave, either full attention group ids "
+                "are before other attention group ids or vice versa."
+                "This is for simplifying merging hit_blocks_full_attn and "
+                "hit_blocks_other_attn to hit_blocks.")
+
     def find_longest_cache_hit(
         self,
         block_hashes: list[BlockHash],
@@ -329,7 +342,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             del group_hit_blocks[hit_length // self.full_attention_block_size:]
 
         # Merge the hit blocks of full attention and other attention.
-        return hit_blocks_full_attn + hit_blocks_other_attn, hit_length
+        if self.full_attn_first:
+            hit_blocks = hit_blocks_full_attn + hit_blocks_other_attn
+        else:
+            hit_blocks = hit_blocks_other_attn + hit_blocks_full_attn
+        return hit_blocks, hit_length
 
 
 def get_kv_cache_coordinator(
@@ -341,8 +358,6 @@ def get_kv_cache_coordinator(
                                          use_eagle, enable_caching,
                                          caching_hash_fn,
                                          enable_kv_cache_events)
-    else:
-        return HybridKVCacheCoordinator(kv_cache_config, max_model_len,
-                                        use_eagle, enable_caching,
-                                        caching_hash_fn,
-                                        enable_kv_cache_events)
+    return HybridKVCacheCoordinator(kv_cache_config, max_model_len, use_eagle,
+                                    enable_caching, caching_hash_fn,
+                                    enable_kv_cache_events)
