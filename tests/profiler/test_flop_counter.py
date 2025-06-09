@@ -56,7 +56,8 @@ class TestFlopCounter:
         # Expected: batch_size * 2 * M * N * K = 3 * 2 * 4 * 6 * 5 = 720 FLOPs
         assert total_flops == 720
 
-    @pytest.mark.xfail(not torch.cuda.is_available(), )
+    @pytest.mark.xfail(not torch.cuda.is_available(),
+                       reason="CUDA not available")
     def test_softmax_flops(self):
         """Test FLOP counting for softmax operations."""
         with FlopContextManager() as counter:
@@ -69,7 +70,8 @@ class TestFlopCounter:
         total_flops = counter.get_total_flops()
         assert total_flops > 0
 
-    @pytest.mark.xfail(not torch.cuda.is_available(), )
+    @pytest.mark.xfail(not torch.cuda.is_available(),
+                       reason="CUDA not available")
     def test_reset_functionality(self):
         """Test counter reset functionality."""
         with FlopContextManager() as counter:
