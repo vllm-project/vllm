@@ -87,6 +87,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                          and _valid_deep_gemm(hidden_states, w1, w2))
 
         experts = self.deep_gemm_expert if use_deep_gemm else self.triton_expert
+        assert experts is not None
 
         experts.apply(
             output,
