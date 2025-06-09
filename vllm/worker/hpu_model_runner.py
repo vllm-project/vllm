@@ -835,6 +835,59 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         quant_config = os.getenv("QUANT_CONFIG", None) is not None
         return (self.model_config.quantization == "inc" or quant_config)
 
+    def _maybe_init_alibi_biases(self) -> None:
+        layers = None
+        layer_alibi_config = None
+        if (not hasattr(self.model, "config")
+                or not hasattr(self.model.config, "architectures")):
+            pass
+        elif "BaichuanForCausalLM" in self.model.config.architectures:
+            if self.model.config.hidden_size != 4096:
+                layers = self.model.model.layers
+                layer_alibi_config = lambda layer: \
+                    layer.self_attn.attn \
+                        if hasattr(layer, 'self_attn') else None
+        elif "JAISLMHeadModel" in self.model.config.architectures:
+            if self.model.config.position_embedding_type == "alibi":
+                layers = self.model.transformer.h
+                layer_alibi_config = lambda layer: \
+                    layer.attn.attn \
+                        if hasattr(layer, 'attn') else None
+        elif "FalconForCausalLM" in self.model.config.architectures:
+            if self.model.config.alibi:
+                layers = self.model.transformer.h
+                layer_alibi_config = lambda layer: \
+                    layer.self_attention.attn \
+                        if hasattr(layer, 'self_attention') else None
+        elif "MPTForCausalLM" in self.model.config.architectures:
+            if self.model.config.attn_config['alibi']:
+                layers = self.model.transformer.blocks
+                layer_alibi_config = lambda layer: \
+                    layer.attn.attn \
+                        if hasattr(layer, 'attn') else None
+        elif "BloomForCausalLM" in self.model.config.architectures:
+            layers = self.model.transformer.h
+            layer_alibi_config = lambda layer: \
+                layer.self_attention.attn \
+                    if hasattr(layer, 'self_attention') else None
+
+        if (layers is not None and layer_alibi_config is not None):
+            _, max_seq_len = self.bucketing_ctx.get_max_prompt_shape()
+            self.use_alibi = True
+            prev_attn = None
+            for layer in layers:
+                attn = layer_alibi_config(layer)
+                if attn is None or not hasattr(attn, "impl"):
+                    continue
+                if (hasattr(attn.impl, "_maybe_init_alibi_biases")):
+                    attn.impl._maybe_init_alibi_biases(
+                        max_seq_len=max_seq_len,
+                        prev_attn=prev_attn,
+                    )
+                prev_attn = attn
+        else:
+            self.use_alibi = False
+
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
         if self.model_config.quantization == 'inc' or \
@@ -907,6 +960,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 self.model = self.model.to("hpu")
                 htcore.mark_step()
 
+            self._maybe_init_alibi_biases()
             hidden_layer_markstep_interval = int(
                 os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
             model_config = getattr(self.model, "config", None)
@@ -1432,6 +1486,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
+            alibi_blocks=None,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
             enable_kv_scales_calculation=False,
             input_positions=input_positions,
@@ -1665,6 +1720,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                    dtype=torch.long,
                                                    device='cpu')
 
+        alibi_blocks = None
+        if self.use_alibi:
+            alibi_blocks = self._compute_alibi_block(block_tables, seq_lens,
+                                                     len(block_groups))
+            alibi_blocks = alibi_blocks.to(  # type: ignore
+                self.device, non_blocking=True)
+
         block_list = torch.tensor(block_list, dtype=torch.int, device='cpu')
         block_groups = torch.tensor(block_groups,
                                     dtype=torch.int,
@@ -1718,6 +1780,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_prefill_tokens=0,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
+            alibi_blocks=alibi_blocks,
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
             input_positions=input_positions)
@@ -1729,6 +1792,70 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                      lora_requests=lora_requests,
                                      slot_mapping=slot_mapping,
                                      lora_ids=lora_ids)
+
+    def _compute_alibi_block(self, block_tables, seq_lens, num_blocks):
+        """
+        Compute the ALiBi offsets for each block during decoding.
+
+        For each block in each sequence, this function assigns position-based
+        offsets according to ALiBi logic. It returns a tensor that captures
+        these offsets for all sequences and blocks, which is then used for
+        decode-time ALiBi bias creation.
+
+        Args:
+            block_tables:
+                A list of lists, where each inner list contains block indices
+                assigned to a particular sequence.
+            seq_lens:
+                A list of sequence lengths corresponding to each sequence.
+            num_blocks:
+                The total number of blocks across all sequences for which
+                ALiBi offsets need to be computed.
+
+        Returns:
+            A torch.Tensor of shape [num_blocks, block_size], containing ALiBi
+            offsets for each block.
+        """
+        # Create intermediary and output structures on the CPU
+        max_block_table_len = max(
+            len(block_table) for block_table in block_tables)
+        alibi_offsets = torch.arange(
+            -max_block_table_len * self.block_size + 1,
+            1,
+            dtype=torch.long,
+            device='cpu',
+        )
+        alibi_blocks = torch.zeros(
+            (num_blocks, self.block_size),
+            dtype=torch.long,
+            device='cpu',
+        )
+
+        # Use lists to accumulate data for each block
+        block_data: List[List[int]] = [[] for _ in range(num_blocks)]
+
+        # Assign biases per token
+        for batch_idx, block_table in enumerate(block_tables):
+            seq_len = seq_lens[batch_idx]
+            for seq_idx, block_idx in enumerate(block_table):
+                # Calculate the number of valid positions in the current block
+                valid_length = seq_len - seq_idx * self.block_size
+                if valid_length > 0:
+                    current_block_length = min(valid_length, self.block_size)
+                    offset_end = current_block_length - valid_length
+                    if offset_end == 0:
+                        block_data[block_idx] = alibi_offsets[
+                            -valid_length:].tolist()
+                    else:
+                        block_data[block_idx] = alibi_offsets[
+                            -valid_length:offset_end].tolist()
+
+        # Populate the alibi_blocks tensor from the accumulated data
+        for block_idx, data in enumerate(block_data):
+            alibi_blocks[block_idx, :len(data)] = torch.tensor(
+                data, dtype=torch.long)
+
+        return alibi_blocks
 
     def prepare_input_tensors(
         self,
@@ -2033,6 +2160,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             'block_size',
             'block_groups',
             'input_positions',
+            'alibi_blocks',
         ])
         return attention_metadata
 
