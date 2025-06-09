@@ -3,25 +3,22 @@
 import json
 import multiprocessing
 import os
-import shutil
+import sys
+from shutil import which
 
-
-def find_executable(executable_name, common_paths=None):
-    """Find an executable in PATH or common paths."""
-    if path := shutil.which(executable_name):
-        return path
-
-    if common_paths:
-        for p in common_paths:
-            full_path = os.path.join(p, executable_name)
-            if os.path.isfile(full_path) and os.access(full_path, os.X_OK):
-                return full_path
-    return None
+try:
+    # Try to get CUDA_HOME from PyTorch installation, which is the
+    # most reliable source of truth for vLLM's build.
+    from torch.utils.cpp_extension import CUDA_HOME
+except ImportError:
+    print("Warning: PyTorch not found. "
+          "Falling back to CUDA_HOME environment variable.")
+    CUDA_HOME = os.environ.get("CUDA_HOME")
 
 
 def get_python_executable():
-    """Get the current Python executable."""
-    return shutil.which("python") or shutil.which("python3")
+    """Get the current Python executable, which is used to run this script."""
+    return sys.executable
 
 
 def get_cpu_cores():
@@ -35,7 +32,19 @@ def generate_presets(output_path="CMakeUserPresets.json"):
     print("Attempting to detect your system configuration...")
 
     # Detect NVCC
-    nvcc_path = find_executable("nvcc")
+    nvcc_path = None
+    if CUDA_HOME:
+        prospective_path = os.path.join(CUDA_HOME, "bin", "nvcc")
+        if os.path.exists(prospective_path):
+            nvcc_path = prospective_path
+            print("Found nvcc via torch.utils.cpp_extension.CUDA_HOME: "
+                  f"{nvcc_path}")
+
+    if not nvcc_path:
+        nvcc_path = which("nvcc")
+        if nvcc_path:
+            print(f"Found nvcc in PATH: {nvcc_path}")
+
     if not nvcc_path:
         nvcc_path_input = input(
             "Could not automatically find 'nvcc'. Please provide the full "
@@ -44,20 +53,20 @@ def generate_presets(output_path="CMakeUserPresets.json"):
     print(f"Using NVCC path: {nvcc_path}")
 
     # Detect Python executable
-    default_python_executable = get_python_executable()
-    python_executable_prompt = (
-        "Enter the path to your Python executable for vLLM development "
-        "(typically from your virtual environment, e.g., "
-        "/home/user/venvs/vllm/bin/python).\n"
-        "Press Enter to use the current detected Python: "
-        f"'{default_python_executable}': ")
-    python_executable = input(python_executable_prompt).strip()
-    if not python_executable:
-        if not default_python_executable:
+    python_executable = get_python_executable()
+    if python_executable:
+        print(f"Found Python via sys.executable: {python_executable}")
+    else:
+        python_executable_prompt = (
+            "Could not automatically find Python executable. Please provide "
+            "the full path to your Python executable for vLLM development "
+            "(typically from your virtual environment, e.g., "
+            "/home/user/venvs/vllm/bin/python): ")
+        python_executable = input(python_executable_prompt).strip()
+        if not python_executable:
             raise ValueError(
-                "Could not determine Python executable. "
-                "Please ensure it's in your PATH or provide it manually.")
-        python_executable = default_python_executable
+                "Could not determine Python executable. Please provide it "
+                "manually.")
 
     print(f"Using Python executable: {python_executable}")
 
@@ -74,12 +83,45 @@ def generate_presets(output_path="CMakeUserPresets.json"):
     print(f"VLLM project root detected as: {project_root}")
 
     # Ensure python_executable path is absolute or resolvable
-    if not os.path.isabs(python_executable) and shutil.which(
-            python_executable):
-        python_executable = os.path.abspath(shutil.which(python_executable))
+    if not os.path.isabs(python_executable) and which(python_executable):
+        python_executable = os.path.abspath(which(python_executable))
     elif not os.path.isabs(python_executable):
         print(f"Warning: Python executable '{python_executable}' is not an "
               "absolute path and not found in PATH. CMake might not find it.")
+
+    cache_variables = {
+        "CMAKE_CUDA_COMPILER": nvcc_path,
+        "CMAKE_BUILD_TYPE": "Release",
+        "VLLM_PYTHON_EXECUTABLE": python_executable,
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}",
+        "CMAKE_CUDA_FLAGS": "",
+        "NVCC_THREADS": str(nvcc_threads),
+    }
+
+    # Detect compiler cache
+    if which("sccache"):
+        print("Using sccache for compiler caching.")
+        for launcher in ("C", "CXX", "CUDA", "HIP"):
+            cache_variables[f"CMAKE_{launcher}_COMPILER_LAUNCHER"] = "sccache"
+    elif which("ccache"):
+        print("Using ccache for compiler caching.")
+        for launcher in ("C", "CXX", "CUDA", "HIP"):
+            cache_variables[f"CMAKE_{launcher}_COMPILER_LAUNCHER"] = "ccache"
+    else:
+        print("No compiler cache ('ccache' or 'sccache') found.")
+
+    configure_preset = {
+        "name": "release",
+        "binaryDir": "${sourceDir}/cmake-build-release",
+        "cacheVariables": cache_variables,
+    }
+    if which("ninja"):
+        print("Using Ninja generator.")
+        configure_preset["generator"] = "Ninja"
+        cache_variables["CMAKE_JOB_POOLS"] = f"compile={cmake_jobs}"
+    else:
+        print("Ninja not found, using default generator. "
+              "Build may be slower.")
 
     presets = {
         "version":
@@ -90,23 +132,7 @@ def generate_presets(output_path="CMakeUserPresets.json"):
             "minor": 26,
             "patch": 1
         },
-        "configurePresets": [{
-            "name": "release",
-            "generator": "Ninja",
-            "binaryDir": "${sourceDir}/cmake-build-release",
-            "cacheVariables": {
-                "CMAKE_CUDA_COMPILER": nvcc_path,
-                "CMAKE_C_COMPILER_LAUNCHER": "ccache",
-                "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
-                "CMAKE_CUDA_COMPILER_LAUNCHER": "ccache",
-                "CMAKE_BUILD_TYPE": "Release",
-                "VLLM_PYTHON_EXECUTABLE": python_executable,
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}",
-                "CMAKE_CUDA_FLAGS": "",
-                "NVCC_THREADS": str(nvcc_threads),
-                "CMAKE_JOB_POOLS": f"compile={cmake_jobs}",
-            },
-        }],
+        "configurePresets": [configure_preset],
         "buildPresets": [{
             "name": "release",
             "configurePreset": "release",
@@ -132,9 +158,8 @@ def generate_presets(output_path="CMakeUserPresets.json"):
         print(
             f"1. Ensure you are in the vLLM root directory: cd {project_root}")
         print("2. Initialize CMake: cmake --preset release")
-        print(
-            "3. Build+install: cmake --build --preset release --target install"
-        )
+        print("3. Build+install: cmake --build --preset release "
+              "--target install")
 
     except OSError as e:
         print(f"Error writing file: {e}")
