@@ -180,8 +180,8 @@ def _fake_apply_greedy_logits_processors(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    """Imitate greedy-compatible logit processor application in engine
-    core"""
+    """Imitate greedy-compatible logit processor application
+    in engine"""
     for processor in sampling_metadata.logitsprocs.greedy_list:
         logits = processor.apply(logits)
     return logits
@@ -410,8 +410,8 @@ def test_min_tokens_penalty(device: str, batch_size: int):
                                                   sampling_metadata)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
+        _, stop_token_ids = min_tokens_dict.get(batch_idx, (0, set()))
         for token_id in range(VOCAB_SIZE):
-            _, stop_token_ids = min_tokens_dict.get(batch_idx, (0, set()))
             if token_id in stop_token_ids:
                 assert logits[batch_idx][token_id] == -float("inf")
             else:
