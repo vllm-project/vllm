@@ -4,26 +4,28 @@
 
 namespace vllm {
 
-template <typename InT, typename OutT, int VEC, typename ScaOp>
+template <int VEC_SIZE, typename InT, typename OutT, typename ScaOp>
 struct DefaultVecOp {
   ScaOp scalar_op;
 
   __device__ __forceinline__ void operator()(
-      vec_n_t<OutT, VEC>& dst, const vec_n_t<InT, VEC>& src) const {
+      vec_n_t<OutT, VEC_SIZE>& dst, const vec_n_t<InT, VEC_SIZE>& src) const {
 #pragma unroll
-    for (int i = 0; i < VEC; ++i) {
+    for (int i = 0; i < VEC_SIZE; ++i) {
       scalar_op(dst.val[i], src.val[i]);
     }
   }
 };
 
-template <typename InT, typename OutT, typename VecOp, typename ScaOp>
+template <int VEC_SIZE, typename InT, typename OutT, typename VecOp,
+          typename ScaOp>
 __device__ inline void vectorize_with_alignment(
     const InT* in, OutT* out, int len, int tid, int stride,
     VecOp&& vec_op,       // vec_n_t<InT,16> -> vec_n_t<OutT,16>
     ScaOp&& scalar_op) {  // InT -> OutT
-  constexpr int VEC = 16;
-  constexpr int WIDTH = VEC * sizeof(InT);  // 64 B
+  static_assert(VEC_SIZE > 0 && (VEC_SIZE & (VEC_SIZE - 1)) == 0,
+                "VEC_SIZE must be a positive power-of-two");
+  constexpr int WIDTH = VEC_SIZE * sizeof(InT);  // eg: 64 B
   uintptr_t addr = reinterpret_cast<uintptr_t>(in);
 
   int misalignment_offset = addr & (WIDTH - 1);       // addr % 64
@@ -41,9 +43,9 @@ __device__ inline void vectorize_with_alignment(
   out += prefix_elems;
   len -= prefix_elems;
 
-  int num_vec = len / VEC;
-  using vin_t = vec_n_t<InT, VEC>;
-  using vout_t = vec_n_t<OutT, VEC>;
+  int num_vec = len / VEC_SIZE;
+  using vin_t = vec_n_t<InT, VEC_SIZE>;
+  using vout_t = vec_n_t<OutT, VEC_SIZE>;
   auto* v_in = reinterpret_cast<const vin_t*>(in);
   auto* v_out = reinterpret_cast<vout_t*>(out);
 
@@ -55,20 +57,20 @@ __device__ inline void vectorize_with_alignment(
   }
 
   // 3. handle the tail
-  int tail_start = num_vec * VEC;
+  int tail_start = num_vec * VEC_SIZE;
   for (int i = tid + tail_start; i < len; i += stride) {
     scalar_op(out[i], in[i]);
   }
 }
 
-template <typename InT, typename OutT, typename ScaOp>
+template <int VEC_SIZE, typename InT, typename OutT, typename ScaOp>
 __device__ __forceinline__ void vectorize_with_alignment(const InT* in,
                                                          OutT* out, int len,
                                                          int tid, int stride,
                                                          ScaOp&& scalar_op) {
-  using Vec = DefaultVecOp<InT, OutT, 16, std::decay_t<ScaOp>>;
-  vectorize_with_alignment(in, out, len, tid, stride, Vec{scalar_op},
-                           std::forward<ScaOp>(scalar_op));
+  using Vec = DefaultVecOp<VEC_SIZE, InT, OutT, std::decay_t<ScaOp>>;
+  vectorize_with_alignment<VEC_SIZE>(in, out, len, tid, stride, Vec{scalar_op},
+                                     std::forward<ScaOp>(scalar_op));
 }
 
 }  // namespace vllm
