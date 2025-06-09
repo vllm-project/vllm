@@ -284,6 +284,7 @@ def test_schedule_partial_requests():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
     scheduler.update_from_output(output, model_runner_output)
 
@@ -334,6 +335,7 @@ def test_no_mm_input_chunking():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
     scheduler.update_from_output(output, model_runner_output)
 
@@ -397,6 +399,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
     scheduler.update_from_output(output, model_runner_output)
 
@@ -421,6 +424,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
     scheduler.update_from_output(output1, model_runner_output)
     output2 = scheduler.schedule()
@@ -474,7 +478,8 @@ def test_stop_via_update_from_output():
                             11]],  # First request hits EOS, second continues
         spec_token_ids=None,
         logprobs=None,
-        prompt_logprobs_dict={})
+        prompt_logprobs_dict={},
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -524,7 +529,8 @@ def test_stop_via_update_from_output():
                            [13, 14]],  # First request hits stop token
         spec_token_ids=None,
         logprobs=None,
-        prompt_logprobs_dict={})
+        prompt_logprobs_dict={},
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -573,7 +579,8 @@ def test_stop_via_update_from_output():
                            [13]],  # First request exceeds max_tokens
         spec_token_ids=None,
         logprobs=None,
-        prompt_logprobs_dict={})
+        prompt_logprobs_dict={},
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -615,7 +622,8 @@ def test_stop_via_update_from_output():
         sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
         spec_token_ids=None,
         logprobs=None,
-        prompt_logprobs_dict={})
+        prompt_logprobs_dict={},
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -664,6 +672,7 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
     scheduler.update_from_output(scheduler_output0, model_runner_output)
 
@@ -681,6 +690,7 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
     scheduler.update_from_output(scheduler_output1, model_runner_output)
 
@@ -731,6 +741,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         spec_token_ids=spec_tokens,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
     engine_core_outputs = scheduler.update_from_output(output,
                                                        model_runner_output)
@@ -770,6 +781,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
     engine_core_outputs = scheduler.update_from_output(output,
                                                        model_runner_output)
@@ -897,6 +909,7 @@ def test_kv_connector_basic():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
 
     # Ensure ScheduleOutput is correct.
@@ -942,6 +955,7 @@ def test_kv_connector_basic():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
 
     # We should get a local cache hit of NUM_TOKENS_PREFIX and
@@ -1008,6 +1022,7 @@ def test_kv_connector_unable_to_allocate():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
 
     # Just one request should be running.
@@ -1088,6 +1103,7 @@ def test_kv_connector_handles_preemption():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
 
     # All can be scheduled - 1st token.
@@ -1182,6 +1198,7 @@ def make_output(scheduler: Scheduler):
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
 
 
