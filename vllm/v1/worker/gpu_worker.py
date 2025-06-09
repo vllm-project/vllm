@@ -232,19 +232,20 @@ class Worker(WorkerBase):
             self.cache_config.gpu_memory_utilization
         available_kv_cache_memory = memory_for_current_instance - peak_memory
 
-        msg = ("The current vLLM instance can use "
-               f"Initial free memory: {self.init_gpu_memory / GiB_bytes:.2f} GiB"
-               " x gpu_memory_utilization "
-               f"({self.cache_config.gpu_memory_utilization:.2f})"
-               f" = {memory_for_current_instance / GiB_bytes:.2f} GiB\n"
-               "Non torch memory takes "
-               f"{non_torch_alloc_bytes / GiB_bytes:.2f} GiB"
-               " and pytorch activation peak memory takes "
-               f"{peak_memory / GiB_bytes:.2f} GiB"
-               f"and available KVCache memory is {available_kv_cache_memory / GiB_bytes:.2f} GiB\n"
-               "The rest of the memory reserved for KV Cache is "
-               f"{available_kv_cache_memory / GiB_bytes:.2f} GiB."
-               )
+        msg = (
+            "The current vLLM instance can use "
+            f"Initial free memory: {self.init_gpu_memory / GiB_bytes:.2f} GiB"
+            " x gpu_memory_utilization "
+            f"({self.cache_config.gpu_memory_utilization:.2f})"
+            f" = {memory_for_current_instance / GiB_bytes:.2f} GiB\n"
+            "Non torch memory takes "
+            f"{non_torch_alloc_bytes / GiB_bytes:.2f} GiB"
+            " and pytorch activation peak memory takes "
+            f"{peak_memory / GiB_bytes:.2f} GiB"
+            "and available KVCache memory is "
+            f"{available_kv_cache_memory / GiB_bytes:.2f} GiB\n"
+            "The rest of the memory reserved for KV Cache is "
+            f"{available_kv_cache_memory / GiB_bytes:.2f} GiB.")
         logger.info(msg)
 
         return int(available_kv_cache_memory)
