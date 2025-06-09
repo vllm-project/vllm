@@ -39,7 +39,10 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               RowParallelLinear,
+                                               AttnRowParallelLinear,
+                                               AttnQKVParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -111,8 +114,11 @@ class Qwen2Attention(nn.Module):
         dual_chunk_attention_config: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__()
+        from vllm.distributed import (
+                              get_lm_tensor_model_parallel_world_size,
+                              get_lm_tensor_model_parallel_rank)
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = get_lm_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -131,9 +137,8 @@ class Qwen2Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-        self.dual_chunk_attention_config = dual_chunk_attention_config
-
-        self.qkv_proj = QKVParallelLinear(
+   
+        self.qkv_proj = AttnQKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
@@ -142,7 +147,7 @@ class Qwen2Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
-        self.o_proj = RowParallelLinear(
+        self.o_proj = AttnRowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
