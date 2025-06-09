@@ -5,6 +5,7 @@ import copy
 import gc
 import time
 import weakref
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
@@ -12,6 +13,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadataBuilder)
@@ -1727,6 +1729,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return prompt_logprobs_dict
 
+    @contextmanager
+    def maybe_randomize_inputs(self, input_ids: torch.Tensor):
+        """
+        Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
+        This is to help balance expert-selection
+         - during profile_run
+         - during DP rank dummy run 
+        """
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
+        if not randomize_inputs:
+            yield
+        else:
+            import functools
+
+            @functools.cache
+            def rand_input_ids() -> torch.Tensor:
+                return torch.randint_like(
+                    self.input_ids,
+                    low=0,
+                    high=self.model_config.get_vocab_size(),
+                    dtype=input_ids.dtype)
+
+            logger.debug("Randomizing dummy data for DP Rank")
+            input_ids.copy_(rand_input_ids()[:input_ids.size(0)],
+                            non_blocking=True)
+            yield
+            input_ids.fill_(0)
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -1807,7 +1838,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens, None, False)
 
-            with set_forward_context(
+            with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
