@@ -58,6 +58,9 @@ class EmbeddingMixin(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(ctx.lora_request
                                                                )
+            adapter_id = (ctx.lora_request.lora_name
+                          if ctx.lora_request else None)
+            self._set_tokenizer(tokenizer, adapter_id)
 
             if ctx.prompt_adapter_request is not None:
                 raise NotImplementedError("Prompt adapter is not supported "
@@ -87,7 +90,6 @@ class EmbeddingMixin(OpenAIServing):
                 (ctx.request_prompts,
                  ctx.engine_prompts) = await self._preprocess_completion(
                      ctx.request,
-                     tokenizer,
                      ctx.request.input,
                      truncate_prompt_tokens=ctx.truncate_prompt_tokens,
                      add_special_tokens=ctx.request.add_special_tokens,
