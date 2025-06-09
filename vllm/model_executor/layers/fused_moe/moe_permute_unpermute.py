@@ -18,7 +18,7 @@ def _moe_permute(
     expert_map: Optional[torch.Tensor],
     block_m: int,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
-           Optional[torch.Tensor]]:
+           torch.Tensor]:
     """
     Determine the sorted_token_ids, expert_ids for the given problem size.
     Permute the hidden states and scales according to `sorted_token_ids`.
