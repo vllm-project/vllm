@@ -6,7 +6,6 @@ from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -148,7 +147,7 @@ class Glm4vVideoLoader(OpenCVVideoBackend):
     @classmethod
     def load_bytes(cls,
                    data: bytes,
-                   num_frames: int = -1) -> Tuple[npt.NDArray, Dict]:
+                   num_frames: int = -1) -> tuple[npt.NDArray, dict]:
         import cv2
 
         backend = cls().get_cv2_video_api()
