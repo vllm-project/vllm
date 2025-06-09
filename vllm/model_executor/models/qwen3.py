@@ -38,14 +38,13 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import LastPool
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import (IntermediateTensors, PoolerOutput,
-                           PoolingSequenceGroupOutput)
+from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsCrossEncoding, SupportsLoRA, SupportsPP
 from .qwen2 import Qwen2MLP as Qwen3MLP
@@ -326,48 +325,36 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
 class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
                                      SupportsCrossEncoding):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         pooler_config = vllm_config.model_config.pooler_config
-        assert pooler_config is not None
 
+        self.vllm_config = vllm_config
         self.config = config
-        self.model_config = vllm_config.model_config
-        self.lora_config = lora_config
-        self.quant_config = quant_config
+        self.maybe_is_qwen3_rerank()
+
         self.model = Qwen3Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
-        self.prefix = prefix
-        self.num_labels = getattr(config, "num_labels", 2)
-        if self.num_labels == 2:
-            self.num_labels = 1
+        self.score = RowParallelLinear(config.hidden_size,
+                                       config.num_labels,
+                                       quant_config=quant_config,
+                                       input_is_parallel=False,
+                                       bias=False,
+                                       prefix=maybe_prefix(prefix, "score"))
 
-        self.classifier = RowParallelLinear(config.hidden_size,
-                                            self.num_labels,
-                                            quant_config=quant_config,
-                                            input_is_parallel=False,
-                                            bias=False,
-                                            prefix=maybe_prefix(
-                                                prefix, "classifier"))
-        self._pooler = LastPool(normalize=False, softmax=False)
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=False,
+            softmax=True)
 
     def forward(
         self,
@@ -375,35 +362,43 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
-        return hidden_states
+    ) -> torch.Tensor:
+        return self.model(input_ids=input_ids,
+                          positions=positions,
+                          inputs_embeds=inputs_embeds,
+                          intermediate_tensors=intermediate_tensors)
 
     def pooler(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> PoolerOutput:
+    ) -> Optional[PoolerOutput]:
         hidden_states = self._pooler.extract_states(hidden_states,
                                                     pooling_metadata)
-        logits, _ = self.classifier(hidden_states)
-
-        if self.num_labels == 1:
-            scores = logits.squeeze(-1).to(torch.float32).sigmoid()
-        else:
-            batch_scores = torch.nn.functional.log_softmax(logits.to(
-                torch.float32),
-                                                           dim=1)
-            scores = batch_scores[:, 1].exp()
-
-        pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]
+        logits, _ = self.score(hidden_states)
+        pooled_data = self._pooler.head(logits, pooling_metadata)
+        pooled_outputs = [
+            self._pooler.build_output(data.squeeze(-1)) for data in pooled_data
+        ]
         return PoolerOutput(outputs=pooled_outputs)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
+
+    def maybe_is_qwen3_rerank(self):
+        if not getattr(self.config, "is_qwen3_rerank", False):
+            return
+
         tokens = getattr(self.config, "classifier_from_token", None)
-        if tokens is not None:
+        assert tokens is not None and len(tokens) == 2
+
+        self.config.num_labels = 1
+        model_config = self.vllm_config.model_config
+
+        original_load_weights = self.load_weights
+
+        def load_weights(weights: Iterable[tuple[str, torch.Tensor]]):
             if get_pp_group().is_last_rank:
                 if self.config.tie_word_embeddings:
                     self.lm_head = self.model.embed_tokens
@@ -416,38 +411,21 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
             else:
                 self.lm_head = PPMissingLayer()
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
-        )
+            loaded_weights = original_load_weights(weights)
 
-        loaded_weights = loader.load_weights(weights)
+            from vllm.transformers_utils.tokenizer import get_tokenizer
+            tokenizer = get_tokenizer(
+                model_config.tokenizer,
+                revision=model_config.tokenizer_revision,
+                tokenizer_mode=model_config.tokenizer_mode,
+                trust_remote_code=model_config.trust_remote_code)
 
-        if tokens is None:
-            return loaded_weights
-
-        assert len(tokens) == self.num_labels or (len(tokens) == 2
-                                                  and self.num_labels == 1)
-
-        from vllm.transformers_utils.tokenizer import get_tokenizer
-        tokenizer = get_tokenizer(
-            self.model_config.tokenizer,
-            revision=self.model_config.tokenizer_revision,
-            tokenizer_mode=self.model_config.tokenizer_mode,
-            trust_remote_code=self.model_config.trust_remote_code)
-
-        if len(tokens) == 2:
             a = tokenizer.convert_tokens_to_ids(tokens[0])
             b = tokenizer.convert_tokens_to_ids(tokens[1])
-            self.classifier.weight.data = self.lm_head.weight.data[
-                b] - self.lm_head.weight.data[a]
-        else:
-            for i, token in enumerate(tokens):
-                token_id = tokenizer.convert_tokens_to_ids(token)
-                self.classifier.weight.data[i] = self.lm_head.weight.data[
-                    token_id]
+            weight = self.lm_head.weight.data[b] - self.lm_head.weight.data[a]
+            self.score.weight.data.copy_(weight)
 
-        del self.lm_head
-        loaded_weights.add("classifier.weight")
-        return loaded_weights
+            del self.lm_head
+            loaded_weights.add("classifier.weight")
+
+        self.load_weights = load_weights

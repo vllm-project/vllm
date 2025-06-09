@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
 
-model_name = "Qwen/Qwen3-Reranker-4B"
+model_name = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
 
 text_1 = "What is the capital of France?"
 texts_2 = [
@@ -13,20 +13,7 @@ texts_2 = [
 def vllm_reranker(model_name):
     from vllm import LLM
 
-    model = LLM(model=model_name,
-                task="score",
-                hf_overrides={
-                    "architectures": ["Qwen3ForSequenceClassification"],
-                    "classifier_from_token": ["no", "yes"],
-                    "is_qwen3_rerank": True,
-                }, dtype="float32")
-
-    text_1 = "What is the capital of France?"
-    texts_2 = [
-        "The capital of Brazil is Brasilia.",
-        "The capital of France is Paris.",
-    ]
-
+    model = LLM(model=model_name, task="score")
     outputs = model.score(text_1, texts_2)
 
     return [output.outputs.score for output in outputs]
