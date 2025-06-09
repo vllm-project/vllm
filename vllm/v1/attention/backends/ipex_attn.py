@@ -201,27 +201,22 @@ class IPEXAttentionImpl(AttentionImpl):
             value_cache,
             attn_metadata.slot_mapping,
             self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
+            layer._k_scale_float,
+            layer._v_scale_float,
         )
 
-        ipex_ops.chunked_prefill(
+        ipex_ops.flash_attn_varlen_func(
+            output[:num_actual_tokens],
             query[:num_actual_tokens],
             key_cache,
             value_cache,
-            output[:num_actual_tokens],
             attn_metadata.query_start_loc,
             attn_metadata.seq_start_loc,
-            None,
-            attn_metadata.block_table,
-            self.alibi_slopes,
             attn_metadata.max_query_len,
             attn_metadata.max_seq_len,
-            0.0,
             self.scale,
-            False,
-            True,
-            False,
-            None,
+            is_casual=True,
+            block_table=attn_metadata.block_table,
+            alibi_slopes=self.alibi_slopes,
         )
         return output

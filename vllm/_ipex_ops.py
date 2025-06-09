@@ -236,32 +236,28 @@ class ipex_ops:
         value_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
-        k_scale: float,
-        v_scale: float,
+        k_scale_float: float,
+        v_scale_flaot: float,
     ) -> None:
         assert kv_cache_dtype == "auto"
+        # TODO: support FP8 kv cache.
         ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
             key, value, key_cache, value_cache, slot_mapping)
 
     @staticmethod
-    def chunked_prefill(
+    def flash_attn_varlen_func(
+        output: torch.Tensor,
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        output: torch.Tensor,
         cu_seqlens_q: torch.Tensor,
-        cu_seqlens_k: torch.Tensor,
-        seq_used_k: Optional[torch.Tensor],
+        cu_seqlens_kv: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_kv: int,
+        scale: float,
+        is_casual: bool,
         block_table: torch.Tensor,
         alibi_slopes: Optional[torch.Tensor],
-        max_seqlen_q: int,
-        max_seqlen_k: int,
-        p_dropout: float,
-        softmax_scale: float,
-        zero_tensors: bool,
-        is_casual: bool,
-        return_softmax: bool,
-        gen_: Optional[torch.Generator],
     ):
         return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
             output,
@@ -269,10 +265,10 @@ class ipex_ops:
             key_cache,
             value_cache,
             cu_seqlens_q,
-            cu_seqlens_k,
+            cu_seqlens_kv,
             max_seqlen_q,
-            max_seqlen_k,
-            softmax_scale,
+            max_seqlen_kv,
+            scale,
             is_casual,
             block_table,
             alibi_slopes,
