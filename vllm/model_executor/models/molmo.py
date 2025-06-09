@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
@@ -965,7 +966,7 @@ def select_tiling(
 
 class MolmoProcessorWrapper:
     """
-    Wraps {class}`MolmoProcessor` so that it can be called directly.
+    Wraps `MolmoProcessor` so that it can be called directly.
 
     The original definition can be found here:
     https://huggingface.co/allenai/Molmo-7B-D-0924/blob/main/preprocessing_molmo.py

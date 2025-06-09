@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
 
@@ -54,13 +55,11 @@ class LlamaModel(nn.Module):
             speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
-        # if PP disabled then draft will share embed with target
-        if get_pp_group().world_size > 1:
-            self.embed_tokens = VocabParallelEmbedding(
-                self.config.vocab_size,
-                self.config.hidden_size,
-                prefix=maybe_prefix(prefix, "embed_tokens"),
-            )
+        self.embed_tokens = VocabParallelEmbedding(
+            self.config.vocab_size,
+            self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
+        )
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
@@ -130,13 +129,15 @@ class LlamaModel(nn.Module):
 
 class EagleLlamaForCausalLM(LlamaForCausalLM):
 
-    def __init__(self, *, vllm_config: VllmConfig, start_layer_id: int = 0):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
+        target_layer_num = vllm_config.model_config.get_num_layers(
+            vllm_config.parallel_config)
         self.model = LlamaModel(vllm_config=vllm_config,
                                 prefix="model",
-                                start_layer_id=start_layer_id)
+                                start_layer_id=target_layer_num)
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
@@ -161,4 +162,4 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             if "lm_head" not in name:
                 name = "model." + name
             model_weights[name] = loaded_weight
-        return loader.load_weights(model_weights.items())
+        loader.load_weights(model_weights.items())

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utils for determining which subset of model tests belong to a specific
 modality, getting all combinations (similar to pytest's parametrization),
 handling multimodal placeholder substitution, and so on.
@@ -83,7 +84,7 @@ def get_parametrized_options(test_settings: dict[str, VLMTestInfo],
                 test_info.num_video_frames)
 
         # No sizes passed for custom inputs, since inputs are directly provided
-        if test_type != VLMTestType.CUSTOM_INPUTS:
+        if test_type not in (VLMTestType.CUSTOM_INPUTS, VLMTestType.AUDIO):
             wrapped_sizes = get_wrapped_test_sizes(test_info, test_type)
             if wrapped_sizes is None:
                 raise ValueError(
@@ -91,7 +92,7 @@ def get_parametrized_options(test_settings: dict[str, VLMTestInfo],
             iter_kwargs["size_wrapper"] = wrapped_sizes
 
         #Otherwise expand the custom test options instead
-        else:
+        elif test_type == VLMTestType.CUSTOM_INPUTS:
             if test_info.custom_test_opts is None:
                 raise ValueError("Test has type CUSTOM_INPUTS, but none given")
             iter_kwargs["custom_test_opts"] = test_info.custom_test_opts
@@ -136,8 +137,8 @@ def get_wrapped_test_sizes(
             ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=factor)
             for factor in EMBEDDING_SIZE_FACTORS
         ])
-    # Custom inputs have preprocessed inputs
-    elif test_type == VLMTestType.CUSTOM_INPUTS:
+    # Audio and Custom inputs have preprocessed inputs
+    elif test_type in (VLMTestType.AUDIO, VLMTestType.CUSTOM_INPUTS):
         return tuple()
 
     size_factors = test_info.image_size_factors \

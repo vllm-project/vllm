@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal, Optional, TypedDict, Union
@@ -681,9 +682,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
                 batch.
             pixel_values: The pixels in each input image.
         
-        :::{seealso}
-        {class}`Blip2ImageInputs`
-        :::
+        Info:
+            [Blip2ImageInputs][]
         """
 
         if intermediate_tensors is not None:

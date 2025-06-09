@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import os
@@ -383,3 +384,25 @@ async def test_delayed_generator(async_engine, stop):
     assert final_output is not None
     assert len(final_output.outputs[0].token_ids) == 10
     assert final_output.finished
+
+
+@pytest.mark.asyncio(scope="module")
+async def test_invalid_argument(async_engine):
+    scheduler_config = await async_engine.get_scheduler_config()
+
+    if scheduler_config.num_scheduler_steps != 1:
+        pytest.skip("no need to test this one with multistep")
+
+    sampling_params = SamplingParams(
+        temperature=0,
+        min_tokens=10,
+        max_tokens=10,
+    )
+
+    # Targeting specific DP rank only supported in v1 multi-instance DP
+    with pytest.raises(ValueError):
+        async for _ in async_engine.generate("test",
+                                             sampling_params,
+                                             request_id=uid(),
+                                             data_parallel_rank=0):
+            pass

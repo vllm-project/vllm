@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import functools
@@ -115,8 +116,19 @@ def apply_w8a8_block_fp8_linear(
     output_shape = [*input.shape[:-1], weight.shape[0]]
 
     if current_platform.is_cuda():
-        use_cutlass = cutlass_block_fp8_supported and (
-            weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
+        if current_platform.has_device_capability(100):
+
+            def ceil_div(x: int, y: int) -> int:
+                return (x + y - 1) // y
+
+            use_cutlass = cutlass_block_fp8_supported and (
+                ceil_div(weight.shape[0], 128) == weight_scale.shape[0]
+                and ceil_div(weight.shape[1], 128) == weight_scale.shape[1])
+        else:
+            # TODO: update this after switching to public sm90 block scale gemm
+            # as it also supports weight.shape % 128 != 0
+            use_cutlass = cutlass_block_fp8_supported and (
+                weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
     else:
         use_cutlass = False
 
@@ -124,24 +136,10 @@ def apply_w8a8_block_fp8_linear(
         use_cutlass, use_aiter_and_is_supported)
 
     if use_cutlass:
-        rows, cols = input_2d.shape
-        # Blackwell GPUs (SM100) require row dimensions to be multiple of 4 for
-        # optimal tensor core usage. Can be removed when targeting platforms
-        # without this constraint.
-        should_pad = current_platform.has_device_capability(
-            100) and rows % 4 != 0
-        if should_pad:
-            input_2d = torch.nn.functional.pad(input_2d,
-                                               (0, 0, 0, 4 - (rows % 4)),
-                                               value=0).contiguous()
-
         q_input, x_scale = per_token_group_quant_fp8(
             input_2d, block_size[1], column_major_scales=use_cutlass)
-
         output = w8a8_blockscale_func(q_input, weight, x_scale, weight_scale,
                                       block_size, input.dtype)
-        if should_pad:
-            output = output[:rows, :]
 
     else:
         q_input, x_scale = per_token_group_quant_fp8(
