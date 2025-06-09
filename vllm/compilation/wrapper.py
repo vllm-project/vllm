@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 import sys
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 import torch
 
@@ -40,15 +41,20 @@ class TorchCompileWrapperWithCustomDispatcher:
             # compiling the forward method
 
             backend = vllm_config.compilation_config.init_backend(vllm_config)
+            options = None
+            if isinstance(backend, str) and backend == "inductor":
+                options = get_current_vllm_config(
+                ).compilation_config.inductor_compile_config
 
             compiled_callable = torch.compile(
                 self.forward,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend)
+                backend=backend,
+                options=options)
 
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
-        self.compiled_codes: List[CodeType] = []
+        self.compiled_codes: list[CodeType] = []
         torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
 
         # read the env var to determine whether to use the custom dispatcher

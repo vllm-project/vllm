@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-from typing import TYPE_CHECKING, Callable, Dict, Type
+from typing import TYPE_CHECKING, Callable
 
 import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
@@ -18,7 +19,7 @@ logger = init_logger(__name__)
 
 
 class KVConnectorFactory:
-    _registry: Dict[str, Callable[[], Type[KVConnectorBaseType]]] = {}
+    _registry: dict[str, Callable[[], type[KVConnectorBaseType]]] = {}
 
     @classmethod
     def register_connector(cls, name: str, module_path: str,
@@ -27,7 +28,7 @@ class KVConnectorFactory:
         if name in cls._registry:
             raise ValueError(f"Connector '{name}' is already registered.")
 
-        def loader() -> Type[KVConnectorBaseType]:
+        def loader() -> type[KVConnectorBaseType]:
             module = importlib.import_module(module_path)
             return getattr(module, class_name)
 
@@ -58,10 +59,20 @@ class KVConnectorFactory:
             raise ValueError("Attempting to initialize a V1 Connector, "
                              f"but found {envs.VLLM_USE_V1=}")
 
-        connector_name = config.kv_transfer_config.kv_connector
-        connector_cls = cls._registry[connector_name]()
+        kv_transfer_config = config.kv_transfer_config
+        connector_name = kv_transfer_config.kv_connector
+        if connector_name in cls._registry:
+            connector_cls = cls._registry[connector_name]()
+        else:
+            connector_module_path = kv_transfer_config.kv_connector_module_path
+            if connector_module_path is None:
+                raise ValueError(
+                    f"Unsupported connector type: {connector_name}")
+            connector_module = importlib.import_module(connector_module_path)
+            connector_cls = getattr(connector_module, connector_name)
         assert issubclass(connector_cls, KVConnectorBase_V1)
-        logger.info("Creating v1 connector with name: %s", connector_name)
+        logger.info("Creating v1 connector with name: %s and engine_id: %s",
+                    connector_name, kv_transfer_config.engine_id)
         # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
         # Scheduler connector:
         # - Co-locate with scheduler process
@@ -105,3 +116,13 @@ KVConnectorFactory.register_connector(
     "LMCacheConnectorV1",
     "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector",
     "LMCacheConnectorV1")
+
+KVConnectorFactory.register_connector(
+    "NixlConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
+    "NixlConnector")
+
+KVConnectorFactory.register_connector(
+    "MultiConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector",
+    "MultiConnector")

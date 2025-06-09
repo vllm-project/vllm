@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only GraniteMoeHybrid model."""
 # Added by the IBM Team, 2025
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -65,13 +67,15 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
                                 activation=config.hidden_act,
                                 quant_config=quant_config)
 
-        self.block_sparse_moe = GraniteMoeMoE(
-            num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.block_sparse_moe")
+        self.block_sparse_moe = None
+        if getattr(config, "num_local_experts", 0) > 0:
+            self.block_sparse_moe = GraniteMoeMoE(
+                num_experts=config.num_local_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.block_sparse_moe")
 
         self.shared_mlp = None if \
             getattr(config, 'shared_intermediate_size', 0) == 0 \
@@ -103,13 +107,19 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         if self.shared_mlp is None:
-            hidden_states = self.block_sparse_moe(hidden_states)
+            if self.block_sparse_moe is not None:
+                hidden_states = self.block_sparse_moe(hidden_states)
+            # else: skip
         else:
             # create a copy since block_sparse_moe modifies in-place
-            moe_hidden_states = hidden_states.clone()
-            moe_hidden_states = self.block_sparse_moe(moe_hidden_states)
-            hidden_states = moe_hidden_states + self.shared_mlp(hidden_states)
-            del moe_hidden_states
+            if self.block_sparse_moe is not None:
+                moe_hidden_states = hidden_states.clone()
+                moe_hidden_states = self.block_sparse_moe(moe_hidden_states)
+                hidden_states = moe_hidden_states + self.shared_mlp(
+                    hidden_states)
+                del moe_hidden_states
+            else:
+                hidden_states = self.shared_mlp(hidden_states)
         hidden_states = residual + hidden_states * self.residual_multiplier
 
         return hidden_states, residual
@@ -135,13 +145,15 @@ class GraniteMoeHybridAttentionDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn")
 
-        self.block_sparse_moe = GraniteMoeMoE(
-            num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.block_sparse_moe")
+        self.block_sparse_moe = None
+        if getattr(config, "num_local_experts", 0) > 0:
+            self.block_sparse_moe = GraniteMoeMoE(
+                num_experts=config.num_local_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.block_sparse_moe")
 
         self.shared_mlp = None if \
             getattr(config, 'shared_intermediate_size', 0) == 0 \
@@ -176,13 +188,19 @@ class GraniteMoeHybridAttentionDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         if self.shared_mlp is None:
-            hidden_states = self.block_sparse_moe(hidden_states)
+            if self.block_sparse_moe is not None:
+                hidden_states = self.block_sparse_moe(hidden_states)
+            # else: skip
         else:
             # create a copy since block_sparse_moe modifies in-place
-            moe_hidden_states = hidden_states.clone()
-            moe_hidden_states = self.block_sparse_moe(moe_hidden_states)
-            hidden_states = moe_hidden_states + self.shared_mlp(hidden_states)
-            del moe_hidden_states
+            if self.block_sparse_moe is not None:
+                moe_hidden_states = hidden_states.clone()
+                moe_hidden_states = self.block_sparse_moe(moe_hidden_states)
+                hidden_states = moe_hidden_states + self.shared_mlp(
+                    hidden_states)
+                del moe_hidden_states
+            else:
+                hidden_states = self.shared_mlp(hidden_states)
         hidden_states = residual + hidden_states * self.residual_multiplier
 
         return hidden_states, residual
@@ -381,10 +399,10 @@ class GraniteMoeHybridModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         def _load(n, p):
             param = params_dict[n]
@@ -538,7 +556,7 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def _get_mamba_cache_shape(
-            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+            self) -> tuple[tuple[int, int], tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = self.config.hidden_size
 
@@ -578,7 +596,7 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

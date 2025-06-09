@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
 Punica: Multi-Tenant LoRA Serving. 
 https://arxiv.org/abs/2310.18547
 """
-
-from typing import List
 
 import torch
 import triton
@@ -98,7 +97,7 @@ def _lora_shrink_kernel(input_ptr, lora_ptr, out_ptr, M, N, K,
 @torch.inference_mode()
 def _lora_shrink(
     inputs: torch.Tensor,  #  shape [num_tokens, hidden_size]
-    lora_a_weights: List[
+    lora_a_weights: list[
         torch.Tensor],  # shape [num_loras, lora_rank, hidden_size]
     output_tensor: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
     token_lora_mapping: torch.Tensor,  # shape [num_tokens]
@@ -112,7 +111,7 @@ def _lora_shrink(
     """
     Args:
         inputs (torch.Tensor): Input tensor
-        lora_a_weights (List[torch.Tensor]): LoRA weights
+        lora_a_weights (list[torch.Tensor]): LoRA weights
         output_tensor (torch.Tensor): output tensor
         token_lora_mapping (torch.Tensor): A tensor mapping each input token
             to the lora-id related to that token. A value of -1 indicates that
@@ -219,7 +218,7 @@ def _lora_shrink(
 
 def _lora_shrink_fake(
     inputs: torch.Tensor,
-    lora_a_weights: List[torch.Tensor],
+    lora_a_weights: list[torch.Tensor],
     output_tensor: torch.Tensor,
     token_lora_mapping: torch.Tensor,
     token_indices_sorted_by_lora_ids: torch.Tensor,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -21,9 +22,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only IBM Granite speeech model."""
+"""Inference-only IBM Granite speech model."""
 import math
-from typing import Iterable, Mapping, Optional, Set, Tuple, TypedDict, Union
+from collections.abc import Iterable, Mapping
+from typing import Optional, TypedDict, Union
 
 import torch
 import torch.nn.functional as F
@@ -625,7 +627,7 @@ class GraniteSpeechForConditionalGeneration(
         audio_embed_sizes: torch.Tensor,
     ) -> torch.Tensor:
         """Calculate the input features mask, which will generally be used
-        to mask the the padded features for all entries in the batch except
+        to mask the padded features for all entries in the batch except
         for those with the most audio features.
 
         Args:
@@ -704,10 +706,11 @@ class GraniteSpeechForConditionalGeneration(
     def get_multimodal_embeddings(
         self,
         **kwargs: object,
-    ) -> Optional[MultiModalEmbeddings]:
+    ) -> MultiModalEmbeddings:
         """Compute the audio embeddings if audio inputs are present."""
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
+            return []
             return None
         audio_features = self._process_audio_input(audio_input)
         return audio_features
@@ -763,8 +766,8 @@ class GraniteSpeechForConditionalGeneration(
 
     def load_weights(
         self,
-        weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> Set[str]:
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

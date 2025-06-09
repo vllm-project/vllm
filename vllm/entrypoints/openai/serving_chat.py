@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import json
-import re
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -10,13 +10,15 @@ from typing import Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
+import regex as re
 from fastapi import Request
 from pydantic import TypeAdapter
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
-                                         ConversationMessage)
+                                         ConversationMessage,
+                                         random_tool_call_id)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -196,7 +198,7 @@ class OpenAIServingChat(OpenAIServing):
         except (ValueError, TypeError, RuntimeError,
                 jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(f"{e} {e.__cause__}")
 
         request_id = "chatcmpl-" \
                      f"{self._base_request_id(raw_request, request.request_id)}"
@@ -235,6 +237,7 @@ class OpenAIServingChat(OpenAIServing):
                         prompt=engine_prompt,
                         request_id=request_id,
                         params=sampling_params,
+                        lora_request=lora_request,
                     )
                 else:
                     generator = self.engine_client.generate(
@@ -317,10 +320,13 @@ class OpenAIServingChat(OpenAIServing):
     def extract_tool_call_required_streaming(
         self,
         previous_text: str,
-        current_text: str,
+        current_text: Optional[str],
         delta_text: str,
         function_name_returned: bool,
     ) -> tuple[Optional[DeltaMessage], bool]:
+        if current_text is None or current_text == "":
+            # if the current text is empty, we cannot parse it
+            return None, function_name_returned
         try:
             obj = partial_json_parser.loads(current_text)
         except partial_json_parser.core.exceptions.MalformedJSON:
@@ -363,9 +369,10 @@ class OpenAIServingChat(OpenAIServing):
 
                     function_name_returned = True
                     delta_message = DeltaMessage(tool_calls=[
-                        DeltaToolCall(function=DeltaFunctionCall(
-                            name=current_tool_call["name"],
-                            arguments=arguments),
+                        DeltaToolCall(id=random_tool_call_id(),
+                                      function=DeltaFunctionCall(
+                                          name=current_tool_call["name"],
+                                          arguments=arguments),
                                       index=len(obj) - 1,
                                       type="function")
                     ])
@@ -382,8 +389,7 @@ class OpenAIServingChat(OpenAIServing):
                                     # instead of name every time
                                     name=None,
                                     arguments=delta_text),
-                                index=len(obj) - 1,
-                                type="function")
+                                index=len(obj) - 1)
                         ])
                     else:
                         delta_message = None
@@ -422,7 +428,7 @@ class OpenAIServingChat(OpenAIServing):
             and self._should_stream_with_auto_tool_parsing(request))
 
         all_previous_token_ids: Optional[list[list[int]]]
-        function_name_returned: Optional[list[bool]] = None
+        function_name_returned = [False] * num_choices
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -435,7 +441,6 @@ class OpenAIServingChat(OpenAIServing):
             reasoning_end_arr = [False] * num_choices
         elif request.tool_choice == "required":
             previous_texts = [""] * num_choices
-            function_name_returned = [False] * num_choices
             all_previous_token_ids = None
         else:
             previous_texts, all_previous_token_ids = None, None
@@ -623,24 +628,43 @@ class OpenAIServingChat(OpenAIServing):
                                 delta_text = previous_text + delta_text
                                 current_text = ""
 
+                            if function_name_returned[i]:
+                                delta_tool_call = DeltaToolCall(
+                                    function=DeltaFunctionCall(
+                                        arguments=delta_text),
+                                    index=i)
+                            else:
+                                delta_tool_call = DeltaToolCall(
+                                    id=random_tool_call_id(),
+                                    type="function",
+                                    function=DeltaFunctionCall(
+                                        name=tool_choice_function_name,
+                                        arguments=delta_text),
+                                    index=i)
+                                function_name_returned[i] = True
+
                             delta_message = DeltaMessage(tool_calls=[
-                                DeltaToolCall(function=DeltaFunctionCall(
-                                    name=tool_choice_function_name,
-                                    arguments=delta_text),
-                                              index=i)
+                                delta_tool_call,
                             ])
 
                     elif request.tool_choice == "required":
                         assert previous_texts is not None
-                        assert function_name_returned is not None
                         previous_text = previous_texts[i]
                         current_text = previous_text + delta_text
                         fn_name_returned = function_name_returned[i]
 
+                        if self.reasoning_parser:
+                            _, content = \
+                                reasoning_parser.extract_reasoning_content(
+                                    current_text,
+                                    request
+                                )
+                        else:
+                            content = current_text
                         delta_message, function_name_returned[i] = (
                             self.extract_tool_call_required_streaming(
                                 previous_text=previous_text,
-                                current_text=current_text,
+                                current_text=content,
                                 delta_text=delta_text,
                                 function_name_returned=fn_name_returned))
 
@@ -665,7 +689,21 @@ class OpenAIServingChat(OpenAIServing):
                                     current_token_ids,
                                     output.token_ids,
                                 ))
-
+                            # When encountering think end id in prompt_token_ids
+                            # i.e {"enable_thinking": False},
+                            # set reasoning status to end.
+                            # Remove the text and token ids related
+                            # to 'reasoning_content'.
+                            if res.prompt_token_ids and \
+                                reasoning_parser.is_reasoning_end(
+                                    list(res.prompt_token_ids)):
+                                reasoning_end_arr[i] = True
+                                current_token_ids = list(output.token_ids)
+                                if delta_message and delta_message.content:
+                                    current_text = delta_message.content
+                                    delta_message.content = None
+                                else:
+                                    current_text = ""
                             # When encountering think end id in delta_token_ids,
                             # set reasoning status to end.
                             # Remove the text and token ids related
@@ -968,15 +1006,17 @@ class OpenAIServingChat(OpenAIServing):
 
                 # the fields of FunctionDefinition are a superset of the
                 # tool call outputs and can be used for parsing
+                assert content is not None
                 tool_calls = TypeAdapter(
-                    list[FunctionDefinition]).validate_json(output.text)
+                    list[FunctionDefinition]).validate_json(content)
                 message = ChatMessage(
                     role=role,
                     content="",
                     tool_calls=[
                         tool_call_class(function=FunctionCall(
                             name=tool_call.name,
-                            arguments=json.dumps(tool_call.parameters)))
+                            arguments=json.dumps(tool_call.parameters,
+                                                 ensure_ascii=False)))
                         for tool_call in tool_calls
                     ])
 
@@ -1075,6 +1115,7 @@ class OpenAIServingChat(OpenAIServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+            kv_transfer_params=final_res.kv_transfer_params,
         )
 
         return response

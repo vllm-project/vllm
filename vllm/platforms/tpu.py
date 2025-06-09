@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
 from tpu_info import device
@@ -9,13 +10,15 @@ import vllm.envs as envs
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
 else:
+    BlockSize = None
     ModelConfig = None
     VllmConfig = None
     PoolingParams = None
@@ -72,7 +75,7 @@ class TpuPlatform(Platform):
         return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
 
     @classmethod
-    def get_infinity_values(cls, dtype: torch.dtype) -> Tuple[float, float]:
+    def get_infinity_values(cls, dtype: torch.dtype) -> tuple[float, float]:
         return torch.finfo(dtype).min, torch.finfo(dtype).max
 
     @classmethod
@@ -94,7 +97,7 @@ class TpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
 
         # TPU only supports DYNAMO_ONCE compilation level
@@ -118,17 +121,17 @@ class TpuPlatform(Platform):
             from vllm.v1.attention.backends.pallas import (
                 PallasAttentionBackend)
             cache_config.block_size = PallasAttentionBackend.get_page_size(
-                vllm_config)
-            min_page_size = PallasAttentionBackend.get_min_page_size(
-                vllm_config)
-            if min_page_size > cache_config.block_size:
-                logger.warning(
-                    "Increase the page size from %s to %s to make sure there's"
-                    "no SMEM OOM",
-                    cache_config.block_size,
-                    min_page_size,
-                )
-                cache_config.block_size = min_page_size
+                vllm_config)  # type: ignore[assignment]
+            # min_page_size = PallasAttentionBackend.get_min_page_size(
+            #     vllm_config)
+            # if min_page_size > cache_config.block_size:
+            #     logger.warning(
+            #         "Increase the page size from %s to %s to make sure there's"
+            #         " no SMEM OOM",
+            #         cache_config.block_size,
+            #         min_page_size,
+            #     )
+            #     cache_config.block_size = min_page_size  # type: ignore[assignment]
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
@@ -159,6 +162,16 @@ class TpuPlatform(Platform):
             " without setting `--disable_chunked_mm_input`. " \
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
+
+        if vllm_config.model_config and vllm_config.model_config.use_mla:
+            logger.info(
+                "MLA is enabled on a non-GPU platform; forcing chunked "
+                "prefill and prefix caching to be disabled.")
+            vllm_config.scheduler_config.enable_chunked_prefill = False
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            vllm_config.scheduler_config.max_num_batched_tokens = max(
+                vllm_config.scheduler_config.max_model_len,
+                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -193,3 +206,11 @@ class TpuPlatform(Platform):
             if params.sampling_type == SamplingType.RANDOM_SEED:
                 raise ValueError(
                     "Torch XLA does not support per-request seed.")
+
+
+try:
+    from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
+    TpuPlatform = TpuCommonsPlatform  # type: ignore
+except ImportError:
+    logger.info("tpu_commons not found, using vLLM's TpuPlatform")
+    pass

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-import importlib
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -150,6 +150,101 @@ def merge_attn_states(output: torch.Tensor,
                                    prefix_lse, suffix_output, suffix_lse)
 
 
+def convert_vertical_slash_indexes(
+    q_seqlens: torch.Tensor,  # [BATCH, ]
+    kv_seqlens: torch.Tensor,  # [BATCH, ]
+    vertical_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
+    slash_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
+    context_size: int,
+    block_size_M: int,
+    block_size_N: int,
+    causal: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size = slash_indexes.size(0)
+    num_heads = slash_indexes.size(1)
+    nnz_slash = slash_indexes.size(2)
+    nnz_vertical = vertical_indexes.size(2)
+    num_rows = (context_size + block_size_M - 1) // block_size_M
+
+    block_count = torch.zeros(batch_size,
+                              num_heads,
+                              num_rows,
+                              dtype=q_seqlens.dtype,
+                              device=q_seqlens.device)
+    block_offset = torch.zeros(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_slash,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_count = torch.zeros(batch_size,
+                               num_heads,
+                               num_rows,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_index = torch.zeros(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_vertical,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+
+    torch.ops._C.convert_vertical_slash_indexes(
+        block_count, block_offset, column_count, column_index, q_seqlens,
+        kv_seqlens, vertical_indexes, slash_indexes, context_size,
+        block_size_M, block_size_N, causal)
+    return block_count, block_offset, column_count, column_index
+
+
+def convert_vertical_slash_indexes_mergehead(
+    q_seqlens: torch.Tensor,  # [BATCH, ]
+    kv_seqlens: torch.Tensor,  # [BATCH, ]
+    vertical_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
+    slash_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
+    # [N_HEADS] : different head use different number of indices
+    vertical_indices_count: torch.Tensor,
+    slash_indices_count: torch.Tensor,
+    context_size: int,
+    block_size_M: int,
+    block_size_N: int,
+    causal: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    batch_size = slash_indexes.size(0)
+    num_heads = slash_indexes.size(1)
+    nnz_slash = slash_indexes.size(2)
+    nnz_vertical = vertical_indexes.size(2)
+    num_rows = (context_size + block_size_M - 1) // block_size_M
+
+    block_count = torch.empty(batch_size,
+                              num_heads,
+                              num_rows,
+                              dtype=q_seqlens.dtype,
+                              device=q_seqlens.device)
+    block_offset = torch.empty(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_slash,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_count = torch.empty(batch_size,
+                               num_heads,
+                               num_rows,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+    column_index = torch.empty(batch_size,
+                               num_heads,
+                               num_rows,
+                               nnz_vertical,
+                               dtype=q_seqlens.dtype,
+                               device=q_seqlens.device)
+
+    torch.ops._C.convert_vertical_slash_indexes_mergehead(
+        block_count, block_offset, column_count, column_index, q_seqlens,
+        kv_seqlens, vertical_indexes, slash_indexes, vertical_indices_count,
+        slash_indices_count, context_size, block_size_M, block_size_N, causal)
+    return block_count, block_offset, column_count, column_index
+
+
 # pos encoding ops
 def rotary_embedding(
     positions: torch.Tensor,
@@ -159,14 +254,8 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
-    query_contiguous = query.contiguous()
-    key_contiguous = key.contiguous() if key is not None else None
-    torch.ops._C.rotary_embedding(positions, query_contiguous, key_contiguous,
-                                  head_size, cos_sin_cache, is_neox)
-    query.copy_(query_contiguous)
-    if key is not None:
-        key.copy_(key_contiguous)
+    torch.ops._C.rotary_embedding(positions, query, key, head_size,
+                                  cos_sin_cache, is_neox)
 
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
@@ -174,16 +263,9 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
                              cos_sin_cache: torch.Tensor, is_neox: bool,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
-    # TODO: Remove this contiguous call when the kernel is updated to support tensor slices
-    query_contiguous = query.contiguous()
-    key_contiguous = key.contiguous() if key is not None else None
-    torch.ops._C.batched_rotary_embedding(positions, query_contiguous,
-                                          key_contiguous, head_size,
+    torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
                                           cos_sin_cache, is_neox, rot_dim,
                                           cos_sin_cache_offsets)
-    query.copy_(query_contiguous)
-    if key is not None:
-        key.copy_(key_contiguous)
 
 
 # layer norm ops
@@ -197,6 +279,45 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+
+
+def apply_repetition_penalties_torch(
+        logits: torch.Tensor, prompt_mask: torch.Tensor,
+        output_mask: torch.Tensor, repetition_penalties: torch.Tensor) -> None:
+    repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(
+        1, logits.size(1))
+    # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
+    penalties = torch.where(prompt_mask | output_mask, repetition_penalties,
+                            1.0)
+    # If logits are positive, divide by penalty, otherwise multiply by penalty.
+    scaling = torch.where(logits > 0, 1.0 / penalties, penalties)
+    logits *= scaling
+
+
+def apply_repetition_penalties_cuda(
+        logits: torch.Tensor, prompt_mask: torch.Tensor,
+        output_mask: torch.Tensor, repetition_penalties: torch.Tensor) -> None:
+    torch.ops._C.apply_repetition_penalties_(logits, prompt_mask, output_mask,
+                                             repetition_penalties)
+
+
+def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
+                               output_mask: torch.Tensor,
+                               repetition_penalties: torch.Tensor) -> None:
+    """Apply repetition penalties to logits in-place.
+
+    Args:
+        logits: The logits tensor of shape [num_seqs, vocab_size].
+        prompt_mask: A boolean tensor indicating which tokens appear in the prompt.
+        output_mask: A boolean tensor indicating which tokens appear in the output.
+        repetition_penalties: The repetition penalties of shape (num_seqs, ).
+    """
+    if current_platform.is_cuda() and logits.is_contiguous():
+        apply_repetition_penalties_cuda(logits, prompt_mask, output_mask,
+                                        repetition_penalties)
+    else:
+        apply_repetition_penalties_torch(logits, prompt_mask, output_mask,
+                                         repetition_penalties)
 
 
 def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
@@ -333,6 +454,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                c: Optional[torch.Tensor],
                                b_q_weight: torch.Tensor,
                                b_scales: torch.Tensor,
+                               global_scale: Optional[torch.Tensor],
                                b_zeros: Optional[torch.Tensor],
                                g_idx: Optional[torch.Tensor],
                                perm: Optional[torch.Tensor],
@@ -472,7 +594,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         quant_type: int,
         row: torch.SymInt,
     ) -> torch.Tensor:
-        return torch.empty((1, row), dtype=X.dtype, device=W.device)
+        return torch.empty((X.shape[0], row), dtype=X.dtype, device=W.device)
 
     @register_fake("_C::ggml_mul_mat_a8")
     def _ggml_mul_mat_a8_fake(
@@ -583,10 +705,8 @@ def cutlass_scaled_mm(a: torch.Tensor,
 
     cutlass_compatible_b = (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     if current_platform.is_rocm() or not cutlass_compatible_b:
-        triton_scaled_mm_module = importlib.import_module(
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "triton_scaled_mm")
-        triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
+        from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa
+            triton_scaled_mm)
         return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
@@ -722,11 +842,16 @@ def cutlass_scaled_sparse_mm(
     return out
 
 
-def get_cutlass_moe_mm_data(
-        topk_ids: torch.Tensor, expert_offsets: torch.Tensor,
-        problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor,
-        input_permutation: torch.Tensor, output_permutation: torch.Tensor,
-        num_experts: int, n: int, k: int):
+def get_cutlass_moe_mm_data(topk_ids: torch.Tensor,
+                            expert_offsets: torch.Tensor,
+                            problem_sizes1: torch.Tensor,
+                            problem_sizes2: torch.Tensor,
+                            input_permutation: torch.Tensor,
+                            output_permutation: torch.Tensor,
+                            num_experts: int,
+                            n: int,
+                            k: int,
+                            blockscale_offsets: Optional[torch.Tensor] = None):
     """
     Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
@@ -744,18 +869,63 @@ def get_cutlass_moe_mm_data(
                          before executing the MMs.
     - output_permutation: Permutation that must be used to shuffle the output
                           after executing the MMs.
+    - blockscale_offsets: Optional argument passed for fp4 moe. Indices that
+                          mark at which block scale index each expert begins
+                          its computation. The number of block scale rows
+                          computed with expert E is blockscale_offsets[E + 1] -
+                          blockscale_offsets[E]
     """
-    torch.ops._C.get_cutlass_moe_mm_data(topk_ids, expert_offsets,
-                                         problem_sizes1, problem_sizes2,
-                                         input_permutation, output_permutation,
-                                         num_experts, n, k)
+    return torch.ops._C.get_cutlass_moe_mm_data(topk_ids, expert_offsets,
+                                                problem_sizes1, problem_sizes2,
+                                                input_permutation,
+                                                output_permutation,
+                                                num_experts, n, k,
+                                                blockscale_offsets)
+
+
+def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
+    """
+    Shuffle and expand the input tensor according to the dst2src_map and store the result in output_tensor.
+    This is used in MoE to permute the input tensor before performing grouped matrix multiplications.
+    """
+    num_tokens_permuted = dst2src_map.shape[0]
+    output_tensor = torch.empty((num_tokens_permuted, input_tensor.shape[1]),
+                                device=input_tensor.device,
+                                dtype=input_tensor.dtype)
+    torch.ops._moe_C.shuffle_rows(input_tensor, dst2src_map, output_tensor)
+    return output_tensor
+
+
+def get_cutlass_pplx_moe_mm_data(expert_offsets: torch.Tensor,
+                                 problem_sizes1: torch.Tensor,
+                                 problem_sizes2: torch.Tensor,
+                                 expert_num_tokens: torch.Tensor,
+                                 num_local_experts: int, padded_m: int, n: int,
+                                 k: int):
+    """
+    Prepare data necessary to perform CUTLASS grouped matrix multiplications
+    used in CUTLASS-based fused MoE.
+
+    The function takes in expert_num_tokens (token count per expert) and
+    non_zero_expert_idxs (consecutive indices of experts with non-zero token 
+    counts) and uses them to compute:
+    - expert_offsets: Indices that mark at which token index each expert begins
+                      its computation.
+    - problem_sizes1, problem_sizes2: MxNxK sizes of each expert's
+                                      multiplication in two grouped MMs used in
+                                      the fused MoE operation.
+    """
+    return torch.ops._C.get_cutlass_pplx_moe_mm_data(
+        expert_offsets, problem_sizes1, problem_sizes2, expert_num_tokens,
+        num_local_experts, padded_m, n, k)
 
 
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                    b_tensors: torch.Tensor, a_scales: torch.Tensor,
                    b_scales: torch.Tensor, expert_offsets: torch.Tensor,
                    problem_sizes: torch.Tensor, a_strides: torch.Tensor,
-                   b_strides: torch.Tensor, c_strides: torch.Tensor):
+                   b_strides: torch.Tensor, c_strides: torch.Tensor,
+                   per_act_token: bool, per_out_ch: bool):
     """
     A single grouped matrix multiplication used in CUTLASS-based fused MoE.
     The function executes fp8-quantized OUT = AB matrix multiplication.
@@ -767,9 +937,41 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                      MMs used in the fused MoE operation.
     - a/b/c_strides: The data strides passed to grouped matrix multiplication.
     """
-    torch.ops._C.cutlass_moe_mm(out_tensors, a_tensors, b_tensors, a_scales,
-                                b_scales, expert_offsets, problem_sizes,
-                                a_strides, b_strides, c_strides)
+    return torch.ops._C.cutlass_moe_mm(out_tensors, a_tensors, b_tensors,
+                                       a_scales, b_scales, expert_offsets,
+                                       problem_sizes, a_strides, b_strides,
+                                       c_strides, per_act_token, per_out_ch)
+
+
+def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
+                       a_scales: torch.Tensor, b_scales: torch.Tensor,
+                       alphas: torch.Tensor, problem_sizes: torch.Tensor,
+                       expert_offsets: torch.Tensor, sf_offsets: torch.Tensor,
+                       out_dtype: torch.dtype, device: torch.device):
+    """
+    An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs 
+    the gemms for each combination based on the specified problem sizes.
+
+    This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
+    - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
+                     input and expert weights.
+    - a_/b_scales: The blockscales in FP8-E4M3 precision
+    - expert_offsets/sf_offsets: Indices that mark at which token index 
+                    each expert begins its computation. The number of tokens 
+                    computed with expert E is expert_offsets[E + 1] - 
+                    expert_offsets[E] And the sf_size per expert is 
+                    sf_offset[E+1] - sf_offset[E]
+    - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
+                     MMs used in the fused MoE operation.
+    """
+    m_topk = a_tensors.shape[0]
+    n = b_tensors.shape[1]
+    c_shape = (m_topk, n)
+    c = torch.empty(c_shape, device=device, dtype=out_dtype)
+    torch.ops._C.cutlass_fp4_group_mm(c, a_tensors, b_tensors, a_scales,
+                                      b_scales, alphas, problem_sizes,
+                                      expert_offsets, sf_offsets)
+    return c.to(out_dtype)
 
 
 # aqlm
@@ -833,6 +1035,7 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor,
+                     global_scale: Optional[torch.Tensor],
                      b_zeros: Optional[torch.Tensor],
                      g_idx: Optional[torch.Tensor],
                      perm: Optional[torch.Tensor],
@@ -845,9 +1048,10 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales, b_zeros,
-                                         g_idx, perm, workspace, b_q_type.id,
-                                         size_m, size_n, size_k, is_k_full,
+    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales,
+                                         global_scale, b_zeros, g_idx, perm,
+                                         workspace, b_q_type.id, size_m,
+                                         size_n, size_k, is_k_full,
                                          use_atomic_add, use_fp32_reduce,
                                          is_zp_float)
 
@@ -960,6 +1164,60 @@ def scaled_fp4_quant(
     return output, output_scale
 
 
+def scaled_fp4_experts_quant(
+    input_tensor: torch.Tensor,
+    input_global_scale: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Quantize input tensor to FP4 and return quantized tensor and scale, for
+    packed MoE Inputs.
+    Args:
+        input_tensor: The input tensor to be quantized to FP4
+        input_global_scale: A scalar scaling factor for the entire tensor.
+        expert_offsets: The expert offsets tensor
+        blockscale_offsets: The blockscale offsets tensor
+    Outputs:
+        output: The quantized tensor in FP4
+        output_scales: The blockscale tensor in FP8-E4M3
+    """
+    assert not current_platform.is_rocm()
+    assert input_tensor.ndim == 2, (
+        f'input.ndim needs to be == 2, but got {input_tensor.ndim}.')
+
+    # Control the maximum number of tokens per expert supported by the
+    # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
+    # from running out of memory. This value can also be increased to support
+    # larger models.
+    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+    m_numtopk, k = input_tensor.shape
+
+    assert (m_numtopk <= MAX_TOKENS_PER_EXPERT * topk), (
+        f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
+        f"{MAX_TOKENS_PER_EXPERT})"
+        f" for cutlass_moe_fp4, observed m_numtopk = {m_numtopk}. Use"
+        f" VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE to set this value.")
+    scales_k = k // 16
+    padded_k = (scales_k + (4 - 1)) // 4
+
+    # output is uint8 and packed fp4 values
+    output = torch.empty(m_numtopk,
+                         k // 2,
+                         device=input_tensor.device,
+                         dtype=torch.uint8)
+    output_scales = torch.empty(MAX_TOKENS_PER_EXPERT * topk,
+                                padded_k,
+                                dtype=torch.int32,
+                                device=input_tensor.device)
+    torch.ops._C.scaled_fp4_experts_quant(output, output_scales, input_tensor,
+                                          input_global_scale, expert_offsets,
+                                          blockscale_offsets)
+    output_scales = output_scales.view(torch.float8_e4m3fn)
+    return output, output_scales
+
+
 # fp8
 def scaled_fp8_quant(
     input: torch.Tensor,
@@ -967,6 +1225,7 @@ def scaled_fp8_quant(
     num_token_padding: Optional[int] = None,
     scale_ub: Optional[torch.Tensor] = None,
     use_per_token_if_dynamic: bool = False,
+    output: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
@@ -998,7 +1257,12 @@ def scaled_fp8_quant(
     out_dtype: torch.dtype = current_platform.fp8_dtype()
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
-    output = torch.empty(shape, device=input.device, dtype=out_dtype)
+    if output is None:
+        output = torch.empty(shape, device=input.device, dtype=out_dtype)
+    else:
+        assert num_token_padding is None, \
+            "padding not supported if output passed in"
+        assert output.dtype == out_dtype
 
     if scale is None:
         if use_per_token_if_dynamic:
@@ -1006,7 +1270,7 @@ def scaled_fp8_quant(
                                 device=input.device,
                                 dtype=torch.float32)
             torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale, scale_ub)
+                output, input.contiguous(), scale, scale_ub)
         else:
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
@@ -1115,8 +1379,8 @@ def scaled_int8_quant(
                                dtype=torch.float32)
     input_azp = None if symmetric else torch.empty_like(input_scales,
                                                         dtype=torch.int32)
-    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
-                                           input_azp)
+    torch.ops._C.dynamic_scaled_int8_quant(output, input.contiguous(),
+                                           input_scales, input_azp)
     return output, input_scales, input_azp
 
 
@@ -1260,15 +1524,6 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                                           num_tokens_post_pad)
 
 
-def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
-                             block_size: int, sorted_token_ids: torch.Tensor,
-                             experts_ids: torch.Tensor,
-                             num_tokens_post_pad: torch.Tensor) -> None:
-    torch.ops._moe_C.sgl_moe_align_block_size(topk_ids, num_experts,
-                                              block_size, sorted_token_ids,
-                                              experts_ids, num_tokens_post_pad)
-
-
 def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
                    b_qweight: torch.Tensor, b_scales: torch.Tensor,
                    b_qzeros: Optional[torch.Tensor],
@@ -1289,14 +1544,15 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 token_expert_indicies: torch.Tensor,
+                 token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor) -> None:
-    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
-                                  token_expert_indicies, gating_output)
+    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids, token_expert_indices,
+                                  gating_output)
 
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           b_qweight: torch.Tensor, b_scales: torch.Tensor,
+                          global_scale: Optional[torch.Tensor],
                           b_qzeros: Optional[torch.Tensor],
                           g_idx: Optional[torch.Tensor],
                           perm: Optional[torch.Tensor],
@@ -1311,11 +1567,11 @@ def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           use_fp32_reduce: bool,
                           is_zp_float: bool) -> torch.Tensor:
     return torch.ops._moe_C.moe_wna16_marlin_gemm(
-        input, output, b_qweight, b_scales, b_qzeros, g_idx, perm, workspace,
-        sorted_token_ids, expert_ids, num_tokens_past_padded, topk_weights,
-        moe_block_size, top_k, mul_topk_weights, is_ep, b_q_type.id, size_m,
-        size_n, size_k, is_k_full, use_atomic_add, use_fp32_reduce,
-        is_zp_float)
+        input, output, b_qweight, b_scales, global_scale, b_qzeros, g_idx,
+        perm, workspace, sorted_token_ids, expert_ids, num_tokens_past_padded,
+        topk_weights, moe_block_size, top_k, mul_topk_weights, is_ep,
+        b_q_type.id, size_m, size_n, size_k, is_k_full, use_atomic_add,
+        use_fp32_reduce, is_zp_float)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
