@@ -182,25 +182,25 @@ __global__ void dynamic_scaled_int8_quant_kernel(
 
 // MinMax structure to hold min and max values in one go
 struct MinMax {
-  float mn, mx;
+  float min, max;
 
   __host__ __device__ MinMax()
-      : mn(std::numeric_limits<float>::max()),
-        mx(std::numeric_limits<float>::lowest()) {}
+      : min(std::numeric_limits<float>::max()),
+        max(std::numeric_limits<float>::lowest()) {}
 
-  __host__ __device__ explicit MinMax(float v) : mn(v), mx(v) {}
+  __host__ __device__ explicit MinMax(float v) : min(v), max(v) {}
 
   // add a value to the MinMax
   __host__ __device__ MinMax& operator+=(float v) {
-    mn = fminf(mn, v);
-    mx = fmaxf(mx, v);
+    min = fminf(min, v);
+    max = fmaxf(max, v);
     return *this;
   }
 
   // merge two MinMax objects
   __host__ __device__ MinMax& operator&=(const MinMax& other) {
-    mn = fminf(mn, other.mn);
-    mx = fmaxf(mx, other.mx);
+    min = fminf(min, other.min);
+    max = fmaxf(max, other.max);
     return *this;
   }
 };
@@ -242,8 +242,8 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   __shared__ float scale_sh;
   __shared__ azp_t azp_sh;
   if (tid == 0) {
-    float s = (mm.mx - mm.mn) / 255.f;
-    float zp = nearbyintf(-128.f - mm.mn / s);  // round-to-even
+    float s = (mm.max - mm.min) / 255.f;
+    float zp = nearbyintf(-128.f - mm.min / s);  // round-to-even
     scale_sh = s;
     azp_sh = azp_t(zp);
     scale_out[blockIdx.x] = s;
