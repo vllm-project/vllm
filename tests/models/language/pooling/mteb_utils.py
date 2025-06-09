@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 import requests
 
-from tests.conftest import HfRunner, VllmRunner
 from tests.models.utils import EmbedModelInfo, RerankModelInfo
 
 # Most embedding models on the STS12 task (See #17175):
@@ -279,8 +278,8 @@ def mteb_test_rerank_models(hf_runner,
             **kwargs,
         ):
             # vllm and st both remove the prompt, fair comparison.
-            sentences = [(s[0], s[1]) for s in sentences]
-            return hf_model_predict(sentences, *args, **kwargs)
+            prompts = [(s[0], s[1]) for s in sentences]
+            return hf_model_predict(prompts, *args, **kwargs)
 
         hf_model.predict = _predict
 
