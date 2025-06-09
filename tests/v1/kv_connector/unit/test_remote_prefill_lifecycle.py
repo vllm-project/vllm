@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -50,8 +51,8 @@ def test_basic_lifecycle():
     assert (block_pool.free_block_queue.num_free_blocks
             < START_FREE_BLOCK_QUEUE_SIZE)
     assert len(block_pool.cached_block_hash_to_block) == 0
-    blocks = scheduler.kv_cache_manager.single_type_manager.req_to_blocks[
-        request_id]
+    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0].req_to_blocks[request_id]
     for block in blocks:
         assert block._block_hash is None
 
@@ -86,8 +87,8 @@ def test_basic_lifecycle():
 
     # Confirm the block are actually allocated.
     num_hashed_blocks = 0
-    blocks = scheduler.kv_cache_manager.single_type_manager.req_to_blocks[
-        request_id]
+    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
         num_hashed_blocks += (1 if block._block_hash is not None else 0)
@@ -260,10 +261,10 @@ def test_no_spurious_prefix_caching():
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
 
-    local_blocks = scheduler.kv_cache_manager.single_type_manager.req_to_blocks[
-        request_local.request_id]
-    remote_blocks = scheduler.kv_cache_manager.single_type_manager.req_to_blocks[  # noqa: E501
-        request_remote.request_id]
+    local_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0].req_to_blocks[request_local.request_id]
+    remote_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0].req_to_blocks[request_remote.request_id]
 
     # Local should have cached blocks (but not all due to preallocate).
     num_hashed_blocks = 0
@@ -299,8 +300,8 @@ def test_full_block_prompt():
     # STEP (1): Initialize a recv.
     scheduler_output = scheduler.schedule()
     # All blocks should be allocated.
-    num_blocks = len(scheduler.kv_cache_manager.single_type_manager.
-                     req_to_blocks[request_id])
+    num_blocks = len(scheduler.kv_cache_manager.coordinator.
+                     single_type_managers[0].req_to_blocks[request_id])
     assert num_blocks == NUM_EXTERNAL_FULL_BLOCKS
     model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
     scheduler.update_from_output(scheduler_output, model_runner_output)
@@ -318,8 +319,8 @@ def test_full_block_prompt():
 
     # We need to recompute the final token of the prompt to generate
     # the first new token, so we should not have a new block.
-    num_blocks = len(scheduler.kv_cache_manager.single_type_manager.
-                     req_to_blocks[request_id])
+    num_blocks = len(scheduler.kv_cache_manager.coordinator.
+                     single_type_managers[0].req_to_blocks[request_id])
     assert num_blocks == NUM_EXTERNAL_FULL_BLOCKS
     assert (scheduler_output.scheduled_new_reqs[0].num_computed_tokens ==
             NUM_TOKENS - 1)

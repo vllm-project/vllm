@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -53,8 +54,8 @@ def test_basic_lifecycle():
     assert len(scheduler.waiting) == 0
 
     # ... but blocks should not be freed.
-    blocks = scheduler.kv_cache_manager.single_type_manager.req_to_blocks[
-        request_id]
+    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
 

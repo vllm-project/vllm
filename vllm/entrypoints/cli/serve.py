@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
 import os
@@ -15,7 +16,7 @@ from vllm.entrypoints.openai.api_server import (run_server, run_server_worker,
                                                 setup_server)
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
-from vllm.entrypoints.utils import (VLLM_SERVE_PARSER_EPILOG,
+from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
                                     show_filtered_argument_or_group_from_help)
 from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
@@ -27,7 +28,8 @@ from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import (APIServerProcessManager, CoreEngine,
-                           EngineZmqAddresses, get_engine_client_zmq_addr,
+                           CoreEngineActorManager, EngineZmqAddresses,
+                           get_engine_client_zmq_addr,
                            wait_for_completion_or_failure,
                            wait_for_engine_startup)
 
@@ -99,8 +101,8 @@ class ServeSubcommand(CLISubcommand):
         )
 
         serve_parser = make_arg_parser(serve_parser)
-        show_filtered_argument_or_group_from_help(serve_parser)
-        serve_parser.epilog = VLLM_SERVE_PARSER_EPILOG
+        show_filtered_argument_or_group_from_help(serve_parser, "serve")
+        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
         return serve_parser
 
 
@@ -229,6 +231,31 @@ def run_multi_api_server(args: argparse.Namespace):
         logger.info("Started DP Coordinator process (PID: %d)",
                     coordinator.proc.pid)
 
+    if parallel_config.data_parallel_backend == "ray":
+        logger.info("Starting ray-based data parallel backend")
+
+        engine_actor_manager = CoreEngineActorManager(
+            vllm_config=vllm_config,
+            addresses=addresses,
+            executor_class=Executor.get_class(vllm_config),
+            log_stats=not engine_args.disable_log_stats,
+        )
+        # Start API servers using the manager
+        api_server_manager = APIServerProcessManager(
+            target_server_fn=run_api_server_worker_proc,
+            listen_address=listen_address,
+            sock=sock,
+            args=args,
+            num_servers=num_api_servers,
+            input_addresses=input_addresses,
+            output_addresses=output_addresses,
+            stats_update_address=stats_update_address)
+
+        wait_for_completion_or_failure(api_server_manager=api_server_manager,
+                                       engine_manager=engine_actor_manager,
+                                       coordinator=coordinator)
+        return
+
     handshake_address = get_engine_client_zmq_addr(
         local_only, host, parallel_config.data_parallel_rpc_port)
 
@@ -277,10 +304,9 @@ def run_multi_api_server(args: argparse.Namespace):
         )
 
         # Wait for API servers
-        wait_for_completion_or_failure(
-            api_server_manager=api_server_manager,
-            local_engine_manager=local_engine_manager,
-            coordinator=coordinator)
+        wait_for_completion_or_failure(api_server_manager=api_server_manager,
+                                       engine_manager=local_engine_manager,
+                                       coordinator=coordinator)
 
 
 def run_api_server_worker_proc(listen_address,

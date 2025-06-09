@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 r"""Benchmark online serving throughput with structured outputs.
 
 On the server side, run one of the following commands:
@@ -11,7 +12,6 @@ On the client side, run:
         --model <your_model> \
         --dataset json \
         --structured-output-ratio 1.0 \
-        --structured-output-backend auto \
         --request-rate 10 \
         --num-prompts 1000
 

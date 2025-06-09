@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from functools import partial
 
 import pytest
@@ -31,8 +32,7 @@ TEXTS_2 = [
 EMBEDDING_MODELS = [
     EmbedModelInfo("jinaai/jina-embeddings-v3",
                    architecture="XLMRobertaModel",
-                   is_matryoshka=True,
-                   dtype="float32")
+                   is_matryoshka=True)
 ]
 
 
