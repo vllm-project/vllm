@@ -27,7 +27,6 @@ import gc
 import pickle
 import weakref
 from collections import namedtuple
-from concurrent.futures import Future
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory

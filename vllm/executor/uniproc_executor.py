@@ -100,7 +100,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             "please set VLLM_ENABLE_V1_MULTIPROCESSING=0")
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
                                                rpc_rank=0)
-        self.non_blocking: bool = False
         self.excecute_model_thread_pool: Optional[ThreadPoolExecutor] = None
         # engines are launched in torchrun-compatible launchers
         # so we can use the env:// method.

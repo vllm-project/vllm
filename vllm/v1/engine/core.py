@@ -189,8 +189,6 @@ class EngineCore:
             assert request.mm_inputs is not None
             request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
                 request.mm_inputs, request.mm_hashes)
-        # if request.request_id == "0":
-            # print(f"{request.prompt_token_ids=}, {len(request.prompt_token_ids)=} {torch.distributed.get_rank()=}")
         req = Request.from_engine_core_request(request)
         if req.use_structured_output:
             # Start grammar compilation asynchronously
@@ -214,7 +212,6 @@ class EngineCore:
 
     def execute_model(self, scheduler_output: SchedulerOutput):
         try:
-            # print(f"{scheduler_output=}")
             return self.model_executor.execute_model(scheduler_output)
         except BaseException as err:
             # NOTE: This method is exception-free
@@ -234,15 +231,11 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        # print(f"schedule for {self.batch_id}")
         scheduler_output = self.scheduler.schedule()
         model_output = self.execute_model(scheduler_output)
-        # if isinstance(model_output, Future):
-        #     # print(f"wait for batch id {self.batch_id}, {torch.distributed.get_rank()=}")
-        #     self.batch_id += 1
-        #     model_output = model_output.result()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
+
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
 
@@ -285,7 +278,6 @@ class EngineCore:
         # but peeking the first element in a queue is not thread-safe,
         # so we need more work.
         if not scheduled_batch and not self.batch_queue.empty():
-            # print(f"wait for batch id {self.batch_id}, {torch.distributed.get_rank()=}")
             future, scheduler_output = self.batch_queue.get_nowait()
             # Blocking until the first result is available.
             model_output = future.result()
