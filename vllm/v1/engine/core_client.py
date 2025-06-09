@@ -463,21 +463,6 @@ class MPClient(EngineCoreClient):
         start_index = parallel_config.data_parallel_rank
         host = parallel_config.data_parallel_master_ip
 
-            eng_id_bytes, data = sync_input_socket.recv_multipart()
-            eng_id = int.from_bytes(eng_id_bytes, byteorder="little")
-            if eng_id not in identities:
-                raise RuntimeError(f"Unexpected or duplicate engine: {eng_id}")
-            message_dict = json.loads(data.decode('utf-8'))
-            if message_dict['type'] != 'READY':
-                raise RuntimeError(f"Engine {eng_id} failed: {data.decode()}")
-            logger.info("Core engine process %d ready.", eng_id)
-            identities.discard(eng_id)
-            # Setup KV cache config with initialization state from
-            # engine core process. Sum values from all engines in DP case.
-            num_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks or 0
-            num_gpu_blocks += message_dict['num_gpu_blocks']
-            self.vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-
         if len(self.core_engines) > 1:
             self.resources.coordinator = DPCoordinator(parallel_config)
 
