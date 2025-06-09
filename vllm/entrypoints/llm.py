@@ -519,7 +519,6 @@ class LLM:
                       Sequence) and len(lora_request) != len(prompts):
             raise ValueError(
                 "Lora request list should be the same length as the prompts")
-            return lora_request
 
         if lora_request is None or isinstance(lora_request, LoRARequest):
             return [lora_request] * len(prompts)

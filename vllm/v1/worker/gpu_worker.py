@@ -130,7 +130,20 @@ class Worker(WorkerBase):
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
-            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+            self.init_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+            requested_memory = (total_gpu_memory *
+                                self.cache_config.gpu_memory_utilization)
+            if self.init_gpu_memory < requested_memory:
+                GiB = lambda b: round(b / GiB_bytes, 2)
+                raise ValueError(
+                    f"Free memory on device ({GiB(self.init_gpu_memory)}/"
+                    f"{GiB(total_gpu_memory)} GiB) on startup is less than "
+                    f"desired GPU memory utilization "
+                    f"({self.cache_config.gpu_memory_utilization}, "
+                    f"{GiB(requested_memory)} GiB). Decrease GPU memory "
+                    f"utilization or reduce GPU memory used by other processes."
+                )
+
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -190,27 +203,46 @@ class Worker(WorkerBase):
         # GPU did not change their memory usage during the profiling.
         assert self.init_gpu_memory > free_gpu_memory, (
             "Error in memory profiling. "
-            f"Initial free memory {self.init_gpu_memory}, current free memory"
-            f" {free_gpu_memory}. This happens when the GPU memory was "
-            "not properly cleaned up before initializing the vLLM instance.")
+            f"Initial free memory {self.init_gpu_memory/GiB_bytes} GiB, "
+            f"current free memory {free_gpu_memory/GiB_bytes} GiB. "
+            f"This happens when the GPU memory was not properly cleaned up "
+            f"before initializing the vLLM instance.")
 
         # Get the peak memory allocation recorded by torch
-        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        peak_torch_memory = torch.cuda.memory_stats(
+        )["allocated_bytes.all.peak"]
 
         # Check for any memory left around that may have been allocated on the
         # gpu outside of `torch`. NCCL operations, for example, can use a few
-        # GB during a forward pass
+        # GB during a forward pass.
         torch.cuda.empty_cache()
         torch_allocated_bytes = torch.cuda.memory_stats(
         )["allocated_bytes.all.current"]
-        total_allocated_bytes = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
-        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
-        if non_torch_allocations > 0:
-            peak_memory += non_torch_allocations
+
+        # Reset after emptying torch cache
+        free_gpu_memory = torch.cuda.mem_get_info()[0]
+
+        # Total forward allocation (current) is equal to the diff in free memory
+        fwd_alloc_bytes = self.init_gpu_memory - free_gpu_memory
+        # We assume current non-torch allocation is equal to peak
+        non_torch_alloc_bytes = max(0, fwd_alloc_bytes - torch_allocated_bytes)
+        # Total forward allocation (peak) is peak torch + non-torch
+        peak_memory = peak_torch_memory + non_torch_alloc_bytes
+
         available_kv_cache_memory = (
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
+
+        GiB = lambda b: b / GiB_bytes
+        logger.debug(
+            "Initial free memory: %.2f GiB, free memory: %.2f GiB, "
+            "total GPU memory: %.2f GiB", GiB(self.init_gpu_memory),
+            GiB(free_gpu_memory), GiB(total_gpu_memory))
+        logger.debug(
+            "Peak torch memory: %.2f GiB, non-torch forward-pass memory: "
+            "%.2f GiB, available KVCache memory: %.2f GiB",
+            GiB(peak_torch_memory), GiB(non_torch_alloc_bytes),
+            GiB(available_kv_cache_memory))
 
         return int(available_kv_cache_memory)
 
