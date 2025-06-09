@@ -14,14 +14,11 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.sample.logits_processor import (BatchUpdate,
-                                             LogitBiasLogitsProcessor,
-                                             LogitsProcessor,
-                                             MinPLogitsProcessor,
-                                             MinTokensLogitsProcessor)
+from vllm.v1.sample.logits_processor import BatchUpdate, MinPLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
+from vllm.v1.worker.utils import init_hard_coded_logitsprocs
 
 # TODO(andy): TPU implementation does not support
 # latest logits processor implementation
@@ -225,21 +222,15 @@ class InputBatch:
             # Should reset each step.
             self.batch_update = BatchUpdate()
 
-            # Define logits processors
+            # Define logits processors. Note that Min-P logitsproc is returned
+            # both on its own as min_p_logitsproc (to support spec decoding
+            # compatibility check) and also as part of logits_procs
             # TODO(andy): logits processor list should be extensible via engine
             # constructor argument; for now the list is fixed.
-            self.logit_procs: list[LogitsProcessor] = [
-                MinTokensLogitsProcessor(pin_memory=pin_memory, device=device),
-                LogitBiasLogitsProcessor(pin_memory=pin_memory, device=device),
-            ]
-            self.min_p_logitsproc = MinPLogitsProcessor(
-                pin_memory=pin_memory,
-                device=device,
-                # +1 for temporary swap space
-                max_num_reqs=max_num_reqs + 1)
-            self.nongreedy_logits_procs: list[LogitsProcessor] = [
-                self.min_p_logitsproc
-            ]
+            self.logitsprocs = init_hard_coded_logitsprocs(
+                pin_memory_available=pin_memory,
+                max_num_reqs=max_num_reqs + 1,
+                device=device)
 
         # TODO convert this to LogitsProcessor
         self.has_allowed_token_ids: set[str] = set()
@@ -614,7 +605,7 @@ class InputBatch:
     def _commit_logit_procs_state_changes(self) -> None:
         """Apply batch add/remove/permute to logits procs' states"""
         self.batch_update.batch_size = self.num_reqs
-        for logit_proc in self.logit_procs + self.nongreedy_logits_procs:
+        for logit_proc in self.logitsprocs.all_list:
             logit_proc.update_state(self.batch_update)
         # Clear state change representation to prepare for next step
         self.batch_update.reset()
@@ -681,8 +672,7 @@ class InputBatch:
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
-            logits_procs=self.logit_procs,
-            nongreedy_logits_procs=self.nongreedy_logits_procs,
+            logitsprocs=self.logitsprocs,
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
@@ -728,7 +718,10 @@ class InputBatch:
 
     def get_min_p_by_req_id(self, req_id: str) -> float:
         assert req_id in self.req_id_to_index
-        return self.min_p_logitsproc.get_min_p_by_index(
+        min_p_logitsproc = self.logitsprocs.get_logitsproc_by_id("min_p")
+        assert min_p_logitsproc is not None and isinstance(
+            min_p_logitsproc, MinPLogitsProcessor)
+        return min_p_logitsproc.get_min_p_by_index(
             self.req_id_to_index[req_id])
 
     @property

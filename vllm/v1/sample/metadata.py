@@ -6,7 +6,7 @@ from typing import Optional
 
 import torch
 
-from vllm.v1.sample.logits_processor import LogitsProcessor
+from vllm.v1.worker.utils import LogitsProcessorObjects
 
 
 @dataclass
@@ -42,8 +42,7 @@ class SamplingMetadata:
     # Some logits processors don't affect greedy decoding (or if they do,
     # only due to precision errors); "non-greedy" processors are
     # only applied to random-sampled requests in the batch.
-    logits_procs: list[LogitsProcessor]
-    nongreedy_logits_procs: list[LogitsProcessor]
+    logitsprocs: LogitsProcessorObjects
 
     # TODO(andy): Because newest logits processors implementation
     # does not support TPU yet, the old min_p field is still required

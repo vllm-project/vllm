@@ -10,6 +10,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
                                               RejectionSampler)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.utils import LogitsProcessorObjects
 
 DEVICE = "cuda"
 
@@ -67,8 +68,7 @@ def create_sampling_metadata(
         output_token_ids=[],
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
-        logits_procs=[],
-        nongreedy_logits_procs=[],
+        logitsprocs=LogitsProcessorObjects(),
     )
 
 

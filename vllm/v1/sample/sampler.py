@@ -45,8 +45,8 @@ class Sampler(nn.Module):
         # Apply bad words exclusion.
         logits = self.apply_bad_words(logits, sampling_metadata)
 
-        # Apply logits processors.
-        for processor in sampling_metadata.logits_procs:
+        # Apply greedy-sampling-compatible logits processors.
+        for processor in sampling_metadata.logitsprocs.greedy_list:
             logits = processor.apply(logits)
 
         # Apply penalties (e.g., min_tokens, freq_penalties).
@@ -113,8 +113,8 @@ class Sampler(nn.Module):
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
 
-        # Apply logits processors.
-        for processor in sampling_metadata.nongreedy_logits_procs:
+        # Apply logits processors only compatible with nongreedy.
+        for processor in sampling_metadata.logitsprocs.nongreedy_list:
             logits = processor.apply(logits)
 
         # Apply top_k and/or top_p.
