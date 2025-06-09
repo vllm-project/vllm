@@ -37,7 +37,7 @@ pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
 setuptools>=77.0.3,<80; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12
 einops # Required for Qwen2-VL.
-compressed-tensors == 0.9.4 # required for compressed-tensors
+compressed-tensors == 0.10.1 # required for compressed-tensors
 depyf==0.18.0 # required for profiling and debugging with compilation config
 cloudpickle # allows pickling lambda functions in model_executor/models/registry.py
 watchfiles # required for http server to monitor the updates of TLS files
