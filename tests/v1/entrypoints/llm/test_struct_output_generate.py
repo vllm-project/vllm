@@ -109,14 +109,15 @@ def test_structured_output(
     enforce_eager = bool(not current_platform.is_tpu())
     # Use a single LLM instance for several scenarios to
     # speed up the test suite.
-    llm = LLM(model=model_name,
-              enforce_eager=enforce_eager,
-              max_model_len=1024,
-              guided_decoding_backend=guided_decoding_backend,
-              guided_decoding_disable_any_whitespace=True if
-              guided_decoding_backend in {"xgrammar", "guidance"} else False,
-              tokenizer_mode=tokenizer_mode,
-              speculative_config=speculative_config)
+    llm = LLM(
+        model=model_name,
+        enforce_eager=enforce_eager,
+        max_model_len=1024,
+        guided_decoding_backend=guided_decoding_backend,
+        guided_decoding_disable_any_whitespace=(guided_decoding_backend
+                                                in {"xgrammar", "guidance"}),
+        tokenizer_mode=tokenizer_mode,
+        speculative_config=speculative_config)
 
     #
     # Test 1: Generate JSON output based on a provided schema
