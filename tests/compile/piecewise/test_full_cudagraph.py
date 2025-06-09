@@ -49,8 +49,7 @@ def llm_pair(request):
         )
         piecewise = LLM(
             model=model,
-            # TODO set to 0.45 after V1 GPU model runner is fixed.
-            gpu_memory_utilization=0.9,
+            gpu_memory_utilization=0.45,
             trust_remote_code=True,
             max_model_len=1024,
             compilation_config=CompilationConfig(),
