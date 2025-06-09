@@ -11,7 +11,7 @@ model = LLM(model=model_name,
             hf_overrides={
                 "architectures": ["Qwen3ForSequenceClassification"],
                 "classifier_from_token": ["no", "yes"],
-                "is_qwen3_rerank": True,
+                "is_qwen3_reranker": True,
             })
 
 # Why do we need hf_overrides:
@@ -21,7 +21,7 @@ model = LLM(model=model_name,
 # - **classifier_from_token**, A more efficient approach is to extract
 # token_false_id = 2152 and token_true_id = 9693 into a 2-class
 # classification task rather than the current 151669-class classification task.
-# - **is_qwen3_rerank**, We need to convert the 2-way classifier into a
+# - **is_qwen3_reranker**, We need to convert the 2-way classifier into a
 # 1-way head classifier. This way, it will be completely consistent with
 # the Qwen3ForSequenceClassification format.
 

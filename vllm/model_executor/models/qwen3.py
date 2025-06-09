@@ -339,7 +339,7 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
 
         self.vllm_config = vllm_config
         self.config = config
-        self.maybe_is_qwen3_rerank()
+        self.maybe_is_qwen3_reranker()
 
         self.model = Qwen3Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
@@ -386,8 +386,8 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
-    def maybe_is_qwen3_rerank(self):
-        if not getattr(self.config, "is_qwen3_rerank", False):
+    def maybe_is_qwen3_reranker(self):
+        if not getattr(self.config, "is_qwen3_reranker", False):
             return
 
         tokens = getattr(self.config, "classifier_from_token", None)
