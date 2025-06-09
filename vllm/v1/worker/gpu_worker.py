@@ -204,15 +204,17 @@ class Worker(WorkerBase):
                     self.model_runner.model_memory_usage)) as profile_result:
             self.model_runner.profile_run()
 
-        free_gpu_memory, _ = torch.cuda.mem_get_info()
+        free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         assert self.init_snapshot.free_memory > free_gpu_memory, (
             "Error in memory profiling. "
             f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
             f"current free memory {GiB(free_gpu_memory)} GiB. "
-            f"This happens when the GPU memory was not properly cleaned up "
-            f"before initializing the vLLM instance.")
+            "This happens when other processes sharing the same container "
+            "release GPU memory while vLLM is profiling during initialization. "
+            "To fix this, ensure consistent GPU memory allocation or "
+            "isolate vLLM in its own container.")
         available_kv_cache_memory = self.requested_memory \
             - profile_result.non_kv_cache_memory
 
