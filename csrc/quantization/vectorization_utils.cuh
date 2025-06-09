@@ -4,11 +4,24 @@
 
 namespace vllm {
 
+template <typename InT, typename OutT, int VEC, typename ScaOp>
+struct DefaultVecOp {
+  ScaOp scalar_op;
+
+  __device__ __forceinline__ void operator()(
+      vec_n_t<OutT, VEC>& dst, const vec_n_t<InT, VEC>& src) const {
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) {
+      scalar_op(dst.val[i], src.val[i]);
+    }
+  }
+};
+
 template <typename InT, typename OutT, typename VecOp, typename ScaOp>
 __device__ inline void vectorize_with_alignment(
     const InT* in, OutT* out, int len, int tid, int stride,
-    VecOp&& vec_op,    // vec_n_t<InT,16> -> vec_n_t<OutT,16>
-    ScaOp&& sca_op) {  // InT -> OutT
+    VecOp&& vec_op,       // vec_n_t<InT,16> -> vec_n_t<OutT,16>
+    ScaOp&& scalar_op) {  // InT -> OutT
   constexpr int VEC = 16;
   constexpr int WIDTH = VEC * sizeof(InT);  // 64 B
   uintptr_t addr = reinterpret_cast<uintptr_t>(in);
@@ -21,7 +34,7 @@ __device__ inline void vectorize_with_alignment(
 
   // 1. prefill the when it is unsafe to vectorize
   for (int i = tid; i < prefix_elems; i += stride) {
-    sca_op(out[i], in[i]);
+    scalar_op(out[i], in[i]);
   }
 
   in += prefix_elems;
@@ -44,8 +57,18 @@ __device__ inline void vectorize_with_alignment(
   // 3. handle the tail
   int tail_start = num_vec * VEC;
   for (int i = tid + tail_start; i < len; i += stride) {
-    sca_op(out[i], in[i]);
+    scalar_op(out[i], in[i]);
   }
+}
+
+template <typename InT, typename OutT, typename ScaOp>
+__device__ __forceinline__ void vectorize_with_alignment(const InT* in,
+                                                         OutT* out, int len,
+                                                         int tid, int stride,
+                                                         ScaOp&& scalar_op) {
+  using Vec = DefaultVecOp<InT, OutT, 16, std::decay_t<ScaOp>>;
+  vectorize_with_alignment(in, out, len, tid, stride, Vec{scalar_op},
+                           std::forward<ScaOp>(scalar_op));
 }
 
 }  // namespace vllm

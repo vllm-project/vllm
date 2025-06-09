@@ -116,17 +116,10 @@ __global__ void static_scaled_int8_quant_kernel(
   const scalar_t* row_in = input + blockIdx.x * hidden_size;
   int8_t* row_out = output + blockIdx.x * hidden_size;
 
-  vectorize_with_alignment(
-      row_in, row_out, hidden_size, tid, stride,
-      [=] __device__(vec_n_t<int8_t, 16> & dst,
-                     const vec_n_t<scalar_t, 16>& src) {
-#pragma unroll
-        for (int k = 0; k < 16; ++k)
-          dst.val[k] = float_to_int8_rn(float(src.val[k]) / scale);
-      },
-      [=] __device__(int8_t& dst, const scalar_t& src) {
-        dst = float_to_int8_rn(float(src) / scale);
-      });
+  vectorize_with_alignment(row_in, row_out, hidden_size, tid, stride,
+                           [=] __device__(int8_t& dst, const scalar_t& src) {
+                             dst = float_to_int8_rn(float(src) / scale);
+                           });
 }
 
 template <typename scalar_t, typename scale_t, typename azp_t>
@@ -142,20 +135,11 @@ __global__ void static_scaled_int8_azp_quant_kernel(
   const scalar_t* row_in = input + blockIdx.x * hidden_size;
   int8_t* row_out = output + blockIdx.x * hidden_size;
 
-  vectorize_with_alignment(
-      row_in, row_out, hidden_size, tid, stride,
-      [=] __device__(vec_n_t<int8_t, 16> & dst,
-                     const vec_n_t<scalar_t, 16>& src) {
-#pragma unroll
-        for (int k = 0; k < 16; ++k) {
-          float v = float(src.val[k]) * inv_s;
-          dst.val[k] = int32_to_int8(float_to_int32_rn(v) + azp);
-        }
-      },
-      [=] __device__(int8_t& dst, const scalar_t& src) {
-        float v = float(src) * inv_s;
-        dst = int32_to_int8(float_to_int32_rn(v) + azp);
-      });
+  vectorize_with_alignment(row_in, row_out, hidden_size, tid, stride,
+                           [=] __device__(int8_t& dst, const scalar_t& src) {
+                             float v = float(src) * inv_s;
+                             dst = int32_to_int8(float_to_int32_rn(v) + azp);
+                           });
 }
 
 template <typename scalar_t, typename scale_t>
@@ -187,17 +171,10 @@ __global__ void dynamic_scaled_int8_quant_kernel(
   float inv_s = (absmax == 0.f) ? 0.f : 127.f / absmax;
 
   // 2. quantize
-  vectorize_with_alignment(
-      row_in, row_out, hidden_size, tid, stride,
-      [=] __device__(vec_n_t<int8_t, 16> & dst,
-                     const vec_n_t<scalar_t, 16>& src) {
-#pragma unroll
-        for (int k = 0; k < 16; ++k)
-          dst.val[k] = float_to_int8_rn(float(src.val[k]) * inv_s);
-      },
-      [=] __device__(int8_t& dst, const scalar_t& src) {
-        dst = float_to_int8_rn(float(src) * inv_s);
-      });
+  vectorize_with_alignment(row_in, row_out, hidden_size, tid, stride,
+                           [=] __device__(int8_t& dst, const scalar_t& src) {
+                             dst = float_to_int8_rn(float(src) * inv_s);
+                           });
 }
 
 // MinMax structure to hold min and max values in one go
@@ -275,20 +252,11 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   azp_t azp = azp_sh;
 
   // 2. quantize
-  vectorize_with_alignment(
-      row_in, row_out, hidden_size, tid, stride,
-      [=] __device__(vec_n_t<int8_t, 16> & dst,
-                     const vec_n_t<scalar_t, 16>& src) {
-#pragma unroll
-        for (int k = 0; k < 16; ++k) {
-          float v = float(src.val[k]) * inv_s;
-          dst.val[k] = int32_to_int8(float_to_int32_rn(v) + azp);
-        }
-      },
-      [=] __device__(int8_t& dst, const scalar_t& src) {
-        float v = float(src) * inv_s;
-        dst = int32_to_int8(float_to_int32_rn(v) + azp);
-      });
+  vectorize_with_alignment(row_in, row_out, hidden_size, tid, stride,
+                           [=] __device__(int8_t& dst, const scalar_t& src) {
+                             float v = float(src) * inv_s;
+                             dst = int32_to_int8(float_to_int32_rn(v) + azp);
+                           });
 }
 
 }  // namespace vllm
