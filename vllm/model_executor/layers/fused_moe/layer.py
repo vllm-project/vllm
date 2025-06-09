@@ -331,13 +331,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 all_to_all_args[
                     "group_name"] = all2all_manager.cpu_group.group_name
 
-            handle = all2all_manager.get_handle(all_to_all_args)
+            handles = all2all_manager.get_handles(all_to_all_args)
 
             input_activations = get_quant_config_input_activations(
                 quant_config)
 
             prepare_finalize = PplxPrepareAndFinalize(
-                handle,
+                handles,
                 max_num_tokens=moe.max_num_tokens,
                 world_size=all2all_manager.world_size,
                 rank=all2all_manager.rank,
