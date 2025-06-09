@@ -1011,7 +1011,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
                 "fps": 2.0,
                 "duration": num_frames / 2.0,
                 "total_frames": num_frames,
-                "video_backend": "pyav",
+                "video_backend": "opencv",
             }
             video_item = (video.copy(), video_metadata)
             video_items.append(video_item)

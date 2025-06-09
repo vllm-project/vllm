@@ -143,7 +143,7 @@ class OpenCVVideoBackend(VideoLoader):
         assert i == num_frames, (f"Expected reading {num_frames} frames, "
                                  f"but only loaded {i} frames from video.")
 
-        # Use transformers VideoMetadata format
+        # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
             "total_frames": total_frames_num,
             "fps": original_fps,

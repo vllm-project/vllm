@@ -60,8 +60,8 @@ these are directly passed to the model without HF processing.
 VideoItem: TypeAlias = Union[HfVideoItem, "torch.Tensor",
                              tuple[HfVideoItem, dict[str, Any]]]
 """
-A `transformers.video_utils.VideoInput` representing a single video
-item, which can be passed to a HuggingFace `VideoProcessor` with `VideoMetadata`.
+A `transformers.video_utils.VideoInput` representing a single video item. 
+This can be passed to a HuggingFace `VideoProcessor` with `transformers.video_utils.VideoMetadata`.
 
 Alternatively, a 3-D tensor or batch of 2-D tensors,
 which are treated as video embeddings;
