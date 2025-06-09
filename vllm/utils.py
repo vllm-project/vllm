@@ -2329,11 +2329,13 @@ class MemoryProfilingResult:
 
     def __repr__(self) -> str:
         return (f"Memory profiling takes {self.profile_time:.2f} seconds. "
-                f"Weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB; "
+                f"Total non KV cache memory: "
+                f"{(self.non_kv_cache_memory / GiB_bytes):.2f}GiB; "
+                f"torch peak memory increase: "
+                f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB; "
                 f"non-torch forward increase memory: "
                 f"{(self.non_torch_increase / GiB_bytes):.2f}GiB; "
-                f"torch peak memory: "
-                f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB.")
+                f"weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB.")
 
 
 @contextlib.contextmanager

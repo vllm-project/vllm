@@ -218,8 +218,9 @@ class Worker(WorkerBase):
 
         logger.debug(
             "Initial free memory: %.2f GiB, free memory: %.2f GiB, "
-            "total GPU memory: %.2f GiB", GiB(self.init_snapshot.free_memory),
-            GiB(free_gpu_memory), GiB(self.init_snapshot.total_memory))
+            "requested GPU memory: %.2f GiB",
+            GiB(self.init_snapshot.free_memory), GiB(free_gpu_memory),
+            GiB(self.requested_memory))
         logger.debug(profile_result)
         logger.info("Available KV cache memory: %.2f GiB",
                     GiB(available_kv_cache_memory))
