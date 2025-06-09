@@ -5,6 +5,7 @@ import copy
 import gc
 import time
 import weakref
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
@@ -12,6 +13,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadataBuilder)
@@ -460,8 +462,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the block IDs.
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                for i in range(len(self.kv_cache_config.kv_cache_groups)):
-                    req_state.block_ids[i].extend(req_data.new_block_ids[i])
+                for block_ids, new_block_ids in zip(  # type: ignore[call-overload]
+                        req_state.block_ids,
+                        req_data.new_block_ids,
+                        strict=True):
+                    block_ids.extend(new_block_ids)
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
@@ -652,7 +657,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Fill unused with -1. Needed for reshape_and_cache
         self.seq_lens[num_reqs:].fill_(0)
-        self.query_start_loc[num_reqs + 1:].fill_(-1)
+        # Note: pad query_start_loc to be non-decreasing, as kernels
+        # like FlashAttention requires that
+        self.query_start_loc[num_reqs + 1:].fill_(
+            self.query_start_loc_cpu[num_reqs].item())
 
         query_start_loc = self.query_start_loc[:num_reqs + 1]
         seq_lens = self.seq_lens[:num_reqs]
@@ -1721,6 +1729,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return prompt_logprobs_dict
 
+    @contextmanager
+    def maybe_randomize_inputs(self, input_ids: torch.Tensor):
+        """
+        Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
+        This is to help balance expert-selection
+         - during profile_run
+         - during DP rank dummy run 
+        """
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
+        if not randomize_inputs:
+            yield
+        else:
+            import functools
+
+            @functools.cache
+            def rand_input_ids() -> torch.Tensor:
+                return torch.randint_like(
+                    self.input_ids,
+                    low=0,
+                    high=self.model_config.get_vocab_size(),
+                    dtype=input_ids.dtype)
+
+            logger.debug("Randomizing dummy data for DP Rank")
+            input_ids.copy_(rand_input_ids()[:input_ids.size(0)],
+                            non_blocking=True)
+            yield
+            input_ids.fill_(0)
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -1801,7 +1838,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens, None, False)
 
-            with set_forward_context(
+            with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
