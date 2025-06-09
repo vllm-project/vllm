@@ -330,7 +330,7 @@ class HfRunner:
             self.config,
             dtype=dtype,
             is_pooling_model=is_sentence_transformer or is_cross_encoder,
-            defer_to_worker=False,
+            defer_auto_to_worker=False,
         )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
