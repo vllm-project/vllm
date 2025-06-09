@@ -346,7 +346,7 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (new_name, orig_name, shard_id)
             (".c_attn.q_proj", ".c_attn", "q"),
@@ -355,7 +355,7 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ]
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "lm_head.weight" in name:
                 continue
