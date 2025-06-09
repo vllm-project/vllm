@@ -22,7 +22,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
+from vllm.utils import GiB_bytes
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -77,7 +77,6 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
-        self.baseline_snapshot = MemorySnapshot()
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
@@ -194,13 +193,10 @@ class Worker(WorkerBase):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-        initial_free_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        _, total_gpu_memory = torch.cuda.mem_get_info()
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-                self.baseline_snapshot,
-                weights_memory=self.model_runner.model_memory_usage) as result:
-            self.model_runner.profile_run()
+        self.model_runner.profile_run()
 
         free_gpu_memory, _ = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -232,7 +228,6 @@ class Worker(WorkerBase):
         non_torch_alloc_bytes = max(0, fwd_alloc_bytes - torch_allocated_bytes)
         # Total forward allocation (peak) is peak torch + non-torch
         peak_memory = peak_torch_memory + non_torch_alloc_bytes
-
         memory_for_current_instance = total_gpu_memory * \
             self.cache_config.gpu_memory_utilization
         available_kv_cache_memory = memory_for_current_instance - peak_memory
