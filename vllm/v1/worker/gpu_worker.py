@@ -136,6 +136,10 @@ class Worker(WorkerBase):
                 is_pooling_model=(self.model_config.runner_type == "pooling"),
             )
 
+        if self.vllm_config.lora_config:
+            self.vllm_config.lora_config.verify_with_model_config(
+                self.model_config)
+
         if self.model_config.dtype not in V1_SUPPORTED_DTYPES:
             raise ValueError(
                 f"dtype 'auto' resolved to {self.model_config.dtype}, which is "

@@ -184,6 +184,10 @@ class Worker(LocalOrDistributedWorkerBase):
                 is_pooling_model=(self.model_config.runner_type == "pooling"),
             )
 
+        if self.vllm_config.lora_config:
+            self.vllm_config.lora_config.verify_with_model_config(
+                self.model_config)
+
         _check_if_gpu_supports_dtype(self.model_config.dtype)
 
         # Configure FlashMLA backend if using MLA
