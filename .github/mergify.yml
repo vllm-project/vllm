@@ -36,6 +36,20 @@ pull_request_rules:
       add:
         - frontend
 
+- name: label-llama
+  description: Automatically apply llama label
+  conditions:
+    - or:
+      - files~=^examples/.*llama.*\.py
+      - files~=^tests/.*llama.*\.py
+      - files~=^vllm/entrypoints/openai/tool_parsers/llama.*\.py
+      - files~=^vllm/model_executor/models/.*llama.*\.py
+      - files~=^vllm/transformers_utils/configs/.*llama.*\.py
+  actions:
+    label:
+      add:
+        - llama
+
 - name: label-multi-modality
   description: Automatically apply multi-modality label
   conditions:
