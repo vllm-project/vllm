@@ -427,6 +427,9 @@ class MultiModalDataParser:
         if self._is_embeddings(data):
             return VideoEmbeddingItems(data)
 
+        if isinstance(data, tuple) and len(data) == 2:
+            frames, metadata = data
+            data = frames
         if (is_list_of(data, PILImage.Image)
                 or isinstance(data,
                               (np.ndarray, torch.Tensor)) and data.ndim == 4):

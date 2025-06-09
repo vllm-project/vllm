@@ -100,51 +100,6 @@ class OpenCVVideoBackend(VideoLoader):
         return api_pref
 
     @classmethod
-    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
-        import cv2
-
-        backend = cls().get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
-        if not cap.isOpened():
-            raise ValueError("Could not open video stream")
-
-        total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        full_read = num_frames == -1 or total_frames_num < num_frames
-        if full_read:
-            num_frames = total_frames_num
-            frame_idx = list(range(0, num_frames))
-        else:
-            uniform_sampled_frames = np.linspace(0,
-                                                 total_frames_num - 1,
-                                                 num_frames,
-                                                 dtype=int)
-            frame_idx = uniform_sampled_frames.tolist()
-
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames = np.empty((len(frame_idx), height, width, 3), dtype=np.uint8)
-
-        i = 0
-        for idx in range(total_frames_num):
-            ok = cap.grab()  # next img
-            if not ok:
-                break
-            if idx in frame_idx:  # only decompress needed
-                ret, frame = cap.retrieve()
-                if ret:
-                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    i += 1
-        # we expect all frames loaded
-        assert i == num_frames, (f"Expected reading {num_frames} frames, "
-                                 f"but only loaded {i} frames from video.")
-        return frames
-
-
-@VIDEO_LOADER_REGISTRY.register("glm4v")
-class Glm4vVideoLoader(OpenCVVideoBackend):
-    """GLM-4V video loader that returns frames and metadata"""
-
-    @classmethod
     def load_bytes(cls,
                    data: bytes,
                    num_frames: int = -1) -> tuple[npt.NDArray, dict]:
@@ -157,7 +112,7 @@ class Glm4vVideoLoader(OpenCVVideoBackend):
 
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
-        duration = total_frames_num / original_fps
+        duration = total_frames_num / original_fps if original_fps > 0 else 0
 
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
@@ -185,15 +140,15 @@ class Glm4vVideoLoader(OpenCVVideoBackend):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
 
-        # we expect all frames loaded
         assert i == num_frames, (f"Expected reading {num_frames} frames, "
                                  f"but only loaded {i} frames from video.")
 
+        # Use transformers VideoMetadata format
         metadata = {
-            "total_num_frames": num_frames,
+            "total_frames": total_frames_num,
             "fps": original_fps,
             "duration": duration,
-            "video_backend": "opencv",
+            "video_backend": "opencv"
         }
 
         return frames, metadata
