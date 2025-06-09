@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gc
+import json
 import os
 import pathlib
 import subprocess
@@ -22,7 +23,7 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
 # yapf: enable
 from vllm.utils import PlaceholderModule
 
-from ..utils import VLLM_PATH
+from ..utils import VLLM_PATH, RemoteOpenAIServer
 
 try:
     from tensorizer import EncryptionParams
@@ -40,11 +41,6 @@ prompts = [
 ]
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
-
-model_ref = "facebook/opt-125m"
-tensorize_model_for_testing_script = os.path.join(
-    os.path.dirname(__file__), "tensorize_vllm_model_for_testing.py")
-
 
 def is_curl_installed():
     try:
@@ -96,7 +92,7 @@ def test_can_deserialize_s3(vllm_runner):
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
-def test_deserialized_encrypted_vllm_model_has_same_outputs(
+def test_deserialized_encrypted_vllm_model_has_same_outputs(model_ref,
         vllm_runner, tmp_path):
     args = EngineArgs(model=model_ref)
     with vllm_runner(model_ref) as vllm_model:
@@ -127,7 +123,7 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
 
 
 def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
-                                                tmp_path):
+                                                tmp_path, model_ref):
     with hf_runner(model_ref) as hf_model:
         model_path = tmp_path / (model_ref + ".tensors")
         max_tokens = 50
@@ -139,7 +135,7 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
     with vllm_runner(model_ref,
                      load_format="tensorizer",
                      model_loader_extra_config=TensorizerConfig(
-                         tensorizer_uri=model_path,
+                         tensorizer_uri=str(model_path),
                          num_readers=1,
                      )) as loaded_hf_model:
         deserialized_outputs = loaded_hf_model.generate_greedy(
@@ -148,7 +144,7 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
         assert outputs == deserialized_outputs
 
 
-def test_load_without_tensorizer_load_format(vllm_runner, capfd):
+def test_load_without_tensorizer_load_format(vllm_runner, capfd, model_ref):
     model = None
     try:
         model = vllm_runner(
@@ -166,7 +162,7 @@ def test_load_without_tensorizer_load_format(vllm_runner, capfd):
         torch.cuda.empty_cache()
 
 
-def test_raise_value_error_on_invalid_load_format(vllm_runner, capfd):
+def test_raise_value_error_on_invalid_load_format(vllm_runner, capfd, model_ref):
     model = None
     try:
         model = vllm_runner(
@@ -281,27 +277,26 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
 
         assert outputs == deserialized_outputs
 
+def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):
+    # For backwards compatibility, ensure Tensorizer can be still be loaded
+    # for inference by passing the model reference name, not a local/S3 dir,
+    # and the location of the model tensors
 
-def test_serialize_and_deserialize_model_artifacts(tmp_path, vllm_runner):
-    model_ref = "facebook/opt-125m"
-    model_dir = tmp_path / model_ref
-    model_path = f"{model_dir}/model.tensors"
-    config = TensorizerConfig(tensorizer_uri=str(model_path))
-    args = EngineArgs(model=model_ref, device="cuda")
+    model_dir = just_serialize_model_tensors
 
-    tensorize_vllm_model(args, config)
+    extra_config = {
+        "tensorizer_uri": f"{model_dir}/model.tensors"
+    }
 
-    gc.collect()
-    torch.cuda.empty_cache()
 
-    config = TensorizerConfig(tensorizer_uri=str(model_path))
+    ## Start OpenAI API server
+    args = [
+        "--load-format", "tensorizer",
+        "--model-loader-extra-config", json.dumps(extra_config),
+    ]
 
-    eng_args = EngineArgs(
-        str(model_dir),
-        load_format="tensorizer",
-        model_loader_extra_config=config.to_dict()
-    )
+    with RemoteOpenAIServer(model_ref, args) as remote_server:
+        assert remote_server
 
-    LLMEngine.from_engine_args(eng_args)
 
 
