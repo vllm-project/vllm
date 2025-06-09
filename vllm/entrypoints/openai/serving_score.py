@@ -243,6 +243,8 @@ class ServingScores(OpenAIServing):
                                       "for scoring models")
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
+        adapter_id = lora_request.lora_name if lora_request else None
+        self._set_tokenizer(tokenizer, adapter_id)
 
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.max_model_len, truncate_prompt_tokens,
