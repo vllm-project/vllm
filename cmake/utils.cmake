@@ -40,16 +40,17 @@ function (run_python OUT EXPR ERR_MSG)
 endfunction()
 
 # Generate CUDA sources via a Python script with caching based on script hash
-function(generate_cuda_sources NAME SCRIPT GLOB OUT_SRCS)
+function(generate_cuda_sources NAME SCRIPT PYTHONPATH_PREPEND GLOB OUT_SRCS)
   string(TOUPPER "${NAME}" _UPPER_NAME)
   set(_CACHE_VAR "${_UPPER_NAME}_GEN_SCRIPT_HASH")
   file(MD5 "${SCRIPT}" _GEN_HASH)
   message(STATUS "${NAME} generation script hash: ${_GEN_HASH}")
   message(STATUS "Last run ${NAME} generation script hash: $CACHE{${_CACHE_VAR}}")
   if(NOT DEFINED CACHE{${_CACHE_VAR}} OR NOT $CACHE{${_CACHE_VAR}} STREQUAL "${_GEN_HASH}")
+    message(STATUS "Running ${NAME} generation script: ${SCRIPT}, with PYTHONPATH prepend: ${PYTHONPATH_PREPEND}")
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=$ENV{PYTHONPATH}
+        PYTHONPATH=${PYTHONPATH_PREPEND}:$ENV{PYTHONPATH}
         ${Python_EXECUTABLE} "${SCRIPT}"
       RESULT_VARIABLE _GEN_RESULT
       OUTPUT_FILE "${CMAKE_CURRENT_BINARY_DIR}/${NAME}_generation.log"
@@ -126,6 +127,7 @@ endfunction()
 #     [VERSION_MSG <line1> [<line2> ...]]
 #     [NO_ARCH_MSG <line1> [<line2> ...]]
 #     [GEN_SCRIPT <path/to/generate_script.py>]
+#     [GEN_PYTHONPATH_PREPEND <str_to_prepend_to_pythonpath>]
 #     [GEN_GLOB <glob_pattern_for_generated_sources>]
 # This will check if `CMAKE_CUDA_COMPILER_VERSION` is greater than or equal
 # to `MIN_VERSION` and the `cuda_archs_loose_intersection` of `ARCHS` and 
@@ -137,10 +139,11 @@ endfunction()
 #  3) append the flags in `FLAGS` to the global `VLLM_GPU_FLAGS` variable.
 #
 # This will also run GEN_SCRIPT (if supplied and the hash of the script does not
-# match the latest in the cmake cache), before globbing sources matching 
-# GEN_GLOB and appending them alongside SRCS (with the gencodes set)
+# match the latest in the cmake cache), with GEN_PYTHONPATH_PREPEND prepended to
+# to the PYTHONPATH when calling  before globbing sources matching GEN_GLOB
+# and appending them alongside SRCS (with the gencodes set)
 macro(optional_cuda_sources)
-  set(oneValueArgs NAME MIN_VERSION GEN_SCRIPT GEN_GLOB OUT_SRCS_VAR)
+  set(oneValueArgs NAME MIN_VERSION GEN_SCRIPT GEN_PYTHONPATH_PREPEND GEN_GLOB OUT_SRCS_VAR)
   set(multiValueArgs ARCHS SRCS FLAGS VERSION_MSG NO_ARCH_MSG)
   cmake_parse_arguments(OCS "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
   if(NOT OCS_NAME)
@@ -161,7 +164,8 @@ macro(optional_cuda_sources)
       set(_OCS_SRCS ${OCS_SRCS})
       # Generate sources if a script is provided
       if(OCS_GEN_SCRIPT AND OCS_GEN_GLOB)
-        generate_cuda_sources(${OCS_NAME} "${OCS_GEN_SCRIPT}" "${OCS_GEN_GLOB}" _OCS_GEN_SRCS)
+        generate_cuda_sources(
+          ${OCS_NAME} "${OCS_GEN_SCRIPT}" "${OCS_GEN_PYTHONPATH_PREPEND}" "${OCS_GEN_GLOB}" _OCS_GEN_SRCS)
         list(APPEND _OCS_SRCS ${_OCS_GEN_SRCS})
       endif()
       set_gencode_flags_for_srcs(SRCS "${_OCS_SRCS}" CUDA_ARCHS "${_OCS_ARCHS}")

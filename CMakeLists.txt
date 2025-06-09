@@ -436,6 +436,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     MIN_VERSION 12.0
     ARCHS "${MACHETE_ARCHS}"
     GEN_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py"
+    GEN_PYTHONPATH_PREPEND 
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/"
     GEN_GLOB "csrc/quantization/machete/generated/*.cu"
     SRCS "csrc/quantization/machete/machete_pytorch.cu"
     VERSION_MSG
