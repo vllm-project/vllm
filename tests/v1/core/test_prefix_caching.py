@@ -148,7 +148,7 @@ def test_prefill(hash_algo):
                                     len(computed_blocks.blocks[0]) * 16,
                                     computed_blocks)
     assert blocks.get_block_ids() == ([5], )
-    for (block, ) in computed_blocks.blocks:
+    for block in computed_blocks.blocks[0]:
         assert block.ref_cnt == 2
 
     # At this point, we should have 5 free blocks left.
@@ -375,7 +375,7 @@ def test_prefill_plp():
                                     len(computed_blocks.blocks[0]) * 16,
                                     computed_blocks)
     assert blocks.get_block_ids() == ([1, 2, 3, 4], )
-    req0_block_hashes = [b.block_hash for b in blocks.blocks]
+    req0_block_hashes = [b.block_hash for b in blocks.blocks[0]]
 
     # Check full block metadata
     parent_block_hash = None
@@ -407,7 +407,7 @@ def test_prefill_plp():
                                     len(computed_blocks.blocks[0]) * 16,
                                     computed_blocks)
     assert blocks.get_block_ids() == ([5], )
-    for block in computed_blocks.blocks:
+    for block in computed_blocks.blocks[0]:
         assert block.ref_cnt == 2
 
     # At this point, we should have 5 free blocks left.
@@ -443,7 +443,7 @@ def test_prefill_plp():
                                     computed_blocks)
     block_ids = blocks.get_block_ids()
     # Duplicate cached blocks have different ids but same hashes vs request #0
-    assert [b.block_hash for b in blocks.blocks] == req0_block_hashes
+    assert [b.block_hash for b in blocks.blocks[0]] == req0_block_hashes
     assert block_ids != ([1, 2, 3, 4], )
 
     # Request #2 block hashes are valid since request #0 hashes are.
