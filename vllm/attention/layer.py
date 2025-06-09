@@ -80,6 +80,9 @@ class Attention(nn.Module):
             calculate_kv_scales = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
+        assert num_heads % num_kv_heads == 0, \
+            f"num_heads ({num_heads}) is not " \
+            f"divisible by num_kv_heads ({num_kv_heads})"
 
         # The default k/v_scale is set to 1.0. This is ignored
         # when kv-cache is not fp8, and should be used with
