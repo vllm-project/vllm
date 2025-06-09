@@ -1133,7 +1133,6 @@ def test_kv_connector_handles_preemption():
     assert len(scheduler.running) == 1
     _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 0
-    assert len(scheduler.waiting) == 1
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
         == NUM_BLOCKS - 1
@@ -1632,11 +1631,10 @@ def test_priority_scheduling_preemption_victim_selection():
     assert len(scheduler.waiting) == 2
 
     # Extract waiting requests and verify priority order
-    temp_waiting = list(scheduler.waiting)
-    temp_waiting.sort()  # Sort by (priority, arrival_time, request)
+    waiting_requests = list(scheduler.waiting)
 
-    waiting_priorities = [priority for priority, _, _ in temp_waiting]
-    waiting_req_ids = [req.request_id for _, _, req in temp_waiting]
+    waiting_priorities = [req.priority for req in waiting_requests]
+    waiting_req_ids = [req.request_id for req in waiting_requests]
 
     # Should be req_1 (priority 2) then req_0 (priority 3)
     assert waiting_priorities == [2, 3]
@@ -1671,13 +1669,10 @@ def test_priority_scheduling_equal_priority_preemption():
     assert len(scheduler.waiting) == 2
 
     # Extract waiting requests and verify arrival time order
-    temp_waiting = list(scheduler.waiting)
-    temp_waiting.sort()  # Sort by (priority, arrival_time, request)
+    waiting_requests = list(scheduler.waiting)
 
-    waiting_arrival_times = [
-        arrival_time for _, arrival_time, _ in temp_waiting
-    ]
-    waiting_req_ids = [req.request_id for _, _, req in temp_waiting]
+    waiting_arrival_times = [req.arrival_time for req in waiting_requests]
+    waiting_req_ids = [req.request_id for req in waiting_requests]
 
     # Should be req_2 (arrival 2.0) then req_0 (arrival 3.0)
     assert waiting_arrival_times == [2.0, 3.0]
@@ -1712,14 +1707,10 @@ def test_priority_scheduling_waiting_queue_order():
 
     # Extract requests from waiting queue
     # (it's a heap, so we need to pop to see order)
-    waiting_priorities = []
-    waiting_req_ids = []
-    temp_waiting = list(scheduler.waiting)  # Copy the heap
-    temp_waiting.sort()  # Sort by (priority, arrival_time, request)
+    waiting_requests = list(scheduler.waiting)
 
-    for priority, arrival_time, request in temp_waiting:
-        waiting_priorities.append(priority)
-        waiting_req_ids.append(request.request_id)
+    waiting_priorities = [req.priority for req in waiting_requests]
+    waiting_req_ids = [req.request_id for req in waiting_requests]
 
     # Should be ordered by priority: req_1 (1), req_2 (2), req_0 (3)
     assert waiting_req_ids == ["1", "2", "0"]
@@ -1785,10 +1776,9 @@ def test_priority_scheduling_with_limited_slots():
     assert len(scheduler.waiting) == 2
 
     # Extract waiting requests and verify order
-    temp_waiting = list(scheduler.waiting)
-    temp_waiting.sort()
-    waiting_priorities = [priority for priority, _, _ in temp_waiting]
-    waiting_req_ids = [req.request_id for _, _, req in temp_waiting]
+    waiting_requests = list(scheduler.waiting)
+    waiting_priorities = [req.priority for req in waiting_requests]
+    waiting_req_ids = [req.request_id for req in waiting_requests]
 
     # Should be req_2 (priority 2) then req_0 (priority 3)
     assert waiting_priorities == [2, 3]

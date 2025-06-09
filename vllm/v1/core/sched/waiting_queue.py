@@ -6,6 +6,7 @@ from __future__ import annotations
 import heapq
 from abc import ABC, abstractmethod
 from collections import deque
+from collections.abc import Iterator
 
 from vllm.v1.request import Request
 
@@ -52,17 +53,16 @@ class WaitingQueue(ABC):
         pass
 
     @abstractmethod
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to the policy."""
         pass
 
 
-class FCFSWaitingQueue(WaitingQueue, deque[Request]):
+class FCFSWaitingQueue(deque[Request], WaitingQueue):
     """A first-come-first-served queue that supports deque operations."""
 
     def __init__(self) -> None:
         super().__init__()
-        deque.__init__(self)
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to FCFS policy."""
@@ -81,16 +81,7 @@ class FCFSWaitingQueue(WaitingQueue, deque[Request]):
 
     def extend_left_requests(self, requests: WaitingQueue) -> None:
         """Extend left with requests from another WaitingQueue."""
-        if isinstance(requests, FCFSWaitingQueue):
-            self.extendleft(requests)
-        else:
-            # Handle priority queue case
-            for item in requests:
-                if isinstance(item, tuple):
-                    _, _, request = item
-                    self.appendleft(request)
-                else:
-                    self.appendleft(item)
+        self.extendleft(reversed(list(requests)))
 
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
@@ -102,11 +93,11 @@ class FCFSWaitingQueue(WaitingQueue, deque[Request]):
 
     def __len__(self) -> int:
         """Get number of requests in queue."""
-        return deque.__len__(self)
+        return super().__len__()
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to FCFS policy."""
-        return deque.__iter__(self)
+        return super().__iter__()
 
 
 class PriorityWaitingQueue(WaitingQueue):
@@ -159,9 +150,12 @@ class PriorityWaitingQueue(WaitingQueue):
         """Get number of requests in queue."""
         return len(self._heap)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to priority policy."""
-        return iter(self._heap)
+        heap_copy = self._heap[:]
+        while heap_copy:
+            _, _, request = heapq.heappop(heap_copy)
+            yield request
 
 
 def create_waiting_queue(policy: str, ) -> WaitingQueue:
