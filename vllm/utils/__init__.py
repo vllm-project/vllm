@@ -578,6 +578,7 @@ class AsyncMicrobatchTokenizer:
             if encode_items:
                 prompts = [item[0] for item in encode_items]
                 futures = [item[2] for item in encode_items]
+                loops = [item[3] for item in encode_items]
                 # Use first request's kwargs for the whole batch
                 batch_kwargs = encode_items[0][1]
 
@@ -586,16 +587,17 @@ class AsyncMicrobatchTokenizer:
                     if len(prompts) == 1:
                         results = [results]
                     # Set results on futures
-                    for fut, res in zip(futures, results):
-                        fut.set_result(res)
+                    for fut, res, loop in zip(futures, results, loops):
+                        loop.call_soon_threadsafe(fut.set_result, res)
                 except Exception as e:
                     # Propagate exceptions to all waiting clients
-                    for fut in futures:
-                        fut.set_exception(e)
+                    for fut, loop in zip(futures, loops):
+                        loop.call_soon_threadsafe(fut.set_exception, e)
 
             if decode_items:
                 token_ids_batch = [item[0] for item in decode_items]
                 futures = [item[2] for item in decode_items]
+                loops = [item[3] for item in decode_items]
                 kwargs = decode_items[0][1]
 
                 try:
@@ -603,23 +605,25 @@ class AsyncMicrobatchTokenizer:
                     results = self.tokenizer.batch_decode(
                         token_ids_batch, **kwargs)
                     # Set results on futures
-                    for fut, result in zip(futures, results):
-                        fut.set_result(result)
+                    for fut, res, loop in zip(futures, results, loops):
+                        loop.call_soon_threadsafe(fut.set_result, res)
                 except Exception as e:
-                    for fut in futures:
-                        fut.set_exception(e)
+                    for fut, loop in zip(futures, loops):
+                        loop.call_soon_threadsafe(fut.set_exception, e)
 
     async def __call__(self, prompt, **kwargs):
         """Submit a tokenization request and wait for result"""
-        fut = asyncio.get_event_loop().create_future()
-        await self.queue.put(("encode", prompt, kwargs, fut))
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        await self.queue.put(("encode", prompt, kwargs, fut, loop))
         self.requests_available_event.set()
         return await fut
 
     async def decode(self, token_ids, **kwargs):
         """Submit a decoding request and wait for result"""
-        fut = asyncio.get_event_loop().create_future()
-        await self.queue.put(("decode", token_ids, kwargs, fut))
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        await self.queue.put(("decode", token_ids, kwargs, fut, loop))
         self.requests_available_event.set()
         return await fut
 
