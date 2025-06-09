@@ -211,7 +211,7 @@ if [[ $commands == *"--shard-id="* ]]; then
         -v "${HF_CACHE}:${HF_MOUNT}" \
         -e "HF_HOME=${HF_MOUNT}" \
         -e "PYTHONPATH=${MYPYTHONPATH}" \
-        -e "VLLM_USE_V1=${MYUSEV1} \
+        -e "VLLM_USE_V1=${MYUSEV1}" \
         --name "${container_name}_${GPU}" \
         "${image_name}" \
         /bin/bash -c "${commands_gpu}" \
