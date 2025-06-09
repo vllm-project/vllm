@@ -106,8 +106,7 @@ class FCFSWaitingQueue(WaitingQueue, deque[Request]):
 
     def __iter__(self):
         """Iterate over the queue according to FCFS policy."""
-        # Cast to deque to access its iterator
-        return iter(deque[Request](self))
+        return deque.__iter__(self)
 
 
 class PriorityWaitingQueue(WaitingQueue):
