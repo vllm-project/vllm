@@ -61,6 +61,10 @@ class KVCacheBlocks:
             if block.block_hash is None
         ]
 
+    def new_empty(self) -> "KVCacheBlocks":
+        """Creates a new KVCacheBlocks instance with no blocks."""
+        return KVCacheBlocks([[] for _ in range(len(self.blocks))])
+
 
 class KVCacheManager:
 
