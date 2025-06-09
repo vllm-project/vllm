@@ -1801,9 +1801,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
 
-        self.seq_lens.fill_(0)
-        seq_lens = self.seq_lens[:num_reqs]
-        seq_lens.copy_(torch.from_numpy(num_scheduled_tokens))
+        #self.seq_lens.fill_(0)
+        #seq_lens = self.seq_lens[:num_reqs]
+        #seq_lens.copy_(torch.from_numpy(num_scheduled_tokens))
 
         if skip_attn:
             attn_metadata: Optional[dict[str, Any]] = None
@@ -1847,12 +1847,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 positions = self.positions[:num_tokens]
 
-            offset = 0
-            for seq_len in num_scheduled_tokens_list:
-                positions[offset:offset + seq_len] = torch.arange(
-                    seq_len, dtype=positions.dtype)
-                offset += seq_len
-
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
@@ -1878,7 +1872,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     inputs_embeds=inputs_embeds,
                 )
 
-            positions = self.positions[:num_tokens].zero_()
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
