@@ -913,17 +913,28 @@ class EngineArgs:
             model_impl=self.model_impl,
         )
 
+    def no_valid_tensorizer_args_in_model_loader_extra_config(self) -> bool:
+        if self.model_loader_extra_config:
+            keys = self.model_loader_extra_config.keys()
+            return "tensorizer_uri" not in keys and "tensorizer_dir" not in keys
+        return True
+
     def create_load_config(self) -> LoadConfig:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
 
-        if self.load_format == "tensorizer" and not self.model_loader_extra_config:
-            # In this instance, infer TensorizerConfig.tensorizer_dir from the
-            # model tag.
+        if self.load_format == "tensorizer" and self.no_valid_tensorizer_args_in_model_loader_extra_config():
+            logger.info("Inferring Tensorizer args from %s", self.model)
             self.model_loader_extra_config = {
                 "tensorizer_dir": self.model
             }
+        else:
+            logger.info(
+                "Using Tensorizer args from --model-loader-extra-config. "
+                "Note that you can now simply pass the S3 directory in the "
+                "model tag instead of providing the JSON string."
+            )
 
         return LoadConfig(
             load_format=self.load_format,
