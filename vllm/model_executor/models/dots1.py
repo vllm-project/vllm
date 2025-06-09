@@ -167,26 +167,17 @@ class Dots1MoE(nn.Module):
         ])
         self.pack_params()
 
-        try:
-            self.moe_gating_fp32 = config.moe_gating_fp32
-        except:
-            self.moe_gating_fp32 = False
-        if self.moe_gating_fp32:
-            self.gate = ReplicatedLinear(
-                config.hidden_size,
-                self.n_routed_experts,
-                bias=False,
-                quant_config=None,
-                params_dtype=torch.float32,
-            )
-        else:
-            self.gate = ReplicatedLinear(config.hidden_size,
-                                         self.n_routed_experts,
-                                         bias=False,
-                                         quant_config=None)
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            self.n_routed_experts,
+            bias=False,
+            quant_config=None,
+            params_dtype=torch.float32,
+        )
 
         if config.n_shared_experts is not None:
-            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            intermediate_size = (config.moe_intermediate_size *
+                                 config.n_shared_experts)
             self.shared_experts = Dots1MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -195,10 +186,8 @@ class Dots1MoE(nn.Module):
                 reduce_results=False,
             )
 
-        try:
-            self.routed_scaling_factor = config.routed_scaling_factor
-        except:
-            self.routed_scaling_factor = 1.0
+        self.routed_scaling_factor = config.routed_scaling_factor
+
         if config.scoring_func == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(self.n_routed_experts))
@@ -443,8 +432,9 @@ class Dots1Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -548,7 +538,7 @@ class Dots1ForCausalLM(nn.Module, SupportsPP):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
