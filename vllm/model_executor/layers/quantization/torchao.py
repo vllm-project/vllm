@@ -151,6 +151,7 @@ def torchao_quantize_param_data(param: torch.Tensor,
     from torchao.quantization import quantize_
 
     assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
+    #Avoid full weight allocation for faster load.
     dummy_linear = torch.nn.Linear(1, 1, bias=False)
     dummy_linear.in_features = param.shape[1]
     dummy_linear.out_features = param.shape[0]
