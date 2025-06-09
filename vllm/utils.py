@@ -2330,9 +2330,9 @@ class MemoryProfilingResult:
     def __repr__(self) -> str:
         return (f"Memory profiling takes {self.profile_time:.2f} seconds. "
                 f"Weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB; "
-                f"Non-torch forward increase memory: "
+                f"non-torch forward increase memory: "
                 f"{(self.non_torch_increase / GiB_bytes):.2f}GiB; "
-                f"Torch peak memory: "
+                f"torch peak memory: "
                 f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB.")
 
 
