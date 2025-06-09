@@ -12,18 +12,20 @@ model = LLM(model=model_name,
                 "architectures": ["Qwen3ForSequenceClassification"],
                 "classifier_from_token": ["no", "yes"],
                 "is_qwen3_reranker": True,
-            })
+            },
+            dtype="float32")
 
 # Why do we need hf_overrides:
-# - **Qwen3ForSequenceClassification**, Qwen3 Embedding & Reranker both
-# use the same architecture Qwen3ForCausalLM. We need to manually route
-# Reranker to Qwen3ForSequenceClassification.
-# - **classifier_from_token**, A more efficient approach is to extract
-# token_false_id = 2152 and token_true_id = 9693 into a 2-class
-# classification task rather than the current 151669-class classification task.
-# - **is_qwen3_reranker**, We need to convert the 2-way classifier into a
-# 1-way head classifier. This way, it will be completely consistent with
-# the Qwen3ForSequenceClassification format.
+# Qwen3-Reranker is a language model that doing reranker by using the
+# logits of "no" and "yes" tokens.
+# vllm converts it to Qwen3ForSequenceClassification when loaded for
+# better performance.
+# - Firstly, we need using `"architectures": ["Qwen3ForSequenceClassification"],`
+# to manually route to Qwen3ForSequenceClassification.
+# - Then, we will extract the vector corresponding to classifier_from_token
+# from lm_head using `"classifier_from_token": ["no", "yes"]`.
+# - Third, we will convert these two vectors into one vector.  The use of
+# conversion logic is controlled by `using "is_qwen3_reranker": True`.
 
 prefix = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"
 suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
