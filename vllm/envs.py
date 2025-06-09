@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
+    VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
@@ -110,6 +111,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -123,6 +125,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
+    VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
 
 
 def get_default_cache_root():
@@ -555,6 +558,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RPC_TIMEOUT":
     lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
 
+    # Timeout in seconds for keeping HTTP connections alive in API server
+    "VLLM_HTTP_TIMEOUT_KEEP_ALIVE":
+    lambda: int(os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")),
+
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
     # if this is set to an empty string, no plugins will be loaded
@@ -760,6 +767,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_MASTER_PORT":
     lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
 
+    # Randomize inputs during dummy runs when using Data Parallel
+    "VLLM_RANDOMIZE_DP_DUMMY_INPUTS":
+    lambda: os.environ.get("VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0") == "1",
+
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
@@ -847,6 +858,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # latency penalty when a request eventually comes.
     "VLLM_SLEEP_WHEN_IDLE":
     lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
+
+    # Control the max chunk bytes (in MB) for the rpc message queue.
+    # Object larger than this threshold will be broadcast to worker
+    # processes via zmq.
+    "VLLM_MQ_MAX_CHUNK_BYTES_MB":
+    lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
 }
 
 # --8<-- [end:env-vars-definition]
