@@ -153,7 +153,9 @@ class EngineClient(ABC):
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     all_beams_token_id.extend(list(logprobs.keys()))
-                    all_beams_logprob.extend([current_beam.cum_logprob + obj.logprob for obj in logprobs.values()])
+                    all_beams_logprob.extend([
+                        current_beam.cum_logprob + obj.logprob
+                        for obj in logprobs.values()])
 
             ##Handle the token for the end of sentence (EOS)
             all_beams_token_id = np.array(all_beams_token_id)
@@ -161,15 +163,17 @@ class EngineClient(ABC):
 
             if not ignore_eos:
                 #Get the index position of eos token in all generated results
-                eos_idx = np.where(all_beams_token_id == tokenizer.eos_token_id)[0]
+                eos_idx = np.where(
+                    all_beams_token_id == tokenizer.eos_token_id)[0]
                 for idx in eos_idx:
                     current_beam = all_beams[idx // logprobs_num]
                     result = output[idx // logprobs_num]
                     completed.append(
                         BeamSearchSequence(
                             tokens=current_beam.tokens +
-                            [tokenizer.eos_token_id] if include_stop_str_in_output
-                            else current_beam.tokens,
+                            [tokenizer.eos_token_id] 
+                            if include_stop_str_in_output else 
+                            current_beam.tokens,
                             logprobs=current_beam.logprobs +
                             [result.outputs[0].logprobs[0]],
                             cum_logprob=float(all_beams_logprob[idx]),
@@ -180,7 +184,8 @@ class EngineClient(ABC):
 
             #Processing non-EOS tokens
             #Get indices of the top beam_width probabilities
-            topn_idx = np.argpartition(-all_beams_logprob, beam_width)[:beam_width]
+            topn_idx = np.argpartition(-all_beams_logprob,
+                                       beam_width)[:beam_width]
 
             for idx in topn_idx:
                 current_beam = all_beams[idx // logprobs_num]
@@ -193,10 +198,8 @@ class EngineClient(ABC):
                         [result.outputs[0].logprobs[0]],
                         lora_request=current_beam.lora_request,
                         cum_logprob=float(all_beams_logprob[idx]),
-                        multi_modal_data=current_beam.
-                        multi_modal_data,
-                        mm_processor_kwargs=current_beam.
-                        mm_processor_kwargs))
+                        multi_modal_data=current_beam.multi_modal_data,
+                        mm_processor_kwargs=current_beam.mm_processor_kwargs))
 
             all_beams = new_beams
 
