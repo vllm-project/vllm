@@ -117,10 +117,8 @@ class Qwen2Attention(nn.Module):
         from vllm.distributed import (
                               get_lm_tensor_model_parallel_world_size,
                               get_lm_tensor_model_parallel_rank)
-         self.hidden_size = hidden_size
-        tp_size = get_lm_tensor_model_parallel_world_size()
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = get_lm_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
