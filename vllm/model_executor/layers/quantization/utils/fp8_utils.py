@@ -5,7 +5,7 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, List, Optional, Union
 
 import torch
 
@@ -103,7 +103,7 @@ def dispatch_w8a8_blockscale_func(
 def apply_w8a8_block_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
-    block_size: list[int],
+    block_size: List[int],
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
@@ -156,7 +156,7 @@ def apply_w8a8_block_fp8_linear(
 def apply_w8a8_block_fp8_linear_fake(
     input: torch.Tensor,
     weight: torch.Tensor,
-    block_size: list[int],
+    block_size: List[int],
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
