@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if TYPE_CHECKING:
@@ -38,7 +39,9 @@ class XPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         torch.xpu.synchronize()
 
-    def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+    def _prepare_inputs(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> tuple[dict[str, Any], torch.Tensor, Optional[SpecDecodeMetadata]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
