@@ -233,16 +233,11 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         # Defaults for internode and intranode are taken from DeepEP tests.
         num_nvl_bytes = 1024 * 1024 * 1024
         num_qps_per_rank = num_local_experts
-        num_rdma_bytes = None
-
-        if self.internode:
-            num_rdma_bytes = 1024 * 1024 * 1024
-        else:
-            num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
-                hidden=token_hidden_size,
-                num_ranks=num_ep_ranks,
-                num_experts=num_global_experts)
+        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
+            hidden=token_hidden_size,
+            num_ranks=num_ep_ranks,
+            num_experts=num_global_experts)
 
         assert num_rdma_bytes is not None
         return dict(group=self.cpu_group,
