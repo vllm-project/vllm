@@ -5,13 +5,21 @@ from typing import Any, Optional
 
 import torch
 
+from vllm import envs
 from vllm.attention.backends.abstract import (AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata)
+
+if HAS_TRITON:
+    from vllm.attention.ops.triton_flash_attention import triton_attention
+else:
+    triton_attention = None
 
 logger = init_logger(__name__)
 
@@ -67,6 +75,71 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "TritonMLA V1 with FP8 KV cache not yet supported")
+
+        self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
+        self.triton_fa_func = triton_attention
+
+    def _flash_attn_varlen_diff_headdims(
+        self,
+        q,
+        k,
+        v,
+        return_softmax_lse=False,
+        softmax_scale=None,
+        **kwargs):
+        maybe_padded_v = v
+        if self._pad_v:
+            maybe_padded_v = torch.nn.functional.pad(
+                v, [0, q.shape[-1] - v.shape[-1]], value=0)
+
+        if current_platform.is_rocm() \
+            and self.use_triton_flash_attn \
+            and not return_softmax_lse:
+            assert self.triton_fa_func is not None
+            attn_out = self.triton_fa_func(
+                q,
+                k,
+                maybe_padded_v,
+                None,  # output
+                kwargs["cu_seqlens_q"],
+                kwargs["cu_seqlens_k"],
+                kwargs["max_seqlen_q"],
+                kwargs["max_seqlen_k"],
+                kwargs["causal"],
+                softmax_scale,
+                None,  # bias
+            )
+        else:
+            if self.is_vllm_fa:
+                kwargs["return_softmax_lse"] = return_softmax_lse
+            else:
+                # Use return_attn_probs instead of return_softmax_lse for ROCm
+                kwargs["return_attn_probs"] = return_softmax_lse
+            assert self.flash_attn_varlen_func is not None
+            attn_out = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=maybe_padded_v,
+                softmax_scale=softmax_scale,
+                **kwargs,
+            )
+
+        # Unpack the output if there is multiple results,
+        # triton always returns (output, softmax_lse),
+        # vllm_flash_attn returns (output, softmax_lse) when
+        #  `return_softmax_lse = True`
+        # flash_attn (RoCM) returns (output, softmax_lse, ...) when
+        #  `return_attn_probs = True`
+        rest = None
+        if isinstance(attn_out, tuple):
+            attn_out, *rest = attn_out
+
+        # Remain consistent with old `flash_attn_varlen_func` where there
+        # is only one output tensor if `return_softmax_lse` is False.
+        if return_softmax_lse:
+            assert rest is not None
+            return attn_out, rest[0]
+        return attn_out
 
     def _forward_decode(
         self,
