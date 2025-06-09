@@ -15,6 +15,78 @@ def sample_prompts():
 
 
 @pytest.fixture
+def sample_prompts_for_structured_output():
+    return [
+        # Test 1: Generate JSON output based on a provided schema
+        ("Give an example JSON for an employee profile that fits this "
+         "schema. Make the response as short as possible. Schema:"),
+        # Test 2: Generate JSON object without a schema
+        ("Generate a JSON object with curly braces for a person with "
+         "name and age fields for John Smith who is 31 years old. "
+         "Make the response as short as possible."),
+        # Test 3: test a jsonschema incompatible with xgrammar
+        "Give an example JSON object for a grade that fits this schema:",
+        # Test 4: Generate SQL statement using EBNF grammar
+        # Test 5: Generate SQL statement using Lark grammar
+        # Test 6: Test invalid grammar input
+        ("Generate a sql statement that selects col_1 from "
+         "table_1 where it is equal to 1. Make the response as short as "
+         "possible."),
+        # Test 7: Generate text based on a regex pattern
+        "Give an example IPv4 address with this regex:",
+        # Test 8: Generate text based on a choices
+        ("The best language for type-safe systems programming is "
+         "(Make the response as short as possible)."),
+        # Test 9: Generate structured output using a Pydantic model
+        ("Generate a JSON with the brand, model and car_type of the most "
+         "iconic car from the 90's. Make the response as short as "
+         "possible."),
+        # Test 10: Generate structured with minLength and maxLength
+        ("Generate a description of a frog using 50 characters. "
+         "Make the response as short as possible."),
+        # Test 11: Generate structured output using structural_tag format
+        """
+You have access to the following function to retrieve the weather in a city:
+
+    {
+        "name": "get_weather",
+        "parameters": {
+            "city": {
+                "param_type": "string",
+                "description": "The city to get the weather for",
+                "required": True
+            }
+        }
+    }
+
+If a you choose to call a function ONLY reply in the following format:
+<{start_tag}={function_name}>{parameters}{end_tag}
+where
+
+start_tag => `<function`
+parameters => a JSON dict with the function argument name
+              as key and function argument value as value.
+end_tag => `</function>`
+
+Here is an example,
+<function=example_function_name>{"example_name": "example_value"}</function>
+
+Reminder:
+- Function calls MUST follow the specified format
+- Required parameters MUST be specified
+- Only call one function at a time
+- Put the entire function call reply on one line
+- Always add your sources when using search results to answer the user query
+
+You are a helpful assistant.
+
+Given the previous instructions, what is the weather in New York City? \
+Make the response as short as possible.
+""",
+    ]
+
+
+@pytest.fixture
 def sample_token_ids():
     return [
         [0],
