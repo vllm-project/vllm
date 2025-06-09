@@ -21,9 +21,8 @@ from .image import ImageMediaIO
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
     num_frames, _, _, channels = frames.shape
     new_height, new_width = size
-    resized_frames = np.empty(
-        (num_frames, new_height, new_width, channels), dtype=frames.dtype
-    )
+    resized_frames = np.empty((num_frames, new_height, new_width, channels),
+                              dtype=frames.dtype)
     # lazy import cv2 to avoid bothering users who only use text models
     import cv2
 
@@ -41,9 +40,8 @@ def rescale_video_size(frames: npt.NDArray, size_factor: float) -> npt.NDArray:
     return resize_video(frames, (new_height, new_width))
 
 
-def sample_frames_from_video(
-    frames: npt.NDArray, num_frames: int
-) -> npt.NDArray:
+def sample_frames_from_video(frames: npt.NDArray,
+                             num_frames: int) -> npt.NDArray:
     total_frames = frames.shape[0]
     if num_frames == -1:
         return frames
@@ -54,6 +52,7 @@ def sample_frames_from_video(
 
 
 class VideoLoader:
+
     @classmethod
     @abstractmethod
     def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
@@ -61,10 +60,12 @@ class VideoLoader:
 
 
 class VideoLoaderRegistry:
+
     def __init__(self) -> None:
         self.name2class: dict[str, type] = {}
 
     def register(self, name: str):
+
         def wrap(cls_to_register):
             self.name2class[name] = cls_to_register
             return cls_to_register
@@ -83,6 +84,7 @@ VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
 
 @VIDEO_LOADER_REGISTRY.register("opencv")
 class OpenCVVideoBackend(VideoLoader):
+
     def get_cv2_video_api(self):
         import cv2.videoio_registry as vr
 
@@ -113,9 +115,10 @@ class OpenCVVideoBackend(VideoLoader):
             num_frames = total_frames_num
             frame_idx = list(range(0, num_frames))
         else:
-            uniform_sampled_frames = np.linspace(
-                0, total_frames_num - 1, num_frames, dtype=int
-            )
+            uniform_sampled_frames = np.linspace(0,
+                                                 total_frames_num - 1,
+                                                 num_frames,
+                                                 dtype=int)
             frame_idx = uniform_sampled_frames.tolist()
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -133,10 +136,8 @@ class OpenCVVideoBackend(VideoLoader):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
         # we expect all frames loaded
-        assert i == num_frames, (
-            f"Expected reading {num_frames} frames, "
-            f"but only loaded {i} frames from video."
-        )
+        assert i == num_frames, (f"Expected reading {num_frames} frames, "
+                                 f"but only loaded {i} frames from video.")
         return frames
 
 
@@ -145,9 +146,9 @@ class Glm4vVideoLoader(OpenCVVideoBackend):
     """GLM-4V video loader that returns frames and metadata"""
 
     @classmethod
-    def load_bytes(
-        cls, data: bytes, num_frames: int = -1
-    ) -> Tuple[npt.NDArray, Dict]:
+    def load_bytes(cls,
+                   data: bytes,
+                   num_frames: int = -1) -> Tuple[npt.NDArray, Dict]:
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -164,9 +165,10 @@ class Glm4vVideoLoader(OpenCVVideoBackend):
             num_frames = total_frames_num
             frame_idx = list(range(0, num_frames))
         else:
-            uniform_sampled_frames = np.linspace(
-                0, total_frames_num - 1, num_frames, dtype=int
-            )
+            uniform_sampled_frames = np.linspace(0,
+                                                 total_frames_num - 1,
+                                                 num_frames,
+                                                 dtype=int)
             frame_idx = uniform_sampled_frames.tolist()
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -185,10 +187,8 @@ class Glm4vVideoLoader(OpenCVVideoBackend):
                     i += 1
 
         # we expect all frames loaded
-        assert i == num_frames, (
-            f"Expected reading {num_frames} frames, "
-            f"but only loaded {i} frames from video."
-        )
+        assert i == num_frames, (f"Expected reading {num_frames} frames, "
+                                 f"but only loaded {i} frames from video.")
 
         metadata = {
             "total_num_frames": num_frames,
@@ -201,6 +201,7 @@ class Glm4vVideoLoader(OpenCVVideoBackend):
 
 
 class VideoMediaIO(MediaIO[npt.NDArray]):
+
     def __init__(
         self,
         image_io: ImageMediaIO,
@@ -224,12 +225,10 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
                 "image/jpeg",
             )
 
-            return np.stack(
-                [
-                    np.asarray(load_frame(frame_data))
-                    for frame_data in data.split(",")
-                ]
-            )
+            return np.stack([
+                np.asarray(load_frame(frame_data))
+                for frame_data in data.split(",")
+            ])
 
         return self.load_bytes(base64.b64decode(data))
 
@@ -254,8 +253,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
             )
 
             return ",".join(
-                encode_frame(Image.fromarray(frame)) for frame in video
-            )
+                encode_frame(Image.fromarray(frame)) for frame in video)
 
         msg = "Only JPEG format is supported for now."
         raise NotImplementedError(msg)

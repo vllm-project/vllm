@@ -1140,13 +1140,13 @@ class MRotaryEmbedding(RotaryEmbedding):
 
     @classmethod
     def _glm4v_get_input_positions_tensor(
-            cls,
-            input_tokens: list[int],
-            hf_config: PretrainedConfig,
-            image_grid_thw: Union[list[list[int]], torch.Tensor],
-            video_grid_thw: Union[list[list[int]], torch.Tensor],
-            context_len: int = 0,
-            seq_len: Optional[int] = None,
+        cls,
+        input_tokens: list[int],
+        hf_config: PretrainedConfig,
+        image_grid_thw: Union[list[list[int]], torch.Tensor],
+        video_grid_thw: Union[list[list[int]], torch.Tensor],
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
     ) -> tuple[torch.Tensor, int]:
         """Get mrope input positions and delta value for GLM4V."""
 
