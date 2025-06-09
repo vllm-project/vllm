@@ -68,16 +68,17 @@ class TestSetting:
             method="encode",
             fullgraph=True,
         ),
-        # encoder-based embedding model (BERT)
-        TestSetting(
-            model="BAAI/bge-base-en-v1.5",
-            model_args=["--task", "embed"],
-            pp_size=1,
-            tp_size=1,
-            attn_backend="XFORMERS",
-            method="encode",
-            fullgraph=True,
-        ),
+        # TODO: bert models are not supported in V1 yet
+        # # encoder-based embedding model (BERT)
+        # TestSetting(
+        #     model="BAAI/bge-base-en-v1.5",
+        #     model_args=["--task", "embed"],
+        #     pp_size=1,
+        #     tp_size=1,
+        #     attn_backend="XFORMERS",
+        #     method="encode",
+        #     fullgraph=True,
+        # ),
         # vision language model
         TestSetting(
             model="microsoft/Phi-3.5-vision-instruct",
