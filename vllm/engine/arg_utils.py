@@ -914,9 +914,15 @@ class EngineArgs:
         )
 
     def no_valid_tensorizer_args_in_model_loader_extra_config(self) -> bool:
+
         if self.model_loader_extra_config:
-            keys = self.model_loader_extra_config.keys()
-            return "tensorizer_uri" not in keys and "tensorizer_dir" not in keys
+            for allowed_to_pass in ["tensorizer_uri", "tensorizer_dir"]:
+                try:
+                    logger.info("Got %s", self.model_loader_extra_config)
+                    self.model_loader_extra_config[allowed_to_pass]
+                    return False
+                except KeyError:
+                    pass
         return True
 
     def create_load_config(self) -> LoadConfig:

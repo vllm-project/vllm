@@ -282,6 +282,9 @@ class TensorizerConfig:
         return open_stream(self.tensorizer_uri,
                            **tensorizer_args.stream_params)
 
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
 
 def load_with_tensorizer(tensorizer_config: TensorizerConfig,
                          **extra_kwargs) -> nn.Module:
