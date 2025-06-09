@@ -113,7 +113,8 @@ def test_structured_output(
               enforce_eager=enforce_eager,
               max_model_len=1024,
               guided_decoding_backend=guided_decoding_backend,
-              guided_decoding_disable_any_whitespace=True,
+              guided_decoding_disable_any_whitespace=True if
+              guided_decoding_backend in {"xgrammar", "guidance"} else False,
               tokenizer_mode=tokenizer_mode,
               speculative_config=speculative_config)
 
