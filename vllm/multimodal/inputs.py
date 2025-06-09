@@ -719,6 +719,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         outputs = torch.empty(len(tensors_),
                               *tensors_[0].shape,
                               dtype=tensors_[0].dtype,
+                              device=tensors_[0].device,
                               pin_memory=pin_memory)
         return torch.stack(tensors_, out=outputs)
 
