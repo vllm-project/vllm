@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import shutil
+import tempfile
 from collections.abc import Sequence
 from typing import Optional
 
@@ -20,6 +20,7 @@ from tests.models.utils import EmbedModelInfo, RerankModelInfo
 MTEB_EMBED_TASKS = ["STS12"]
 MTEB_EMBED_TOL = 1e-4
 
+# See #19344
 MTEB_RERANK_TASKS = ["NFCorpus"]
 MTEB_RERANK_LANGS = ["en"]
 MTEB_RERANK_TOL = 1e-4
@@ -57,10 +58,10 @@ class VllmMtebEncoder(mteb.Encoder):
         r = self.rng.permutation(len(sentences))
         sentences = [sentences[i] for i in r]
 
-        querys = [s[0] for s in sentences]
+        queries = [s[0] for s in sentences]
         corpus = [s[1] for s in sentences]
 
-        outputs = self.model.score(querys,
+        outputs = self.model.score(queries,
                                    corpus,
                                    truncate_prompt_tokens=-1,
                                    use_tqdm=False)
@@ -201,10 +202,7 @@ def mteb_test_embed_models(hf_runner,
 
 
 def run_mteb_rerank(cross_encoder, tasks, languages):
-    results_folder = "tmp_mteb_results"
-    shutil.rmtree(results_folder, ignore_errors=True)
-
-    try:
+    with tempfile.TemporaryDirectory(delete=True) as results_folder:
         bm25s = mteb.get_model("bm25s")
         tasks = mteb.get_tasks(tasks=tasks, languages=languages)
 
@@ -232,10 +230,7 @@ def run_mteb_rerank(cross_encoder, tasks, languages):
             f"{results_folder}/stage1/NFCorpus_{subset}_predictions.json",
             encode_kwargs={"show_progress_bar": False},
         )
-
         main_score = results[0].scores["test"][0]["main_score"]
-    finally:
-        shutil.rmtree(results_folder, ignore_errors=True)
     return main_score
 
 
