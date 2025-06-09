@@ -158,8 +158,8 @@ def run_mteb_embed_task(encoder, tasks):
     return main_score
 
 
-def mteb_test_embed_models(hf_runner: HfRunner,
-                           vllm_runner: VllmRunner,
+def mteb_test_embed_models(hf_runner,
+                           vllm_runner,
                            model_info: EmbedModelInfo,
                            vllm_extra_kwargs=None,
                            hf_model_callback=None):
@@ -240,8 +240,8 @@ def run_mteb_rerank(cross_encoder, tasks, languages):
     return main_score
 
 
-def mteb_test_rerank_models(hf_runner: HfRunner,
-                            vllm_runner: VllmRunner,
+def mteb_test_rerank_models(hf_runner,
+                            vllm_runner,
                             model_info: RerankModelInfo,
                             vllm_extra_kwargs=None,
                             hf_model_callback=None):
