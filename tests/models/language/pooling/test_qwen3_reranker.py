@@ -19,7 +19,8 @@ def vllm_reranker(model_name):
                     "architectures": ["Qwen3ForSequenceClassification"],
                     "classifier_from_token": ["no", "yes"],
                     "is_qwen3_rerank": True,
-                }, dtype="float32")
+                },
+                dtype="float32")
 
     text_1 = "What is the capital of France?"
     texts_2 = [
