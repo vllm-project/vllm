@@ -200,6 +200,38 @@ __global__ void dynamic_scaled_int8_quant_kernel(
       });
 }
 
+// MinMax structure to hold min and max values in one go
+struct MinMax {
+  float mn, mx;
+
+  __host__ __device__ MinMax()
+      : mn(std::numeric_limits<float>::max()),
+        mx(std::numeric_limits<float>::lowest()) {}
+
+  __host__ __device__ explicit MinMax(float v) : mn(v), mx(v) {}
+
+  // add a value to the MinMax
+  __host__ __device__ MinMax& operator+=(float v) {
+    mn = fminf(mn, v);
+    mx = fmaxf(mx, v);
+    return *this;
+  }
+
+  // merge two MinMax objects
+  __host__ __device__ MinMax& operator&=(const MinMax& other) {
+    mn = fminf(mn, other.mn);
+    mx = fmaxf(mx, other.mx);
+    return *this;
+  }
+};
+
+__host__ __device__ inline MinMax operator+(MinMax a, float v) {
+  return a += v;
+}
+__host__ __device__ inline MinMax operator&(MinMax a, const MinMax& b) {
+  return a &= b;
+}
+
 template <typename scalar_t, typename scale_t, typename azp_t>
 __global__ void dynamic_scaled_int8_azp_quant_kernel(
     const scalar_t* __restrict__ input, int8_t* __restrict__ output,
@@ -211,29 +243,22 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   int8_t* row_out = output + blockIdx.x * hidden_size;
 
   // 1. calculate min & max
-  float tmin = FLT_MAX;
-  float tmax = -FLT_MAX;
+  MinMax thread_mm;
   for (int i = tid; i < hidden_size; i += stride) {
-    float v = float(row_in[i]);
-    tmin = fminf(tmin, v);
-    tmax = fmaxf(tmax, v);
+    thread_mm += float(row_in[i]);
   }
-
-  // This is used for BlockReduce
-  struct MinMax {
-    float mn, mx;
-  };
-  struct ReduceMinMax {
-    __device__ MinMax operator()(const MinMax& a, const MinMax& b) const {
-      return {fminf(a.mn, b.mn), fmaxf(a.mx, b.mx)};
-    }
-  };
 
   using BlockReduce = cub::BlockReduce<MinMax, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
 
-  MinMax thread_mm{tmin, tmax};
-  MinMax mm = BlockReduce(tmp).Reduce(thread_mm, ReduceMinMax(), blockDim.x);
+  MinMax mm = BlockReduce(tmp).Reduce(
+      thread_mm,
+      [] __device__(MinMax a, const MinMax& b) {
+        a &= b;
+        return a;
+      },
+      blockDim.x);
+
   __shared__ float scale_sh;
   __shared__ azp_t azp_sh;
   if (tid == 0) {
