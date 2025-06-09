@@ -2305,7 +2305,7 @@ class MemorySnapshot:
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
             free_memory=self.free_memory - other.free_memory,
-            total_memory=self.total_memory - other.free_memory,
+            total_memory=self.total_memory - other.total_memory,
             cuda_memory=self.cuda_memory - other.cuda_memory,
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
