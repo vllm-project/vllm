@@ -339,8 +339,8 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
 
         self.vllm_config = vllm_config
         self.config = config
-        self.maybe_is_qwen3_reranker()
-
+        self.quant_config = quant_config
+        self.prefix = prefix
         self.model = Qwen3Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
         self.score = RowParallelLinear(config.hidden_size,
@@ -383,51 +383,62 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
         return PoolerOutput(outputs=pooled_outputs)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        is_original_qwen3_reranker = getattr(self.config,
+                                             "is_original_qwen3_reranker",
+                                             False)
 
-    def maybe_is_qwen3_reranker(self):
-        if not getattr(self.config, "is_qwen3_reranker", False):
-            return
+        if not is_original_qwen3_reranker:
+            loader = AutoWeightsLoader(self)
+            return loader.load_weights(weights)
 
+        return self.load_weights_from_original_qwen3_reranker(weights)
+
+    def load_weights_from_original_qwen3_reranker(
+            self, weights: Iterable[tuple[str, torch.Tensor]]):
         tokens = getattr(self.config, "classifier_from_token", None)
         assert tokens is not None and len(tokens) == 2, \
-            ("Load Qwen3 Reranker?, see: "
+            ("Try loading the original Qwen3 Reranker?, see: "
              "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/qwen3_reranker.py")
 
         self.config.num_labels = 1
         model_config = self.vllm_config.model_config
 
-        original_load_weights = self.load_weights
+        device = self.score.weight.device
+        self.score = RowParallelLinear(self.config.hidden_size,
+                                       self.config.num_labels,
+                                       quant_config=self.quant_config,
+                                       input_is_parallel=False,
+                                       bias=False,
+                                       prefix=maybe_prefix(
+                                           self.prefix, "score")).to(device)
 
-        def load_weights(weights: Iterable[tuple[str, torch.Tensor]]):
-            if get_pp_group().is_last_rank:
-                if self.config.tie_word_embeddings:
-                    self.lm_head = self.model.embed_tokens
-                else:
-                    self.lm_head = ParallelLMHead(
-                        self.config.vocab_size,
-                        self.config.hidden_size,
-                        quant_config=self.quant_config,
-                        prefix=maybe_prefix(self.prefix, "lm_head"))
+        if get_pp_group().is_last_rank:
+            if self.config.tie_word_embeddings:
+                self.lm_head = self.model.embed_tokens
             else:
-                self.lm_head = PPMissingLayer()
+                self.lm_head = ParallelLMHead(self.config.vocab_size,
+                                              self.config.hidden_size,
+                                              quant_config=self.quant_config,
+                                              prefix=maybe_prefix(
+                                                  self.prefix, "lm_head"))
+        else:
+            self.lm_head = PPMissingLayer()
 
-            loaded_weights = original_load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loaded_weights = loader.load_weights(weights)
 
-            from vllm.transformers_utils.tokenizer import get_tokenizer
-            tokenizer = get_tokenizer(
-                model_config.tokenizer,
-                revision=model_config.tokenizer_revision,
-                tokenizer_mode=model_config.tokenizer_mode,
-                trust_remote_code=model_config.trust_remote_code)
+        from vllm.transformers_utils.tokenizer import get_tokenizer
+        tokenizer = get_tokenizer(
+            model_config.tokenizer,
+            revision=model_config.tokenizer_revision,
+            tokenizer_mode=model_config.tokenizer_mode,
+            trust_remote_code=model_config.trust_remote_code)
 
-            a = tokenizer.convert_tokens_to_ids(tokens[0])
-            b = tokenizer.convert_tokens_to_ids(tokens[1])
-            weight = self.lm_head.weight.data[b] - self.lm_head.weight.data[a]
-            self.score.weight.data.copy_(weight)
+        a = tokenizer.convert_tokens_to_ids(tokens[0])
+        b = tokenizer.convert_tokens_to_ids(tokens[1])
+        weight = self.lm_head.weight.data[b].to(
+            device) - self.lm_head.weight.data[a].to(device)
+        self.score.weight.data.copy_(weight)
 
-            del self.lm_head
-            loaded_weights.add("classifier.weight")
-
-        self.load_weights = load_weights
+        del self.lm_head
+        loaded_weights.add("classifier.weight")

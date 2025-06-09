@@ -12,7 +12,7 @@ model = LLM(
     hf_overrides={
         "architectures": ["Qwen3ForSequenceClassification"],
         "classifier_from_token": ["no", "yes"],
-        "is_qwen3_reranker": True,
+        "is_original_qwen3_reranker": True,
     },
     dtype="float32",
 )
@@ -27,7 +27,7 @@ model = LLM(
 # - Then, we will extract the vector corresponding to classifier_from_token
 # from lm_head using `"classifier_from_token": ["no", "yes"]`.
 # - Third, we will convert these two vectors into one vector.  The use of
-# conversion logic is controlled by `using "is_qwen3_reranker": True`.
+# conversion logic is controlled by `using "is_original_qwen3_reranker": True`.
 
 prefix = '<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\n<|im_start|>user\n'
 suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
@@ -53,7 +53,9 @@ queries = [
     query_template.format(prefix=prefix, instruction=instruction, query=query)
     for query in queries
 ]
-documents = [document_template.format(doc=doc, suffix=suffix) for doc in documents]
+documents = [
+    document_template.format(doc=doc, suffix=suffix) for doc in documents
+]
 
 outputs = model.score(queries, documents)
 

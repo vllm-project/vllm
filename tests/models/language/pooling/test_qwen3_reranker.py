@@ -18,7 +18,7 @@ def vllm_reranker(model_name):
                 hf_overrides={
                     "architectures": ["Qwen3ForSequenceClassification"],
                     "classifier_from_token": ["no", "yes"],
-                    "is_qwen3_reranker": True,
+                    "is_original_qwen3_reranker": True,
                 },
                 dtype="float32")
 
