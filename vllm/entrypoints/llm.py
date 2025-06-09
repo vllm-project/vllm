@@ -606,7 +606,7 @@ class LLM:
 
         token_iter = range(max_tokens)
         if use_tqdm:
-            token_iter = tqdm(range(max_tokens),
+            token_iter = tqdm(token_iter,
                               desc="Beam search",
                               unit="token",
                               unit_scale=False)
