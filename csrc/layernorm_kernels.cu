@@ -10,12 +10,6 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
-#ifdef USE_ROCM
-  #include "quantization/fp8/amd/quant_utils.cuh"
-#else
-  #include "quantization/fp8/nvidia/quant_utils.cuh"
-#endif
-
 namespace vllm {
 
 // This kernel uses the _f16Vec to represent vectorized data.
@@ -190,26 +184,6 @@ fused_add_rms_norm_kernel(
         ((scalar_t)(x * s_variance)) * weight[idx];
   }
 }
-
-/* Function specialization in the case of FP16/BF16 tensors.
-   Additional optimizations we can make in this case are
-   packed and vectorized operations, which help with the
-   memory latency bottleneck. */
-
-template <>
-struct Vec<c10::Float8_e4m3fnuz, 8> {
-  using Type = uint2;
-};
-
-template <>
-struct Vec<c10::Half, 8> {
-  using Type = uint4;
-};
-
-template <>
-struct Vec<c10::BFloat16, 8> {
-  using Type = bf16_8_t;
-};
 
 }  // namespace vllm
 

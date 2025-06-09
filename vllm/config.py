@@ -1951,13 +1951,6 @@ class ParallelConfig:
 
         self._verify_args()
 
-        from vllm.platforms.rocm import on_gfx1x
-        if on_gfx1x() and self.tensor_parallel_size > 1:
-            self.disable_custom_all_reduce = True
-            logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "working correctly on multiple AMD Radeon GPUs.")
-
     @property
     def use_ray(self) -> bool:
         return self.distributed_executor_backend == "ray" or (
