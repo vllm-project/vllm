@@ -85,7 +85,10 @@ def test_env(
                        CpuPlatform()):
                 backend = get_attn_backend(16, torch.float16, torch.float16,
                                            block_size, False)
-            assert backend.get_name() == "TORCH_SDPA"
+            if use_v1:
+                assert backend.get_name() == "TORCH_SDPA_VLLM_V1"
+            else:
+                assert backend.get_name() == "TORCH_SDPA"
 
         elif device == "hip":
             with patch("vllm.attention.selector.current_platform",
@@ -178,6 +181,34 @@ def test_env(
                                                use_mla=use_mla)
                     expected = "FLASH_ATTN_VLLM_V1" if use_v1 else name
                     assert backend.get_name() == expected
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("use_v1", [True, False])
+def test_fp32_fallback(
+    device: str,
+    use_v1: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test attention backend selection with fp32."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
+
+        if device == "cpu":
+            with patch("vllm.attention.selector.current_platform",
+                       CpuPlatform()):
+                backend = get_attn_backend(16, torch.float32, torch.float32,
+                                           16, False)
+            assert (backend.get_name() == "TORCH_SDPA_VLLM_V1"
+                    if use_v1 else "TORCH_SDPA")
+
+        elif device == "cuda":
+            with patch("vllm.attention.selector.current_platform",
+                       CudaPlatform()):
+                backend = get_attn_backend(16, torch.float32, torch.float32,
+                                           16, False)
+            assert (backend.get_name() == "FLEX_ATTENTION"
+                    if use_v1 else "XFORMERS")
 
 
 def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
