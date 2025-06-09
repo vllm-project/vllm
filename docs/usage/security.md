@@ -31,6 +31,7 @@ refer to the [PyTorch Security
 Guide](https://github.com/pytorch/pytorch/security/policy#using-distributed-features).
 
 Key points from the PyTorch security guide:
+
 - PyTorch Distributed features are intended for internal communication only
 - They are not built for use in untrusted environments or networks
 - No authorization protocol is included for performance reasons

@@ -44,7 +44,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, try_get_safetensors_metadata, uses_mrope)
+    try_get_generation_config, try_get_safetensors_metadata,
+    try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
@@ -648,7 +649,7 @@ class ModelConfig:
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
         """Pull model/tokenizer from S3 to temporary directory when needed.
-        
+
         Args:
             model: Model name or path
             tokenizer: Tokenizer name or path
@@ -1370,9 +1371,9 @@ class ModelConfig:
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
         """
-        For Mllama, VLLM overrides HF's is_encoder_decoder flag and sets it to 
+        For Mllama, VLLM overrides HF's is_encoder_decoder flag and sets it to
         True to enable cross-attention
-        Neuron needs all multimodal data to be in the decoder and does not 
+        Neuron needs all multimodal data to be in the decoder and does not
         need to explicitly enable cross-attention
         """
         if (current_platform.is_neuron()
@@ -1427,6 +1428,18 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config)
+
+        tokenizer_config = try_get_tokenizer_config(
+            self.tokenizer,
+            trust_remote_code=self.trust_remote_code,
+            revision=self.tokenizer_revision)
+
+        if tokenizer_config is None:
+            return max_model_len
+
+        model_max_length = tokenizer_config.get("model_max_length",
+                                                max_model_len)
+        max_model_len = min(max_model_len, model_max_length)
         return max_model_len
 
 
@@ -1794,7 +1807,7 @@ class ParallelConfig:
     """Global rank in distributed setup."""
 
     enable_multimodal_encoder_data_parallel: bool = False
-    """ Use data parallelism instead of tensor parallelism for vision encoder. 
+    """ Use data parallelism instead of tensor parallelism for vision encoder.
     Only support LLama4 for now"""
 
     @property
@@ -2104,6 +2117,12 @@ class SchedulerConfig:
     default scheduler. Can be a class directly or the path to a class of form
     "mod.custom_class"."""
 
+    disable_hybrid_kv_cache_manager: bool = False
+    """If set to True, KV cache manager will allocate the same size of KV cache
+    for all attention layers even if there are multiple type of attention layers
+    like full attention and sliding window attention.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2266,9 +2285,9 @@ class DeviceConfig:
 
     device: SkipValidation[Union[Device, torch.device]] = "auto"
     """Device type for vLLM execution.
-    This parameter is deprecated and will be 
-    removed in a future release. 
-    It will now be set automatically based 
+    This parameter is deprecated and will be
+    removed in a future release.
+    It will now be set automatically based
     on the current platform."""
     device_type: str = field(init=False)
     """Device type from the current platform. This is set in
@@ -3912,12 +3931,14 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    use_cudagraph: bool = False
+    use_cudagraph: bool = envs.VLLM_USE_V1
     """Whether to use cudagraph inside compilation.
     - False: cudagraph inside compilation is not used.
     - True: cudagraph inside compilation is used. It requires
         that all input buffers have fixed addresses, and all
         splitting ops write their outputs to input buffers.
+    In the vLLM V1 Engine, this flag only applies for
+    CompilationLevel.PIECEWISE (aka -O3).
     Note that this is orthogonal to the cudagraph capture logic
     outside of compilation.
     TODO: move outside cudagraph logic into compilation.
@@ -4001,19 +4022,24 @@ class CompilationConfig:
 
     def __repr__(self) -> str:
         exclude = {
-            "static_forward_context",
-            "enabled_custom_ops",
-            "disabled_custom_ops",
-            "compilation_time",
-            "bs_to_padded_graph_size",
-            "pass_config",
-            "traced_files",
+            "static_forward_context": True,
+            "enabled_custom_ops": True,
+            "disabled_custom_ops": True,
+            "compilation_time": True,
+            "bs_to_padded_graph_size": True,
+            "pass_config": True,
+            "traced_files": True,
+            "inductor_compile_config": {
+                "post_grad_custom_post_pass": True,
+            },
         }
         # The cast to string is necessary because Pydantic is mocked in docs
         # builds and sphinx-argparse doesn't know the return type of decode()
         return str(
             TypeAdapter(CompilationConfig).dump_json(
-                self, exclude=exclude, exclude_unset=True).decode())
+                self,
+                exclude=exclude,  # type: ignore[arg-type]
+                exclude_unset=True).decode())
 
     __str__ = __repr__
 
@@ -4414,7 +4440,6 @@ class VllmConfig:
             # FIXME(rob): Add function to set all of these.
             if not self.compilation_config.custom_ops:
                 self.compilation_config.custom_ops = ["none"]
-            self.compilation_config.use_cudagraph = True
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
@@ -4464,6 +4489,21 @@ class VllmConfig:
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
+
+        if (envs.VLLM_USE_V1
+                and not self.scheduler_config.disable_hybrid_kv_cache_manager):
+            # logger should only print warning message for hybrid models. As we
+            # can't know whether the model is hybrid or not now, so we don't log
+            # warning message here and will log it later.
+            if not (current_platform.is_cuda() or current_platform.is_rocm()):
+                # Hybrid KV cache manager is not supported on non-GPU platforms.
+                self.disable_hybrid_kv_cache_manager = True
+            if self.kv_transfer_config is not None:
+                # Hybrid KV cache manager is not compatible with KV transfer.
+                self.disable_hybrid_kv_cache_manager = True
+            if self.kv_events_config is not None:
+                # Hybrid KV cache manager is not compatible with KV events.
+                self.disable_hybrid_kv_cache_manager = True
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:

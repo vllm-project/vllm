@@ -632,7 +632,8 @@ def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
     ops.cutlass_moe_mm(out_tensors_stacked, a_tensors_stacked,
                        b_tensors_stacked, a_scales_tensors_stacked,
                        b_scales_tensors_stacked, expert_offsets[:-1],
-                       problem_sizes, ab_strides, ab_strides, c_strides)
+                       problem_sizes, ab_strides, ab_strides, c_strides,
+                       per_act_token, per_out_ch)
 
     # Validate each group's result against the baseline
     for g in range(num_experts):
