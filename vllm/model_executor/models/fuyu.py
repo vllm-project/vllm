@@ -247,7 +247,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "language_model.layers.": "language_model.model.layers."
+            "model.vision_embed_tokens.": "vision_embed_tokens.",
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
         })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
