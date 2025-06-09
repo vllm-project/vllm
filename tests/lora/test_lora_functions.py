@@ -15,13 +15,6 @@ MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 LORA_MODULE_PATH = "yard1/llama-2-7b-sql-lora-test"
 LORA_RANK = 8
 
-# @pytest.fixture(autouse=True)
-# def v1(run_with_both_engines_lora):
-#     # Simple autouse wrapper to run both engines for each test
-#     # This can be promoted up to conftest.py to run for every
-#     # test in a package
-#     pass
-
 
 def make_lora_request(lora_id: int):
     return LoRARequest(lora_name=f"{lora_id}",
