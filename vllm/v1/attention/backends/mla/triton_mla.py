@@ -79,14 +79,13 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         self.triton_fa_func = triton_attention
 
-    def _flash_attn_varlen_diff_headdims(
-        self,
-        q,
-        k,
-        v,
-        return_softmax_lse=False,
-        softmax_scale=None,
-        **kwargs):
+    def _flash_attn_varlen_diff_headdims(self,
+                                         q,
+                                         k,
+                                         v,
+                                         return_softmax_lse=False,
+                                         softmax_scale=None,
+                                         **kwargs):
         maybe_padded_v = v
         if self._pad_v:
             maybe_padded_v = torch.nn.functional.pad(

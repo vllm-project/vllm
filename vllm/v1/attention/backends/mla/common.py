@@ -350,7 +350,6 @@ class MLACommonMetadataBuilder(Generic[M]):
         self.num_heads = model_config.get_num_attention_heads(
             runner.parallel_config)
         self.mla_dims = get_mla_dims(model_config)
-        self.is_vllm_fa = is_vllm_fa
         self.aot_schedule = current_platform.is_cuda()
         self.kv_cache_spec = kv_cache_spec
 
@@ -614,6 +613,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
         self.vllm_flash_attn_version = get_flash_attn_version()
+        self.is_vllm_fa = is_vllm_fa
 
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
