@@ -4,12 +4,15 @@ import os
 
 import pytest
 
+# yapf conflicts with isort for this block
+# yapf: disable
 from tests.models.language.pooling.mteb_utils import (MTEB_RERANK_LANGS,
                                                       MTEB_RERANK_TASKS,
                                                       MTEB_RERANK_TOL,
                                                       RerankClientMtebEncoder,
                                                       ScoreClientMtebEncoder,
                                                       run_mteb_rerank)
+# yapf: enable
 from tests.utils import RemoteOpenAIServer
 
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
