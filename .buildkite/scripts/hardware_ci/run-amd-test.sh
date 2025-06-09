@@ -171,6 +171,8 @@ if [[ $commands == *" entrypoints/llm "* ]]; then
   --ignore=entrypoints/llm/test_prompt_validation.py "}
 fi
 
+
+
 #Obsolete currently
 ##ignore certain Entrypoints/llm tests
 #if [[ $commands == *" && pytest -v -s entrypoints/llm/test_guided_generate.py"* ]]; then
@@ -186,6 +188,7 @@ fi
 
 PARALLEL_JOB_COUNT=8
 MYPYTHONPATH=".."
+MYUSEV1=1
 
 # check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
 if [[ $commands == *"--shard-id="* ]]; then
@@ -208,6 +211,7 @@ if [[ $commands == *"--shard-id="* ]]; then
         -v "${HF_CACHE}:${HF_MOUNT}" \
         -e "HF_HOME=${HF_MOUNT}" \
         -e "PYTHONPATH=${MYPYTHONPATH}" \
+        -e "VLLM_USE_V1=${MYUSEV1} \
         --name "${container_name}_${GPU}" \
         "${image_name}" \
         /bin/bash -c "${commands_gpu}" \
