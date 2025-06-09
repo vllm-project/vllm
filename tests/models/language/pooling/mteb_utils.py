@@ -202,7 +202,7 @@ def mteb_test_embed_models(hf_runner,
 
 
 def run_mteb_rerank(cross_encoder, tasks, languages):
-    with tempfile.TemporaryDirectory(delete=True) as results_folder:
+    with tempfile.TemporaryDirectory() as results_folder:
         bm25s = mteb.get_model("bm25s")
         tasks = mteb.get_tasks(tasks=tasks, languages=languages)
 
