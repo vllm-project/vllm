@@ -1938,7 +1938,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
                 self.drafter.dummy_run(num_tokens)
-            if self.use_spec_decode and self.speculative_config.method == 'mlp_speculator':  # noqa: E501
+            if self.speculative_config \
+                and self.speculative_config.method == 'mlp_speculator':
                 if TYPE_CHECKING:
                     assert isinstance(self.drafter, MlpProposer)
                 self.drafter.dummy_run(num_tokens)
