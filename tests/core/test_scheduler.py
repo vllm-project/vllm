@@ -1041,6 +1041,7 @@ def test_no_batches_mixed_with_prompt_tokens_and_prompt_embeds():
                 seq.status = SequenceStatus.FINISHED_STOPPED
         scheduler.free_finished_seq_groups()
 
+
 def test_remove_seq_from_computed_blocks_tracker():
     """
     Test that computed_blocks_tracker correctly removes stale sequences
@@ -1051,12 +1052,13 @@ def test_remove_seq_from_computed_blocks_tracker():
     - 1 in _schedule_priority_preemption
     - 7 in _schedule_prefill
 
-    Each branch is tested to ensure proper cleanup of _seq_id_to_num_tokens_computed.
+    Each branch is tested to ensure proper cleanup of
+    _seq_id_to_num_tokens_computed.
     """
     # Budget can not schedule in swapped
     block_size = 2
     max_seq_group = 3
-    seq_tokens: list[list[int]] = []
+    seq_tokens_with_swapped: list[list[int]] = []
     blocks_to_swap_out: list[tuple[int, int]] = []
     curr_loras: set[int] = set()
 
@@ -1072,13 +1074,13 @@ def test_remove_seq_from_computed_blocks_tracker():
     seq_length = 16
     num_seqs = 3
     for i in range(num_seqs):
-        seq_tokens.append([i] * seq_length)
+        seq_tokens_with_swapped.append([i] * seq_length)
 
     seq_and_seq_groups = [
         create_dummy_prompt(f"{i}",
-                            prompt_tokens=seq_tokens[i],
+                            prompt_tokens=seq_tokens_with_swapped[i],
                             block_size=block_size)
-        for i in range(len(seq_tokens))
+        for i in range(len(seq_tokens_with_swapped))
     ]
 
     for _, seq_group in seq_and_seq_groups:
@@ -1102,7 +1104,6 @@ def test_remove_seq_from_computed_blocks_tracker():
                                      num_gpu_blocks=64,
                                      enable_prefix_caching=True)
     budget = create_token_budget(token_budget=120)
-    curr_loras: set[int] = set()
     num_seqs = 2
     for i in range(num_seqs):
         _, seq_group = create_dummy_prompt(str(i),
@@ -1141,20 +1142,20 @@ def test_remove_seq_from_computed_blocks_tracker():
     )
     seq_length = 7
     embedding_size = 5
-    seq_tokens: list[list[int]] = []
+    seq_tokens_with_embedding: list[list[int]] = []
     seq_embeds: list[Optional[torch.Tensor]] = []
 
-    seq_tokens.append(list(range(seq_length)))
+    seq_tokens_with_embedding.append(list(range(seq_length)))
     seq_embeds.append(None)
-    seq_tokens.append([0] * seq_length)
+    seq_tokens_with_embedding.append([0] * seq_length)
     seq_embeds.append(torch.rand(embedding_size))
 
     seq_and_seq_groups = [
         create_dummy_prompt(f"{i}",
-                            prompt_tokens=seq_tokens[i],
+                            prompt_tokens=seq_tokens_with_embedding[i],
                             prompt_embeds=seq_embeds[i],
                             block_size=block_size)
-        for i in range(len(seq_tokens))
+        for i in range(len(seq_tokens_with_embedding))
     ]
 
     for _, seq_group in seq_and_seq_groups:
@@ -1170,7 +1171,8 @@ def test_remove_seq_from_computed_blocks_tracker():
     #  >= scheduler_config max_num_batched_tokens
     block_size = 2
     max_seq_group = 3
-    seq_tokens: list[list[int]] = []
+    seq_tokens_prefill_budget: list[list[int]] = []
+
     scheduler = initialize_scheduler(
         block_size=block_size,
         max_token_budget=8,
@@ -1183,13 +1185,13 @@ def test_remove_seq_from_computed_blocks_tracker():
     seq_length = 4
     num_seqs = 3
     for i in range(num_seqs):
-        seq_tokens.append([i] * seq_length)
+        seq_tokens_prefill_budget.append([i] * seq_length)
 
     seq_and_seq_groups = [
         create_dummy_prompt(f"{i}",
-                            prompt_tokens=seq_tokens[i],
+                            prompt_tokens=seq_tokens_prefill_budget[i],
                             block_size=block_size)
-        for i in range(len(seq_tokens))
+        for i in range(len(seq_tokens_prefill_budget))
     ]
 
     for _, seq_group in seq_and_seq_groups:
@@ -1204,7 +1206,7 @@ def test_remove_seq_from_computed_blocks_tracker():
     # Budget can not schedule in waiting
     block_size = 2
     max_seq_group = 3
-    seq_tokens: list[list[int]] = []
+
     scheduler = initialize_scheduler(
         block_size=block_size,
         max_token_budget=30,
@@ -1216,14 +1218,16 @@ def test_remove_seq_from_computed_blocks_tracker():
     )
     seq_length = 16
     num_seqs = 3
+    seq_tokens_prefill_budget_waiting: list[list[int]] = []
+
     for i in range(num_seqs):
-        seq_tokens.append(list(range(seq_length)))
+        seq_tokens_prefill_budget_waiting.append(list(range(seq_length)))
 
     seq_and_seq_groups = [
         create_dummy_prompt(f"{i}",
-                            prompt_tokens=seq_tokens[i],
+                            prompt_tokens=seq_tokens_prefill_budget_waiting[i],
                             block_size=block_size)
-        for i in range(len(seq_tokens))
+        for i in range(len(seq_tokens_prefill_budget_waiting))
     ]
 
     for _, seq_group in seq_and_seq_groups:
@@ -1246,13 +1250,15 @@ def test_remove_seq_from_computed_blocks_tracker():
         max_model_len=30,
         enable_prefix_caching=True,
     )
-    seq_tokens: list[list[int]] = []
 
     seq_length = 31
-    seq_tokens.append(list(range(seq_length)))
-    seq_and_seq_groups = [create_dummy_prompt("0",
-                                              prompt_tokens=seq_tokens[0],
-                                              block_size=block_size)]
+    seq_tokens_prompt_limit: list[list[int]] = []
+    seq_tokens_prompt_limit.append(list(range(seq_length)))
+    seq_and_seq_groups = [
+        create_dummy_prompt("0",
+                            prompt_tokens=seq_tokens_prompt_limit[0],
+                            block_size=block_size)
+    ]
     for _, seq_group in seq_and_seq_groups:
         scheduler.add_seq_group(seq_group)
     scheduler._schedule_default()
@@ -1272,18 +1278,18 @@ def test_remove_seq_from_computed_blocks_tracker():
         max_model_len=320,
         enable_prefix_caching=True,
     )
-    seq_tokens: list[list[int]] = []
+
     seq_length = 320
     num_seqs = 1
-
+    seq_tokens_never: list[list[int]] = []
     for i in range(num_seqs):
-        seq_tokens.append(list(range(seq_length)))
+        seq_tokens_never.append(list(range(seq_length)))
 
     seq_and_seq_groups = [
         create_dummy_prompt(f"{i}",
-                            prompt_tokens=seq_tokens[i],
+                            prompt_tokens=seq_tokens_never[i],
                             block_size=block_size)
-        for i in range(len(seq_tokens))
+        for i in range(len(seq_tokens_never))
     ]
 
     for _, seq_group in seq_and_seq_groups:
@@ -1306,18 +1312,18 @@ def test_remove_seq_from_computed_blocks_tracker():
         max_model_len=320,
         enable_prefix_caching=True,
     )
-    seq_tokens: list[list[int]] = []
 
     seq_length = 160
     num_seqs = 2
+    seq_tokens_later: list[list[int]] = []
     for i in range(num_seqs):
-        seq_tokens.append(list(range(seq_length)))
+        seq_tokens_later.append(list(range(seq_length)))
 
     seq_and_seq_groups = [
         create_dummy_prompt(f"{i}",
-                            prompt_tokens=seq_tokens[i],
+                            prompt_tokens=seq_tokens_later[i],
                             block_size=block_size)
-        for i in range(len(seq_tokens))
+        for i in range(len(seq_tokens_later))
     ]
 
     for _, seq_group in seq_and_seq_groups:
