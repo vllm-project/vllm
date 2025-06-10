@@ -22,6 +22,12 @@ class CPUModelRunner(GPUModelRunner):
         assert not self.model_config.uses_mrope, "mrope is not supported."
         assert self.lora_config is None, "lora is not supported."
 
+        cache_dtype = vllm_config.cache_config.cache_dtype
+        if cache_dtype == "auto":
+            self.kv_cache_dtype = self.dtype
+        elif cache_dtype in ["fp8", "fp8_e5m2"]:
+            self.kv_cache_dtype = torch.float8_e5m2
+
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
 

@@ -97,13 +97,6 @@ class CpuPlatform(Platform):
                 f"--block-size={cache_config.block_size} requires"
                 " intel_extension_for_pytorch")
 
-        scheduler_config = vllm_config.scheduler_config
-        if ((scheduler_config.chunked_prefill_enabled
-             or cache_config.enable_prefix_caching)
-                and cache_config.cache_dtype != "auto"):
-            raise RuntimeError("Chunked-prefill and prefix-cache on the CPU "
-                               "backend is not compatible with FP8 KV cache.")
-
         if cache_config.cache_dtype == "fp8_e4m3":
             cache_config.cache_dtype = "fp8_e5m2"
             logger.warning(

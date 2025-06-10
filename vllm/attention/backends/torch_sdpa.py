@@ -561,6 +561,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     True,
                     prefill_meta.prefill_block_tables,
                     self.alibi_slopes,
+                    kv_cache_dtype=self.kv_cache_dtype,
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
