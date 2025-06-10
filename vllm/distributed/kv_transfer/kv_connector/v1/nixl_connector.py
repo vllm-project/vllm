@@ -57,7 +57,6 @@ class NixlAgentMetadata(
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
     num_blocks: int
-    tp_size: int
     block_len: int
     attn_backend_name: str
 
@@ -69,6 +68,7 @@ class ReqMeta:
     remote_host: str
     remote_port: int
     remote_engine_id: str
+    tp_size: int
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -88,6 +88,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
+            tp_size=kv_transfer_params["tp_size"],
         )
 
 
@@ -311,7 +312,7 @@ class NixlConnectorScheduler:
             remote_engine_id=self.engine_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
-        )
+            tp_size=self.vllm_config.parallel_config.tensor_parallel_size)
 
 
 class NixlConnectorWorker:
@@ -439,7 +440,7 @@ class NixlConnectorWorker:
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
 
-    def _nixl_handshake(self, host: str, port: int):
+    def _nixl_handshake(self, host: str, port: int, remote_tp_size: int):
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
@@ -448,7 +449,7 @@ class NixlConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
 
-        def handshake(path: str, rank: int) -> NixlAgentMetadata:
+        def handshake(path: str, rank: int):
             # Send query for the request.
             with zmq_ctx(zmq.REQ, path) as sock:
                 sock.send(GET_META_MSG)
@@ -458,29 +459,22 @@ class NixlConnectorWorker:
                 got_metadata_time = time.perf_counter()
 
                 # Register Remote agent.
-                self.add_remote_agent(metadata, rank)
+                self.add_remote_agent(metadata, rank, remote_tp_size)
                 setup_agent_time = time.perf_counter()
 
                 logger.debug("NIXL handshake: get metadata took: %s",
                              got_metadata_time - start_time)
                 logger.debug("NIXL handshake: add agent took: %s",
                              setup_agent_time - got_metadata_time)
-                return metadata
 
-        # Handshake with remote agent-rank0 first to get the tp_size of remote
-        path = make_zmq_path("tcp", host, port)
-        logger.debug("Querying master rank metadata on path: %s", path)
-        metadata = handshake(path, 0)
-
-        # Handshake only with the other TP remote the current local rank will
+        # Handshake only with the remote TP rank that current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
-        tp_ratio = self._tp_size[self.engine_id] // metadata.tp_size
+        tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
         p_remote_rank = self.tp_rank // tp_ratio
-        if p_remote_rank > 0:
-            path = make_zmq_path("tcp", host, port + p_remote_rank)
-            logger.debug("Querying metadata on path: %s at remote rank %s",
-                         path, p_remote_rank)
-            _ = handshake(path, p_remote_rank)
+        path = make_zmq_path("tcp", host, port + p_remote_rank)
+        logger.debug("Querying metadata on path: %s at remote rank %s", path,
+                     p_remote_rank)
+        handshake(path, p_remote_rank)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -607,7 +601,6 @@ class NixlConnectorWorker:
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
             num_blocks=self.num_blocks,
-            tp_size=self.world_size,
             block_len=self.block_len,
             attn_backend_name=self.backend_name)
         ready_event = threading.Event()
@@ -621,7 +614,8 @@ class NixlConnectorWorker:
 
     def add_remote_agent(self,
                          nixl_agent_meta: NixlAgentMetadata,
-                         remote_tp_rank: int = 0):
+                         remote_tp_rank: int = 0,
+                         remote_tp_size: int = 1):
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
@@ -666,9 +660,9 @@ class NixlConnectorWorker:
             return
 
         if engine_id in self._tp_size:
-            assert self._tp_size[engine_id] == nixl_agent_meta.tp_size
+            assert self._tp_size[engine_id] == remote_tp_size
         else:
-            self._tp_size[engine_id] = nixl_agent_meta.tp_size
+            self._tp_size[engine_id] = remote_tp_size
         # We may eventually enable this after asserting equality in cache
         # layout and close outputs.
         assert nixl_agent_meta.attn_backend_name == self.backend_name
@@ -716,6 +710,7 @@ class NixlConnectorWorker:
         # rank. With heterogeneous TP, prepare the descriptors by splitting the
         # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
+        # TODO remove if
         p_remote_tp_rank = self.tp_rank // tp_ratio
         # Only register the remote's descriptors if current rank pulls from it.
         if p_remote_tp_rank == remote_tp_rank:
@@ -862,27 +857,21 @@ class NixlConnectorWorker:
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
-            self._read_blocks(
-                request_id=req_id,
-                dst_engine_id=meta.remote_engine_id,
-                local_block_ids=meta.local_block_ids,
-                remote_block_ids=meta.remote_block_ids,
-                remote_host=meta.remote_host,
-                remote_port=meta.remote_port,
-            )
+            self._read_blocks(request_id=req_id,
+                              dst_engine_id=meta.remote_engine_id,
+                              local_block_ids=meta.local_block_ids,
+                              remote_block_ids=meta.remote_block_ids,
+                              remote_host=meta.remote_host,
+                              remote_port=meta.remote_port,
+                              remote_tp_size=meta.tp_size)
 
-    def _read_blocks(
-        self,
-        local_block_ids: list[int],
-        remote_block_ids: list[int],
-        remote_host: str,
-        remote_port: int,
-        dst_engine_id: str,
-        request_id: str,
-    ):
+    def _read_blocks(self, local_block_ids: list[int],
+                     remote_block_ids: list[int], remote_host: str,
+                     remote_port: int, dst_engine_id: str, request_id: str,
+                     remote_tp_size: int):
         # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
         if dst_engine_id not in self._remote_agents:
-            self._nixl_handshake(remote_host, remote_port)
+            self._nixl_handshake(remote_host, remote_port, remote_tp_size)
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
