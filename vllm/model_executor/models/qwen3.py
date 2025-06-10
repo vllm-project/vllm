@@ -323,7 +323,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return loader.load_weights(weights)
 
 
-class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
+class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA,
                                      SupportsCrossEncoding):
 
     def __init__(
@@ -412,17 +412,14 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
                                        prefix=maybe_prefix(
                                            self.prefix, "score")).to(device)
 
-        if get_pp_group().is_last_rank:
-            if self.config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                              self.config.hidden_size,
-                                              quant_config=self.quant_config,
-                                              prefix=maybe_prefix(
-                                                  self.prefix, "lm_head"))
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.model.embed_tokens
         else:
-            self.lm_head = PPMissingLayer()
+            self.lm_head = ParallelLMHead(self.config.vocab_size,
+                                          self.config.hidden_size,
+                                          quant_config=self.quant_config,
+                                          prefix=maybe_prefix(
+                                              self.prefix, "lm_head"))
 
         loader = AutoWeightsLoader(self)
         loaded_weights = loader.load_weights(weights)
@@ -442,3 +439,4 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP,
 
         del self.lm_head
         loaded_weights.add("classifier.weight")
+        loaded_weights.discard("lm_head.weight")
