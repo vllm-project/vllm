@@ -2269,6 +2269,8 @@ def kill_process_tree(pid: int):
 class MemorySnapshot:
     """Memory snapshot."""
     torch_peak: int = 0
+    free_memory: int = 0
+    total_memory: int = 0
     cuda_memory: int = 0
     torch_memory: int = 0
     non_torch_memory: int = 0
@@ -2288,8 +2290,8 @@ class MemorySnapshot:
         self.torch_peak = torch.cuda.memory_stats().get(
             "allocated_bytes.all.peak", 0)
 
-        self.cuda_memory = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+        self.free_memory, self.total_memory = torch.cuda.mem_get_info()
+        self.cuda_memory = self.total_memory - self.free_memory
 
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
@@ -2302,6 +2304,8 @@ class MemorySnapshot:
     def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
+            free_memory=self.free_memory - other.free_memory,
+            total_memory=self.total_memory - other.total_memory,
             cuda_memory=self.cuda_memory - other.cuda_memory,
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
@@ -2322,6 +2326,16 @@ class MemoryProfilingResult:
     before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
+
+    def __repr__(self) -> str:
+        return (f"Memory profiling takes {self.profile_time:.2f} seconds. "
+                f"Total non KV cache memory: "
+                f"{(self.non_kv_cache_memory / GiB_bytes):.2f}GiB; "
+                f"torch peak memory increase: "
+                f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB; "
+                f"non-torch forward increase memory: "
+                f"{(self.non_torch_increase / GiB_bytes):.2f}GiB; "
+                f"weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB.")
 
 
 @contextlib.contextmanager
