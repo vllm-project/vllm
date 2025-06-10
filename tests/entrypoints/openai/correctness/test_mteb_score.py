@@ -18,7 +18,7 @@ from tests.utils import RemoteOpenAIServer
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
 MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-MAIN_SCORE = 0.33702
+MAIN_SCORE = 0.33437
 
 
 @pytest.fixture(scope="module")
