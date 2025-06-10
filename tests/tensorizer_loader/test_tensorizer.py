@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import contextlib
+import copy
 import functools
 import gc
 import json
@@ -8,6 +9,7 @@ import os
 import pathlib
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, Future
 from typing import Callable
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
@@ -27,8 +29,12 @@ from vllm.model_executor.model_loader.tensorizer import (
     open_stream,
     tensorize_vllm_model
 )
+from .conftest import DummyExecutor
 # yapf: enable
-from vllm.utils import PlaceholderModule
+from vllm.utils import (
+    PlaceholderModule, get_distributed_init_method,
+    get_open_port, get_ip,
+)
 from .conftest import assert_from_collective_rpc
 
 from ..utils import VLLM_PATH
@@ -39,6 +45,10 @@ try:
 except ImportError:
     tensorizer = PlaceholderModule("tensorizer")  # type: ignore[assignment]
     EncryptionParams = tensorizer.placeholder_attr("EncryptionParams")
+
+
+class TensorizerCaughtError(Exception):
+    pass
 
 EXAMPLES_PATH = VLLM_PATH / "examples"
 
@@ -57,6 +67,22 @@ model_ref = "facebook/opt-125m"
 tensorize_model_for_testing_script = os.path.join(
     os.path.dirname(__file__), "tensorize_vllm_model_for_testing.py")
 
+
+def patch_init_and_catch_error(self, obj, method, expected_error: Exception):
+    original = getattr(obj, method, None)
+    if original is None:
+        raise ValueError("Method '{}' not found.".format(method))
+
+    def wrapper(*args, **kwargs):
+        try:
+            breakpoint()
+            return original(*args, **kwargs)
+        except expected_error:
+            raise TensorizerCaughtError
+
+    setattr(obj, method, wrapper)
+
+    self.load_model()
 
 def is_curl_installed():
     try:
@@ -339,9 +365,10 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
 
 def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
 
+    expected_error = TypeError
+
     deserialization_params = {
-        "lazy_load": True,
-        "num_readers": 1,
+        "num_readers": "bar", # illegal value
     }
 
     serialization_params = {
@@ -356,28 +383,29 @@ def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(tmp_path, c
     args = EngineArgs(model=model_ref, device="cuda")
     tensorize_vllm_model(args, config)
 
-    loader_tc = TensorizerConfig(
-        tensorizer_uri=str(model_path),
-        deserialization_kwargs=deserialization_params,
-    )
-
     # lazy_load = True is listed as a deserialization_param, which will
     # break the loading process because is_vllm_tensorized hard-codes a
     # lazy_load = True to check for the vllm-tensorized marker.
 
     # If `deserialization_params` is passed to TensorDeserializer as expected,
     # we should expect the ValueError being caught.
-    try:
-        LLM(
-            model=model_ref,
-            load_format="tensorizer",
-            model_loader_extra_config=loader_tc,
-        )
-    except RuntimeError:
-        out, err = capfd.readouterr()
-        combined_output = out + err
-        assert ("TypeError: tensorizer.serialization.TensorDeserializer() got multiple values for keyword argument 'lazy_load'") in combined_output
 
+
+    loader_tc = TensorizerConfig(
+        tensorizer_uri=str(model_path),
+        deserialization_kwargs=deserialization_params,
+    )
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        load_format = "tensorizer",
+        model_loader_extra_config=loader_tc.to_dict(),)
+
+    vllm_config = engine_args.create_engine_config()
+    executor = DummyExecutor(vllm_config)
+
+    with pytest.raises(TensorizerCaughtError):
+        executor.collective_rpc(patch_init_and_catch_error, args=(tensorizer.serialization.TensorDeserializer, "__init__",  TypeError,))
 
 def test_assert_stream_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
 
@@ -401,26 +429,24 @@ def test_assert_stream_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
         "mode": "foo"
     }
 
+
     loader_tc = TensorizerConfig(
         tensorizer_uri=str(model_path),
         deserialization_kwargs=deserialization_params,
         stream_kwargs=stream_kwargs,
     )
 
-    # Like in the last test, purposefully breaking the loading process
-    # by passing an illegal value for the "mode" parameter for open_stream.
-    # If the ValueError we're looking for is produced, we've confirmed that
-    # we're able to pass stream_kwargs to configure the stream
-    try:
-        LLM(
-            model=model_ref,
-            load_format="tensorizer",
-            model_loader_extra_config=loader_tc,
-        )
-    except RuntimeError:
-        out, err = capfd.readouterr()
-        combined_output = out + err
-        assert ("ValueError: Only binary modes (\"rb\", \"wb\", \"wb+\", etc.) are valid when opening local file streams.") in combined_output
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        load_format = "tensorizer",
+        model_loader_extra_config=loader_tc.to_dict(),)
+
+    vllm_config = engine_args.create_engine_config()
+    executor = DummyExecutor(vllm_config)
+
+    import vllm.model_executor.model_loader.tensorizer
+    with pytest.raises(TensorizerCaughtError):
+        executor.collective_rpc(patch_init_and_catch_error, args=(vllm.model_executor.model_loader.tensorizer, "open_stream", ValueError,))
 
 @pytest.mark.asyncio
 async def test_serialize_and_serve_entrypoints(tmp_path):
@@ -444,7 +470,7 @@ async def test_serialize_and_serve_entrypoints(tmp_path):
         print("STDERR:\n", e.stderr)
         raise
 
-    print("Serializing STDOUT:\n", result.stdout)
+    assert "Successfully serialized" in result.stdout
 
     # Next, try to serve with vllm serve
     model_uri = tmp_path / "vllm" / model_ref / suffix / "model.tensors"
