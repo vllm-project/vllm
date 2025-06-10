@@ -226,12 +226,12 @@ class MistralToolParser(ToolParser):
             match_name = self.tool_call_first_attribute_name.match(raw_current_tool_call)
             match_arguments = self.tool_call_first_attribute_arguments.match(raw_current_tool_call)
             if not self.current_tool_name_finished and match_name:
-                if self.previous_attribute_end_index is not None and match_name.end() <= self.previous_attribute_end_index:
+                if match_name.end() <= self.previous_attribute_end_index:
                     return self._none_or_additional_content(additional_content)
                 self.current_element_streaming = "name"
                 self.current_attribute_start_index = match_name.end()
             elif not self.current_tool_arguments_finished and match_arguments:
-                if self.previous_attribute_end_index is not None and match_arguments.end() <= self.previous_attribute_end_index:
+                if match_arguments.end() <= self.previous_attribute_end_index:
                     return self._none_or_additional_content(additional_content)
                 self.current_element_streaming = "arguments"
                 self.current_attribute_start_index = match_arguments.end() - 1 # the `{` is the last IN the match part. We want it as the start index element
