@@ -82,7 +82,7 @@ def test_models(
 
     with vllm_runner(model,
                      task="embed",
-                     max_model_len=None,
+                     max_model_len=512,
                      **vllm_extra_kwargs) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
 

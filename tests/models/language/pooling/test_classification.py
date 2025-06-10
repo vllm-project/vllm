@@ -37,7 +37,7 @@ def test_models(
         # switch to use ROCm CK FA backend
         monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
 
-    with vllm_runner(model, dtype=dtype) as vllm_model:
+    with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.classify(example_prompts)
 
     with hf_runner(model,
