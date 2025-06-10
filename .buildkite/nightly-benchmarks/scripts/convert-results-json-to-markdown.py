@@ -3,9 +3,11 @@
 
 import json
 import os
+from importlib import util
 from pathlib import Path
 
 import pandas as pd
+import psutil
 from tabulate import tabulate
 
 results_folder = Path("results/")
@@ -171,20 +173,28 @@ if __name__ == "__main__":
     serving_results = pd.DataFrame.from_dict(serving_results)
     throughput_results = pd.DataFrame.from_dict(throughput_results)
 
-    import pandas as pd
-    import psutil
-    from cpuinfo import get_cpu_info
-    from numa import info
-
     svmem = psutil.virtual_memory()
-    numa_size = info.get_num_configured_nodes()
-    platform_data = {
-        "CPU Brand": [get_cpu_info()["brand_raw"]],
-        "Physical cores": [psutil.cpu_count(logical=False)],
-        "Total cores": [psutil.cpu_count(logical=True)],
-        "Total Memory": [get_size(svmem.total)],
-        "Total NUMA nodes": [numa_size],
-    }
+    libnuma_found = util.find_spec("numa") is not None
+    cpuinfo_found = util.find_spec("cpuinfo") is not None
+    if libnuma_found and cpuinfo_found:
+        from cpuinfo import get_cpu_info
+        from numa import info
+
+        numa_size = info.get_num_configured_nodes()
+        platform_data = {
+            "CPU Brand": [get_cpu_info()["brand_raw"]],
+            "Physical cores": [psutil.cpu_count(logical=False)],
+            "Total cores": [psutil.cpu_count(logical=True)],
+            "Total Memory": [get_size(svmem.total)],
+            "Total NUMA nodes": [numa_size],
+        }
+    else:
+        platform_data = {
+            "Physical cores": [psutil.cpu_count(logical=False)],
+            "Total cores": [psutil.cpu_count(logical=True)],
+            "Total Memory": [get_size(svmem.total)],
+        }
+
     platform_results = pd.DataFrame.from_dict(
         platform_data, orient="index", columns=["Platform Info"]
     )
@@ -211,7 +221,6 @@ if __name__ == "__main__":
         latency_results, throughput_results, serving_results
     )
 
-    chg_line_char = "\n"
     for df in [latency_results, serving_results, throughput_results]:
         if df.empty:
             continue
@@ -222,7 +231,7 @@ if __name__ == "__main__":
         # The GPUs sometimes come in format of "GPUTYPE\nGPUTYPE\n...",
         # we want to turn it into "8xGPUTYPE"
         df["GPU"] = df["GPU"].apply(
-            lambda x: f"{len(x.split(chg_line_char))}x{x.split(chg_line_char)[0]}"
+            lambda x: f"{len(x.split('\n'))}x{x.split('\n')[0]}"
         )
 
     # get markdown tables

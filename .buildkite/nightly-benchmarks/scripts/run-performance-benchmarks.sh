@@ -427,12 +427,13 @@ run_serving_tests() {
 }
 
 main() {
+  local ARCH
+  ARCH=''
   if [ "$ON_CPU" == "1" ];then
      check_cpus
-     declare -g ARCH='cpu'
+     ARCH='-cpu'
   else
      check_gpus
-     declare -g ARCH='gpu'
   fi
   check_hf_token
 
@@ -459,9 +460,9 @@ main() {
   QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
   # benchmarking
-  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests-$ARCH.json}" 
-  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/"${LATENCY_JSON:-latency-tests-$ARCH.json}"
-  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/"${THROUGHPUT_JSON:-throughput-tests-$ARCH.json}"
+  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests$ARCH.json}"
+  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/"${LATENCY_JSON:-latency-tests$ARCH.json}"
+  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/"${THROUGHPUT_JSON:-throughput-tests$ARCH.json}"
 
   # postprocess benchmarking results
   pip install tabulate pandas

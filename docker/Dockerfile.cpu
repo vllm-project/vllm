@@ -123,6 +123,7 @@ ADD ./tests/ ./tests/
 ADD ./examples/ ./examples/
 ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
+ADD ./.buildkite/ ./.buildkite/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -134,8 +135,6 @@ ENTRYPOINT ["bash"]
 FROM base AS vllm-openai
 
 WORKDIR /workspace/
-ADD ./benchmarks/ ./benchmarks/
-ADD ./.buildkite/ ./.buildkite/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
