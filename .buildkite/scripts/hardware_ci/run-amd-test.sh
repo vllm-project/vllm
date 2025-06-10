@@ -171,6 +171,10 @@ if [[ $commands == *" entrypoints/llm "* ]]; then
   --ignore=entrypoints/llm/test_prompt_validation.py "}
 fi
 
+#Unset HF_TOKEN to evaluate a model from modelscope
+if [[ $commands == *" test_regression.py"* ]]; then
+  commands="unset HF_TOKEN; ${commands}"
+fi
 
 
 #Obsolete currently
