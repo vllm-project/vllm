@@ -39,12 +39,15 @@ def test_rocm_aiter_gemm_a8w8_bpreshuffle_custom_op_registration():
 
 @pytest.mark.parametrize("m", [1, 32, 64])
 @pytest.mark.parametrize(
-    "nk", [(1280, 8192),
-           (8192, 1024)])  # n,k shapes for qkv_proj and attn output
+    "nk",
+    [
+        (1280, 8192),  # n,k shapes for qkv_proj
+        (8192, 1024),  # n,k shapes for attn output
+    ])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fnuz])
 def test_rocm_aiter_gemm_a8w8_bpreshuffle_torch_compile_compatibility(
-        m: int, nk: tuple[int], out_dtype: torch.dtype,
+        m: int, nk: tuple[int, int], out_dtype: torch.dtype,
         quant_dtype: torch.dtype):
     n, k = nk
     qinput = torch.randn((m, k), dtype=out_dtype, device="cuda")
