@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+import torch._dynamo
 
 from tests.compile.backend import TestBackend
 from tests.models.utils import check_outputs_equal
@@ -10,25 +11,34 @@ from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
+from vllm.platforms import current_platform
 
-MODEL = "amd/Llama-3.1-8B-Instruct-FP8-KV"
 test_backend = TestBackend()
 
 
-@pytest.mark.parametrize("num_prompts", [4])
-def test_attention_fusion2(example_prompts, num_prompts):
-    # TODO(luka): use all prompts if possible (after recompilation resolved)
-    # https://github.com/vllm-project/vllm/issues/19391
-    prompts = example_prompts[:num_prompts]
+@pytest.mark.parametrize(
+    "model, quant_key",
+    [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)])
+# TODO llm not being freed correctly
+@pytest.mark.parametrize("use_triton_fa",
+                         [True] if current_platform.is_rocm() else [False])
+@pytest.mark.skipif(not current_platform.supports_fp8(),
+                    reason="Need FP8 support")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(),
+                    reason="Only test CUDA and ROCm")
+def test_attention_fusion2(example_prompts, monkeypatch, model, quant_key,
+                           use_triton_fa):
+    monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
 
-    # For some reason, if we compile the first LLM with Dynamo,
-    # the second time the compiler is not invoked.
-    # Hence, we use eager mode as the baseline.
-    llm = LLM(MODEL,
+    # Prompt 4 seems too open-ended
+    prompts = example_prompts[:4] + example_prompts[5:]
+
+    llm = LLM(model,
               enforce_eager=True,
               compilation_config=CompilationConfig(
-                  level=CompilationLevel.NO_COMPILATION),
-              gpu_memory_utilization=0.9)
+                  level=CompilationLevel.DYNAMO_AS_IS),
+              gpu_memory_utilization=0.4,
+              max_model_len=2048)
 
     sampling_params = SamplingParams(temperature=0.0,
                                      max_tokens=10,
@@ -37,11 +47,13 @@ def test_attention_fusion2(example_prompts, num_prompts):
     unfused_output = llm.generate(prompts, sampling_params)
     del llm
 
+    torch._dynamo.reset()
+
     compile_config = CompilationConfig(
         # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
+        # DYNAMO_ONCE does not properly propagate shapes.
         level=CompilationLevel.DYNAMO_AS_IS,
         backend="tests.compile.test_fusion_attn.test_backend",
-        use_cudagraph=False,
     )
     vllm_config = VllmConfig(compilation_config=compile_config)
 
@@ -49,13 +61,25 @@ def test_attention_fusion2(example_prompts, num_prompts):
     # so we initialize it during compilation.
     attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw)
     test_backend.custom_passes += [NoOpEliminationPass(vllm_config), attn_pass]
-    llm2 = LLM(MODEL,
+    llm2 = LLM(model,
+               enforce_eager=True,
                compilation_config=compile_config,
-               gpu_memory_utilization=0.9)
+               gpu_memory_utilization=0.4,
+               max_model_len=2048)
 
-    # Check quant ops
-    test_backend.check_before_ops([QUANT_OPS[kFp8StaticTensorSym]],
-                                  fully_replaced=False)
+    # check support
+    attn_fusion_supported = [
+        layer.impl.fused_output_quant_supported(quant_key.dtype,
+                                                quant_key.static,
+                                                quant_key.group_shape)
+        for key, layer in compile_config.static_forward_context.items()
+    ]
+
+    print(attn_fusion_supported)
+    if any(attn_fusion_supported):
+        # Check quant ops
+        test_backend.check_before_ops([QUANT_OPS[quant_key]],
+                                      fully_replaced=False)
 
     # attention ops present in both, just output_scale param changes
     attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
@@ -63,13 +87,17 @@ def test_attention_fusion2(example_prompts, num_prompts):
                                          test_backend.graph_post_pass))
     assert len(attn_nodes_pre) == len(attn_nodes_post)
 
-    for pre_node, post_node in zip(attn_nodes_pre, attn_nodes_post):
-        assert pre_node.kwargs["output_scale"] is None
-        assert post_node.kwargs["output_scale"] is not None
+    for i in range(len(attn_nodes_pre)):
+        assert attn_nodes_pre[i].kwargs["output_scale"] is None
+        fused = attn_nodes_post[i].kwargs["output_scale"] is not None
+        assert fused == attn_fusion_supported[i], \
+            f"Node {i} {'' if fused else 'not '} expected " \
+            f"to have fused output quant"
 
     # check outputs
     fused_output = llm2.generate(prompts, sampling_params)
 
+    # transform outputs to format expected by check_outputs_equal
     req_outs = lambda ro: [(list(s.token_ids), s.text) for s in ro.outputs]
     outs_lst = lambda ros: [tuple(zip(*req_outs(ro))) for ro in ros]
 
@@ -79,3 +107,4 @@ def test_attention_fusion2(example_prompts, num_prompts):
         name_0="unfused",
         name_1="fused",
     )
+    del llm2
