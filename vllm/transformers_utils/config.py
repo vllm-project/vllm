@@ -141,9 +141,10 @@ def list_repo_files(
             if envs.VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import (
                     modelscope_list_repo_files)
-                return modelscope_list_repo_files(repo_id,
-                                                  revision=revision,
-                                                  token=token)
+                return modelscope_list_repo_files(
+                    repo_id,
+                    revision=revision,
+                    token=os.getenv("MODELSCOPE_API_TOKEN"))
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
