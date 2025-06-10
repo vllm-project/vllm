@@ -134,8 +134,6 @@ def apply_w8a8_block_fp8_linear(
 
     if should_use_deepgemm(output_dtype, weight):
 
-        import vllm.model_executor.layers.quantization.deepgemm as deepgemm
-
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[0]]
 
