@@ -358,13 +358,13 @@ async def benchmark(
         if profile_output.success:
             print("Profiler started")
 
-    distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
+    distribution = ("Poisson process" if burstiness == 1.0 
+                   else "Gamma distribution")
 
     if ramp_up_strategy is not None:
-        print(
-            f"Traffic ramp-up strategy: {ramp_up_strategy}. Will increase RPS "
-            f"from {ramp_up_start_rps} to {ramp_up_end_rps} RPS over the "
-            "duration of the benchmark.")
+        print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
+        print(f"Will increase RPS from {ramp_up_start_rps} to "
+              f"{ramp_up_end_rps} RPS over the duration of the benchmark.")
     else:
         print(f"Traffic request rate: {request_rate}")
 
