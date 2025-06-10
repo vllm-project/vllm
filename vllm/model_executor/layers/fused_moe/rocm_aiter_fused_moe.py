@@ -360,6 +360,8 @@ def rocm_aiter_fused_experts(
             assert w1_scale is not None
             assert w2_scale is not None
             quant_method = QuantMethod.BLOCK_128x128.value
+        elif per_channel_quant and use_fp8_w8a8:
+            quant_method = QuantMethod.PER_TOKEN.value
         elif use_fp8_w8a8:
             # Currently only per tensor quantization method is enabled.
             quant_method = QuantMethod.PER_TENSOR.value
