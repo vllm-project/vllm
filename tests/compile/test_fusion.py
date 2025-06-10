@@ -8,7 +8,6 @@ import vllm.envs as envs
 import vllm.plugins
 from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, FusedRMSQuantKey,
                                      FusionPass, QuantKey)
-from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import (CompilationConfig, CompilationLevel, PassConfig,
                          VllmConfig)
@@ -122,9 +121,7 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
         torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
 
         # In pre-nodes, fp8 quant should be there and fused kernels should not
-        backend.check_before_ops(model.ops_in_model_before(), find_auto_fn,
-                                 find_auto_fn_maybe)
+        backend.check_before_ops(model.ops_in_model_before())
 
         # In post-nodes, fused kernels should be there and fp8 quant should not
-        backend.check_after_ops(model.ops_in_model_after(), find_auto_fn,
-                                find_auto_fn_maybe)
+        backend.check_after_ops(model.ops_in_model_after())

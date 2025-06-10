@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import operator
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Optional
 
 from torch import fx
@@ -64,6 +64,16 @@ def find_getitem(node: fx.Node, idx: int) -> fx.Node:
     ret = find_getitem_maybe(node, idx)
     assert ret is not None, f"Could not find getitem {idx} in node {node}"
     return ret
+
+
+# An auto-functionalization-aware utility for finding nodes with a specific op
+def find_op_nodes(op: OpOverload, graph: fx.Graph) -> Iterator[fx.Node]:
+    if not op._schema.is_mutable:
+        yield from graph.find_nodes(op="call_function", target=op)
+
+    for n in graph.find_nodes(op="call_function", target=auto_functionalized):
+        if n.args[0] == op:
+            yield n
 
 
 # Asserts that the node only has one user and returns it
