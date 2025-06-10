@@ -542,12 +542,11 @@ class WorkerWrapperBase:
             del os.environ[key]
         update_environment_variables(envs)
 
-    def init_config(self, kwargs: Dict[str, Any]) -> None:
-        """Resolve configuration that depends on actual hardware capabilities.
-
-        This must be called after device initialization and distributed setup
-        to ensure current_platform is correctly set.
+    def init_config(self, all_kwargs: List[Dict[str, Any]]) -> None:
         """
+        Resolve configuration that depends on hardware capabilities.
+        """
+        kwargs = all_kwargs[self.rpc_rank]
         self.vllm_config: VllmConfig = kwargs.get("vllm_config")
         assert self.vllm_config is not None, (
             "vllm_config is required to initialize the worker")
