@@ -71,7 +71,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
-                block_ids=[[0]],  # block_ids should be list[list[int]]
+                block_ids=([0], ),  # block_ids should be tuple[list[int]]
                 num_computed_tokens=0,
                 lora_request=None,
             ))
@@ -116,10 +116,10 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
     # This is safe since we currently only use single KV cache groups
     block_table = multi_group_block_table[0]
 
-    # req_state.block_ids is now list[list[int]] for MultiGroupBlockTable
+    # req_state.block_ids is now tuple[list[int], ...] for MultiGroupBlockTable
     # Extract the first group's block IDs
     if isinstance(req_state.block_ids[0], list):
-        # New format: list[list[int]] - extract first group
+        # New format: tuple[list[int], ...] - extract first group
         req_block_ids = req_state.block_ids[0]
     else:
         # Legacy format: list[int] - use directly
@@ -210,7 +210,7 @@ def test_update_states_request_resumed(model_runner):
         req_id=req_id,
         resumed_from_preemption=False,
         new_token_ids=[],
-        new_block_ids=[[]],
+        new_block_ids=([], ),
         num_computed_tokens=0,
     )
 
