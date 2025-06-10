@@ -148,6 +148,12 @@ class AttnFusionPass(VllmInductorPass):
                                                   layer.head_size,
                                                   current_platform.fp8_dtype())
             pattern.register_if_supported(self.patterns, layer)
+        if len(self.static_fwd_ctx) == 0:
+            logger.warning(
+                "Attention + quant fusion is enabled, but "
+                "CompilationConfig.static_forward_context is empty. "
+                "Cannot access attention layers so no fusion "
+                "patterns were registered.")
 
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
         self.begin()
