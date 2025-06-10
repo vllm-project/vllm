@@ -184,6 +184,7 @@ def create_model_runner_output(
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=None,
         finished_sending=finished_sending,
         finished_recving=finished_recving,
     )
