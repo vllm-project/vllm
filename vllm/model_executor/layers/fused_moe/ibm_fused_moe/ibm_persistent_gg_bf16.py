@@ -1,7 +1,7 @@
 import triton
 import triton.language as tl
 import torch
-from tma_cuda_autotune import CudaUtils, early_config_prune, HOPPER_CONFIGS, STANDARD_CONFIGS
+from .tma_cuda_autotune import CudaUtils, early_config_prune, HOPPER_CONFIGS, STANDARD_CONFIGS
 
 
 @triton.jit
