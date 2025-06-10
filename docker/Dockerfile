@@ -261,7 +261,7 @@ if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
     git clone https://github.com/flashinfer-ai/flashinfer.git --single-branch --branch v0.2.6.post1 --recursive && \
     # Needed to build AOT kernels
     (cd flashinfer && \
-        python -m flashinfer.aot && \
+        python3 -m flashinfer.aot && \
         uv pip install --system --no-build-isolation . \
     ) && \
     rm -rf flashinfer; \
