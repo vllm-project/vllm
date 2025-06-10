@@ -34,6 +34,7 @@ from vllm.utils import direct_register_custom_op
 
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 has_deepep = importlib.util.find_spec("deep_ep") is not None
+has_triton_kernels = importlib.util.find_spec("triton_kernels") is not None
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -41,13 +42,13 @@ if current_platform.is_cuda_alike():
     from .modular_kernel import (FusedMoEModularKernel,
                                  FusedMoEPermuteExpertsUnpermute,
                                  FusedMoEPrepareAndFinalize)
-    from .triton_kernels_moe import (can_use_triton_moe,
-                                     triton_kernel_moe_forward)
     if has_pplx:
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
     if has_deepep:
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import DeepEPLLPrepareAndFinalize
+    if has_triton_kernels:
+        from .triton_kernels_moe import triton_kernel_moe_forward
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -434,11 +435,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
-    def __init__(self, moe: MoEConfig):
+    def __init__(self, moe: MoEConfig, use_triton_kernels: False):
         super().__init__()
         self.fused_experts = fused_experts  # type: ignore
         self.topk_indices_dtype = None
         self.moe = moe
+        self.use_triton_kernels = use_triton_kernels
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
         if self.rocm_aiter_moe_enabled:
@@ -494,7 +496,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                      2 * intermediate_size_per_partition,
                                      hidden_size,
                                      dtype=params_dtype)
-        if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
+        if self.use_triton_kernels:
             w13_weight_raw = w13_weight_raw.transpose(-2, -1).contiguous()
         w13_weight = torch.nn.Parameter(w13_weight_raw, requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
@@ -505,7 +507,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                     hidden_size,
                                     intermediate_size_per_partition,
                                     dtype=params_dtype)
-        if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
+        if self.use_triton_kernels:
             w2_weight_raw = w2_weight_raw.transpose(-2, -1).contiguous()
         w2_weight = torch.nn.Parameter(w2_weight_raw, requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
@@ -604,7 +606,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         activation: str = "silu",
     ) -> torch.Tensor:
 
-        if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
+        if self.use_triton_kernels:
             return triton_kernel_moe_forward(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -866,9 +868,27 @@ class FusedMoE(torch.nn.Module):
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts
-
+        
+        self.use_triton_kernel = False
+        if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
+            if not has_triton_kernels:
+                logger.warning_once("Failed to import Triton MoE kernels, use default fused_experts for MoE.")
+            elif quant_config is not None:
+                logger.warning_once("Triton kernel doesn't support quantization now.")
+            elif custom_routing_function is not None:
+                logger.warning_once("Triton kernel doesn't support custom routing function now.")
+            elif use_grouped_topk:
+                logger.warning_once("Triton kernel doesn't support use grouped topk now.")
+            elif scoring_func != "softmax":
+                logger.warning_once("Triton kernel only support softmax scoring function.")
+            elif self.use_ep:
+                logger.warning_once("Triton kernel doesn't support Experts Parallelism now.")
+            else:
+                logger.info_once("Using Triton MoE kernels.")
+                self.use_triton_kernel = True
+            
         # For smuggling this layer into the fused moe custom op
-        self.use_direct_call = self.dp_size == 1 and not envs.VLLM_USE_EXP_TRITON_MOE_KERNEL
+        self.use_direct_call = self.dp_size == 1 and not self.use_triton_kernel
         if not self.use_direct_call:
             compilation_config = vllm_config.compilation_config
             if prefix in compilation_config.static_forward_context:
@@ -934,19 +954,10 @@ class FusedMoE(torch.nn.Module):
         self.moe_config = moe
         self.quant_config = quant_config
 
-        if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL and not can_use_triton_moe(
-                quant_config=self.quant_config,
-                custom_routing_function=self.custom_routing_function,
-                use_grouped_topk=self.use_grouped_topk,
-                scoring_func=self.scoring_func,
-                use_ep=self.use_ep):
-            raise NotImplementedError(
-                "Some functionality is not supported in new Triton MoE kernel")
-
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         quant_method: Optional[QuantizeMethodBase] = None
-        quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
+        quant_method = (UnquantizedFusedMoEMethod(moe, self.use_triton_kernel) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
 
         assert quant_method is not None
@@ -1092,7 +1103,7 @@ class FusedMoE(torch.nn.Module):
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         shard_size = expert_data.shape[shard_dim] // 2
-        if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
+        if self.use_triton_kernel:
             loaded_weight = loaded_weight.transpose(-2, -1).contiguous()
         loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
                                              shard_size)
@@ -1117,7 +1128,7 @@ class FusedMoE(torch.nn.Module):
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Narrow parameter and load.
         shard_size = expert_data.shape[shard_dim]
-        if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
+        if self.use_triton_kernel:
             loaded_weight = loaded_weight.transpose(-2, -1).contiguous()
         if not load_full:
             loaded_weight = loaded_weight.narrow(shard_dim,
@@ -1189,7 +1200,7 @@ class FusedMoE(torch.nn.Module):
         # should be flipped. Required by GPTQ, compressed-tensors
         # should be whatever dimension intermediate_size_per_partition is
         is_transposed = getattr(param, "is_transposed", False)
-        if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
+        if self.use_triton_kernel:
             is_transposed = not is_transposed
         shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
         if is_transposed:

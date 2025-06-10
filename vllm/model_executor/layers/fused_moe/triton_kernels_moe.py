@@ -9,26 +9,6 @@ from triton_kernels.routing import (GatherIndx, RoutingData, ScatterIndx,
 
 from vllm.utils import direct_register_custom_op
 
-
-def can_use_triton_moe(**kwargs):
-    if kwargs.get("quant_config") is not None:
-        raise NotImplementedError(
-            "Triton kernel doesn't support quantization now")
-    if kwargs.get("custom_routing_function") is not None:
-        raise NotImplementedError(
-            "Triton kernel doesn't support custom routing function now")
-    if kwargs.get("use_grouped_topk"):
-        raise NotImplementedError(
-            "Triton kernel doesn't support use grouped topk now")
-    if kwargs.get("scoring_func") != 'softmax':
-        raise NotImplementedError(
-            "Triton kernel only support softmax scoring function")
-    if kwargs.get("use_ep"):
-        raise NotImplementedError(
-            "Triton kernel doesn't support Experts Parallelism now")
-    return True
-
-
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
