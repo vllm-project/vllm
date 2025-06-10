@@ -6,7 +6,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from datetime import timedelta
-from functools import wraps
+from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
 import torch
@@ -390,6 +390,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
+    @lru_cache(maxsize=8)
     def get_device_capability(cls,
                               device_id: int = 0
                               ) -> Optional[DeviceCapability]:
@@ -486,6 +487,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
 class NonNvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
+    @lru_cache(maxsize=8)
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
