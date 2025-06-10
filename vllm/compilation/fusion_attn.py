@@ -12,8 +12,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-# TODO(luka) move this around
-from .fusion import QUANT_OPS, QuantKey, empty_bf16, empty_fp32
+from .fusion import QUANT_OPS, GroupShape, QuantKey, empty_bf16, empty_fp32
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -38,7 +37,7 @@ class AttentionStaticQuantPattern:
         self.quant_dtype = quant_dtype
         self.quant_key = QuantKey(dtype=quant_dtype,
                                   static=True,
-                                  per_tensor=True,
+                                  group_shape=GroupShape.PER_TENSOR,
                                   symmetric=symmetric)
         assert self.quant_key in QUANT_OPS, \
             f"unsupported quantization scheme {self.quant_key}"
@@ -50,9 +49,9 @@ class AttentionStaticQuantPattern:
 
     def register_if_supported(self, pm_pass: PatternMatcherPass,
                               layer: Attention):
-        if layer.impl.fused_output_quant_supported(
-                self.quant_dtype, self.quant_key.static,
-                not self.quant_key.per_tensor):
+        if layer.impl.fused_output_quant_supported(self.quant_dtype,
+                                                   self.quant_key.static,
+                                                   self.quant_key.group_shape):
             self._register(pm_pass)
 
     def _register(self, pm_pass: PatternMatcherPass):
@@ -95,7 +94,8 @@ class AttentionStaticQuantPattern:
 
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
-        # custom fake mode
+        # Need custom fake mode, otherwise tracing happens with real tensors.
+        # That would not work for the unified_attention custom op.
         with unset_fake_temporarily(), FakeTensorMode():
             inputs = [
                 empty_bf16(5, self.num_heads, self.head_size),  # q

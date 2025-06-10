@@ -594,10 +594,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                                                     head_dim))
 
     def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
-                                     per_token: bool):
+                                     group_shape: tuple[int, int]):
         if self.use_triton_flash_attn:
             return dtype == current_platform.fp8_dtype(
-            ) and static and not per_token
+            ) and static and group_shape == (-1, -1)  # per-tensor
 
         # Only supported in the Triton backend
         return False

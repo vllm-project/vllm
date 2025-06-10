@@ -7,7 +7,7 @@ import torch
 import vllm.envs as envs
 import vllm.plugins
 from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, FusedRMSQuantKey,
-                                     FusionPass, QuantKey)
+                                     FusionPass, GroupShape, QuantKey)
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import (CompilationConfig, CompilationLevel, PassConfig,
                          VllmConfig)
@@ -29,9 +29,10 @@ class TestModel(torch.nn.Module):
         self.cutlass_fp8_enabled = cutlass_fp8_enabled
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(3)]
         self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
+        group_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
         self.key = QuantKey(dtype=FP8_DTYPE,
                             static=static,
-                            per_tensor=static,
+                            group_shape=group_shape,
                             symmetric=True)
         if static:
             self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
