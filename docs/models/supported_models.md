@@ -459,8 +459,8 @@ Specified using `--task score`.
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |
 
 !!! note
-    Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/qwen3_reranker.py.
-    
+    Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: <gh-file:examples/offline_inference/qwen3_reranker.py>.
+
     ```bash
     vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
