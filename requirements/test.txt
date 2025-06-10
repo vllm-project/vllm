@@ -680,7 +680,7 @@ scipy==1.13.1
     #   sentence-transformers
     #   statsmodels
     #   vocos
-sentence-transformers==3.2.1
+sentence-transformers==4.1.0
     # via
     #   -r requirements/test.in
     #   mteb
@@ -835,6 +835,7 @@ typing-extensions==4.12.2
     #   pqdm
     #   pydantic
     #   pydantic-core
+    #   sentence-transformers
     #   torch
     #   typer
     #   typing-inspection
