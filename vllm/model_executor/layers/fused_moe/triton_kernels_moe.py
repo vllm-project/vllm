@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import List, Optional
+from typing import Optional
 
 import torch
 from triton_kernels.matmul_ogs import matmul_ogs
@@ -8,6 +8,7 @@ from triton_kernels.routing import (GatherIndx, RoutingData, ScatterIndx,
                                     routing)
 
 from vllm.utils import direct_register_custom_op
+
 
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
@@ -75,7 +76,7 @@ def triton_kernel_fused_experts(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[List[int]] = None,
+    block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
 
     # type check
@@ -95,7 +96,6 @@ def triton_kernel_fused_experts(
 
     M, K = hidden_states.shape
     E, _, N = w1.shape
-    n_expts_tot = routing_data.n_expts_tot
     n_expts_act = routing_data.n_expts_act
     dtype = hidden_states.dtype
 

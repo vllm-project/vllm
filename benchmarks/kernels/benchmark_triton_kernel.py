@@ -310,10 +310,6 @@ def main(args: argparse.Namespace):
     hidden_size = config.hidden_size
     dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
 
-    use_fp8_w8a8 = args.dtype == "fp8_w8a8"
-    use_int8_w8a16 = args.dtype == "int8_w8a16"
-    block_quant_shape = get_weight_block_size_safety(config)
-
     for size_m in DEFAULT_BATCH_SIZES:
         bench_run(results, size_m, E, shard_intermediate_size, hidden_size, topk, dtype)
 

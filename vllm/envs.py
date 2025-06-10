@@ -861,7 +861,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MQ_MAX_CHUNK_BYTES_MB":
     lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
 
-     # If set, use experimental triton MoE kernel
+    # If set, use experimental triton MoE kernel
     "VLLM_USE_EXP_TRITON_MOE_KERNEL":
     lambda: bool(int(os.getenv("VLLM_USE_EXP_MOE", "1"))),
 }

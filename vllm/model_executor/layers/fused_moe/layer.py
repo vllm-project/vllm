@@ -868,25 +868,33 @@ class FusedMoE(torch.nn.Module):
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts
-        
+
         self.use_triton_kernel = False
         if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
             if not has_triton_kernels:
-                logger.warning_once("Failed to import Triton MoE kernels, use default fused_experts for MoE.")
+                logger.warning_once(
+                    "Failed to import Triton MoE kernels, use default fused_experts for MoE."
+                )
             elif quant_config is not None:
-                logger.warning_once("Triton kernel doesn't support quantization now.")
+                logger.warning_once(
+                    "Triton kernel doesn't support quantization now.")
             elif custom_routing_function is not None:
-                logger.warning_once("Triton kernel doesn't support custom routing function now.")
+                logger.warning_once(
+                    "Triton kernel doesn't support custom routing function now."
+                )
             elif use_grouped_topk:
-                logger.warning_once("Triton kernel doesn't support use grouped topk now.")
+                logger.warning_once(
+                    "Triton kernel doesn't support use grouped topk now.")
             elif scoring_func != "softmax":
-                logger.warning_once("Triton kernel only support softmax scoring function.")
+                logger.warning_once(
+                    "Triton kernel only support softmax scoring function.")
             elif self.use_ep:
-                logger.warning_once("Triton kernel doesn't support Experts Parallelism now.")
+                logger.warning_once(
+                    "Triton kernel doesn't support Experts Parallelism now.")
             else:
                 logger.info_once("Using Triton MoE kernels.")
                 self.use_triton_kernel = True
-            
+
         # For smuggling this layer into the fused moe custom op
         self.use_direct_call = self.dp_size == 1 and not self.use_triton_kernel
         if not self.use_direct_call:
@@ -957,8 +965,9 @@ class FusedMoE(torch.nn.Module):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         quant_method: Optional[QuantizeMethodBase] = None
-        quant_method = (UnquantizedFusedMoEMethod(moe, self.use_triton_kernel) if quant_config is None
-                        else quant_config.get_quant_method(self, prefix))
+        quant_method = (UnquantizedFusedMoEMethod(moe, self.use_triton_kernel)
+                        if quant_config is None else
+                        quant_config.get_quant_method(self, prefix))
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
