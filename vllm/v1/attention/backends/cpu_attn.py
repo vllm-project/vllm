@@ -118,13 +118,9 @@ class TorchSDPAMetadataBuilderV1:
 
         return True
 
-    def build(self,
-              num_reqs: int,
-              num_actual_tokens: int,
-              max_query_len: int,
+    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              for_cudagraph_capture: bool = False):
+              common_attn_metadata: CommonAttentionMetadata):
         runner = self.runner
         block_table = self.block_table
         seq_lens_np = runner.seq_lens_np[:num_reqs]
