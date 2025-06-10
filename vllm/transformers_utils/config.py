@@ -37,6 +37,9 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              NemotronConfig, NVLM_D_Config,
                                              RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
+                                             OAIModelConfig, OvisConfig,
+                                             RWConfig, SkyworkR1VChatConfig,
+                                             SolarConfig, Telechat2Config,
                                              UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
@@ -88,6 +91,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
     "step3_text": Step3TextConfig,
+    "oai": OAIModelConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 

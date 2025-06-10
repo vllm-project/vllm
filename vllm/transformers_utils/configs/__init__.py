@@ -28,6 +28,11 @@ from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
 from vllm.transformers_utils.configs.step3_vl import (Step3TextConfig,
                                                       Step3VisionEncoderConfig,
                                                       Step3VLConfig)
+from vllm.transformers_utils.configs.oai import OAIModelConfig
+from vllm.transformers_utils.configs.ovis import OvisConfig
+from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
+from vllm.transformers_utils.configs.solar import SolarConfig
+from vllm.transformers_utils.configs.telechat2 import Telechat2Config
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
@@ -50,4 +55,5 @@ __all__ = [
     "Step3VLConfig",
     "Step3VisionEncoderConfig",
     "Step3TextConfig",
+    "OAIMoelConfig",
 ]
