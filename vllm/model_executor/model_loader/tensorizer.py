@@ -264,15 +264,20 @@ class TensorizerArgs:
           inferred as vLLM models.
       verify_hash: If True, the hashes of each tensor will be verified against 
           the hashes stored in the metadata. A `HashMismatchError` will be 
-          raised if any of the hashes do not match. Deprecated, as this can 
-          now be passed along with any other `TensorDeserializer` kwargs 
-          through `deserialization_kwargs`.
+          raised if any of the hashes do not match. Passing parameters 
+          to TensorizerSerializer and TensorDeserializer objects explicitly
+          in TensorizerArgs and TensorizerConfig is deprecated. This parameter 
+          and others that are given to TensorDeserializer should now be 
+          provided in the deserialization_kwargs dict.
       num_readers: Controls how many threads are allowed to read concurrently
           from the source file. Default is `None`, which will dynamically set
           the number of readers based on the number of available.
           resources and model size. This greatly increases performance.
-          Deprecated, as this can now be passed along with any other 
-          `TensorDeserializer` kwargs through `deserialization_kwargs`.
+          Passing parameters to TensorizerSerializer and TensorDeserializer 
+          objects explicitly in TensorizerArgs and TensorizerConfig is 
+          deprecated. This parameter and others that are given to 
+          TensorDeserializer should now be provided in the 
+          deserialization_kwargs dict.
       encryption_keyfile: File path to a binary file containing a  
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 

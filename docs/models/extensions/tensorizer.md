@@ -65,19 +65,30 @@ python examples/others/tensorize_vllm_model.py \
 ```
 
 This saves the model tensors at 
-`s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors`.
+`s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors`, as well as all other 
+artifacts needed to load the model at that same directory.
 
 ## Serving the model using Tensorizer
-Once the model is serialized where you want it, you must specify the
-following additional command line parameters to `vllm serve` to load the model:
-- `--load-format=tensorizer`
-- `--model-loader-extra-config`
-  - This expects a JSON string specifying keyword arguments for
-    the `TensorizerConfig` object
-  - For example, `--model-loader-extra-config='{"tensorizer_uri": "foo"}'`
-    would be equivalent to `TensorizerConfig(**{"tensorizer_uri": "foo"})`
-The shell snippet below shows a typical invocation of `vllm serve`
-with these parameters specified:
+Once the model is serialized where you want it, all that is needed is to 
+pass that directory with the model artifacts to `vllm serve` in the case above, 
+one can simply do:
+
+```bash
+#!/bin/bash
+vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 --load-format=tensorizer
+```
+
+Please note that authentication to S3 is still required. Tensorizer will 
+automatically look for a `~/.s3cfg` or `~/.aws/config` and `~/.aws/credentials`
+file locally to authenticate, but also can be given the environment variables 
+`AWS_ACCESS_KEY_ID` or `S3_ACCESS_KEY_ID` for the object storage access key,
+`AWS_SECRET_ACCESS_KEY` or `S3_SECRET_ACCESS_KEY` for the object storage 
+secret key, and `AWS_S3_ENDPOINT_URL` or `S3_ENDPOINT_URL` for the endpoint url.
+
+If only the model tensors are saved, you can still provide that as the only 
+artifact in your directory to load from, and vLLM will fetch the rest using the 
+`--model-loader-extra-config` CLI arg, passing a JSON string with the args 
+for `TensorizerConfig`.
 
 ```bash
 #!/bin/bash
@@ -94,11 +105,10 @@ vllm serve facebook/opt-125m \
 ```
 
 Note in this case, if the directory to the model artifacts at
-`s3://my-bucket/vllm/facebook/opt-125m/v1/` doesn't at least have a `config.
-json` file, you'll want to pass `facebook/opt-125m` as the model tag like
-it was done in the example script above. In our example, we just added a
-`model.tensors` file to that directory. In this case, vLLM will take care of
-resolving the other model artifacts using HF Hub.
+`s3://my-bucket/vllm/facebook/opt-125m/v1/` doesn't have all necessary model 
+artifacts to load, you'll want to pass `facebook/opt-125m` as the model tag like
+it was done in the example script above. In this case, vLLM will take care of
+resolving the other model artifacts by pulling them from HuggingFace Hub.
 
 !!! note
     Note that to use this feature you will need to install `tensorizer` by running `pip install vllm[tensorizer]`.
