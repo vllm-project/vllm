@@ -33,7 +33,7 @@ class CachedRequestState:
     pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
 
-    block_ids: list[list[int]]
+    block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     output_token_ids: list[int]
 
