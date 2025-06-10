@@ -150,6 +150,7 @@ def create_request(
         request_id=f"id-{request_id}",
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
+        pooling_params=None,
         multi_modal_inputs=None,
         multi_modal_placeholders=None,
         multi_modal_hashes=None,
