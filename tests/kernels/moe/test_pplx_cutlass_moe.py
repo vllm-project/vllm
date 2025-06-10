@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Optional
+
 import pytest
 import torch
 
-from typing import Optional
-
-from .deepep_utils import ProcessGroupInfo, parallel_launch
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -15,6 +14,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
+
+from .deepep_utils import ProcessGroupInfo, parallel_launch
 
 try:
     from pplx_kernels import AllToAll
@@ -86,7 +87,6 @@ def pplx_cutlass_moe(
         scale_elems = 4  # hack to circumvent pplx data format requirements
     else:
         scale_elems = (hidden_dim + block_size - 1) // block_size
-
 
     args = dict(
         max_num_tokens=max_num_tokens,

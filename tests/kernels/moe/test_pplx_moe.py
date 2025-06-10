@@ -18,7 +18,6 @@ try:
 except ImportError:
     has_pplx = False
 
-from .deepep_utils import ProcessGroupInfo, parallel_launch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import override_config
@@ -29,6 +28,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
+
+from .deepep_utils import ProcessGroupInfo, parallel_launch
 
 requires_pplx = pytest.mark.skipif(
     not has_pplx,
@@ -154,7 +155,9 @@ def batched_moe(
 
     fused_experts = FusedMoEModularKernel(
         BatchedPrepareAndFinalize(max_num_tokens=a.shape[0],
-                                  world_size=1, dp_size=1, rank=0),
+                                  world_size=1,
+                                  dp_size=1,
+                                  rank=0),
         BatchedExperts(max_num_tokens=a.shape[0], dp_size=1, world_size=1))
 
     return fused_experts(a, w1, w2, topk_weight, topk_ids, num_experts)
@@ -557,7 +560,7 @@ def _pplx_moe(
 ):
     if use_internode:
         uid = nvshmem_get_unique_id(
-            ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
+        ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
         torch.distributed.broadcast(uid, src=0)
         nvshmem_init(uid, pgi.rank, pgi.world_size)
         group_name = None
@@ -574,8 +577,8 @@ def _pplx_moe(
     with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
-        pplx_output = pplx_moe(group_name, pgi.rank, pgi.world_size, dp_size, a, w1, w2,
-                               topk_weight, topk_ids)
+        pplx_output = pplx_moe(group_name, pgi.rank, pgi.world_size, dp_size,
+                               a, w1, w2, topk_weight, topk_ids)
         # TODO (bnell): fix + re-enable
         #batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight,
         #                              topk_ids)
@@ -613,4 +616,5 @@ def test_pplx_moe(
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
-    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk, use_internode)
+    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk,
+                    use_internode)

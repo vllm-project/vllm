@@ -466,7 +466,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 assert cdiv(M_out, OUT_CHUNK_SIZE) == num_chunks, (
                     f"{cdiv(M_out, OUT_CHUNK_SIZE)} == {num_chunks}")
 
-
                 for chunk in range(num_chunks):
                     begin_chunk_idx = chunk * CHUNK_SIZE
                     end_chunk_idx = min((chunk + 1) * CHUNK_SIZE, M)

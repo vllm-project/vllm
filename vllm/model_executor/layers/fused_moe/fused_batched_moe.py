@@ -387,8 +387,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     that the PPLX dispatch/combine kernels use.
     """
 
-    def __init__(self, max_num_tokens: int, world_size: int,
-                 dp_size: int, rank: int):
+    def __init__(self, max_num_tokens: int, world_size: int, dp_size: int,
+                 rank: int):
         super().__init__()
         self.world_size = world_size
         self.dp_size = dp_size
