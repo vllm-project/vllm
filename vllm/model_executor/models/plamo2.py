@@ -97,20 +97,6 @@ def is_mamba(config: Plamo2Config, i: int) -> bool:
     return (i % config.mamba_step) != (config.mamba_step // 2)
 
 
-# TODO(Shinichi): Replace this with RMSNorm.
-def _rms_norm(hidden_states: torch.Tensor, weight: torch.Tensor,
-              eps: float) -> torch.Tensor:
-    input_shape = hidden_states.shape
-    hidden_states = hidden_states.reshape(input_shape[:-1] + weight.shape)
-    input_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float32)
-    variance = hidden_states.pow(2).mean(-1, keepdim=True)
-    hidden_states = hidden_states * torch.rsqrt(variance + eps)
-    hidden_states = hidden_states.to(input_dtype)
-    hidden_states = weight * hidden_states
-    return hidden_states.reshape(input_shape)
-
-
 def _swiglu(h: torch.Tensor) -> torch.Tensor:
     h0, h1 = h.chunk(2, dim=-1)
     return torch.nn.functional.silu(h0) * h1
@@ -405,10 +391,18 @@ class Plamo2AttentionMixer(nn.Module):
             base=self.rope_theta,
             rope_scaling=self.rope_scaling,
         )
-        self.q_weight = torch.nn.Parameter(
+        self.q_norm = RMSNorm(config.hidden_size_per_head,
+                              eps=config.rms_norm_eps)
+        self.q_norm.weight = torch.nn.Parameter(
             torch.ones((self.num_heads, config.hidden_size_per_head)))
-        self.k_weight = torch.nn.Parameter(
+        set_weight_attrs(self.q_norm.weight,
+                         {"weight_loader": sharded_weight_loader(0)})
+        self.k_norm = RMSNorm(config.hidden_size_per_head,
+                              eps=config.rms_norm_eps)
+        self.k_norm.weight = torch.nn.Parameter(
             torch.ones((self.num_kv_heads, config.hidden_size_per_head)))
+        set_weight_attrs(self.k_norm.weight,
+                         {"weight_loader": sharded_weight_loader(0)})
 
         self.attn = Attention(
             self.num_heads,
@@ -428,8 +422,14 @@ class Plamo2AttentionMixer(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = _rms_norm(q, self.q_weight, 1e-6)
-        k = _rms_norm(k, self.k_weight, 1e-6)
+
+        q_shape = q.shape
+        q = q.reshape(q_shape[:-1] + self.q_norm.weight.shape)
+        q = self.q_norm.forward_native(q).reshape(q_shape)
+        k_shape = k.shape
+        k = k.reshape(k_shape[:-1] + self.k_norm.weight.shape)
+        k = self.k_norm.forward_native(k).reshape(k_shape)
+
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -703,6 +703,8 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, IsHybrid,
                 ".B_norm_weight": ".B_norm.weight",
                 ".C_norm_weight": ".C_norm.weight",
                 ".dt_norm_weight": ".dt_norm.weight",
+                ".q_weight": ".q_norm.weight",
+                ".k_weight": ".k_norm.weight",
             }
             # Apply replacements based on the defined mappings
             for old, new in replacements.items():
