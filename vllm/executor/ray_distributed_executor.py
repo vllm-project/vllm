@@ -391,6 +391,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 or (rank % self.parallel_config.tensor_parallel_size == 0),
             )
             all_kwargs.append(kwargs)
+
+        # init_config must be called before init_worker to verify hardware
+        # dependent configurations and resolve "auto" dtype
+        self._run_workers("init_config", all_kwargs)
         self._run_workers("init_worker", all_kwargs)
 
         self._run_workers("init_device")
