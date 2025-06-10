@@ -68,6 +68,12 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
+    parser.add_argument(
+        "--no-prefill-token-shift",
+        dest="prefill_token_shift",
+        action="store_false",
+        help="Disable prefill token shift (default: enabled)",
+    )
     return parser.parse_args()
 
 
@@ -109,6 +115,7 @@ def main():
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
+            "prefill_token_shift": args.prefill_token_shift,
         }
     elif args.method == "ngram":
         speculative_config = {

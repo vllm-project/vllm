@@ -1980,6 +1980,14 @@ class SpeculativeConfig:
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
+    # Shift prefill tokens for draft, only used in eagle
+    prefill_token_shift: bool = True
+    """Shift tokens during draft prefill or not"""
+
+    # Config for kv sharing, map from base model layer to draft layer
+    kv_sharing_mapping: SkipValidation[dict[str, str]] = None
+    """KV copy mapping for prefill stage from base to draft"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2362,6 +2370,11 @@ class SpeculativeConfig:
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "deepseek_mtp")
+
+    def eagle_shift_prefill_token(self) -> bool:
+        if self.use_eagle():
+            return self.prefill_token_shift
+        return False
 
     def __repr__(self) -> str:
         method = self.method

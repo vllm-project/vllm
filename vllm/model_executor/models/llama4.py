@@ -185,6 +185,11 @@ class Llama4Attention(nn.Module):
         is_gguf = quant_config and quant_config.get_name() == "gguf"
         if is_gguf and config.model_type == "llama":
             is_neox_style = False
+        elif config.model_type == "eagle":
+            # EAGLE draft model does not use neox style RoPE
+            is_neox_style = False
+        else:
+            is_neox_style = True
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -262,7 +267,6 @@ class Llama4DecoderLayer(nn.Module):
         super().__init__()
 
         self.layer_idx = extract_layer_index(prefix)
-        self.global_layer = config.no_rope_layers[self.layer_idx] == 0
         self.hidden_size = config.hidden_size
         rope_theta = config.rope_theta
         rope_scaling = config.rope_scaling
