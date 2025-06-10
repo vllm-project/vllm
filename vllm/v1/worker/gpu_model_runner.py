@@ -1801,13 +1801,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata = {}
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
-                attn_metadata_i = (
-                    self.attn_metadata_builders[kv_cache_group_id].
-                    build_for_cudagraph_catpure(
+                attn_metadata_i = self.attn_metadata_builders[
+                    kv_cache_group_id].build_for_cudagraph_capture(
                         num_reqs=num_reqs,
                         num_tokens=num_tokens,
                         common_attn_metadata=common_attn_metadata,
-                    ))
+                    )
                 for layer_name in kv_cache_group_spec.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 
