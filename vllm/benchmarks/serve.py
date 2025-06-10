@@ -83,10 +83,13 @@ async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-) -> AsyncGenerator[SampleRequest, None]:
+    ramp_up_strategy: Optional[str] = None,
+    ramp_up_start_rps: Optional[float] = None,
+    ramp_up_end_rps: Optional[float] = None,
+) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
-    with OPTIONAL burstiness.
+    with OPTIONAL burstiness and OPTIONAL ramp-up strategy.
 
     Args:
         input_requests:
@@ -101,26 +104,58 @@ async def get_request(
             A lower burstiness value (0 < burstiness < 1) results
             in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
+         ramp_up_strategy (optional):
+            The ramp-up strategy. Can be "linear" or "exponential".
+            If None, uses constant request rate (specified by request_rate).
+        ramp_up_start_rps (optional):
+            The starting request rate for ramp-up.
+        ramp_up_end_rps (optional):
+            The ending request rate for ramp-up.
     """
-    input_requests: Iterable[SampleRequest] = iter(input_requests)
-
-    # Calculate scale parameter theta to maintain the desired request_rate.
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}.")
-    theta = 1.0 / (request_rate * burstiness)
+    # Convert to list to get length for ramp-up calculations
+    if isinstance(input_requests, Iterable) and not isinstance(
+            input_requests, list):
+        input_requests = list(input_requests)
+
+    total_requests = len(input_requests)
+    request_index = 0
 
     for request in input_requests:
-        yield request
+        # Determine current request rate based on ramp-up strategy
+        current_request_rate = request_rate
+        if (ramp_up_strategy and ramp_up_start_rps is not None
+                and ramp_up_end_rps is not None):
+            # Calculate progress through the requests (0 to 1)
+            progress = request_index / max(total_requests - 1, 1)
 
-        if request_rate == float("inf"):
+            if ramp_up_strategy == "linear":
+                current_request_rate = ramp_up_start_rps + (
+                    ramp_up_end_rps - ramp_up_start_rps) * progress
+            elif ramp_up_strategy == "exponential":
+                # Exponential interpolation: start * (end/start)^progress
+                ratio = ramp_up_end_rps / ramp_up_start_rps
+                current_request_rate = ramp_up_start_rps * (ratio**progress)
+            else:
+                raise ValueError(
+                    f"Unknown ramp-up strategy: {ramp_up_strategy}")
+
+        yield request, current_request_rate
+
+        if current_request_rate == float("inf"):
             # If the request rate is infinity, then we don't need to wait.
+            request_index += 1
             continue
+
+        theta = 1.0 / (current_request_rate * burstiness)
 
         # Sample the request interval from the gamma distribution.
         # If burstiness is 1, it follows exponential distribution.
         interval = np.random.gamma(shape=burstiness, scale=theta)
         # The next request will be sent after the interval.
         await asyncio.sleep(interval)
+        request_index += 1
 
 
 def calculate_metrics(
@@ -263,6 +298,9 @@ async def benchmark(
     max_concurrency: Optional[int],
     lora_modules: Optional[Iterable[str]],
     extra_body: Optional[dict],
+    ramp_up_strategy: Optional[str] = None,
+    ramp_up_start_rps: Optional[float] = None,
+    ramp_up_end_rps: Optional[float] = None,
 ):
     if endpoint_type in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -320,12 +358,16 @@ async def benchmark(
         if profile_output.success:
             print("Profiler started")
 
-    if burstiness == 1.0:
-        distribution = "Poisson process"
-    else:
-        distribution = "Gamma distribution"
+    distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
 
-    print(f"Traffic request rate: {request_rate}")
+    if ramp_up_strategy is not None:
+        print(
+            f"Traffic ramp-up strategy: {ramp_up_strategy}. Will increase RPS "
+            f"from {ramp_up_start_rps} to {ramp_up_end_rps} RPS over the "
+            "duration of the benchmark.")
+    else:
+        print(f"Traffic request rate: {request_rate}")
+
     print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
 
@@ -348,7 +390,29 @@ async def benchmark(
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
-    async for request in get_request(input_requests, request_rate, burstiness):
+
+    rps_change_events = []
+    last_int_rps = -1
+    if ramp_up_strategy is not None and ramp_up_start_rps is not None:
+        last_int_rps = int(ramp_up_start_rps)
+        rps_change_events.append({
+            "rps": last_int_rps,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    async for request, current_request_rate in get_request(
+            input_requests, request_rate, burstiness, ramp_up_strategy,
+            ramp_up_start_rps, ramp_up_end_rps):
+        if ramp_up_strategy is not None:
+            current_int_rps = int(current_request_rate)
+            if current_int_rps > last_int_rps:
+                timestamp = datetime.now().isoformat()
+                for rps_val in range(last_int_rps + 1, current_int_rps + 1):
+                    rps_change_events.append({
+                        "rps": rps_val,
+                        "timestamp": timestamp
+                    })
+                last_int_rps = current_int_rps
         prompt, prompt_len, output_len, mm_content = (
             request.prompt,
             request.prompt_len,
@@ -438,6 +502,9 @@ async def benchmark(
         "generated_texts": [output.generated_text for output in outputs],
         "errors": [output.error for output in outputs],
     }
+
+    if rps_change_events:
+        result["rps_change_events"] = rps_change_events
 
     def process_one_metric(
         # E.g., "ttft"
@@ -878,11 +945,55 @@ def add_cli_args(parser: argparse.ArgumentParser):
                         "launching the server. For each request, the "
                         "script chooses a LoRA module at random.")
 
+    parser.add_argument(
+        "--ramp-up-strategy",
+        type=str,
+        default=None,
+        choices=["linear", "exponential"],
+        help="The ramp-up strategy. This would be used to "
+        "ramp up the request rate from initial RPS to final "
+        "RPS rate (specified by --ramp-up-start-rps and "
+        "--ramp-up-end-rps.) over the duration of the benchmark."
+        "This argument specifies the ramp-up strategy. ")
+    parser.add_argument(
+        "--ramp-up-start-rps",
+        type=float,
+        default=None,
+        help="The starting request rate for ramp-up (RPS). "
+        "Needs to be specified when --ramp-up is used.",
+    )
+    parser.add_argument(
+        "--ramp-up-end-rps",
+        type=float,
+        default=None,
+        help="The ending request rate for ramp-up (RPS). "
+        "Needs to be specified when --ramp-up is used.",
+    )
+
 
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
+
+    # Validate ramp-up arguments
+    if args.ramp_up_strategy is not None:
+        if args.request_rate != float("inf"):
+            raise ValueError(
+                "When using ramp-up, do not specify --request-rate. "
+                "The request rate will be controlled by ramp-up parameters.")
+        if args.ramp_up_start_rps is None or args.ramp_up_end_rps is None:
+            raise ValueError(
+                "When using --ramp-up, both --ramp-up-start-rps and "
+                "--ramp-up-end-rps must be specified")
+        if args.ramp_up_start_rps < 0 or args.ramp_up_end_rps < 0:
+            raise ValueError("Ramp-up start and end RPS must be non-negative")
+        if args.ramp_up_start_rps > args.ramp_up_end_rps:
+            raise ValueError("Ramp-up start RPS must be less than end RPS")
+        if (args.ramp_up_strategy == "exponential"
+                and args.ramp_up_start_rps == 0):
+            raise ValueError(
+                "For exponential ramp-up, the start RPS cannot be 0.")
 
     endpoint_type = args.endpoint_type
     label = args.label
@@ -1064,6 +1175,9 @@ def main(args: argparse.Namespace):
             max_concurrency=args.max_concurrency,
             lora_modules=args.lora_modules,
             extra_body=sampling_params,
+            ramp_up_strategy=args.ramp_up_strategy,
+            ramp_up_start_rps=args.ramp_up_start_rps,
+            ramp_up_end_rps=args.ramp_up_end_rps,
         ))
 
     # Save config and results to json
@@ -1095,6 +1209,11 @@ def main(args: argparse.Namespace):
                                        < float("inf") else "inf")
         result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
+
+        if args.ramp_up_strategy is not None:
+            result_json["ramp_up_strategy"] = args.ramp_up_strategy
+            result_json["ramp_up_start_rps"] = args.ramp_up_start_rps
+            result_json["ramp_up_end_rps"] = args.ramp_up_end_rps
 
         # Merge with benchmark result
         result_json = {**result_json, **benchmark_result}
