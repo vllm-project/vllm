@@ -3,7 +3,6 @@
 """Attention layer with FlashInfer."""
 from __future__ import annotations
 
-import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -17,12 +16,11 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.utils import (
-    get_kv_connector_cache_layout)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+                                              CommonAttentionMetadata,
+                                              get_kv_cache_layout)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -34,19 +32,6 @@ if TYPE_CHECKING:
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
 logger = init_logger(__name__)
-
-
-@functools.lru_cache
-def get_flashinfer_kv_cache_layout():
-    # Override with format specified by the user.
-    cache_layout = envs.VLLM_KV_CACHE_LAYOUT
-    if cache_layout is None:
-        cache_layout = get_kv_connector_cache_layout()
-    else:
-        logger.info("`FLASHINFER_KV_CACHE_LAYOUT` environment variable " \
-        "detected. Setting KV cache layout to %s.", cache_layout)
-
-    return cache_layout
 
 
 class FlashInferBackend(AttentionBackend):
@@ -86,7 +71,7 @@ class FlashInferBackend(AttentionBackend):
     def get_kv_cache_stride_order() -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets us from
         # `get_kv_cache_shape` to the actual memory layout we want.
-        cache_layout = get_flashinfer_kv_cache_layout()
+        cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD":
             stride_order = (0, 1, 2, 3, 4)
         elif cache_layout == "HND":
@@ -319,7 +304,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), get_flashinfer_kv_cache_layout())
+                self._get_workspace_buffer(), get_kv_cache_layout())
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self):
@@ -332,15 +317,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 num_qo_heads // num_kv_heads > 4)
             self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
-                get_flashinfer_kv_cache_layout(),
+                get_kv_cache_layout(),
                 use_tensor_cores=use_tensor_cores)
         return self._decode_wrapper
 
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
             self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
-                2, self._get_workspace_buffer(),
-                get_flashinfer_kv_cache_layout())
+                2, self._get_workspace_buffer(), get_kv_cache_layout())
         return self._cascade_wrapper
 
     def _plan(self, attn_metadata: FlashInferMetadata):
