@@ -18,7 +18,6 @@ from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.streaming_params import StreamingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device, collect_from_async_generator, random_uuid
 
@@ -53,7 +52,6 @@ class EngineClient(ABC):
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
-        streaming_params: StreamingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -134,7 +132,6 @@ class EngineClient(ABC):
                         self.generate(individual_prompt,
                                       beam_search_params,
                                       request_id_item,
-                                      StreamingParams(),
                                       lora_request=lora_req)))
                 tasks.append(task)
 

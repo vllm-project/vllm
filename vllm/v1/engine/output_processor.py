@@ -8,6 +8,7 @@ from typing import Any, Optional, Union
 
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
+from vllm.streaming_params import StreamingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -32,6 +33,15 @@ class RequestOutputCollector:
         self.output: Optional[Union[RequestOutput, Exception]] = None
         self.ready = asyncio.Event()
 
+    def _is_output_ready(
+            self,
+            output: RequestOutput,
+            streaming_params: Optional[StreamingParams] = None) -> bool:
+        return output is not None and (streaming_params is None or isinstance(
+            output, Exception) or output.finished or sum(
+                len(o.token_ids)
+                for o in output.outputs) >= streaming_params.stream_n)
+
     def put(self, output: Union[RequestOutput, Exception]) -> None:
         """Non-blocking put operation."""
         if self.output is None or isinstance(output, Exception):
@@ -41,21 +51,31 @@ class RequestOutputCollector:
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
             self.output.add(output, aggregate=self.aggregate)
+            self.ready.set()
 
-    async def get(self) -> RequestOutput:
+    async def get(
+            self,
+            streaming_params: Optional[StreamingParams] = None
+    ) -> RequestOutput:
         """Get operation blocks on put event."""
-        while (output := self.output) is None:
+        while not self._is_output_ready(output := self.output,
+                                        streaming_params):
+            self.ready.clear()
             await self.ready.wait()
+
         self.output = None
         self.ready.clear()
         if isinstance(output, Exception):
             raise output
         return output
 
-    def get_nowait(self) -> Optional[RequestOutput]:
+    def get_nowait(
+        self,
+        streaming_params: Optional[StreamingParams] = None
+    ) -> Optional[RequestOutput]:
         """Non-blocking get operation."""
         output = self.output
-        if output is not None:
+        if self._is_output_ready(output, streaming_params):
             self.output = None
             self.ready.clear()
         if isinstance(output, Exception):

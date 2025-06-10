@@ -244,7 +244,7 @@ async def test_finished_flag(
             async for out in engine.generate(request_id="request-33",
                                              prompt=prompt,
                                              sampling_params=sampling_params,
-                                             streaming_params=streaming_params)
+                                             streaming_params=None)
         ]
 
         # Assert only the last output has the finished flag set
@@ -307,6 +307,45 @@ async def test_mid_stream_cancellation(monkeypatch: pytest.MonkeyPatch,
         num_generated_tokens, request_id = await task
         assert num_generated_tokens == NUM_EXPECTED_TOKENS
         assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.parametrize("n", [1, 3])
+@pytest.mark.parametrize("engine_args,prompt",
+                         [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
+                          (VISION_ENGINE_ARGS, VISION_PROMPT)])
+@pytest.mark.asyncio
+async def test_streaming_params(monkeypatch: pytest.MonkeyPatch, n: int,
+                                engine_args: AsyncEngineArgs,
+                                prompt: PromptType):
+
+    with monkeypatch.context() as m, ExitStack() as after:
+        m.setenv("VLLM_USE_V1", "1")
+
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        sampling_params = SamplingParams(max_tokens=100,
+                                         output_kind=RequestOutputKind.DELTA,
+                                         temperature=1.0,
+                                         seed=33,
+                                         n=n)
+        streaming_params = StreamingParams(stream_n=3)
+        outputs = [
+            out
+            async for out in engine.generate(request_id="request-33",
+                                             prompt=prompt,
+                                             sampling_params=sampling_params,
+                                             streaming_params=streaming_params)
+        ]
+
+        # Assert that all but the last output have at least stream_n tokens
+        print("DEBUG_OUTPUT output lengths: ", [
+            sum(len(o.token_ids) for o in out.outputs) for out in outputs[:-1]
+        ])
+        assert all(
+            sum(len(o.token_ids)
+                for o in out.outputs) >= streaming_params.stream_n
+            for out in outputs[:-1])
 
 
 class MockLoggingStatLogger(LoggingStatLogger):
