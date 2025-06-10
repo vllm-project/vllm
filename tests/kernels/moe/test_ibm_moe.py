@@ -7,7 +7,7 @@ from typing import Optional
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.ibm_fused_moe.ibm_persistent_gg_bf16 import grouped_gemm_persistent
+from vllm.model_executor.layers.fused_moe.ibm_fused_moe.persistent_gg_bf16 import grouped_gemm_persistent
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (_moe_permute)
 
 
