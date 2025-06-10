@@ -710,34 +710,31 @@ class NixlConnectorWorker:
         # rank. With heterogeneous TP, prepare the descriptors by splitting the
         # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
-        # TODO remove if
-        p_remote_tp_rank = self.tp_rank // tp_ratio
         # Only register the remote's descriptors if current rank pulls from it.
-        if p_remote_tp_rank == remote_tp_rank:
-            self.kv_caches_base_addr[
-                engine_id] = nixl_agent_meta.kv_caches_base_addr
-            rank_offset = self.tp_rank % tp_ratio * self.block_len \
-                if not self.use_mla else 0
-            # Register all remote blocks, but only the corresponding kv heads.
-            for base_addr in nixl_agent_meta.kv_caches_base_addr:
-                for block_id in range(nixl_agent_meta.num_blocks):
-                    block_offset = block_id * nixl_agent_meta.block_len
-                    # For each block, grab the heads chunk belonging to rank_i
-                    # of size remote_nheads // tp_ratio, which correspond to
-                    # self.block_len == remote_block_len//tp_ratio bytes.
-                    addr = base_addr + block_offset + rank_offset
-                    # (addr, len, device id)
-                    blocks_data.append((addr, self.block_len, remote_tp_rank))
-            logger.debug(
-                "Created %s blocks for dst engine %s with remote rank %s and "
-                "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
-                self.tp_rank)
+        self.kv_caches_base_addr[
+            engine_id] = nixl_agent_meta.kv_caches_base_addr
+        rank_offset = self.tp_rank % tp_ratio * self.block_len \
+            if not self.use_mla else 0
+        # Register all remote blocks, but only the corresponding kv heads.
+        for base_addr in nixl_agent_meta.kv_caches_base_addr:
+            for block_id in range(nixl_agent_meta.num_blocks):
+                block_offset = block_id * nixl_agent_meta.block_len
+                # For each block, grab the heads chunk belonging to rank_i
+                # of size remote_nheads // tp_ratio, which correspond to
+                # self.block_len == remote_block_len//tp_ratio bytes.
+                addr = base_addr + block_offset + rank_offset
+                # (addr, len, device id)
+                blocks_data.append((addr, self.block_len, remote_tp_rank))
+        logger.debug(
+            "Created %s blocks for dst engine %s with remote rank %s and "
+            "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
+            self.tp_rank)
 
-            # Register with NIXL.
-            descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
-            self.dst_xfer_side_handles[
-                engine_id] = self.nixl_wrapper.prep_xfer_dlist(
-                    self._remote_agents[engine_id][remote_tp_rank], descs)
+        # Register with NIXL.
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
+        self.dst_xfer_side_handles[
+            engine_id] = self.nixl_wrapper.prep_xfer_dlist(
+                self._remote_agents[engine_id][remote_tp_rank], descs)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
