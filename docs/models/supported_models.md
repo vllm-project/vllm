@@ -454,8 +454,8 @@ Specified using `--task score`.
 | Architecture                          | Models            | Example HF Models                                                                    |
 |---------------------------------------|-------------------|--------------------------------------------------------------------------------------|
 | `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |
-| `Qwen3ForSequenceClassification`      | Qwen3-based       | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |
-| `RobertaForSequenceClassification`    | RoBERTa-based     | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. |
+| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. |
+| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |
 
 !!! note
