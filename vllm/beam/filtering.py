@@ -47,6 +47,7 @@ class BeamValidator:
         request.n = n
         beam_validator_res = self.validate(res)
         filtered_res = [r for r, valid in zip(res, beam_validator_res) if valid]
+        print('everything is filtered', len(filtered_res) == 0)
         if len(filtered_res) == 0:
             return res
         
