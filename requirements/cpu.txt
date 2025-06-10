@@ -27,3 +27,5 @@ triton==3.2.0; platform_machine == "x86_64"
 # Intel Extension for PyTorch, only for x86_64 CPUs
 intel-openmp==2024.2.1; platform_machine == "x86_64"
 intel_extension_for_pytorch==2.7.0; platform_machine == "x86_64"
+py-libnuma; platform_system != "Darwin"
+psutil; platform_system != "Darwin"
