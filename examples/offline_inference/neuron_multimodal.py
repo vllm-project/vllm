@@ -64,7 +64,7 @@ def print_outputs(outputs):
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
-if __name__ == "__main__":
+def main():
     assert (
         len(PROMPTS) == len(IMAGES) == len(SAMPLING_PARAMS)
     ), f"""Text, image prompts and sampling parameters should have the 
@@ -104,3 +104,7 @@ if __name__ == "__main__":
     # test batch-size = 4
     outputs = llm.generate(batched_inputs, batched_sample_params)
     print_outputs(outputs)
+
+
+if __name__ == "__main__":
+    main()
