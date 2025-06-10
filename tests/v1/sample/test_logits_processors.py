@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Sequence
-from typing import Optional
+from collections.abc import Callable, Sequence
+from typing import NamedTuple, Optional
 
 import numpy as np
 import pytest
@@ -10,16 +10,13 @@ import torch
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.v1.sample.logits_processor import (BatchUpdate,
-                                             LogitBiasLogitsProcessor,
-                                             MinTokensLogitsProcessor)
+from vllm.v1.sample.logits_processor import (AddedRequestType, BatchUpdate,
+                                             LogitsProcessor)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import (STR_LOGITS_BIAS_LOGITSPROC_ID,
                                   STR_MIN_P_LOGITSPROC_ID,
                                   STR_MIN_TOKENS_LOGITSPROC_ID,
                                   init_hard_coded_logitsprocs)
-
-BatchAddType = Sequence[tuple[int, SamplingParams, list[int]]]
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
 MAX_NUM_REQS = 256
@@ -30,6 +27,15 @@ CUDA_DEVICES = [
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 MAX_NUM_PROMPT_TOKENS = 64
+STR_NO_LOGITSPROC = "none"
+
+
+class TestFakes(NamedTuple):
+    logits: torch.Tensor
+    sampling_metadata: SamplingMetadata
+
+    def get_logitsproc_by_id(self, id: str) -> LogitsProcessor:
+        return self.sampling_metadata.logitsprocs.get_logitsproc_by_id(id)
 
 
 def _create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:
@@ -69,69 +75,6 @@ def _create_logit_bias(
         logit_bias = {min(i, vocab_size - 1): bias_value}
         res.append(logit_bias)
     return res
-
-
-def _create_allowed_token_ids(
-    batch_size: int,
-    vocab_size: int,
-    num_allowed_token_ids: int,
-    device: torch.device,
-) -> Optional[torch.Tensor]:
-    mask: Optional[torch.Tensor] = None
-    for i in range(batch_size):
-        if i % 2 == 1:
-            continue
-        if mask is None:
-            mask = torch.zeros((batch_size, vocab_size),
-                               dtype=torch.bool,
-                               device=device)
-        start = min(i, vocab_size - 1)
-        end = min(i + num_allowed_token_ids, vocab_size - 1)
-        mask[i, start:end] = True
-    return mask
-
-
-def _create_bad_words_token_ids(
-        batch_size: int, vocab_size: int,
-        bad_words_lengths: list[tuple[int]]) -> dict[int, list[list[int]]]:
-    bad_words_token_ids = {}
-    for batch_idx in range(batch_size):
-        token_ids_single_batch = []
-        for bad_words_length in bad_words_lengths:
-            token_ids = np.random.choice(vocab_size,
-                                         size=bad_words_length,
-                                         replace=True).tolist()
-            token_ids_single_batch.append(token_ids)
-        bad_words_token_ids[batch_idx] = token_ids_single_batch
-    if batch_size >= 2:
-        # Test no bad_words for some batch
-        no_bad_words_batch_idx = np.random.choice(batch_size)
-        bad_words_token_ids.pop(no_bad_words_batch_idx, None)
-    return bad_words_token_ids
-
-
-def _update_output_token_ids_for_bad_words(
-        metadata: SamplingMetadata, vocab_size: int) -> dict[int, list[int]]:
-    bad_words_last_tokens = {}
-    for batch_idx, bad_words_token_ids in metadata.bad_words_token_ids.items():
-        output_token_ids = metadata.output_token_ids[batch_idx]
-        bad_words_last_token: list[int] = []
-        for i, bad_word_token_ids in enumerate(bad_words_token_ids):
-            if len(bad_word_token_ids) == 1:
-                # Single token id always affects logits
-                bad_words_last_token.append(bad_word_token_ids[0])
-            else:
-                prefix_length = len(bad_word_token_ids) - 1
-                has_bad_words = np.random.choice([True, False])
-                if has_bad_words:
-                    output_token_ids[-prefix_length:] = bad_word_token_ids[:-1]
-                    bad_words_last_token.append(bad_word_token_ids[-1])
-                    break  # Maximum one update to output_token_ids
-                else:  # Make sure no accidental match to bad words
-                    output_token_ids[-1] = (bad_word_token_ids[-2] +
-                                            1) % vocab_size
-        bad_words_last_tokens[batch_idx] = bad_words_last_token
-    return bad_words_last_tokens
 
 
 def _create_default_sampling_metadata(
@@ -177,23 +120,21 @@ def _create_default_sampling_metadata(
 
 
 def _fake_apply_greedy_logits_processors(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> torch.Tensor:
+        test_fakes: TestFakes) -> torch.Tensor:
     """Imitate greedy-compatible logit processor application
     in engine"""
-    for processor in sampling_metadata.logitsprocs.greedy_list:
+    logits = test_fakes.logits
+    for processor in test_fakes.sampling_metadata.logitsprocs.greedy_list:
         logits = processor.apply(logits)
     return logits
 
 
 def _fake_apply_nongreedy_logits_processors(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> torch.Tensor:
+        test_fakes: TestFakes) -> torch.Tensor:
     """Imitate non-greedy-only logit processor application in engine
     core"""
-    for processor in sampling_metadata.logitsprocs.nongreedy_list:
+    logits = test_fakes.logits
+    for processor in test_fakes.sampling_metadata.logitsprocs.nongreedy_list:
         logits = processor.apply(logits)
     return logits
 
@@ -227,39 +168,31 @@ def _generate_min_token_penalties_and_stop_tokens(
     return min_tokens
 
 
-def _create_weighted_output_token_list(
-        batch_size: int,
-        vocab_size: int) -> tuple[list[list[int]], list[list[int]]]:
-    """
-    Creates an output token list where each token occurs a distinct
-    number of times.
+def _test_setup(batch_size: int, device: str) -> TestFakes:
+    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
+    # Create one dominant token per batch, to support min-p test
+    for i in range(batch_size):
+        fake_logits[i, 0] = 10.0  # High logit for first token
+        fake_logits[i, 1:] = 1e-2  # Others remain low
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
+    return TestFakes(
+        logits=fake_logits,
+        sampling_metadata=sampling_metadata,
+    )
 
-    For each batch, a random subset of token IDs is selected from the
-    vocabulary. The selected tokens are then added to the output token
-    list, each with a different frequency.
 
-    Returns:
-        tuple[list[list[int]], list[list[int]]]:
-            - The first element is the output token list, where each sublist
-              corresponds to a batch and contains tokens with weighted
-              frequencies.
-            - The second element is a list of distinct token IDs for each
-              batch, ordered by their frequency in the corresponding output
-              list.
-    """
-    output_token_ids: list[list[int]] = []
-    sorted_token_ids_in_output: list[list[int]] = []
-    for _ in range(batch_size):
-        distinct_token_ids = np.random.choice(vocab_size,
-                                              size=np.random.randint(1, 10),
-                                              replace=False).tolist()
-        sorted_token_ids_in_output.append(distinct_token_ids)
-        output_token_ids_for_batch = []
-        for index, token_id in enumerate(distinct_token_ids):
-            output_token_ids_for_batch.extend(
-                [token_id for _ in range(index + 1)])
-        output_token_ids.append(output_token_ids_for_batch)
-    return output_token_ids, sorted_token_ids_in_output
+class LogitsprocTestHelpers(NamedTuple):
+    gen_request_fxn: Callable
+    eval_fxn: Callable
+
+
+logitsprocs_test_mapping = {
+    STR_NO_LOGITSPROC: None,
+    STR_LOGITS_BIAS_LOGITSPROC_ID: LogitsprocTestHelpers(),
+    STR_MIN_P_LOGITSPROC_ID: LogitsprocTestHelpers(),
+    STR_MIN_TOKENS_LOGITSPROC_ID: LogitsprocTestHelpers(),
+}
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -272,14 +205,12 @@ def test_logit_bias(device: str, batch_size: int, bias_value: float):
     output.
     """
     torch.set_default_device(device)
+
     # Create fake logits where each token is assigned the same
     # logit value.
-    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
-    sampling_metadata = _create_default_sampling_metadata(
-        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
-    logit_bias_logitproc: LogitBiasLogitsProcessor = (
-        sampling_metadata.logitsprocs.get_logitsproc_by_id(
-            STR_LOGITS_BIAS_LOGITSPROC_ID))
+    test_fakes = _test_setup(batch_size, device)
+    logit_bias_logitproc = test_fakes.get_logitsproc_by_id(
+        STR_LOGITS_BIAS_LOGITSPROC_ID)
     # Create batch update where each request demands a
     # different logit bias
     logit_bias_list = _create_logit_bias(
@@ -287,7 +218,7 @@ def test_logit_bias(device: str, batch_size: int, bias_value: float):
         vocab_size=VOCAB_SIZE,
         bias_value=bias_value,
     )
-    added: BatchAddType = [
+    added: Sequence[AddedRequestType] = [
         (rdx, SamplingParams(logit_bias=logit_bias_list[rdx]), [])
         for rdx in range(batch_size)
     ]
@@ -300,8 +231,7 @@ def test_logit_bias(device: str, batch_size: int, bias_value: float):
     # Register batch update with logit processor
     logit_bias_logitproc.update_state(batch_update)
     # Emulate application of greedy logits processors in engine
-    logits = _fake_apply_greedy_logits_processors(fake_logits,
-                                                  sampling_metadata)
+    logits = _fake_apply_greedy_logits_processors(test_fakes)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         logits_for_req = logits[batch_idx]
@@ -323,22 +253,16 @@ def test_min_p(device: str, batch_size: int, min_p: float):
     min_p * max_prob are masked with -inf.
     """
     torch.set_default_device(device)
-    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
 
-    # Create one dominant token per batch
-    for i in range(batch_size):
-        fake_logits[i, 0] = 10.0  # High logit for first token
-        fake_logits[i, 1:] = 1e-2  # Others remain low
+    # Create fake logits where each token is assigned the same
+    # logit value.
+    test_fakes = _test_setup(batch_size, device)
 
-    sampling_metadata = _create_default_sampling_metadata(
-        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
-
-    min_p_logitproc = (sampling_metadata.logitsprocs.get_logitsproc_by_id(
-        STR_MIN_P_LOGITSPROC_ID))
+    min_p_logitproc = test_fakes.get_logitsproc_by_id(STR_MIN_P_LOGITSPROC_ID)
     # Create batch update where each request demands
     # the same min_p value
-    added: BatchAddType = [(rdx, SamplingParams(min_p=min_p), [])
-                           for rdx in range(batch_size)]
+    added: Sequence[AddedRequestType] = [(rdx, SamplingParams(min_p=min_p), [])
+                                         for rdx in range(batch_size)]
     batch_update = BatchUpdate(
         removed=[],
         moved=[],
@@ -348,8 +272,7 @@ def test_min_p(device: str, batch_size: int, min_p: float):
     # Register batch update with logit processor
     min_p_logitproc.update_state(batch_update)
     # Emulate application of non-greedy logits processors in engine
-    logits = _fake_apply_nongreedy_logits_processors(fake_logits,
-                                                     sampling_metadata)
+    logits = _fake_apply_nongreedy_logits_processors(test_fakes)
     logits = logits.cpu()
 
     for batch_idx in range(batch_size):
@@ -375,12 +298,9 @@ def test_min_tokens_penalty(device: str, batch_size: int):
     the stop token ids to -inf.
     """
     torch.set_default_device(device)
-    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
-    sampling_metadata = _create_default_sampling_metadata(
-        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
-    min_tokens_logitproc: MinTokensLogitsProcessor = (
-        sampling_metadata.logitsprocs.get_logitsproc_by_id(
-            STR_MIN_TOKENS_LOGITSPROC_ID))
+    test_fakes = _test_setup(batch_size, device)
+    min_tokens_logitproc = test_fakes.get_logitsproc_by_id(
+        STR_MIN_TOKENS_LOGITSPROC_ID)
     batch_indices_for_min_token_penalty = (
         [0] if batch_size == 1 else np.random.randint(
             0, batch_size - 1, size=np.random.randint(1, batch_size)).tolist())
@@ -390,7 +310,7 @@ def test_min_tokens_penalty(device: str, batch_size: int):
 
     # Create batch update where each request demands
     # a different min_tokens value
-    added: BatchAddType = [
+    added: Sequence[AddedRequestType] = [
         (rdx,
          SamplingParams(min_tokens=min_tokens_dict[rdx][0],
                         max_tokens=None,
@@ -406,8 +326,7 @@ def test_min_tokens_penalty(device: str, batch_size: int):
     # Register batch update with logit processor
     min_tokens_logitproc.update_state(batch_update)
     # Emulate application of greedy logits processors in engine
-    logits = _fake_apply_greedy_logits_processors(fake_logits,
-                                                  sampling_metadata)
+    logits = _fake_apply_greedy_logits_processors(test_fakes)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         _, stop_token_ids = min_tokens_dict.get(batch_idx, (0, set()))
@@ -416,3 +335,6 @@ def test_min_tokens_penalty(device: str, batch_size: int):
                 assert logits[batch_idx][token_id] == -float("inf")
             else:
                 assert logits[batch_idx][token_id] != -float("inf")
+
+
+# def test_mixed_batch_with_reordering(device: str, batch_size: int):

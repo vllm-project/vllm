@@ -11,7 +11,7 @@ from vllm.v1.sample.logits_processor import (LogitBiasLogitsProcessor,
                                              MinPLogitsProcessor,
                                              MinTokensLogitsProcessor)
 
-# Logits processor id strs
+# Logits processor id strsW
 STR_MIN_P_LOGITSPROC_ID = "min_p"
 STR_MIN_TOKENS_LOGITSPROC_ID = "min_tokens"
 STR_LOGITS_BIAS_LOGITSPROC_ID = "logit_bias"
