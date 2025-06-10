@@ -201,6 +201,7 @@ def _construct_cached_request_state(req_id_suffix: int):
         req_id=f"req_id_{req_id_suffix}",
         prompt_token_ids=prompt_token_ids,
         sampling_params=_create_sampling_params(),
+        pooling_params=None,
         mm_inputs=[],
         mm_positions=[],
         block_ids=[[]],
