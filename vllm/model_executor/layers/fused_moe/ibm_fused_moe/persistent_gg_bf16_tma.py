@@ -1,9 +1,9 @@
 import triton
 import triton.language as tl
 import torch
-from tma_cuda_autotune import CudaUtils, early_config_prune, HOPPER_CONFIGS, STANDARD_CONFIGS
+from .tma_cuda_autotune import CudaUtils, early_config_prune, HOPPER_CONFIGS, STANDARD_CONFIGS
 
-from tma_autotune_ke import (
+from .tma_autotune import (
     CudaUtils,
     TmaDescriptorHelper,
 )
@@ -265,6 +265,13 @@ def _grouped_gemm_persistent(
     )
     return c
 
+
+def is_kernel_supported(x: torch.Tensor,
+                        w: torch.Tensor):
+    """
+    Supports cuda architectures >= 9.0, bf16 tensors and multiple of 128 hidden size.
+    """
+    return (torch.cuda.get_device_capability()[0] >= 9 and x.dtype == torch.bfloat16 and w.dtype == torch.bfloat16 and x.size(1) % 128 == 0)
 
 def grouped_gemm_persistent(
     x: torch.Tensor,  # [M_total, K]
