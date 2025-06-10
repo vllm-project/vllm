@@ -50,11 +50,11 @@ Nightly benchmark will be triggered when:
 
 ## Performance benchmark details
 
-See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions.md) for detailed descriptions, and use `tests/latency-tests-gpu.json`, `tests/throughput-tests-gpu.json`, `tests/serving-tests-gpu.json` to configure the test cases.
+See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions.md) for detailed descriptions, and use `tests/latency-tests.json`, `tests/throughput-tests.json`, `tests/serving-tests.json` to configure the test cases.
 > NOTE: For Intel® Xeon® Processors, use `tests/latency-tests-cpu.json`, `tests/throughput-tests-cpu.json`, `tests/serving-tests-cpu.json` instead.
 ### Latency test
 
-Here is an example of one test inside `latency-tests-gpu.json`:
+Here is an example of one test inside `latency-tests.json`:
 
 ```json
 [
@@ -73,7 +73,7 @@ Here is an example of one test inside `latency-tests-gpu.json`:
 
 In this example:
 
-- The `test_name` attributes is a unique identifier for the test. In `latency-tests-gpu.json`, it must start with `latency_`.
+- The `test_name` attributes is a unique identifier for the test. In `latency-tests.json`, it must start with `latency_`.
 - The `parameters` attribute control the command line arguments to be used for `benchmark_latency.py`. Note that please use underline `_` instead of the dash `-` when specifying the command line arguments, and `run-performance-benchmarks.sh` will convert the underline to dash when feeding the arguments to `benchmark_latency.py`. For example, the corresponding command line arguments for `benchmark_latency.py` will be `--model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 1 --load-format dummy --num-iters-warmup 5 --num-iters 15`
 
 Note that the performance numbers are highly sensitive to the value of the parameters. Please make sure the parameters are set correctly.
@@ -82,13 +82,13 @@ WARNING: The benchmarking script will save json results by itself, so please do 
 
 ### Throughput test
 
-The tests are specified in `throughput-tests-gpu.json`. The syntax is similar to `latency-tests-gpu.json`, except for that the parameters will be fed forward to `benchmark_throughput.py`.
+The tests are specified in `throughput-tests.json`. The syntax is similar to `latency-tests.json`, except for that the parameters will be fed forward to `benchmark_throughput.py`.
 
 The number of this test is also stable -- a slight change on the value of this number might vary the performance numbers by a lot.
 
 ### Serving test
 
-We test the throughput by using `benchmark_serving.py` with request rate = inf to cover the online serving overhead. The corresponding parameters are in `serving-tests-gpu.json`, and here is an example:
+We test the throughput by using `benchmark_serving.py` with request rate = inf to cover the online serving overhead. The corresponding parameters are in `serving-tests.json`, and here is an example:
 
 ```json
 [

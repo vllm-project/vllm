@@ -2,10 +2,7 @@
     {
         "test_name": "throughput_llama8B_tp1",
         "environment_variables": {
-	    "VLLM_USE_V1": 1,
-            "VLLM_RPC_TIMEOUT": 1000000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 600,
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "parameters": {
@@ -20,10 +17,7 @@
     {
         "test_name": "throughput_llama8B_tp4",
         "environment_variables": {
-	    "VLLM_USE_V1": 1,
-            "VLLM_RPC_TIMEOUT": 1000000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 600,
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "parameters": {
