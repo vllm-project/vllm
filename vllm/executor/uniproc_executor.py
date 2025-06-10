@@ -43,6 +43,10 @@ class UniProcExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+
+        # init_config first to resolve hardware dependent config/"auto" dtype
+        self.collective_rpc("init_config",
+                            args=(dict(vllm_config=self.vllm_config), ))
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
@@ -115,6 +119,10 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+
+        # init_config first to resolve hardware dependent config and auto dtype
+        self.collective_rpc("init_config",
+                            args=(dict(vllm_config=self.vllm_config), ))
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
