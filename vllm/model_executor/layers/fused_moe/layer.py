@@ -876,9 +876,8 @@ class FusedMoE(torch.nn.Module):
 
         # Determine expert maps
         if self.use_ep:
-            global_physical_experts = num_experts + num_redundant_experts
             if self.enable_eplb:
-                assert global_physical_experts % self.ep_size == 0, \
+                assert self.global_num_experts % self.ep_size == 0, \
                     "EPLB currently only supports even distribution of " \
                     "experts across ranks."
             else:
@@ -887,7 +886,7 @@ class FusedMoE(torch.nn.Module):
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
-                global_num_experts=global_physical_experts)
+                global_num_experts=self.global_num_experts)
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
@@ -992,8 +991,9 @@ class FusedMoE(torch.nn.Module):
                 dtype=act_dtype,
                 device=torch.cuda.current_device())
 
+            # Note here we use `num_experts` which is logical expert count
             self.batched_router_logits = torch.zeros(
-                (MOE_DP_CHUNK_SIZE, self.global_num_experts),
+                (MOE_DP_CHUNK_SIZE, num_experts),
                 dtype=act_dtype,
                 device=torch.cuda.current_device())
 
@@ -1438,10 +1438,17 @@ class FusedMoE(torch.nn.Module):
 
             # 1. Convert the logical expert ids to physical expert ids
             # Directly select a random replica for each logical expert
+
+            # TODO: maybe optimize this by using specified kernels,
+            # or compute pseudo-random indices by modulo
+
+            # In case `indices_type` is not `torch.long` or `torch.int`,
+            # e.g. `torch.uint32` as required by dispatch/combine kernels
+            topk_ids_long = topk_ids.long()
             replica_indices = (
                 torch.rand_like(topk_ids, dtype=torch.float) *
-                logical_replica_count[topk_ids]).long().unsqueeze(-1)
-            physical_ids = logical_to_physical_map[topk_ids].gather(
+                logical_replica_count[topk_ids_long]).long().unsqueeze(-1)
+            physical_ids = logical_to_physical_map[topk_ids_long].gather(
                 -1, replica_indices).squeeze(-1)
 
             topk_ids = physical_ids
@@ -1489,6 +1496,8 @@ class FusedMoE(torch.nn.Module):
             expert_load_view.scatter_add_(dim=0,
                                           index=index.long(),
                                           src=src.to(expert_load_view))
+
+            topk_ids = topk_ids.to(dtype=indices_type)
 
         return topk_weights, topk_ids
 
