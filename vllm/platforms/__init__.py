@@ -139,8 +139,9 @@ def xpu_platform_plugin() -> Optional[str]:
     try:
         # installed IPEX if the machine has XPUs.
         # detect dist_backend
-        import intel_extension_for_pytorch  # noqa: F401
         import os
+
+        import intel_extension_for_pytorch  # noqa: F401
         import torch
         if supports_xccl():
             default_backend = "xccl"
@@ -150,7 +151,8 @@ def xpu_platform_plugin() -> Optional[str]:
         detect_backend = os.getenv("XPU_CCL_BACKEND", default_backend)
 
         if detect_backend not in ["xccl", "ccl"]:
-            raise ValueError(f"Unknown {detect_backend} backend for XPU platform.")
+            raise ValueError(
+                f"Unknown {detect_backend} backend for XPU platform.")
 
         if detect_backend == "ccl":
             logger.debug("Checking if ccl is available.")
