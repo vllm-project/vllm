@@ -37,14 +37,16 @@ def assert_tool_calls(actual_tool_calls: list[ToolCall],
         assert len(actual_tool_call.id) == 9
 
         assert actual_tool_call.type == "function"
-        assert actual_tool_call.function == expected_tool_call.function, f'got ${actual_tool_call.function}'
+        assert actual_tool_call.function == expected_tool_call.function, (
+            f'got ${actual_tool_call.function}')
 
 
 def stream_delta_message_generator(
-        mistral_tool_parser: MistralToolParser, mistral_tokenizer: AnyTokenizer,
+        mistral_tool_parser: MistralToolParser,
+        mistral_tokenizer: AnyTokenizer,
         model_output: str) -> Generator[DeltaMessage, None, None]:
     all_token_ids = mistral_tokenizer.encode(model_output,
-                                           add_special_tokens=False)
+                                             add_special_tokens=False)
 
     previous_text = ""
     previous_tokens = None
@@ -98,9 +100,7 @@ def test_extract_tool_calls_no_tools(mistral_tool_parser):
 
 @pytest.mark.parametrize(
     ids=[
-        "single_tool_add",
-        "single_tool_weather",
-        "argument_before_name",
+        "single_tool_add", "single_tool_weather", "argument_before_name",
         "argument_before_name_and_name_in_argument"
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
@@ -109,11 +109,10 @@ def test_extract_tool_calls_no_tools(mistral_tool_parser):
             '''[TOOL_CALLS][{"name": "add", "arguments":{"a": 3.5, "b": 4}}]''',  # noqa: E501
             [
                 ToolCall(function=FunctionCall(name="add",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "a": 3.5,
-                                                       "b": 4
-                                                   })))
+                                               arguments=json.dumps({
+                                                   "a": 3.5,
+                                                   "b": 4
+                                               })))
             ],
             None),
         (
@@ -125,7 +124,7 @@ def test_extract_tool_calls_no_tools(mistral_tool_parser):
                                                        "city": "San Francisco",
                                                        "state": "CA",
                                                        "unit": "celsius"
-                                                    })))
+                                                   })))
             ],
             None),
         (
@@ -137,17 +136,17 @@ def test_extract_tool_calls_no_tools(mistral_tool_parser):
                                                        "city": "San Francisco",
                                                        "state": "CA",
                                                        "unit": "celsius"
-                                                    })))
+                                                   })))
             ],
             None),
         (
             '''[TOOL_CALLS] [{"arguments":{"name": "John Doe"}, "name": "get_age"}]''',  # noqa: E501
             [
                 ToolCall(function=FunctionCall(name="get_age",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "name": "John Doe",
-                                                    })))
+                                               arguments=json.dumps({
+                                                   "name":
+                                                   "John Doe",
+                                               })))
             ],
             None),
     ],
@@ -180,22 +179,20 @@ def test_extract_tool_calls(mistral_tool_parser, model_output,
             '''[TOOL_CALLS]  [ {"name":"add" , "arguments" : {"a": 3, "b": 4} } ]''',  # noqa: E501
             [
                 ToolCall(function=FunctionCall(name="add",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "a": 3,
-                                                       "b": 4
-                                                   })))
+                                               arguments=json.dumps({
+                                                   "a": 3,
+                                                   "b": 4
+                                               })))
             ],
             ""),
         (
             '''[TOOL_CALLS] [{"name": "add", "arguments":{"a": "3", "b": "4"}}]''',  # noqa: E501
             [
                 ToolCall(function=FunctionCall(name="add",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "a": "3",
-                                                       "b": "4"
-                                                   })))
+                                               arguments=json.dumps({
+                                                   "a": "3",
+                                                   "b": "4"
+                                               })))
             ],
             ""),
         (
@@ -207,7 +204,7 @@ def test_extract_tool_calls(mistral_tool_parser, model_output,
                                                        "city": "San Francisco",
                                                        "state": "CA",
                                                        "unit": "celsius"
-                                                    })))
+                                                   })))
             ],
             ""),
         (
@@ -219,35 +216,34 @@ def test_extract_tool_calls(mistral_tool_parser, model_output,
                                                        "city": "San Francisco",
                                                        "state": "CA",
                                                        "unit": "celsius"
-                                                    })))
+                                                   })))
             ],
             ''),
         (
             '''[TOOL_CALLS] [{"arguments": {"name": "John Doe"}, "name": "get_age"}]''',  # noqa: E501
             [
                 ToolCall(function=FunctionCall(name="get_age",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "name": "John Doe",
-                                                    })))
+                                               arguments=json.dumps({
+                                                   "name":
+                                                   "John Doe",
+                                               })))
             ],
             ''),
         (
             '''[TOOL_CALLS][{"name": "add", "arguments": {"a": 3.5, "b": 4}}, {"name": "get_current_weather", "arguments":{"city": "San Francisco", "state": "CA", "unit": "celsius"}]''',  # noqa: E501
             [
                 ToolCall(function=FunctionCall(name="add",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "a": 3.5,
-                                                       "b": 4
-                                                   }))),
+                                               arguments=json.dumps({
+                                                   "a": 3.5,
+                                                   "b": 4
+                                               }))),
                 ToolCall(function=FunctionCall(name="get_current_weather",
                                                arguments=json.dumps(
                                                    {
                                                        "city": "San Francisco",
                                                        "state": "CA",
                                                        "unit": "celsius"
-                                                    })))
+                                                   })))
             ],
             ''),
     ],
