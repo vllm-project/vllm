@@ -162,8 +162,8 @@ def xpu_platform_plugin() -> Optional[str]:
             is_xpu = True
             from vllm.platforms.xpu import XPUPlatform
             XPUPlatform.dist_backend = detect_backend
-            logger.debug(f"Confirmed {XPUPlatform.dist_backend}"
-                         " backend is available.")
+            logger.debug("Confirmed %s backend is available.",
+                         XPUPlatform.dist_backend)
             logger.debug("Confirmed XPU platform is available.")
     except Exception as e:
         logger.debug("XPU platform is not available because: %s", str(e))
