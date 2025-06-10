@@ -38,7 +38,6 @@ __all__ = [
     "FusedMoEPrepareAndFinalize",
     "override_config",
     "get_config",
-    "MOE_DP_CHUNK_SIZE",
 ]
 
 if HAS_TRITON:

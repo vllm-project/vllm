@@ -36,6 +36,11 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
 
+from .modular_kernel import (FusedMoEModularKernel,
+                             FusedMoEPrepareAndFinalize,
+                             FusedMoEPermuteExpertsUnpermute,
+                             FusedMoEPrepareAndFinalize)
+
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import TritonExperts, fused_experts
@@ -92,6 +97,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
 
         if moe.use_pplx_kernels:
+            block_shape = quant_config.weight_block_size if quant_config is not None else None
+
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
                 moe.max_num_tokens,
                 moe.hidden_dim,
@@ -396,7 +403,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,

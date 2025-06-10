@@ -153,7 +153,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
         num_dp = self.world_size // self.dp_size
-        expert_x = torch.empty(
+        expert_x = torch.zeros(
             (num_local_experts, self.max_num_tokens * num_dp, hidden_dim),
             dtype=a1q.dtype,
             device=device,

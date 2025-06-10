@@ -83,6 +83,7 @@ def _moe_problem_size(
 
     return E, M, N, K, topk
 
+# TODO: pass FusedMoEParallelConfig in as ctor parameter?
 
 class FusedMoEActivationFormat(Enum):
     """
@@ -101,16 +102,6 @@ class FusedMoEPrepareAndFinalize(ABC):
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above.
     """
-
-    def __init__(
-        self,
-        quant_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        block_shape: Optional[list[int]],
-    ):
-        self.quant_dtype = quant_dtype
-        self.per_act_token_quant = per_act_token_quant
-        self.block_shape = block_shape
 
     @abstractmethod
     def prepare(
@@ -216,6 +207,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         per_act_token_quant: bool,
         block_shape: Optional[list[int]],
     ):
+        assert not per_act_token_quant or block_shape is None
         self.quant_dtype = quant_dtype
         self.per_act_token_quant = per_act_token_quant
         self.block_shape = block_shape
