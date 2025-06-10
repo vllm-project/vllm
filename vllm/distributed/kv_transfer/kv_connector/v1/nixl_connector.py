@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+<<<<<<< HEAD
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+=======
+import base64
+import json
+>>>>>>> a1eaf5a5e (attempt to background agent registration)
 import math
 import threading
 import time
@@ -8,10 +13,9 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
-import json
-import base64
-import aiohttp
-import msgspec
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+from urllib.parse import urljoin
 import torch
 
 from vllm import envs
@@ -379,6 +383,12 @@ class NixlConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_transfers = defaultdict[str, list[Transfer]](list)
 
+        
+        # Pending requests waiting for handshake completion
+        # [engine_id -> list[(req_id, meta)]]
+        self._pending_requests: dict[str, list[tuple[str, ReqMeta]]] = {}
+
+
         # Complete transfer tracker. Used by the rank 0 to track finished
         # transactions on ranks 1 to N-1.
         # [req_id -> count]
@@ -387,8 +397,11 @@ class NixlConnectorWorker:
         self._done_sending_count: defaultdict[str,
                                               int] = defaultdict(lambda: 0)
 
-        # Background thread for establishing new connections.
-        self._nixl_handshake_listener_t: Optional[threading.Thread] = None
+        # Background handshake threads for remote engines
+        self._handshake_threads: dict[str, threading.Thread] = {}
+        
+        # Thread results for handshake completion tracking
+        self._handshake_results: dict[str, bool] = {}
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -417,19 +430,45 @@ class NixlConnectorWorker:
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[str, int](int)
 
-    async def _nixl_handshake(self, host: str, port: int):
+    def _run_handshake_in_thread(self, engine_id: str, host: str, port: int):
+        """Run handshake in background thread."""
+        
+        def handshake_worker():
+            logger.debug("Starting handshake worker for engine %s", engine_id)
+            try:
+                self._nixl_handshake(host, port)
+                self._handshake_results[engine_id] = True
+                logger.debug("Handshake succeeded for engine %s", engine_id)
+            except Exception as e:
+                self._handshake_results[engine_id] = False
+                logger.warning("Handshake failed for engine %s: %s", engine_id, e)
+            finally:
+                logger.debug("Handshake worker finished for engine %s", engine_id)
+        
+        thread = threading.Thread(target=handshake_worker, daemon=True)
+        thread._start_time = time.time()  # track when thread started
+        self._handshake_threads[engine_id] = thread
+        thread.start()
+        return thread
+
+    def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
 
-        url = build_uri(host, port, path="get_kv_connector_metadata")
+        # TODO: make the scheme dynamic, and/or implement https on both sides.
+        url = build_uri("http", host, port, path="get_kv_connector_metadata")
         logger.debug("Querying metadata on path: %s", url)
 
-        timeout = aiohttp.ClientTimeout(total=30.0)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as response:
-                res = await response.json()
+        try:
+            req = Request(url)
+            with urlopen(req, timeout=5.0) as response:
+                response_data = response.read().decode('utf-8')
+                res = json.loads(response_data)
                 logger.debug("NIXL handshake response: %s", res)
+        except (URLError, HTTPError) as e:
+            logger.error("Failed to fetch metadata from %s: %s", url, e)
+            raise
 
 
         remote_tp_size = len(res.keys())
@@ -460,13 +499,18 @@ class NixlConnectorWorker:
             )
 
             # Register Remote agent.
-            self.add_remote_agent(metadata, p_remote_rank)
-            setup_agent_time = time.perf_counter()
+            logger.debug("About to register remote agent for engine %s", 
+                        metadata.engine_id)
+            pre_register = time.perf_counter()
+            self.add_remote_agent(metadata, remote_tp_rank=p_remote_rank)
+            agent_time = time.perf_counter()
+            logger.debug("Finished registering remote agent for engine %s", 
+                        metadata.engine_id)
 
-            logger.debug("NIXL handshake: get metadata took: %s",
-                         time.perf_counter() - start_time)
-            logger.debug("NIXL handshake: add agent took: %s",
-                         setup_agent_time - (time.perf_counter() - start_time))
+            logger.debug("NIXL handshake: get metadata took: %s", 
+                        pre_register - start_time)
+            logger.debug("NIXL handshake: add agent took: %s", 
+                        agent_time - pre_register)
         else:
             # If metadata_bytes is None, it means the remote agent
             # is not using NIXL, so we can skip the handshake.
@@ -755,6 +799,7 @@ class NixlConnectorWorker:
                 "Rank %s, get_finished: %s requests done sending "
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
+        
 
         if self.world_size == 1:
             return done_sending, done_recving
@@ -843,39 +888,128 @@ class NixlConnectorWorker:
                                        xfer_state)
         return done_req_ids
 
+    def _process_completed_handshakes(self):
+        """Process completed handshakes and mark remote agents as ready."""
+        
+        # debug: log current state
+        if self._handshake_threads:
+            logger.debug("Processing handshakes: %d active threads, %d pending",
+                        len(self._handshake_threads), 
+                        sum(len(reqs) for reqs in self._pending_requests.values()))
+        
+        completed_engines = []
+        for engine_id, thread in list(self._handshake_threads.items()):
+            logger.debug("Checking handshake thread for engine %s: alive=%s", 
+                        engine_id, thread.is_alive())
+            
+            # check for timeout (threads running > 30 seconds)
+            thread_age = time.time() - getattr(thread, '_start_time', time.time())
+            if thread.is_alive() and thread_age > 30.0:
+                logger.warning("Handshake thread for %s running %.1fs (hung?)", 
+                              engine_id, thread_age)
+            
+            if not thread.is_alive():
+                logger.debug("Handshake completed for engine %s", engine_id)
+                completed_engines.append(engine_id)
+                
+                success = self._handshake_results.get(engine_id, False)
+                logger.debug("Handshake result for engine %s: success=%s", 
+                           engine_id, success)
+                if not success:
+                    logger.warning("Handshake failed for engine %s", engine_id)
+                    continue
+                
+                logger.debug("Handshake succeeded for engine %s", engine_id)
+                if engine_id in self._pending_requests:
+                    pending_reqs = self._pending_requests[engine_id]
+                    logger.debug(
+                        "Handshake completed for %s, clearing %d pending requests "
+                        "(will retry naturally on next start_load_kv)",
+                        engine_id, len(pending_reqs))
+                    
+                    # clear pending requests - they'll be retried naturally 
+                    # by the event loop on the next start_load_kv() call
+                    del self._pending_requests[engine_id]
+        
+        for engine_id in completed_engines:
+            logger.debug("Cleaning up handshake thread for engine %s", 
+                         engine_id)
+            del self._handshake_threads[engine_id]
+            if engine_id in self._handshake_results:
+                del self._handshake_results[engine_id]
+
+    def _is_request_pending_handshake(self, req_id: str) -> bool:
+        """Check if request is still pending handshake completion."""
+        for engine_requests in self._pending_requests.values():
+            for pending_req_id, _ in engine_requests:
+                if pending_req_id == req_id:
+                    return True
+        return False
+
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
+        logger.debug("start_load_kv called with %d requests", len(metadata.requests))
         for req_id, meta in metadata.requests.items():
+            if (req_id in self._recving_transfers or 
+                self._is_request_pending_handshake(req_id)):
+                logger.debug(
+                    "Request %s already being processed, skipping", req_id)
+                continue
+                
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
+            
+
+            if meta.remote_engine_id not in self._remote_agents:
+                logger.debug(
+                    "Remote engine %s not registered for request %s, "
+                    "starting handshake and deferring transfer",
+                    meta.remote_engine_id, req_id)
+                
+                if meta.remote_engine_id not in self._handshake_threads:
+                    logger.debug(
+                        "Starting handshake thread for remote engine %s", 
+                        meta.remote_engine_id)
+                    self._run_handshake_in_thread(
+                        meta.remote_engine_id, meta.remote_host, 
+                        meta.remote_port)
+                else:
+                    logger.debug(
+                        "Handshake thread already exists for remote engine %s", 
+                        meta.remote_engine_id)
+                
+                if meta.remote_engine_id not in self._pending_requests:
+                    self._pending_requests[meta.remote_engine_id] = []
+                self._pending_requests[meta.remote_engine_id].append(
+                    (req_id, meta))
+                
+                logger.debug(
+                    "Request %s marked as pending handshake for engine %s",
+                    req_id, meta.remote_engine_id)
+                continue
+
+            logger.debug("Remote agent available for %s, calling _read_blocks",
+                        meta.remote_engine_id)
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote_engine_id,
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,
-                remote_host=meta.remote_host,
-                remote_port=meta.remote_port,
             )
 
     def _read_blocks(
         self,
         local_block_ids: list[int],
         remote_block_ids: list[int],
-        remote_host: str,
-        remote_port: int,
         dst_engine_id: str,
         request_id: str,
     ):
-        # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
-        if dst_engine_id not in self._remote_agents:
-            asyncio.run(self._nixl_handshake(remote_host, remote_port))
-
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
