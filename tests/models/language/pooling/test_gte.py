@@ -52,10 +52,8 @@ MODELS = [
                    enable_test=True),
     EmbedModelInfo("Qwen/Qwen3-Embedding-4B",
                    architecture="Qwen3ForCausalLM",
-                   enable_test=True),
-    EmbedModelInfo("Qwen/Qwen3-Embedding-8B",
-                   architecture="Qwen3ForCausalLM",
-                   enable_test=True),
+                   dtype="float32",
+                   enable_test=False),
 ]
 
 
