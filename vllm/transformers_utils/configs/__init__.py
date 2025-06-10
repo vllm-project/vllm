@@ -25,6 +25,7 @@ from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.transformers_utils.configs.nemotron_vl import Nemotron_Nano_VL_Config
 from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
+from vllm.transformers_utils.configs.oai import OAIModelConfig
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
 from vllm.transformers_utils.configs.solar import SolarConfig
@@ -58,4 +59,5 @@ __all__ = [
     "SolarConfig",
     "Telechat2Config",
     "UltravoxConfig",
+    "OAIMoelConfig",
 ]

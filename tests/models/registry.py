@@ -286,6 +286,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst",
                                         min_transformers_version="4.53"),
+    "OAIForCausalLM": _HfExamplesInfo("ft-hf-o-c/open-weight-model-pre-release-random-weight",
+                                            trust_remote_code=True),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
