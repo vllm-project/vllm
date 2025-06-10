@@ -389,8 +389,8 @@ class CudaPlatformBase(Platform):
 class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
-    @with_nvml_context
     @lru_cache(maxsize=8)
+    @with_nvml_context
     def get_device_capability(cls,
                               device_id: int = 0
                               ) -> Optional[DeviceCapability]:
