@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
@@ -124,3 +125,140 @@ class PPLXAll2AllManager(All2AllManagerBase):
             from pplx_kernels.nvshmem import nvshmem_finalize
             logger.debug("PPLX NVSHMEM finalize")
             nvshmem_finalize()
+
+
+class DeepEPAll2AllManagerBase(All2AllManagerBase):
+    """
+    All2All communication based on DeepEP High-Throughput kernels.
+    """
+
+    def __init__(self, cpu_group):
+        has_deepep = importlib.util.find_spec("deep_ep") is not None
+        assert has_deepep, "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install DeepEP kernels."  # noqa
+        super().__init__(cpu_group)
+        self.handle_cache = Cache()
+
+        # This is the DeepEP default. Stick to it till we can establish
+        # reasonable defaults based on profiling.
+        self.num_sms = 20
+
+    def get_handle(self, kwargs):
+        raise NotImplementedError
+
+    def dispatch(self, hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor):
+        raise NotImplementedError
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        pass
+
+
+class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
+    """
+    All2All communication based on DeepEP High-Throughput kernels.
+    """
+
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
+
+    def _make_all2all_kwargs(self) -> dict[Any, Any]:
+        # Defaults for internode and intranode are taken from DeepEP tests.
+        num_nvl_bytes = 1024 * 1024 * 1024
+        num_rdma_bytes = None
+        num_qps_per_rank = None
+
+        if self.internode:
+            num_rdma_bytes = 1024 * 1024 * 1024
+            num_qps_per_rank = self.num_sms // 2
+        else:
+            num_rdma_bytes = 0
+            num_qps_per_rank = 1
+
+        assert num_rdma_bytes is not None
+        assert num_qps_per_rank is not None
+        return dict(group=self.cpu_group,
+                    num_nvl_bytes=num_nvl_bytes,
+                    num_rdma_bytes=num_rdma_bytes,
+                    low_latency_mode=False,
+                    num_qps_per_rank=num_qps_per_rank)
+
+    def get_handle(self, kwargs):
+
+        assert len(kwargs) == 0, (
+            "DeepEPHTAll2AllManager expects no arguments. All the required "
+            "args are computed in the Manager itself.")
+
+        import deep_ep
+        buffer_kwargs = self._make_all2all_kwargs()
+        logger.debug("DeepEP all2all args %s", buffer_kwargs)
+        handle: deep_ep.Buffer = self.handle_cache.get_or_create(
+            buffer_kwargs, deep_ep.Buffer)
+        # It is dangerous to set num sms outside this function. num_sms is not
+        # a part of the hash-key that identifies this object. If we are in a
+        # situation where we make objects with different num_sms, the hash key
+        # in get_or_create must be updated.
+        handle.set_num_sms(self.num_sms)
+        return handle
+
+
+class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
+    """
+    All2All communication based on DeepEP Low-Latency kernels.
+    """
+
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
+
+    def _make_all2all_kwargs(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_ep_ranks: int,
+        num_global_experts: int,
+        num_local_experts: int,
+    ) -> dict[Any, Any]:
+        """
+        max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
+          can dispatch all the ranks must hold the same value.
+        token_hidden_size: the hidden dimension of each token.
+        num_ep_ranks: the number of EP group ranks.
+        num_global_experts: Number of experts in the model.
+        num_local_experts: Number of experts in an EP rank.
+        """
+        import deep_ep
+
+        # Defaults for internode and intranode are taken from DeepEP tests.
+        num_nvl_bytes = 1024 * 1024 * 1024
+        num_qps_per_rank = num_local_experts
+        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
+            hidden=token_hidden_size,
+            num_ranks=num_ep_ranks,
+            num_experts=num_global_experts)
+
+        assert num_rdma_bytes is not None
+        return dict(group=self.cpu_group,
+                    num_nvl_bytes=num_nvl_bytes,
+                    num_rdma_bytes=num_rdma_bytes,
+                    low_latency_mode=True,
+                    num_qps_per_rank=num_qps_per_rank)
+
+    def get_handle(self, kwargs):
+        """
+        The kwargs for DeepEPLLAll2AllManager is dictated by
+        _make_all2all_kwargs.
+        """
+        import deep_ep
+        buffer_kwargs = self._make_all2all_kwargs(**kwargs)
+        logger.debug("DeepEP all2all args %s", buffer_kwargs)
+        handle: deep_ep.Buffer = self.handle_cache.get_or_create(
+            buffer_kwargs, deep_ep.Buffer)
+        # It is dangerous to set num sms outside this function. num_sms is not
+        # a part of the hash-key that identifies this object. If we are in a
+        # situation where we make objects with different num_sms, the hash key
+        # in get_or_create must be updated.
+        handle.set_num_sms(self.num_sms)
+        return handle

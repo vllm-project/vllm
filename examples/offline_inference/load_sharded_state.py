@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Validates the loading of a model saved with the sharded_state format.
 This script demonstrates how to load a model that was previously saved

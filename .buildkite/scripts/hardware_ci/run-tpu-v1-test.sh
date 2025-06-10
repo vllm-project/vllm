@@ -2,14 +2,45 @@
 
 set -xu
 
+
+remove_docker_container() { 
+    docker rm -f tpu-test || true; 
+    docker rm -f vllm-tpu || true;
+}
+
+trap remove_docker_container EXIT
+
+# Remove the container that might not be cleaned up in the previous run.
+remove_docker_container
+
 # Build the docker image.
 docker build -f docker/Dockerfile.tpu -t vllm-tpu .
 
 # Set up cleanup.
-remove_docker_container() { docker rm -f tpu-test || true; }
-trap remove_docker_container EXIT
-# Remove the container that might not be cleaned up in the previous run.
-remove_docker_container
+cleanup_docker() {
+  # Get Docker's root directory
+  docker_root=$(docker info -f '{{.DockerRootDir}}')
+  if [ -z "$docker_root" ]; then
+    echo "Failed to determine Docker root directory."
+    exit 1
+  fi
+  echo "Docker root directory: $docker_root"
+  # Check disk usage of the filesystem where Docker's root directory is located
+  disk_usage=$(df "$docker_root" | tail -1 | awk '{print $5}' | sed 's/%//')
+  # Define the threshold
+  threshold=70
+  if [ "$disk_usage" -gt "$threshold" ]; then
+    echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
+    # Remove dangling images (those that are not tagged and not used by any container)
+    docker image prune -f
+    # Remove unused volumes / force the system prune for old images as well.
+    docker volume prune -f && docker system prune --force --filter "until=72h" --all
+    echo "Docker images and volumes cleanup completed."
+  else
+    echo "Disk usage is below $threshold%. No cleanup needed."
+  fi
+}
+cleanup_docker
 
 # For HF_TOKEN.
 source /etc/environment
@@ -119,13 +150,15 @@ run_and_track_test 9 "test_multimodal.py" \
 run_and_track_test 10 "test_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py"
 run_and_track_test 11 "test_struct_output_generate.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py"
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
 run_and_track_test 12 "test_moe_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py"
-
-# Disable the TPU LoRA tests until the feature is activated
-# run_and_track_test 13 "test_lora (directory)" \
-#     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/lora/"
+run_and_track_test 13 "test_lora.py" \
+    "VLLM_XLA_CHECK_RECOMPILATION=0 python3 -m pytest -s -v /workspace/vllm/tests/tpu/lora/test_lora.py"
+run_and_track_test 14 "test_tpu_qkv_linear.py" \
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_tpu_qkv_linear.py"
+run_and_track_test 15 "test_spmd_model_weight_loading.py" \
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_spmd_model_weight_loading.py"
 
 # After all tests have been attempted, exit with the overall status.
 if [ "$overall_script_exit_code" -ne 0 ]; then

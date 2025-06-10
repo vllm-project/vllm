@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
 import pytest
@@ -10,27 +11,21 @@ MODELS = [
     ########## BertModel
     EmbedModelInfo("thenlper/gte-large",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=True),
     EmbedModelInfo("thenlper/gte-base",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=False),
     EmbedModelInfo("thenlper/gte-small",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=False),
     EmbedModelInfo("thenlper/gte-large-zh",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=False),
     EmbedModelInfo("thenlper/gte-base-zh",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=False),
     EmbedModelInfo("thenlper/gte-small-zh",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=False),
     ########### NewModel
     EmbedModelInfo("Alibaba-NLP/gte-multilingual-base",

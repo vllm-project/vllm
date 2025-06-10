@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark offline inference throughput."""
 import argparse
 import dataclasses
@@ -527,7 +528,6 @@ def main(args: argparse.Namespace):
     validate_args(args)
     if args.seed is None:
         args.seed = 0
-    print(args)
     random.seed(args.seed)
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(

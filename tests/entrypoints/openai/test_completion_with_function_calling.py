@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import openai  # use the official client for correctness check
 import pytest
@@ -8,7 +9,7 @@ import pytest_asyncio
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
@@ -21,7 +22,9 @@ def server():  # noqa: F811
         "--guided-decoding-backend",
         "xgrammar",
         "--tool-call-parser",
-        "hermes"
+        "hermes",
+        "--reasoning-parser",
+        "qwen3",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -36,7 +39,12 @@ async def client(server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_required_tool_use(client: openai.AsyncOpenAI, model_name: str):
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+@pytest.mark.parametrize("enable_thinking", [True, False])
+async def test_function_tool_use(client: openai.AsyncOpenAI, model_name: str,
+                                 stream: bool, tool_choice: str,
+                                 enable_thinking: bool):
     tools = [
         {
             "type": "function",
@@ -125,30 +133,38 @@ async def test_required_tool_use(client: openai.AsyncOpenAI, model_name: str):
             "forecast for the next 5 days, in fahrenheit?",
         },
     ]
+    if not stream:
+        # Non-streaming test
+        chat_completion = await client.chat.completions.create(
+            messages=messages,
+            model=model_name,
+            tools=tools,
+            tool_choice=tool_choice,
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": enable_thinking
+                }
+            })
 
-    # Non-streaming test
-    chat_completion = await client.chat.completions.create(
-        messages=messages,
-        model=model_name,
-        tools=tools,
-        tool_choice="required",
-    )
+        assert chat_completion.choices[0].message.tool_calls is not None
+        assert len(chat_completion.choices[0].message.tool_calls) > 0
+    else:
+        # Streaming test
+        output_stream = await client.chat.completions.create(
+            messages=messages,
+            model=model_name,
+            tools=tools,
+            tool_choice=tool_choice,
+            stream=True,
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": enable_thinking
+                }
+            })
 
-    assert chat_completion.choices[0].message.tool_calls is not None
-    assert len(chat_completion.choices[0].message.tool_calls) > 0
+        output = []
+        async for chunk in output_stream:
+            if chunk.choices and chunk.choices[0].delta.tool_calls:
+                output.extend(chunk.choices[0].delta.tool_calls)
 
-    # Streaming test
-    stream = await client.chat.completions.create(
-        messages=messages,
-        model=model_name,
-        tools=tools,
-        tool_choice="required",
-        stream=True,
-    )
-
-    output = []
-    async for chunk in stream:
-        if chunk.choices and chunk.choices[0].delta.tool_calls:
-            output.extend(chunk.choices[0].delta.tool_calls)
-
-    assert len(output) > 0
+        assert len(output) > 0
