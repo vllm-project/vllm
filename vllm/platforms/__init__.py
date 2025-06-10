@@ -140,20 +140,28 @@ def xpu_platform_plugin() -> Optional[str]:
         # installed IPEX if the machine has XPUs.
         import intel_extension_for_pytorch  # noqa: F401
         import torch
+        # detect dist_backend
         import os
-        default_backend = "xccl" if supports_xccl() else "ccl"
-        XPU_CCL_BACKEND = os.getenv("XPU_CCL_BACKEND", default_backend)
+        if supports_xccl():
+            default_backend = "xccl"
+        else:
+            logger.debug("xccl is not available.")
+            default_backend = "ccl"
+        detect_backend = os.getenv("XPU_CCL_BACKEND", default_backend)
 
-        if XPU_CCL_BACKEND not in ["xccl", "ccl"]:
-            raise ValueError(f"Unknown {XPU_CCL_BACKEND} backend for XPU platform")
+        if detect_backend not in ["xccl", "ccl"]:
+            raise ValueError(f"Unknown {detect_backend} backend for XPU platform.")
 
-        if XPU_CCL_BACKEND == "ccl":
-            logger.debug("xccl is not available in current torch, checking ccl")
+        if detect_backend == "ccl":
+            logger.debug("Checking if ccl is available.")
             import oneccl_bindings_for_pytorch  # noqa: F401
 
         if hasattr(torch, 'xpu') and torch.xpu.is_available():
             is_xpu = True
-            logger.debug(f"Confirmed {XPU_CCL_BACKEND} backend is available.")
+            from vllm.platforms.xpu import XPUPlatform
+            XPUPlatform.dist_backend = detect_backend
+            logger.debug(f"Confirmed {XPUPlatform.dist_backend}"
+                         " backend is available.")
             logger.debug("Confirmed XPU platform is available.")
     except Exception as e:
         logger.debug("XPU platform is not available because: %s", str(e))

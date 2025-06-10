@@ -15,7 +15,6 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.utils import supports_xccl
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
@@ -160,8 +159,6 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
             # use sockets as default Level zero IPC exchange backend. By
             # default oneccl will use `drmfd` as mechanism which need extra
             # dependency (libdrm and drm headers) on your system.
-            default_backend = "xccl" if supports_xccl() else "ccl"
-            XPU_CCL_BACKEND = os.getenv("XPU_CCL_BACKEND", default_backend)
             ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
             ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE",
                                              str(parallel_config.world_size))
@@ -173,7 +170,7 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
                 rank=rank,
                 distributed_init_method=distributed_init_method,
                 local_rank=self.local_rank,
-                backend=XPU_CCL_BACKEND)
+                backend=current_platform.dist_backend)
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
