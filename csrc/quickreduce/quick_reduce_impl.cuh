@@ -175,16 +175,27 @@ struct CodecQ4Symm : public CodecBase {
       int32x4_t w;
       {
         static constexpr uint kMask000F = 0x000F000F;
-        // {1024.0, 1024.0}, f16x2_t
-        static constexpr uint kF162_1024 =
-            std::is_same<T, half>::value ? 0x64006400 : 0x44804480;
-        // {-1032.0, -1032.0}, f16x2_t
-        static constexpr uint kF162_1032 =
-            std::is_same<T, half>::value ? 0xE408E408 : 0xC481C481;
+        static constexpr uint kHalf2_1024 =
+            0x64006400;  // {1024.0, 1024.0}, fp16x2_t
+        static uint constexpr kHalf2_1032 =
+            0xE408E408;  // {-1032.0, -1032.0}, fp16x2_t
 
         for (int i = 0; i < 4; i++) {
-          int32_t q4 = ((qw >> (i * 4)) & kMask000F) | kF162_1024;
-          w[i] = packed_add<T>(q4, kF162_1032);
+          if constexpr (std::is_same<T, half>::value) {
+            int32_t q4 = ((qw >> (i * 4)) & kMask000F) | kHalf2_1024;
+            asm volatile("v_pk_add_f16 %0, %1, %2"
+                         : "=v"(w[i])
+                         : "v"(q4), "v"(kHalf2_1032));
+          } else {
+            int32_t int16_2 = (qw >> (i * 4)) & kMask000F;
+            int16_t low = static_cast<int16_t>(int16_2 & 0xFFFF);
+            int16_t high = static_cast<int16_t>((int16_2 >> 16) & 0xFFFF);
+            nv_bfloat16 bf_low = __float2bfloat16(static_cast<float>(low));
+            nv_bfloat16 bf_high = __float2bfloat16(static_cast<float>(high));
+            nv_bfloat162 bf2 = __halves2bfloat162(bf_low, bf_high);
+            int32_t packed_bf16 = *reinterpret_cast<int32_t*>(&bf2);
+            w[i] = packed_add<nv_bfloat16>(packed_bf16, kRangeMin);
+          }
         }
       }
 
