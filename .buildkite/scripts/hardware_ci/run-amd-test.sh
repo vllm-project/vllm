@@ -172,8 +172,8 @@ if [[ $commands == *" entrypoints/llm "* ]]; then
 fi
 
 #Unset HF_TOKEN to evaluate a model from modelscope
-if [[ $commands == *" pytest -v -s test_regression.py"* ]]; then
-  commands=${commands//" pytest -v -s test_regression.py"/" unset HF_TOKEN; \
+if [[ $commands == *"pytest -v -s test_regression.py"* ]]; then
+  commands=${commands//"pytest -v -s test_regression.py"/"unset HF_TOKEN; \
   pytest -v -s test_regression.py"}
 fi
 
