@@ -207,7 +207,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -336,7 +337,7 @@ class MLACommonMetadata(Generic[D]):
 M = TypeVar("M", bound=MLACommonMetadata)
 
 
-class MLACommonMetadataBuilder(Generic[M]):
+class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -467,6 +468,8 @@ class MLACommonMetadataBuilder(Generic[M]):
         assert num_reqs == num_tokens, \
             "MLA only supports decode-only full CUDAGraph capture. " \
             "Make sure all cudagraph capture sizes <= max_num_seq."
+
+        # Update state usually set in reorder_batch.
         self._num_decodes = num_tokens
         self._num_decode_tokens = num_tokens
         self._num_prefills = 0
@@ -589,9 +592,6 @@ class MLACommonMetadataBuilder(Generic[M]):
             prefill=prefill_metadata,
             decode=decode_metadata,
         )
-
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
 
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):

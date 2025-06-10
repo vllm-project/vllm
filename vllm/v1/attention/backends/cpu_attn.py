@@ -7,7 +7,8 @@ from vllm.attention.backends.torch_sdpa import (TorchSDPABackendImpl,
                                                 TorchSDPAMetadata)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.ipex_attn import PagedAttention
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
@@ -53,7 +54,7 @@ class TorchSDPABackend:
         return False
 
 
-class TorchSDPAMetadataBuilderV1:
+class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
     def __init__(self, runner: CPUModelRunner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable) -> None:

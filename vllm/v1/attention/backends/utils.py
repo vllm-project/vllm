@@ -1,8 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import abc
+from abc import abstractmethod
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Generic, TypeVar
 
+import numpy as np
 import torch
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 @dataclass
@@ -17,6 +25,52 @@ class CommonAttentionMetadata:
     seq_lens: torch.Tensor
     """(batch_size,), the length of each request including both computed tokens
     and newly scheduled tokens"""
+
+
+M = TypeVar("M")
+
+
+class AttentionMetadataBuilder(abc.ABC, Generic[M]):
+
+    @abstractmethod
+    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata) -> M:
+        """
+        Central method that builds attention metadata.
+        Some builders (MLA) require reorder_batch to be called prior to build.
+        """
+        raise NotImplementedError
+
+    def build_for_cudagraph_capture(
+            self, num_reqs: int, num_tokens: int,
+            common_attn_metadata: CommonAttentionMetadata) -> M:
+        """
+        Build attention metadata for CUDA graph capture. Uses build by default.
+        Subclasses that override this method should call self.build.
+        """
+        return self.build(num_reqs, num_tokens, num_tokens, 0,
+                          common_attn_metadata)
+
+    def use_cascade_attention(
+        self,
+        common_prefix_len: int,
+        query_lens: np.ndarray,
+        num_query_heads: int,
+        num_kv_heads: int,
+        use_alibi: bool,
+        use_sliding_window: bool,
+        num_sms: int,
+    ) -> bool:
+        return False
+
+    def reorder_batch(self, input_batch: "InputBatch",
+                      scheduler_output: "SchedulerOutput") -> bool:
+        """
+        This method can reorder the batch if desired by the backend.
+        :return: Has the batch been reordered (default False).
+        """
+        return False
 
 
 def validate_kv_sharing_target(current_layer_name, target_layer_name,
