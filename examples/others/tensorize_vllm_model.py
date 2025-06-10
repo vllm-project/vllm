@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
     tensorize_lora_adapter,
     tensorize_vllm_model,
+    tensorizer_kwargs_arg
 )
 from vllm.utils import FlexibleArgumentParser
 
@@ -172,7 +173,7 @@ def parse_args():
 
     serialize_parser.add_argument(
         "--serialization-kwargs",
-        type=str,
+        type=tensorizer_kwargs_arg,
         required=False,
         help=("A JSON string containing additional keyword arguments to "
               "pass to Tensorizer's `TensorSerializer` during "
@@ -202,6 +203,14 @@ def parse_args():
         required=False,
         help=("Path to a binary key to use to decrypt the model weights,"
               " if the model was serialized with encryption"))
+
+    deserialize_parser.add_argument(
+        "--deserialization-kwargs",
+        type=tensorizer_kwargs_arg,
+        required=False,
+        help=("A JSON string containing additional keyword arguments to "
+              "pass to Tensorizer's `TensorDeserializer` during "
+              "serialization."))
 
     TensorizerArgs.add_cli_args(deserialize_parser)
 
@@ -298,28 +307,36 @@ if __name__ == '__main__':
         else:
             model_path = f"{base_path}/model.tensors"
 
-        tensorizer_config = TensorizerConfig(
-            tensorizer_uri=model_path,
-            encryption_keyfile=keyfile,
-            **credentials)
 
-        if args.serialization_kwargs:
-            serialization_kwargs = json.loads(args.serialization_kwargs)
-            tensorizer_config.serialization_kwargs = serialization_kwargs
+        if not tensorizer_args:
+            tensorizer_config = TensorizerConfig(
+                tensorizer_uri=model_path,
+                encryption_keyfile=keyfile,
+                **credentials
+            )
+            if args.serialization_kwargs:
+                serialization_kwargs = json.loads(args.serialization_kwargs)
+                tensorizer_config.serialization_kwargs = serialization_kwargs
 
-        if args.lora_path:
-            tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
-            tensorize_lora_adapter(args.lora_path, tensorizer_config)
+            if args.lora_path:
+                tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
+                tensorize_lora_adapter(args.lora_path, tensorizer_config)
 
         tensorize_vllm_model(engine_args, tensorizer_config)
 
     elif args.command == "deserialize":
+
         if not tensorizer_args:
             tensorizer_config = TensorizerConfig(
                 tensorizer_uri=args.path_to_tensors,
                 encryption_keyfile = keyfile,
                 **credentials
             )
+
+            if args.deserialization_kwargs:
+                deserialization_kwargs = json.loads(args.deserialization_kwargs)
+                tensorizer_config.deserialization_kwargs = deserialization_kwargs
+
         deserialize()
     else:
         raise ValueError("Either serialize or deserialize must be specified.")
