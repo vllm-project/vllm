@@ -17,13 +17,13 @@ To load a model using Tensorizer, it first needs to be serialized by Tensorizer.
 The example script in [examples/others/tensorize_vllm_model.py](https://github.com/vllm-project/vllm/blob/main/examples/others/tensorize_vllm_model.py)
 takes care of this process.
 
-The core frontend object of note integrating Tensorizer is 
-`TensorizerConfig`, defined [here](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/model_loader/tensorizer.py#L135-L214)
-It's a config object holding important state and passed to any serialization 
-or deserialization operation. When loading with Tensorizer using the vLLM 
+The `TensorizerConfig` class is used to customize Tensorizer's behaviour,
+defined in [vllm/model_executor/model_loader/tensorizer.py](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/model_loader/tensorizer.py).
+It is passed to any serialization or deserialization operation.
+When loading with Tensorizer using the vLLM 
 library rather than through a model-serving entrypoint, it gets passed to 
 the `LLM` entrypoint class directly. Here's an example of loading a model
-saved at `"s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors"`.
+saved at `"s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors"`:
 
 ```python
 from vllm import LLM
@@ -33,8 +33,8 @@ path_to_tensors = "s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors"
 
 model_ref = "facebook/opt-125m"
 tensorizer_config = TensorizerConfig(
-        tensorizer_uri=path_to_tensors,
-    )
+    tensorizer_uri=path_to_tensors
+)
 
 llm = LLM(
     model_ref,
@@ -43,9 +43,11 @@ llm = LLM(
 )
 ```
 
-But that code won't work unless you actually have your serialized model 
-tensors `model.tensors`, so let's walk through a basic example of serializing 
-`facebook/opt-125m` using the example script, and then loading it for inference.
+However, the above code will not function until you have successfully
+serialized the model tensors with Tensorizer to get the `model.tensors`
+file shown. The following section walks through an end-to-end example
+of serializing `facebook/opt-125m` with the example script,
+and then loading it for inference.
 
 ## Saving a vLLM model with Tensorizer
 To save a model with Tensorizer, call the example script with the necessary
@@ -66,27 +68,25 @@ This saves the model tensors at
 `s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors`.
 
 ## Serving the model using Tensorizer
-Once the model is serialized where you want it, you need to pass
-`--load-format=tensorizer` as well as a JSON string to the
-`--model-loader-extra-config` CLI arg for `vllm serve`, specifying
-all the keyword arguments you'd normally pass to the `TensorizerConfig`
-initializer, as if you were instantiating it like this, for instance:
-`TensorizerConfig(**{"tensorizer_uri": "foo"})`. Here's an example bash
-script that neatly lays out the JSON string before passing it to
-`--model-loader-extra-config`:
+Once the model is serialized where you want it, you must specify the
+following additional command line parameters to `vllm serve` to load the model:
+- `--load-format=tensorizer`
+- `--model-loader-extra-config`
+  - This expects a JSON string specifying keyword arguments for
+    the `TensorizerConfig` object
+  - For example, `--model-loader-extra-config='{"tensorizer_uri": "foo"}'`
+    would be equivalent to `TensorizerConfig(**{"tensorizer_uri": "foo"})`
+The shell snippet below shows a typical invocation of `vllm serve`
+with these parameters specified:
 
 ```bash
 #!/bin/bash
 
-read -r -d '' JSON << EOF
-{
+MODEL_LOADER_EXTRA_CONFIG='{
   "tensorizer_uri": "s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors",
-  "stream_kwargs": {"force_http": "False"},
-  "deserialization_kwargs": {"verify_hash": "True", "num_readers": 8}
-}
-EOF
-
-MODEL_LOADER_EXTRA_CONFIG=$(echo "$JSON" | tr -d '\n')
+  "stream_kwargs": {"force_http": false},
+  "deserialization_kwargs": {"verify_hash": true, "num_readers": 8}
+}'
 
 vllm serve facebook/opt-125m \
   --load-format=tensorizer \

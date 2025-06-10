@@ -174,8 +174,8 @@ def parse_args():
         "--serialization-kwargs",
         type=str,
         required=False,
-        help=("A JSON string containing additional keyword arguments that "
-              "will be passed to Tensorizer's `TensorSerializer` during "
+        help=("A JSON string containing additional keyword arguments to "
+              "pass to Tensorizer's `TensorSerializer` during "
               "serialization."))
 
     serialize_parser.add_argument(
@@ -306,8 +306,6 @@ if __name__ == '__main__':
         if args.serialization_kwargs:
             serialization_kwargs = json.loads(args.serialization_kwargs)
             tensorizer_config.serialization_kwargs = serialization_kwargs
-            print("Found serialization kwargs: ", serialization_kwargs)
-
 
         if args.lora_path:
             tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir

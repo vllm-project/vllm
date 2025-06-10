@@ -275,9 +275,9 @@ class TensorizerArgs:
           be set via the S3_SECRET_ACCESS_KEY environment variable.
       s3_endpoint: The endpoint for the S3 bucket. Can also be set via the
           S3_ENDPOINT_URL environment variable.
-      stream_kwargs: Arbitrary keyword arguments to pass to Tensorizer's
-          `stream_io` object, which the `TensorSeriaizer` and 
-          TensorDeserializer` objects use to work with streams.
+      stream_kwargs: Keyword arguments to pass to Tensorizer's
+          `stream_io.open_stream()` function, which the `TensorSerializer` and
+          `TensorDeserializer` objects use to work with files and streams.
           See the Tensorizer page in vLLM's official documentation for more 
           information on available kwargs.
       deserialization_kwargs: Additional keyword arguments to be passed 

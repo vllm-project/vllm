@@ -325,8 +325,7 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
 
         tensorizer.serialization.TensorSerializer.__init__ = tensorizer_serializer_wrapper
 
-        tensorizer_config = TensorizerConfig(**kwargs.get("tensorizer_config"))
-        assert tensorizer_config is not None
+        tensorizer_config = TensorizerConfig(**kwargs["tensorizer_config"])
         self.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
         return to_compare | original_dict == to_compare
@@ -434,7 +433,7 @@ async def test_serialize_and_serve_entrypoints(tmp_path):
             f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py", "--model",
             model_ref, "serialize", "--serialized-directory",
             str(tmp_path), "--suffix", suffix, "--serialization-kwargs",
-            json.dumps({"limit_cpu_concurrency": 4})
+            '{"limit_cpu_concurrency": 4}'
         ],
                                 check=True,
                                 capture_output=True,
@@ -474,12 +473,10 @@ async def test_serialize_and_serve_entrypoints(tmp_path):
     try:
         async with asyncio.timeout(180):
             await proc.stdout.readuntil(b"Application startup complete.")
-
     except asyncio.TimeoutError:
         pytest.fail("Server did not start successfully")
-
-
-    proc.terminate()
+    finally:
+        proc.terminate()
     await proc.communicate()
 
 
