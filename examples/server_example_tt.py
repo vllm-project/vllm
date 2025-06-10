@@ -14,7 +14,13 @@ def main():
                         type=str,
                         default="meta-llama/Llama-3.1-70B-Instruct",
                         help="Model name")
-    args, unknown_args = parser.parse_known_args()
+    parser.add_argument(
+        "--max_num_seqs",
+        type=int,
+        default=32,
+        help="Maximum number of sequences to be processed in a single iteration"
+    )
+    args, _ = parser.parse_known_args()
 
     check_tt_model_supported(args.model)
 
@@ -24,7 +30,7 @@ def main():
         "--block_size",
         "64",
         "--max_num_seqs",
-        "32",
+        str(args.max_num_seqs),
         "--num_scheduler_steps",
         "10",
     ])
