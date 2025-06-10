@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+from importlib import util
 from typing import Optional
 
 import torch
@@ -110,7 +111,6 @@ class CPUWorker(Worker):
         rank_to_cpus = self.local_omp_cpuid
         # Setup OpenMP thread affinity based on NUMA nodes automatically
         world_size = self.vllm_config.parallel_config.world_size
-        from importlib import util
         libnuma_found = util.find_spec("numa") is not None
         psutil_found = util.find_spec("psutil") is not None
         if libnuma_found and psutil_found:
