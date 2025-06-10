@@ -10,6 +10,13 @@ from vllm import envs
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
+import importlib
+try:
+    aiter_version = importlib.metadata.version("aiter").split('.')[:3]
+    aiter_version = [int(_) for _ in aiter_version]
+except:
+    aiter_version = [0,1,3]
+
 
 class QuantMethod(IntEnum):
     # This allows interfacing with AITER QuantType Enum
@@ -19,11 +26,19 @@ class QuantMethod(IntEnum):
     # supported in AITER package. However,
     # not all are used in this module.
 
-    NO = 0  # a16w16
-    PER_TENSOR = 1  # w8a8 (pre_Tensor)
-    PER_TOKEN = 2  # w8a8/w8a4 (per_Token)
-    BLOCK_1X128 = 3  # block quantized w8a8 (per_1x128)
-    BLOCK_128x128 = 4  # block quantized w8a8 (per_128x128)
+    if aiter_version>=[0,1,2]:
+        NO = 0  # a16w16
+        PER_TENSOR = 1  # w8a8 (pre_Tensor)
+        PER_TOKEN = 2  # w8a8/w8a4 (per_Token)
+        BLOCK_1X32 = 3
+        BLOCK_1X128 = 4  # block quantized w8a8 (per_1x128)
+        BLOCK_128x128 = 5  # block quantized w8a8 (per_128x128)
+    else:
+        NO = 0  # a16w16
+        PER_TENSOR = 1  # w8a8 (pre_Tensor)
+        PER_TOKEN = 2  # w8a8/w8a4 (per_Token)
+        BLOCK_1X128 = 3  # block quantized w8a8 (per_1x128)
+        BLOCK_128x128 = 4  # block quantized w8a8 (per_128x128)
 
 
 class ActivationMethod(IntEnum):
