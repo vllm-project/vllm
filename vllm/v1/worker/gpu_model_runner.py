@@ -83,7 +83,7 @@ logger = init_logger(__name__)
 
 class GPUModelRunner(LoRAModelRunnerMixin):
 
-    drafter: Drafter
+    drafter: "Drafter"
 
     def __init__(
         self,
