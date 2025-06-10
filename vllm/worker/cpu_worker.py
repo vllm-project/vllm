@@ -17,6 +17,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, bind_kv_cache
 from vllm.worker.cpu_enc_dec_model_runner import CPUEncoderDecoderModelRunner
@@ -386,7 +387,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
             world_size=parallel_config.world_size,
             rank=rank,
             distributed_init_method=distributed_init_method,
-            backend="gloo",
+            backend=current_platform.dist_backend,
         )
 
         # A small all_reduce for warmup.
