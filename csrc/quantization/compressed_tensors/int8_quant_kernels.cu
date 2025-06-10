@@ -121,7 +121,7 @@ __global__ void static_scaled_int8_quant_kernel(
   vectorize_with_alignment<16>(
       row_in, row_out, hidden_size, tid, stride,
       [=] __device__(int8_t& dst, const scalar_t& src) {
-        dst = float_to_int8_rn(float(src) / scale);
+        dst = float_to_int8_rn(static_cast<float>(src) / scale);
       });
 }
 
@@ -133,7 +133,7 @@ __global__ void static_scaled_int8_azp_quant_kernel(
   const int stride = blockDim.x;
   const int64_t token_idx = blockIdx.x;
   const float scale = *scale_ptr;
-  azp_t azp = *azp_ptr;
+  const azp_t azp = *azp_ptr;
   const float inv_s = 1.0f / scale;
 
   // Must be performed using 64-bit math to avoid integer overflow.
@@ -143,7 +143,7 @@ __global__ void static_scaled_int8_azp_quant_kernel(
   vectorize_with_alignment<16>(
       row_in, row_out, hidden_size, tid, stride,
       [=] __device__(int8_t& dst, const scalar_t& src) {
-        float v = float(src) * inv_s;
+        const auto v = static_cast<float>(src) * inv_s;
         dst = int32_to_int8(float_to_int32_rn(v) + azp);
       });
 }
@@ -163,7 +163,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
   // calculate for absmax
   float thread_max = 0.f;
   for (int i = tid; i < hidden_size; i += stride) {
-    float v = fabsf(float(row_in[i]));
+    const auto v = fabsf(static_cast<float>(row_in[i]));
     thread_max = fmaxf(thread_max, v);
   }
   using BlockReduce = cub::BlockReduce<float, 256>;
@@ -182,7 +182,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
   vectorize_with_alignment<16>(
       row_in, row_out, hidden_size, tid, stride,
       [=] __device__(int8_t& dst, const scalar_t& src) {
-        dst = float_to_int8_rn(float(src) * inv_s);
+        dst = float_to_int8_rn(static_cast<float>(src) * inv_s);
       });
 }
 
@@ -233,7 +233,7 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   // 1. calculate min & max
   MinMax thread_mm;
   for (int i = tid; i < hidden_size; i += stride) {
-    thread_mm += float(row_in[i]);
+    thread_mm += static_cast<float>(row_in[i]);
   }
 
   using BlockReduce = cub::BlockReduce<MinMax, 256>;
@@ -259,14 +259,14 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   }
   __syncthreads();
 
-  float inv_s = 1.f / scale_sh;
-  azp_t azp = azp_sh;
+  const float inv_s = 1.f / scale_sh;
+  const azp_t azp = azp_sh;
 
   // 2. quantize
   vectorize_with_alignment<16>(
       row_in, row_out, hidden_size, tid, stride,
       [=] __device__(int8_t& dst, const scalar_t& src) {
-        float v = float(src) * inv_s;
+        const auto v = static_cast<float>(src) * inv_s;
         dst = int32_to_int8(float_to_int32_rn(v) + azp);
       });
 }
