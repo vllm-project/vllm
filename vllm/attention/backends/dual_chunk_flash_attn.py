@@ -1266,10 +1266,7 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         descale_shape = None
         q_descale = k_descale = v_descale = None
         if fp8_attention:
-            # For dual chunk attention, we need to handle descaling properly
             descale_shape = (q_len, query_states.shape[1])
-            # Note: In a real implementation, you'd need access to the layer object
-            # This is a simplified version - you'd need to pass these scales from the forward method
             q_descale = torch.ones(descale_shape, device=query_states.device, dtype=torch.float32)
             k_descale = torch.ones(descale_shape, device=query_states.device, dtype=torch.float32)
             v_descale = torch.ones(descale_shape, device=query_states.device, dtype=torch.float32)
