@@ -109,12 +109,14 @@ template <typename scalar_t, typename scale_t>
 __global__ void static_scaled_int8_quant_kernel(
     const scalar_t* __restrict__ input, int8_t* __restrict__ output,
     const scale_t* scale_ptr, const int hidden_size) {
-  int tid = threadIdx.x;
-  int stride = blockDim.x;
-  float scale = *scale_ptr;
+  const int tid = threadIdx.x;
+  const int stride = blockDim.x;
+  const int64_t token_idx = blockIdx.x;
+  const float scale = *scale_ptr;
 
-  const scalar_t* row_in = input + blockIdx.x * hidden_size;
-  int8_t* row_out = output + blockIdx.x * hidden_size;
+  // Must be performed using 64-bit math to avoid integer overflow.
+  const scalar_t* row_in = input + token_idx * hidden_size;
+  int8_t* row_out = output + token_idx * hidden_size;
 
   vectorize_with_alignment<16>(
       row_in, row_out, hidden_size, tid, stride,
@@ -127,14 +129,16 @@ template <typename scalar_t, typename scale_t, typename azp_t>
 __global__ void static_scaled_int8_azp_quant_kernel(
     const scalar_t* __restrict__ input, int8_t* __restrict__ output,
     const scale_t* scale_ptr, const azp_t* azp_ptr, const int hidden_size) {
-  int tid = threadIdx.x;
-  int stride = blockDim.x;
-  float scale = *scale_ptr;
+  const int tid = threadIdx.x;
+  const int stride = blockDim.x;
+  const int64_t token_idx = blockIdx.x;
+  const float scale = *scale_ptr;
   azp_t azp = *azp_ptr;
-  float inv_s = 1.0f / scale;
+  const float inv_s = 1.0f / scale;
 
-  const scalar_t* row_in = input + blockIdx.x * hidden_size;
-  int8_t* row_out = output + blockIdx.x * hidden_size;
+  // Must be performed using 64-bit math to avoid integer overflow.
+  const scalar_t* row_in = input + token_idx * hidden_size;
+  int8_t* row_out = output + token_idx * hidden_size;
 
   vectorize_with_alignment<16>(
       row_in, row_out, hidden_size, tid, stride,
@@ -148,11 +152,13 @@ template <typename scalar_t, typename scale_t>
 __global__ void dynamic_scaled_int8_quant_kernel(
     const scalar_t* __restrict__ input, int8_t* __restrict__ output,
     scale_t* scale_out, const int hidden_size) {
-  int tid = threadIdx.x;
-  int stride = blockDim.x;
+  const int tid = threadIdx.x;
+  const int stride = blockDim.x;
+  const int64_t token_idx = blockIdx.x;
 
-  const scalar_t* row_in = input + blockIdx.x * hidden_size;
-  int8_t* row_out = output + blockIdx.x * hidden_size;
+  // Must be performed using 64-bit math to avoid integer overflow.
+  const scalar_t* row_in = input + token_idx * hidden_size;
+  int8_t* row_out = output + token_idx * hidden_size;
 
   // calculate for absmax
   float thread_max = 0.f;
@@ -216,11 +222,13 @@ template <typename scalar_t, typename scale_t, typename azp_t>
 __global__ void dynamic_scaled_int8_azp_quant_kernel(
     const scalar_t* __restrict__ input, int8_t* __restrict__ output,
     scale_t* scale_out, azp_t* azp_out, const int hidden_size) {
-  int tid = threadIdx.x;
-  int stride = blockDim.x;
+  const int tid = threadIdx.x;
+  const int stride = blockDim.x;
+  const int64_t token_idx = blockIdx.x;
 
-  const scalar_t* row_in = input + blockIdx.x * hidden_size;
-  int8_t* row_out = output + blockIdx.x * hidden_size;
+  // Must be performed using 64-bit math to avoid integer overflow.
+  const scalar_t* row_in = input + token_idx * hidden_size;
+  int8_t* row_out = output + token_idx * hidden_size;
 
   // 1. calculate min & max
   MinMax thread_mm;

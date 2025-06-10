@@ -1,4 +1,3 @@
-// vector_utils.cuh
 #pragma once
 #include "vectorization.cuh"
 
