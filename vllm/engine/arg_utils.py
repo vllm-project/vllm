@@ -387,6 +387,9 @@ class EngineArgs:
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
+    disable_hybrid_kv_cache_manager: bool = (
+        SchedulerConfig.disable_hybrid_kv_cache_manager)
+
     guided_decoding_backend: GuidedDecodingBackend = DecodingConfig.backend
     guided_decoding_disable_fallback: bool = DecodingConfig.disable_fallback
     guided_decoding_disable_any_whitespace: bool = \
@@ -849,6 +852,9 @@ class EngineArgs:
             **scheduler_kwargs["disable_chunked_mm_input"])
         scheduler_group.add_argument("--scheduler-cls",
                                      **scheduler_kwargs["scheduler_cls"])
+        scheduler_group.add_argument(
+            "--disable-hybrid-kv-cache-manager",
+            **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1174,6 +1180,8 @@ class EngineArgs:
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            disable_hybrid_kv_cache_manager=self.
+            disable_hybrid_kv_cache_manager,
         )
 
         lora_config = LoRAConfig(
@@ -1401,6 +1409,7 @@ class EngineArgs:
             "FLASHINFER_VLLM_V1",
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
+            "FLEX_ATTENTION",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
