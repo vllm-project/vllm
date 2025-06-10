@@ -45,8 +45,7 @@ class UniProcExecutor(ExecutorBase):
         )
 
         # init_config first to resolve hardware dependent config/"auto" dtype
-        self.collective_rpc("init_config",
-                            args=(dict(vllm_config=self.vllm_config), ))
+        self.collective_rpc("init_config", args=([kwargs], ))
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
@@ -121,8 +120,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         )
 
         # init_config first to resolve hardware dependent config and auto dtype
-        self.collective_rpc("init_config",
-                            args=(dict(vllm_config=self.vllm_config), ))
+        self.collective_rpc("init_config", args=([kwargs], ))
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
