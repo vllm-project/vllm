@@ -1337,6 +1337,13 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
+        # Only Fp16 and Bf16 dtypes since we only support FA.
+        V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
+        if model_config.dtype not in V1_SUPPORTED_DTYPES:
+            _raise_or_fallback(feature_name=f"--dtype {model_config.dtype}",
+                               recommend_to_remove=False)
+            return False
+
         # No Embedding Models so far.
         if model_config.task not in ["generate"]:
             _raise_or_fallback(feature_name=f"--task {model_config.task}",

@@ -233,10 +233,6 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using Triton backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "triton_attn.TritonAttentionBackend")
-            if dtype not in (torch.float16, torch.bfloat16):
-                logger.info_once(
-                    f"Using FlexAttenion backend for {dtype} on V1 engine.")
-                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
             if cls.is_device_capability(100):
                 # Prefer FlashInfer for V1 on Blackwell GPUs if installed
                 try:
