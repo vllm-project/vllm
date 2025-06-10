@@ -175,6 +175,7 @@ class Worker(WorkerBase):
             self.device = torch.device(f"cuda:{self.local_rank}")
             torch.cuda.set_device(self.device)
 
+            _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -201,8 +202,6 @@ class Worker(WorkerBase):
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
-
-        self._resolve_hardware_dependent_config()
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
