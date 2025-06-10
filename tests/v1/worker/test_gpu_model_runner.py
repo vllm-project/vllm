@@ -4,7 +4,6 @@
 import random
 
 import pytest
-import torch
 
 from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
@@ -400,7 +399,6 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
-    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     error_msg = f"{layer_1} must come before the current layer"
@@ -429,7 +427,6 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
 
 
 def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
-    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     invalid_layer = "model.layers.0.cross_attn.attn"
@@ -458,7 +455,6 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
 
 
 def test_init_kv_cache_with_kv_sharing_target_same_as_current():
-    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     error_msg = f"{layer_1} cannot be the same as the current layer"
@@ -487,7 +483,6 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current():
 
 
 def test_init_kv_cache_without_kv_sharing():
-    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     vllm_config = get_vllm_config()
@@ -555,7 +550,6 @@ def test_init_kv_cache_without_kv_sharing():
 
 
 def test_init_kv_cache_with_kv_sharing_valid():
-    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     vllm_config = get_vllm_config()
