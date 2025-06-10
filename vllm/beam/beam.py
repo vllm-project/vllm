@@ -15,10 +15,9 @@ class BeamScorer:
             
             scores = torch.zeros(len(responses), dtype=torch.float)
  
-            has_additional_heads = torch.tensor([response.choices[0].additional_heads is not None for response in responses], dtype=torch.bool)
-            if has_additional_heads.any():
-                heads = [response.choices[0].additional_heads[0] for response in responses]
-                heads_tensor = torch.tensor(heads, dtype=torch.float)
+            heads = [response.choices[0].additional_heads[0] for response in responses]
+            heads_tensor = torch.tensor(heads, dtype=torch.float)
+            if len(heads_tensor) > 0:
                 penalties = self.penalty_computer.compute(heads_tensor, debug_info)
                 scores -= penalties
 

@@ -553,11 +553,6 @@ MODEL_SERVER_RANKING = [
         {"name": "chosen_after_swipe_preference", "pow": 0.5, "negation": False},
     ]
 
-def format_filter(filter_params_list):
-    keys = ["name", "threshold"]
-    if any([len(p) != len(keys) for p in filter_params_list]):
-        raise ValueError(f"Expect 2 keys, seeing {filter_params_list=}")
-    return [dict(zip(keys, vals)) for vals in filter_params_list]
 
 def format_penalty(penalty_params_list):
     keys = [
@@ -586,16 +581,6 @@ MODEL_SERVER_PENALTY = format_penalty([
     ("annotations_looping", 1000, 0.0619, 1),
     ("annotations_out_of_character_gd", 1000, 0.3346, 1),
 ])
-
-DEFAULT_CHAR_SERVER_FILTER = format_filter(
-        [
-            ("annotations_porn", 0.1024),
-            ("annotations_racist", 0.2856),
-            ("annotations_disturbing", 0.1851),
-            ("annotations_harmful_promotes_selfharm", 0.0629),
-            ("annotations_harmful_promotes_terrorism", 0.1009),
-        ]
-    )
 
 
 

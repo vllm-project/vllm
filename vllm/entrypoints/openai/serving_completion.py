@@ -13,6 +13,7 @@ from fastapi import Request
 from typing_extensions import assert_never
 
 from vllm.beam.beam import BeamScorer
+from vllm.beam.filtering import BeamValidator
 from vllm.beam.penalty import MEOW_CLASSI_IDX, PenaltyComputer
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -83,61 +84,55 @@ class OpenAIServingCompletion(OpenAIServing):
                         source, self.default_sampling_params)
             
         self.beam_scorer = BeamScorer(classi_idx=MEOW_CLASSI_IDX)
-
-    async def _get_beams(self, request: CompletionRequest, raw_request: Optional[Request] = None):
-        request.stream = False
-        n = request.n
-        request.n = 1
-        request.max_tokens = _CHUNK_SIZE
-        request.echo = True
-        tasks = []
-        for _ in range(n):
-            request = request
-            tasks.append(self.create_completion(
-                request,
-            ))
-        res = await asyncio.gather(*tasks)
-        request.n = n
-        return res
-
+        self.beam_validator = BeamValidator(classi_idx=MEOW_CLASSI_IDX, classifier_names=MEOW_CLASSI_IDX.keys())
 
     async def create_completion_with_chunkwise_beam(
-            self,
-            request: CompletionRequest,
-            raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
+        self,
+        request: CompletionRequest,
+        raw_request: Optional[Request] = None,
+) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
         """
-        Chunkwise beam search hack
-        """
+    Chunkwise beam search hack
+    """
         async def _process_prefix(request: CompletionRequest):
-            request = request
             og_max_tokens = request.max_tokens
             og_n = request.n
             request.max_tokens = 1
             request.n = 1
             res = await self.create_completion(
-                request,
-                raw_request=raw_request,
-            )
+            request,
+            raw_request=raw_request,
+        )
             request.max_tokens = og_max_tokens
-            request.n =  og_n
-            input_tokens_len = res.usage.prompt_tokens
-            return input_tokens_len
-        
-        input_tokens_len = await _process_prefix(request)
-        num_chunks = 0
-        eom = False
-        final = None
-        while num_chunks < 4 and not eom:
-            num_chunks += 1
-            beams = await self._get_beams(request=request, raw_request=raw_request)
-            final = await self.beam_scorer.collapse_beams(beams, num_chunks)
-            request.prompt = final.choices[0].text
-            eom = final.choices[0].finish_reason == "stop"
+            request.n = og_n
+            return res
+    
+        res = await _process_prefix(request)
+        input_str_len = len(request.prompt)
 
-        print('num_chunks', num_chunks)
-        print('input_tokens_len', input_tokens_len)
-        return final
+        async def _chunk_generator():
+            num_chunks = 0
+            eom = False
+        
+            while num_chunks < 4 and not eom:
+                num_chunks += 1
+                beams = await self.beam_validator.get_n_valid_beams(create_completion=self.create_completion, request=request, raw_request=raw_request)
+                final = await self.beam_scorer.collapse_beams(beams, num_chunks)
+                request.prompt = final.choices[0].text
+                eom = final.choices[0].finish_reason == "stop"
+                yield f"data: {final.model_dump_json()}\n\n"
+            
+                if eom:
+                    return
+        
+            # Final chunk with trimmed text
+            if final:
+                final.choices[0].text = final.choices[0].text[input_str_len:]
+                yield f"data: {final.choices[0].text}\n\n"
+        
+            yield "data: [DONE]\n\n"
+    
+        return _chunk_generator()
 
     async def create_completion(
         self,
