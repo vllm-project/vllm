@@ -214,9 +214,7 @@ def deep_gemm_moe_fp8(
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(quant_dtype=torch.float8_e4m3fn,
-                                  per_act_token_quant=False,
-                                  block_shape=deep_gemm_block_shape()),
+        MoEPrepareAndFinalizeNoEP(),
         DeepGemmExperts(),
     )
     return fn(

@@ -1617,12 +1617,13 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int4_w4a16: bool = False,
         per_act_token_quant: bool = False,
         block_shape: Optional[list[int]] = None,
-        block_m: Optional[int] = None,
     ):
-        quant_dtype = get_config_quant_dtype(use_fp8_w8a8=use_fp8_w8a8,
-                                             use_int8_w8a8=use_int8_w8a8,
-                                             use_int8_w8a16=use_int8_w8a16,
-                                             use_int4_w4a16=use_int4_w4a16)
+        quant_dtype = get_config_quant_dtype(
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16
+        )
 
         super().__init__(
             quant_dtype,
@@ -1634,7 +1635,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_int4_w4a16 = use_int4_w4a16
         self.use_int8_w8a8 = use_int8_w8a8
         self.use_int8_w8a16 = use_int8_w8a16
-        self.block_m = block_m
 
     def supports_chunking(self) -> bool:
         return True
@@ -1803,11 +1803,7 @@ def modular_triton_fused_moe(
         use_int4_w4a16=use_int4_w4a16,
     )
     return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(
-            quant_dtype=quant_dtype,
-            per_act_token_quant=per_act_token_quant,
-            block_shape=block_shape,
-        ),
+        MoEPrepareAndFinalizeNoEP(),
         TritonExperts(
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,

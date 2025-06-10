@@ -21,7 +21,6 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         use_int4_w4a16: bool = False,
         per_act_token_quant: bool = False,
         block_shape: Optional[list[int]] = None,
-        block_m: Optional[int] = None,
         allow_deep_gemm: bool = False,
     ):
         quant_dtype = get_config_quant_dtype(
@@ -42,7 +41,6 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_int8_w8a16=use_int8_w8a16,
             per_act_token_quant=per_act_token_quant,
             block_shape=block_shape,
-            block_m=block_m,
         )
         self.allow_deep_gemm = (allow_deep_gemm and
                                 not per_act_token_quant and

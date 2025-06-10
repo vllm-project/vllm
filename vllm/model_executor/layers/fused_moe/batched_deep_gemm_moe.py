@@ -19,22 +19,29 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     # The Deep Gemm kernels only support block size of 128
     DEEPGEMM_BLOCK_SHAPE = 128
 
-    def __init__(self, max_num_tokens: int, world_size: int, dp_size: int,
-                 block_shape: list[int]):
+    def __init__(
+        self,
+        max_num_tokens: int,
+        world_size: int,
+        dp_size: int,
+        block_shape: list[int]
+    ):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
         world_size: Number of EP ranks
         dp_size: Number of data-parallel ranks
         block_shape: Block quantization block shape
         """
-        super().__init__()
+
+        assert self.block_shape == [self.DEEPGEMM_BLOCK_SHAPE, self.DEEPGEMM_BLOCK_SHAPE]
+        super().__init__(
+            quant_dtype=torch.float8_e4m3fn,
+            block_shape=block_shape,
+            per_act_token_quant=False,
+        )
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.dp_size = dp_size
-        self.block_shape = block_shape
-
-        assert (len(self.block_shape) == 2 and all(
-            [v == self.DEEPGEMM_BLOCK_SHAPE for v in self.block_shape]))
 
     def supports_chunking(self) -> bool:
         return False

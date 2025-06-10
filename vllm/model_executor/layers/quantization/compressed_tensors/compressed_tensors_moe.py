@@ -18,7 +18,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (MOE_DP_CHUNK_SIZE, FusedMoE,
+from vllm.model_executor.layers.fused_moe import (FusedMoE,
                                                   FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
@@ -143,8 +143,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             is_rocm_aiter_moe_enabled)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
-
-        self.use_pplx_kernels = False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -323,23 +321,22 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def select_gemm_impl(self, prepare_finalize):
         from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-            BatchedPrepareAndFinalize, BatchedTritonExperts)
-        from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-            PplxPrepareAndFinalize)
+            BatchedTritonExperts)
 
         assert not self.rocm_aiter_moe_enabled and not self.use_marlin
-
-        assert isinstance(prepare_finalize,
-                          (BatchedPrepareAndFinalize, PplxPrepareAndFinalize))
 
         logger.debug("BatchedTritonExperts(%s)", self.__classname__.__name__)
 
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
-        self.use_pplx_kernels = True
+        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+        use_batched_experts = max_num_tokens_per_rank is not None
+
+        assert use_batched_experts
+
         return BatchedTritonExperts(
-            max_num_tokens=MOE_DP_CHUNK_SIZE,
+            max_num_tokens=max_num_tokens_per_rank,
             world_size=all2all_manager.world_size,
             dp_size=all2all_manager.tp_group.world_size,
             use_fp8_w8a8=True,
@@ -379,7 +376,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            indices_type=torch.uint32 if self.use_pplx_kernels else None)
+            indices_type=self.topk_indices_dtype,
+        )
 
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts_func(
@@ -599,6 +597,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             (moe.num_experts + prepare_finalize.world_size - 1) //
             prepare_finalize.world_size)
 
+        logger.debug("CutlassExpertsFp8(%s)", self.__classname__.__name__)
+
         experts = CutlassExpertsFp8(
             max_experts_per_worker,
             None,  # moe.in_dtype?
@@ -645,7 +645,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            indices_type=torch.uint32)
+            indices_type=self.topk_indices_dtype,
+        )
 
         return self.fused_experts(
             x,

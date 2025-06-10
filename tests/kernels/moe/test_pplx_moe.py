@@ -393,6 +393,7 @@ def pplx_moe(
     max_num_tokens = round_up(rank_chunk(a.shape[0], 0, world_size), 64)
 
     hidden_dim_bytes, scale_bytes = pplx_hidden_dim_scale_bytes(
+        max_num_tokens,
         hidden_dim,
         a.dtype,
         qtype,
@@ -426,9 +427,6 @@ def pplx_moe(
         world_size,
         rank,
         dp_size,
-        quant_dtype=qtype,
-        per_act_token_quant=per_act_token_quant,
-        block_shape=block_shape,
     )
 
     experts = BatchedTritonExperts(max_num_tokens=max_num_tokens,

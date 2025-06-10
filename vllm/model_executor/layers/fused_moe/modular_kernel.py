@@ -81,22 +81,13 @@ def _moe_problem_size(
 
     return E, M, N, K, topk
 
+# TODO: pass FusedMoEParallelConfig in as ctor parameter?
 
 class FusedMoEPrepareAndFinalize(ABC):
     """
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above.
     """
-
-    def __init__(
-        self,
-        quant_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        block_shape: Optional[list[int]],
-    ):
-        self.quant_dtype = quant_dtype
-        self.per_act_token_quant = per_act_token_quant
-        self.block_shape = block_shape
 
     @abstractmethod
     def prepare(
@@ -109,6 +100,9 @@ class FusedMoEPrepareAndFinalize(ABC):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
+        quant_dtype: Optional[torch.dtype],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
@@ -192,6 +186,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         per_act_token_quant: bool,
         block_shape: Optional[list[int]],
     ):
+        assert not per_act_token_quant or block_shape is None
         self.quant_dtype = quant_dtype
         self.per_act_token_quant = per_act_token_quant
         self.block_shape = block_shape
@@ -400,8 +395,11 @@ class FusedMoEModularKernel(torch.nn.Module):
         (a1q, a1q_scale, expert_num_tokens, _expert_topk_ids,
          _expert_topk_weights) = self.prepare_finalize.prepare(
              a1, a1_scale, a2_scale, topk_weights, topk_ids,
-             global_num_experts, expert_map, apply_router_weight_on_input)
-
+             global_num_experts, expert_map, apply_router_weight_on_input,
+             self.fused_experts.quant_dtype,
+             self.fused_experts.per_act_token_quant,
+             self.fused_experts.block_shape,
+         )
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
         topk_weights = (topk_weights if _expert_topk_weights is None else

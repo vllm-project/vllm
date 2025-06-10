@@ -202,8 +202,7 @@ def run_cutlass_moe_fp8(
 
 
 # TODO (bnell): split class batched vs. non-batched?
-class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
-
+# maybe remove need for passing aq to workspace_shapes
 class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
@@ -212,12 +211,13 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         out_dtype: Optional[torch.dtype],
         per_act_token_quant: bool,
         per_out_ch_quant: bool,
+        block_shape: Optional[list[int]] = None,
         use_batched_format: bool = False,
     ):
         super().__init__(
             quant_dtype=torch.float8_e4m3fn,
             per_act_token_quant=per_act_token_quant,
-            block_shape=None,
+            block_shape=block_shape,
         )
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
@@ -345,11 +345,7 @@ def cutlass_moe_fp8(
         out_dtype = a.dtype
 
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(
-            quant_dtype=torch.float8_e4m3fn,
-            per_act_token_quant=per_act_token,
-            block_shape=None,
-        ),
+        MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsFp8(
             max_experts_per_worker=global_num_experts,
             out_dtype=out_dtype,

@@ -787,20 +787,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
         use_batched_experts = max_num_tokens_per_rank is not None
 
+        assert use_batched_experts
+
         if use_batched_experts:
             logger.debug(
-                "BatchedTritonOrDeepGemmExperts(%s): block_size=%s, per_act_token=%s",
+                "BatchedTritonOrDeepGemmExperts(%s): max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
                 self.__class__.__name__,
+                max_num_tokens_per_rank,
                 self.quant_config.weight_block_size,
                 False
             )
             return BatchedTritonOrDeepGemmExperts(
-                max_num_tokens=max_num_tokens_per_rank,
-                world_size=prepare_finalize.world_size,
-                dp_size=prepare_finalize.dp_size,
-                qtype=torch.float8_e4m3fn,
+                max_num_tokens=max_num_tokens_per_rank, # get from prepare_finalize?
+                world_size=prepare_finalize.world_size, # sketchy
+                dp_size=prepare_finalize.dp_size,       # sketchy
+                use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
-                per_act_token=False,  #?
+                per_act_token_quant=False,  #?
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         else:
@@ -835,7 +838,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,

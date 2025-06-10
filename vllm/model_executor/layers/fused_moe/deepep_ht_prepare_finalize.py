@@ -20,17 +20,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  world_size: int,
                  rank: int,
                  dp_size: int,
-                 rank_expert_offset: int,
-                 quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None):
+                 rank_expert_offset: int):
         super().__init__()
         self.buffer = buffer
         self.world_size = world_size
         self.rank = rank
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
-        self.quant_dtype = quant_dtype
-        self.block_shape = block_shape
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
@@ -135,6 +131,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
+        quant_dtype: Optional[torch.dtype],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 

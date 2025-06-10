@@ -12,6 +12,7 @@ from vllm.utils import cdiv, round_up
 
 
 def pplx_hidden_dim_scale_bytes(
+    max_num_tokens: int,
     hidden_dim: int,
     in_dtype: torch.dtype,
     quant_dtype: Optional[torch.dtype],
@@ -21,18 +22,25 @@ def pplx_hidden_dim_scale_bytes(
     # For blocked per token: set to
     #   ceil_div(hidden_dim, block_size) * sizeof(float32)
     # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
-    if quant_dtype is not None and quant_dtype.itemsize == 1:
+    if quant_dtype is not None:
+        assert quant_dtype.itemsize == 1
         hidden_dim_bytes = hidden_dim * quant_dtype.itemsize
         elem_size = torch.float32.itemsize
-        if block_shape is not None:
-            assert not per_act_token_quant
+        align = 16
+
+        if per_act_token_quant:
+            # per-token
+            assert block_shape is None
+            hidden_scale_bytes = round_up(max_num_tokens * elem_size, align)
+        elif block_shape is not None:
+            # per-group
             block_size = block_shape[1]
-            hidden_scale_bytes = round_up(
-                (cdiv(hidden_dim, block_size) * elem_size), elem_size)
-        elif per_act_token_quant:
-            hidden_scale_bytes = hidden_dim * elem_size
+            num_blocks = cdiv(hidden_dim, block_size)
+            hidden_scale_bytes = round_up(num_blocks * elem_size, align)
         else:
-            hidden_scale_bytes = 4 * elem_size
+            # per-tensor
+            # ?
+            hidden_scale_bytes = round_up(elem_size, align)
     else:
         hidden_dim_bytes = hidden_dim * in_dtype.itemsize
         hidden_scale_bytes = 0
@@ -51,15 +59,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         world_size: int,
         rank: int,
         dp_size: int,
-        quant_dtype: Optional[torch.dtype] = None,
-        per_act_token_quant: bool = False,
-        block_shape: Optional[list[int]] = None,
     ):
-        super().__init__(
-            quant_dtype,
-            per_act_token_quant,
-            block_shape,
-        )
         assert max_num_tokens > 0
         self.a2a = a2a
         self.max_num_tokens = max_num_tokens
@@ -83,6 +83,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
+        quant_dtype: Optional[torch.dtype],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
         num_tokens = a1.size(0)  # M
@@ -102,8 +105,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
         a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, (None if self.per_act_token_quant else a1_scale), self.quant_dtype,
-            self.per_act_token_quant, self.block_shape)
+            a1, (None if per_act_token_quant else a1_scale), quant_dtype,
+            per_act_token_quant, block_shape)
 
         if a1q_scale is not None:
             scalar_scales = a1q_scale.numel() == 1
@@ -137,7 +140,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
         num_dp = self.world_size // self.dp_size
-        expert_x = torch.empty(
+        expert_x = torch.zeros(
             (num_local_experts, self.max_num_tokens * num_dp, hidden_dim),
             dtype=a1q.dtype,
             device=device,
@@ -146,7 +149,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
             float32_size = torch.float32.itemsize
-            block_size = (self.block_shape[1] if self.block_shape is not None else 1) * float32_size
+            block_size = (block_shape[1] if block_shape is not None else 1) * float32_size
 
             expert_x_scale_shape = (
                 num_local_experts,
