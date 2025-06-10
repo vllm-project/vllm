@@ -122,7 +122,6 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
-    VLLM_USE_TRITON_CONV1D: bool = False
     VLLM_SLEEP_WHEN_IDLE: bool = False
 
 
@@ -832,10 +831,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "deepep_low_latency", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
-
-    # use Triton implementation of causal-conv1d
-    "VLLM_USE_TRITON_CONV1D":
-    lambda: os.getenv("VLLM_USE_TRITON_CONV1D", "0") == "1",
 
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
