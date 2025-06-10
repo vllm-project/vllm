@@ -107,7 +107,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 softmax_scale,
                 None,  # bias
             )
-            # The output of triton_attention is a tuple of [output_tensor, encoded_softmax]
+            # The output of triton_attention is a tuple of
+            # [output_tensor, encoded_softmax]
             return attn_out[0]
         else:
             return super()._flash_attn_varlen_diff_headdims(
