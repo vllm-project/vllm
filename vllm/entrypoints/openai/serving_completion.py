@@ -48,12 +48,9 @@ from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators
 
-from numba.np.old_arraymath import numpy_unwrap
 
 logger = init_logger(__name__)
 
-
-_CHUNK_SIZE = 16
 
 class OpenAIServingCompletion(OpenAIServing):
 
@@ -110,26 +107,24 @@ class OpenAIServingCompletion(OpenAIServing):
         res = await _process_prefix(request)
         input_str_len = len(request.prompt)
 
+        async def _should_stop(final):
+            return final.choices[0].finish_reason == "stop" or final.choices[0].is_filtered
+        
         async def _chunk_generator():
             num_chunks = 0
-            eom = False
+            should_stop = False
         
-            while num_chunks < 4 and not eom:
+            while num_chunks < 4 and not should_stop:
                 num_chunks += 1
                 beams = await self.beam_validator.get_n_valid_beams(create_completion=self.create_completion, request=request, raw_request=raw_request)
                 final = await self.beam_scorer.collapse_beams(beams, num_chunks)
                 request.prompt = final.choices[0].text
-                eom = final.choices[0].finish_reason == "stop"
+                should_stop = await _should_stop(final)
                 final.choices[0].text = final.choices[0].text[input_str_len:]
                 yield f"data: {final.model_dump_json()}\n\n"
             
-                if eom:
+                if should_stop:
                     return
-        
-            # Final chunk with trimmed text
-            if final:
-                final.choices[0].text = final.choices[0].text[input_str_len:]
-                yield f"data: {final.model_dump_json()}\n\n"
         
             yield "data: [DONE]\n\n"
     
