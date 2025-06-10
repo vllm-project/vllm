@@ -10,7 +10,7 @@ from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 # ruff: noqa: E501
 
 
-def test_disable_fast_detok_env_var():
+def test_fast_inc_detok_invalid_utf8_err_case():
     """
     Test edge case where tokenizer can produce non-monotonic,
     invalid UTF-8 output, which breaks the internal state of
@@ -60,12 +60,16 @@ def test_disable_fast_detok_env_var():
         2555, 513, 236789, 602, 31118, 569
     ]
 
-    output = ""
-    for i, token_id in enumerate(test_tokens):
-        detokenizer.update([token_id], False)
+    try:
+        output = ""
+        for i, token_id in enumerate(test_tokens):
+            detokenizer.update([token_id], False)
 
-        finished = i == len(test_tokens) - 1
-        output += detokenizer.get_next_output_text(finished, delta=True)
+            finished = i == len(test_tokens) - 1
+            output += detokenizer.get_next_output_text(finished, delta=True)
+    except Exception as e:
+        print("TYPE IS", type(e))
+        raise e
 
 
 # fmt: off
