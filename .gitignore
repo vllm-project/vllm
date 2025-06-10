@@ -2,6 +2,8 @@
 /vllm/_version.py
 
 # vllm-flash-attn built from source
+vllm-kernels/vllm_kernels/vllm_flash_attn/*
+# for historical purposes
 vllm/vllm_flash_attn/*
 
 # Byte-compiled / optimized / DLL files
@@ -34,6 +36,7 @@ share/python-wheels/
 *.egg
 MANIFEST
 /.deps/
+.deps/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

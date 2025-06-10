@@ -75,7 +75,6 @@ if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
 else()
     find_isa(${CPUINFO} "avx2" AVX2_FOUND)
     find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
-    find_isa(${CPUINFO} "Power11" POWER11_FOUND)
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
@@ -102,24 +101,18 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     else()
         message(WARNING "Disable AVX512-BF16 ISA support, no avx512_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512BF16=1.")
     endif()
-    
+
 elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
-    
-elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
+
+elseif (POWER9_FOUND OR POWER10_FOUND)
     message(STATUS "PowerPC detected")
-    if (POWER9_FOUND)
-        list(APPEND CXX_COMPILE_FLAGS
-            "-mvsx"
-            "-mcpu=power9"
-            "-mtune=power9")
-    elseif (POWER10_FOUND OR POWER11_FOUND)
-        list(APPEND CXX_COMPILE_FLAGS
-            "-mvsx"
-            "-mcpu=power10"
-            "-mtune=power10")
-    endif()
+    # Check for PowerPC VSX support
+    list(APPEND CXX_COMPILE_FLAGS
+        "-mvsx"
+        "-mcpu=native"
+        "-mtune=native")
 
 elseif (ASIMD_FOUND)
     message(STATUS "ARMv8 or later architecture detected")
@@ -129,9 +122,9 @@ elseif (ASIMD_FOUND)
         add_compile_definitions(ARM_BF16_SUPPORT)
     else()
         message(WARNING "BF16 functionality is not available")
-        set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
+        set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")
     endif()
-    list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
+    list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})
 elseif(APPLE_SILICON_FOUND)
     message(STATUS "Apple Silicon Detected")
     set(ENABLE_NUMA OFF)
@@ -173,7 +166,7 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
     FetchContent_MakeAvailable(oneDNN)
-    
+
     list(APPEND LIBS dnnl)
 elseif(POWER10_FOUND)
     FetchContent_Declare(
@@ -243,7 +236,7 @@ endif()
 
 define_gpu_extension_target(
     _C
-    DESTINATION vllm
+    DESTINATION vllm_kernels
     LANGUAGE CXX
     SOURCES ${VLLM_EXT_SRC}
     LIBRARIES ${LIBS}
