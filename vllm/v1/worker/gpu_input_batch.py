@@ -611,13 +611,15 @@ class InputBatch:
 
     @property
     def pooling_metadata(self) -> PoolingMetadata:
-
-        # Note, for now this assumes that all request in the batch
-        # are either sampling or pooling requests
-        assert len(self.req_ids) == len(self.pooling_params)
-        pooling_params = [
-            self.pooling_params[req_id] for req_id in self.req_ids
-        ]
+        if len(self.pooling_params) == 0:
+            pooling_params = []
+        else:
+            # Note, for now this assumes that all request in the batch
+            # are either sampling or pooling requests
+            assert len(self.req_ids) == len(self.pooling_params)
+            pooling_params = [
+                self.pooling_params[req_id] for req_id in self.req_ids
+            ]
 
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(
