@@ -13,16 +13,6 @@ fi
 # install dependencies if not installed
 pip3 install cmake torch ninja
 
-# build gdrcopy, required by nvshmem
-pushd $WORKSPACE
-wget https://github.com/NVIDIA/gdrcopy/archive/refs/tags/v2.4.4.tar.gz
-mkdir -p gdrcopy_src
-tar -xvf v2.4.4.tar.gz -C gdrcopy_src --strip-components=1
-pushd gdrcopy_src
-make -j$(nproc)
-make prefix=$WORKSPACE/gdrcopy_install install
-popd
-
 # build nvshmem
 pushd $WORKSPACE
 mkdir -p nvshmem_src

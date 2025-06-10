@@ -20,6 +20,6 @@ bash install_python_libraries.sh
 
 ```bash
 bash install_python_libraries.sh
-sudo bash install_system_drivers.sh
+sudo bash configure_system_drivers.sh
 sudo reboot # Reboot is required to load the new driver
 ```
