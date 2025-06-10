@@ -1442,7 +1442,7 @@ class EngineArgs:
 
         # Non-[CUDA, TPU] may be supported on V1, but off by default for now.
         v0_hardware = not any(
-            (current_platform.is_cuda(), current_platform.is_tpu(),
+            (current_platform.is_cuda_alike(), current_platform.is_tpu(),
              (current_platform.is_cpu()
               and current_platform.get_cpu_architecture() == CpuArchEnum.X86)))
         if v0_hardware and _warn_or_fallback(  # noqa: SIM103
