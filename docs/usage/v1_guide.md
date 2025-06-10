@@ -54,7 +54,7 @@ This living user guide outlines a few known **important changes and limitations*
 | **FP8 KV Cache**                            | <nobr>🟢 Functional on Hopper devices ([PR #15191](https://github.com/vllm-project/vllm/pull/15191))</nobr>|
 | **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
 | **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
-| **Structured Output Alternative Backends**  | <nobr>🟡 Planned</nobr>                                                           |
+| **Structured Output Alternative Backends**  | <nobr>🟢 Functional</nobr>                                                        |
 | **Embedding Models**                        | <nobr>🚧 WIP ([PR #16188](https://github.com/vllm-project/vllm/pull/16188))</nobr> |
 | **Mamba Models**                            | <nobr>🟡 Planned</nobr>                                                           |
 | **Encoder-Decoder Models**                  | <nobr>🟠 Delayed</nobr>                                                           |
@@ -131,13 +131,6 @@ in progress.
 
 - **Multimodal Models**: V1 is almost fully compatible with V0 except that interleaved modality input is not supported yet.
   See [here](https://github.com/orgs/vllm-project/projects/8) for the status of upcoming features and optimizations.
-
-#### Features to Be Supported
-
-- **Structured Output Alternative Backends**: Structured output alternative backends (outlines, guidance) support is planned. V1 currently
-  supports only the `xgrammar:no_fallback` mode, meaning that it will error out if the output schema is unsupported by xgrammar.
-  Details about the structured outputs can be found
-  [here](https://docs.vllm.ai/en/latest/features/structured_outputs.html).
 
 #### Models to Be Supported
 
