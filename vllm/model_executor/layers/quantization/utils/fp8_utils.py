@@ -145,7 +145,7 @@ def apply_w8a8_block_fp8_linear(
             column_major_scales=True,
         )
 
-        output = deepgemm.w8a8_block_fp8_matmul_deepgemm(
+        output = torch.ops.vllm.w8a8_block_fp8_matmul_deepgemm(
             q_input,
             weight,
             x_scale,
