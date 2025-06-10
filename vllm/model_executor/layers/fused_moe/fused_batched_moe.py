@@ -335,9 +335,6 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config['BLOCK_SIZE_M']
     BLOCK_N = config['BLOCK_SIZE_N']
     BLOCK_K = config['BLOCK_SIZE_K']
-    assert (torch.compiler.is_compiling()
-            or torch.cuda.is_current_stream_capturing()
-            or max_num_tokens % BLOCK_M == 0)
 
     grid = (expert_num_tokens.size(0), triton.cdiv(max_num_tokens, BLOCK_M) *
             triton.cdiv(B.size(1), BLOCK_N))
@@ -390,7 +387,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     that the PPLX dispatch/combine kernels use.
     """
 
-    def __init__(self, max_num_tokens: Optional[int], world_size: int,
+    def __init__(self, max_num_tokens: int, world_size: int,
                  dp_size: int, rank: int):
         super().__init__()
         self.world_size = world_size
@@ -430,14 +427,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_tokens, hidden_dim = a1.size()
         topk = topk_ids.size(1)
 
-        if self.max_num_tokens is None:
-            tokens_per_expert = torch.bincount(topk_ids.view(-1),
-                                               minlength=num_experts)
-            self.max_num_tokens = int(tokens_per_expert.max().item())
-        else:
-            tokens_per_expert = torch.zeros(num_experts,
-                                            dtype=torch.int,
-                                            device=a1.device)
+        tokens_per_expert = torch.zeros(num_experts,
+                                        dtype=torch.int,
+                                        device=a1.device)
 
         assert num_experts % self.world_size == 0
 
@@ -497,9 +489,9 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
+        max_num_tokens: int,
         world_size: int,
         dp_size: int,
-        max_num_tokens: Optional[int] = None,
         use_fp8_w8a8: bool = False,
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
@@ -533,10 +525,8 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         num_dp = self.world_size // self.dp_size
-        max_num_tokens = a.size(
-            0) if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = (num_experts, max_num_tokens * num_dp, K)
-        workspace2 = (max_num_tokens * num_dp, N)
+        workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
+        workspace2 = (self.max_num_tokens * num_dp, N)
         return (workspace13, workspace2, workspace13, a.dtype)
 
     def apply(
@@ -562,11 +552,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert hidden_states.dim() == 3
         assert expert_num_tokens is not None
 
-        if self.max_num_tokens is None:
-            max_num_tokens = hidden_states.size(1)
-        else:
-            max_num_tokens = self.max_num_tokens
-
+        max_num_tokens = self.max_num_tokens
         num_dp = self.world_size // self.dp_size
         num_local_experts = w1.size(0)
         assert num_local_experts == w1.size(0), (
@@ -584,7 +570,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # Indexing expert_num_tokens doesn't work w/cudagraphs or inductor
             if (torch.compiler.is_compiling()
                     or torch.cuda.is_current_stream_capturing()):
-                num = max_num_tokens * num_dp
+                num = hidden_states.shape[1]
             else:
                 num = int(expert_num_tokens[expert].item())
             tmp = _resize_cache(workspace2, (num, N))

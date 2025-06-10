@@ -232,8 +232,8 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         if self.use_batched_format:
             padded_M = aq.shape[1]
-            workspace1 = self.max_experts_per_worker * padded_M * max(N, K)
-            workspace2 = self.max_experts_per_worker * padded_M * (N // 2)
+            workspace1 = (self.max_experts_per_worker, padded_M, max(N, K))
+            workspace2 = (self.max_experts_per_worker, padded_M, (N // 2))
             output: tuple[int,
                           ...] = (self.max_experts_per_worker, padded_M, K)
         else:
