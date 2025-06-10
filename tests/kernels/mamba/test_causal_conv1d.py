@@ -8,7 +8,6 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 
-from tests.kernels.utils import opcheck
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
@@ -144,10 +143,6 @@ def causal_conv1d_opcheck_fn(x: torch.Tensor,
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    opcheck(torch.ops._C.causal_conv1d_fwd,
-            (x, weight, bias, conv_states, cu_seq_len, cache_indices,
-             has_initial_state, activation in ["silu", "swish"], pad_slot_id))
-
 
 @pytest.mark.parametrize("itype", [torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
@@ -186,10 +181,6 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation,
     assert torch.equal(conv_state, conv_state_ref)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
-    opcheck(torch.ops._C.causal_conv1d_update,
-            (x, conv_state, weight, bias, activation
-             in ["silu", "swish"], None, None, PAD_SLOT_ID))
-
 
 @pytest.mark.parametrize("itype",
                          [torch.float32, torch.float16, torch.bfloat16])
@@ -217,20 +208,9 @@ def test_causal_conv1d_update_with_batch_gather(batch_size, with_padding, dim,
     # total_entries = number of cache line
     total_entries = 10 * batch_size
 
-    channel_last = True
-    if not channel_last:
-        x = torch.randn(padded_batch_size,
-                        dim,
-                        seqlen,
-                        device=device,
-                        dtype=itype)
-    else:
-        # x will be (batch, dim, seqlen) with contiguous along dim-axis
-        x = torch.randn(padded_batch_size,
-                        seqlen,
-                        dim,
-                        device=device,
-                        dtype=itype).transpose(1, 2)
+    # x will be (batch, dim, seqlen) with contiguous along dim-axis
+    x = torch.randn(padded_batch_size, seqlen, dim, device=device,
+                    dtype=itype).transpose(1, 2)
 
     x_ref = x.clone()
 
@@ -247,20 +227,13 @@ def test_causal_conv1d_update_with_batch_gather(batch_size, with_padding, dim,
     ],
                                         dim=0)
 
-    if not channel_last:
-        conv_state = torch.randn(total_entries,
-                                 dim,
-                                 width - 1,
-                                 device=device,
-                                 dtype=itype)
-    else:
-        # conv_state will be (cache_lines, dim, state_len)
-        # with contiguous along dim-axis
-        conv_state = torch.randn(total_entries,
-                                 width - 1,
-                                 dim,
-                                 device=device,
-                                 dtype=itype).transpose(1, 2)
+    # conv_state will be (cache_lines, dim, state_len)
+    # with contiguous along dim-axis
+    conv_state = torch.randn(total_entries,
+                             width - 1,
+                             dim,
+                             device=device,
+                             dtype=itype).transpose(1, 2)
 
     conv_state_for_padding_test = conv_state.clone()
 
@@ -292,7 +265,7 @@ def test_causal_conv1d_update_with_batch_gather(batch_size, with_padding, dim,
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
 @pytest.mark.parametrize("width", [4])
-@pytest.mark.parametrize('seqlen', [8, 2049, 4096])
+@pytest.mark.parametrize('seqlen', [8, 30, 249, 2049, 4096])
 @pytest.mark.parametrize('dim', [64, 4096])
 @pytest.mark.parametrize('with_padding', [True, False])
 @pytest.mark.parametrize('batch', [4, 10])
@@ -325,14 +298,9 @@ def test_causal_conv1d_varlen(batch, with_padding, dim, seqlen, width,
     cumsum = torch.cumsum(torch.tensor(seqlens[0]), dim=0).to(torch.int32)
     cumsum = torch.concat([torch.tensor([0], dtype=torch.int32), cumsum],
                           dim=0)
-    channel_last = True
-    if not channel_last:
-        x = torch.randn(1, 4096 + dim + 64, seqlen, device=device,
-                        dtype=itype)[:, 4096:4096 + dim, :]
-    else:
-        x = rearrange(
-            torch.randn(1, seqlen, 4096 + dim + 64, device=device,
-                        dtype=itype), "b s d -> b d s")[:, 4096:4096 + dim, :]
+    x = rearrange(
+        torch.randn(1, seqlen, 4096 + dim + 64, device=device, dtype=itype),
+        "b s d -> b d s")[:, 4096:4096 + dim, :]
 
     weight = torch.randn(dim, width, device=device, dtype=itype)
 
@@ -341,18 +309,11 @@ def test_causal_conv1d_varlen(batch, with_padding, dim, seqlen, width,
     weight_ref = weight.clone()
     bias_ref = bias.clone() if bias is not None else None
     activation = None if not silu_activation else "silu"
-    if not channel_last:
-        final_states = torch.randn(total_entries,
-                                   dim,
-                                   width - 1,
-                                   device=x.device,
-                                   dtype=x.dtype)
-    else:
-        final_states = torch.randn(total_entries,
-                                   width - 1,
-                                   dim,
-                                   device=x.device,
-                                   dtype=x.dtype).transpose(1, 2)
+    final_states = torch.randn(total_entries,
+                               width - 1,
+                               dim,
+                               device=x.device,
+                               dtype=x.dtype).transpose(1, 2)
     final_states_ref = final_states.clone()
     has_initial_states = torch.randint(0,
                                        2, (cumsum.shape[0] - 1, ),

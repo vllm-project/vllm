@@ -416,16 +416,15 @@ def causal_conv1d_fn(
         activation = "silu"
 
     args = None
+    out = torch.zeros_like(x)
     if metadata is not None:
         cu_seqlen = metadata.cu_seqlen
-        out = metadata.out
         nums_dict = metadata.nums_dict
         #x = metadata.x
         args = nums_dict
         batch_ptr = metadata.batch_ptr
         token_chunk_offset_ptr = metadata.token_chunk_offset_ptr
     else:
-        out = torch.zeros_like(x)
         seqlens = np.diff(query_start_loc.to('cpu'))
         args = seqlens
         MAX_NUM_PROGRAMS = 1024

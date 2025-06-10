@@ -47,7 +47,6 @@ class Mamba2Metadata:
     """
     nums_dict: Optional[dict] = None
     cu_seqlen: Optional[int] = None
-    out: Optional[torch.Tensor] = None
     MAX_NUM_PROGRAMS: int = 1024
     batch_ptr: Optional[torch.tensor] = None
     token_chunk_offset_ptr: Optional[torch.tensor] = None
@@ -176,9 +175,7 @@ def update_metadata(x: torch.Tensor, query_start_loc: torch.Tensor,
     this is triggered upon handling a new input at the first layer
     """
     dim, cu_seqlen = x.shape
-    out = torch.zeros_like(x)
     mamba2_metadata.cu_seqlen = cu_seqlen
-    mamba2_metadata.out = out
     seqlens = np.diff(query_start_loc.to('cpu'))
     nums_dict = {}  # type: ignore
     for BLOCK_M in [8]:  # cover all BLOCK_M values
