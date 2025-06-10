@@ -9,7 +9,7 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported,UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
-    get_linear_quant_method)
+    get_linear_quant_method,override_config, get_dynamic_override)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported, check_moe_marlin_supports_layer,
     marlin_make_workspace_new, marlin_moe_permute_scales,
@@ -31,9 +31,31 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            RowvLLMParameter)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from copy import deepcopy
 
 logger = init_logger(__name__)
 
+def get_moe_quant_method(
+        config: QuantizationConfig,
+        layer: torch.nn.Module,
+        prefix: str,
+        moe_method_cls: type,
+    ):
+    cloned_config = deepcopy(config)
+
+    if isinstance(layer, FusedMoE):
+        # False = skip module, None = no override, else = Positive match
+        if get_dynamic_override(  # noqa: E712
+                cloned_config,  # noqa: E712
+                layer_name=prefix) == False:  # noqa: E712
+            return UnquantizedFusedMoEMethod(layer.moe_config)
+
+        if prefix:
+            # Dynamic per module/layer rules may override base config
+            override_config(cloned_config, prefix=prefix)
+
+        return moe_method_cls(cloned_config)
+    return None
 
 class GPTQMarlinConfig(QuantizationConfig):
     """Config class for GPTQ Marlin"""
@@ -163,7 +185,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            return GPTQMarlinMoEMethod(self)
+            return get_moe_quant_method(self,layer, prefix, GPTQMarlinMoEMethod)
         return get_linear_quant_method(self, layer, prefix,
                                        GPTQMarlinLinearMethod)
 
