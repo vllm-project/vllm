@@ -373,8 +373,6 @@ class Fp8LinearOp:
             else:
                 qinput, x_scale = input_2d, input_scale
 
-        # per_tensor_weights = (weight_scale.numel() == 1)
-        # per_tensor_activations = (x_scale.numel() == 1)
         per_tensor_weights = (weight_scale.numel()
                               == 1) and weight_scale.dim() < 2
         per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
