@@ -3,6 +3,7 @@
 
 # imports for guided decoding tests
 import json
+import os
 from typing import Optional
 
 import jsonschema
@@ -12,6 +13,7 @@ import pytest_asyncio
 import regex as re
 import requests
 import torch
+from huggingface_hub import snapshot_download
 from openai import BadRequestError, OpenAI
 
 from ...conftest import AudioTestAssets
@@ -22,8 +24,11 @@ from .test_completion import zephyr_lora_files  # noqa: F401
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # Contains a modality specific lora alongside the base model
-MULTIMODAL_MODEL_NAME = "ibm-granite/granite-speech-3.3-2b"
-ACTIVE_MM_LORA_RESPONSE = "the first words i spoke in the original chorus a little piece of practical poetry mary had a little lamb its fleece was white as"  # noqa: E501
+MULTIMODAL_MODEL_NAME = snapshot_download(
+    "microsoft/Phi-4-multimodal-instruct")
+AUDIO_LORA_PATH = os.path.join(MULTIMODAL_MODEL_NAME, "speech-lora")
+
+ACTIVE_MM_LORA_RESPONSE = "Spoken text: The first words I spoke in the original chronograph, a little piece of practical poetry. Mary had a little lamb, it slept with quite a snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
 
 
 @pytest.fixture(scope="module")
@@ -77,20 +82,23 @@ def multimodal_server(request, monkeypatch_module):  # noqa: F811
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",
+        "half",
         "--max-model-len",
-        "2048",
+        "12800",
         "--enforce-eager",
         # lora config below
         "--enable-lora",
         "--lora-modules",
-        f"speech={MULTIMODAL_MODEL_NAME}",
+        f"speech={AUDIO_LORA_PATH}",
         "--max-lora-rank",
-        "64",
+        "320",
         "--max-num-seqs",
-        "4",
+        "2",
+        "--trust-remote-code",
+        "--gpu-memory-utilization",
+        "0.8",
         "--default-mm-loras",
-        f"{{\"audio\": \"{MULTIMODAL_MODEL_NAME}\"}}",
+        f"{{\"audio\": \"{AUDIO_LORA_PATH}\"}}",
     ]
 
     with RemoteOpenAIServer(MULTIMODAL_MODEL_NAME, args) as remote_server:
@@ -131,10 +139,8 @@ async def test_default_mm_lora_chat_completions(
         "role":
         "user",
         "content": [{
-            "type":
-            "text",
-            "text":
-            "can you transcribe the speech into a written format?",
+            "type": "text",
+            "text": "Can you transcribe this audio?",
         }, {
             "type": "audio_url",
             "audio_url": {
@@ -146,7 +152,7 @@ async def test_default_mm_lora_chat_completions(
     chat_completion = await multi_modal_client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=32,
+        max_completion_tokens=128,
         temperature=0.0)
 
     assert len(chat_completion.choices) > 0
