@@ -91,8 +91,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             and not return_softmax_lse:
             assert self.triton_fa_func is not None
 
-            padded_v = torch.nn.functional.pad(
-                v, [0, q.shape[-1] - v.shape[-1]], value=0)
+            padded_v = torch.nn.functional.pad(v,
+                                               [0, q.shape[-1] - v.shape[-1]],
+                                               value=0)
             attn_out = self.triton_fa_func(
                 q,
                 k,
@@ -109,12 +110,13 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             # The output of triton_attention is a tuple of [output_tensor, encoded_softmax]
             return attn_out[0]
         else:
-            return super()._flash_attn_varlen_diff_headdims(q,
-                                                            k,
-                                                            v,
-                                                            return_softmax_lse=return_softmax_lse,
-                                                            softmax_scale=softmax_scale,
-                                                            **kwargs)
+            return super()._flash_attn_varlen_diff_headdims(
+                q,
+                k,
+                v,
+                return_softmax_lse=return_softmax_lse,
+                softmax_scale=softmax_scale,
+                **kwargs)
 
     def _forward_decode(
         self,
