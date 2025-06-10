@@ -854,13 +854,15 @@ class NixlConnectorWorker:
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
-            self._read_blocks(request_id=req_id,
-                              dst_engine_id=meta.remote_engine_id,
-                              local_block_ids=meta.local_block_ids,
-                              remote_block_ids=meta.remote_block_ids,
-                              remote_host=meta.remote_host,
-                              remote_port=meta.remote_port,
-                              remote_tp_size=meta.tp_size)
+            self._read_blocks(
+                request_id=req_id,
+                dst_engine_id=meta.remote_engine_id,
+                local_block_ids=meta.local_block_ids,
+                remote_block_ids=meta.remote_block_ids,
+                remote_host=meta.remote_host,
+                remote_port=meta.remote_port,
+                remote_tp_size=meta.tp_size,
+            )
 
     def _read_blocks(self, local_block_ids: list[int],
                      remote_block_ids: list[int], remote_host: str,
