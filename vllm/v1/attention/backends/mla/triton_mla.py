@@ -9,17 +9,13 @@ from vllm import envs
 from vllm.attention.backends.abstract import (AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.attention.ops.triton_flash_attention import triton_attention
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata)
-
-if HAS_TRITON:
-    from vllm.attention.ops.triton_flash_attention import triton_attention
-else:
-    triton_attention = None
 
 logger = init_logger(__name__)
 
@@ -77,7 +73,38 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLA V1 with FP8 KV cache not yet supported")
 
         self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
-        self.triton_fa_func = triton_attention
+        self.triton_fa_func = triton_attention if HAS_TRITON else None
+
+    def _flash_attn_varlen_diff_headdims_rocm(self,
+                                              q,
+                                              k,
+                                              v,
+                                              return_softmax_lse=False,
+                                              softmax_scale=None,
+                                              **kwargs):
+        assert self.triton_fa_func is not None
+
+        # Triton Attention requires a padded V
+        padded_v = torch.nn.functional.pad(v,
+                                           [0, q.shape[-1] - v.shape[-1]],
+                                           value=0)
+        # The output of triton_attention is a tuple of
+        # [output_tensor, encoded_softmax] where encoded_softmax is always None
+        output_tensor, _ = self.triton_fa_func(
+            q,
+            k,
+            padded_v,
+            None,  # output
+            kwargs["cu_seqlens_q"],
+            kwargs["cu_seqlens_k"],
+            kwargs["max_seqlen_q"],
+            kwargs["max_seqlen_k"],
+            kwargs["causal"],
+            softmax_scale,
+            None,  # bias
+        )
+
+        return output_tensor
 
     def _flash_attn_varlen_diff_headdims(self,
                                          q,
@@ -87,29 +114,15 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                          softmax_scale=None,
                                          **kwargs):
         if current_platform.is_rocm() \
-            and self.use_triton_flash_attn \
+            and self.use_triton_flash_attn  \
             and not return_softmax_lse:
-            assert self.triton_fa_func is not None
-
-            padded_v = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
-            attn_out = self.triton_fa_func(
+            return self._flash_attn_varlen_diff_headdims_rocm(
                 q,
                 k,
-                padded_v,
-                None,  # output
-                kwargs["cu_seqlens_q"],
-                kwargs["cu_seqlens_k"],
-                kwargs["max_seqlen_q"],
-                kwargs["max_seqlen_k"],
-                kwargs["causal"],
-                softmax_scale,
-                None,  # bias
-            )
-            # The output of triton_attention is a tuple of
-            # [output_tensor, encoded_softmax]
-            return attn_out[0]
+                v,
+                return_softmax_lse=return_softmax_lse,
+                softmax_scale=softmax_scale,
+                **kwargs)
         else:
             return super()._flash_attn_varlen_diff_headdims(
                 q,

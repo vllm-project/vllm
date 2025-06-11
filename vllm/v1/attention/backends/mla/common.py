@@ -646,7 +646,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if is_vllm_fa:
             kwargs["return_softmax_lse"] = return_softmax_lse
         else:
-            # Use return_attn_probs instead of return_softmax_lse for ROCm
+            # ROCm leverages the upstream flash_attn, which takes a parameter
+            # called "return_attn_probs" instead of return_softmax_lse
             kwargs["return_attn_probs"] = return_softmax_lse
 
         attn_out = self.flash_attn_varlen_func(
