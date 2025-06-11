@@ -7,17 +7,12 @@ Run `pytest tests/kernels/test_triton_flash_attention.py`.
 import pytest
 import torch
 
-import vllm._custom_ops as ops
-# yapf: disable
 from vllm.attention.ops.triton_flash_attention import (SUPPORTED_LAYOUTS,
                                                        MetaData,
                                                        compute_alibi_tensor,
                                                        scale_fp8,
-                                                       triton_attention,
                                                        triton_attention_rocm)
 from vllm.platforms import current_platform
-
-# yapf: enable
 
 
 class ReferenceAttention:
@@ -379,61 +374,6 @@ def test_op_fwd_fp8(Z,
                                tri_out.to(torch.float32),
                                atol=7e-2,
                                rtol=2e-1)
-
-
-# TODO(luka): this test is supposed to replicate the arguments
-#  as they occur after the attention fusion pass.
-#  But sadly it fails with a maxdiff.
-@pytest.mark.parametrize("fp8_kvcache", [True])
-@pytest.mark.parametrize("N", [
-    1,
-])  # [256] for CUDAGraph
-@pytest.mark.skip()
-def test_fused_fwd(fp8_kvcache: bool, N: int):
-    current_platform.seed_everything(0)
-    torch.set_default_device("cuda")
-
-    MAX_SEQLENS = 64
-    q = torch.rand(MAX_SEQLENS * N, 32, 128, dtype=torch.bfloat16)
-    k = torch.rand(MAX_SEQLENS * N, 8, 128, dtype=torch.bfloat16)
-    v = torch.rand(MAX_SEQLENS * N, 8, 128, dtype=torch.bfloat16)
-
-    cu_seqlens = torch.arange(0, N + 1, dtype=torch.int32) * MAX_SEQLENS
-
-    # fp8_scales = tuple(torch.rand(1) for _ in range(4)) if fp8_kvcache else None # noqa: E501
-    fp8_scales = (torch.tensor([1.0]), torch.tensor([0.0508]),
-                  torch.tensor([0.0508]),
-                  torch.tensor([1.0])) if fp8_kvcache else None
-    # input_scale = torch.tensor([0.0019])
-    input_scale = torch.tensor([0.0019])
-
-    FP8_DTYPE = current_platform.fp8_dtype()
-    oq_fused = torch.empty(MAX_SEQLENS * N, 32, 128, dtype=FP8_DTYPE)
-    o_unfused = torch.empty(MAX_SEQLENS * N, 32, 128, dtype=torch.bfloat16)
-
-    call_attn = lambda o, scale: triton_attention(q,
-                                                  k,
-                                                  v,
-                                                  o,
-                                                  cu_seqlens,
-                                                  cu_seqlens,
-                                                  MAX_SEQLENS,
-                                                  MAX_SEQLENS,
-                                                  causal=True,
-                                                  sm_scale=0.08838,
-                                                  bias=None,
-                                                  fp8_scales=fp8_scales,
-                                                  input_scale=scale)
-
-    call_attn(oq_fused, input_scale)
-
-    call_attn(o_unfused, None)
-    oq_unfused, _ = ops.scaled_fp8_quant(o_unfused.view(-1, 4096), input_scale)
-
-    out_fused = oq_fused.view(-1, 4096).to(torch.float32)
-    out_unfused = oq_unfused.to(torch.float32)
-
-    torch.testing.assert_close(out_fused, out_unfused, atol=1e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
