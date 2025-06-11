@@ -30,8 +30,8 @@ class QuickAllReduce:
         if not ops_available:
             # disable because of missing quick reduce library
             # e.g. in a non-cuda environment
-            logger.info("Custom allreduce is disabled because "
-                        "of missing custom allreduce library")
+            logger.info("Custom quick allreduce is disabled because "
+                        "of missing custom quick allreduce library")
             return
 
         self.max_size = ops.qr_max_size()
@@ -41,8 +41,7 @@ class QuickAllReduce:
         # On RocM bfloat16 kernels are slower than fp16
         # due to slower match operations
         # If environment is not set to 1 we convert input to fp16
-        self.use_bf16_kernels = envs.VLLM_ROCM_CA_QUANTIZED
-
+        self.use_bf16_kernels = envs.VLLM_ROCM_CA_CAST_BF16_TO_FP16
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "QuickReduce should be attached to a non-NCCL group.")
         rank = dist.get_rank(group=self.group)
@@ -53,7 +52,7 @@ class QuickAllReduce:
 
         if world_size not in QuickAllReduce._SUPPORTED_WORLD_SIZES:
             logger.warning(
-                "QuickReduce allreduce is disabled due to an unsupported world"
+                "QuickReduce is disabled due to an unsupported world"
                 " size: %d. Supported world sizes: %s."
                 " To disable this warning set VLLM_ROCM_CA_BACKEND"
                 " to None", world_size,
@@ -87,7 +86,8 @@ class QuickAllReduce:
         ops.qr_open_handles(self._ptr, handles)
 
     def all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
-        """Performs an out-of-place all reduce.       
+        """
+        Performs an out-of-place all reduce.       
         """
         inp_size = inp.numel() * inp.element_size()
         if inp_size >= self.max_size:

@@ -90,7 +90,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
     def all_reduce(self, input_):
         # always try quick reduce first, then custom allreduce,
-        # and then pynccl.
+        # and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
         if qr_comm is not None and not qr_comm.disabled and \
             qr_comm.should_quick_allreduce(input_):
