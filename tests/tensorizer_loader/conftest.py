@@ -39,6 +39,10 @@ def assert_from_collective_rpc(engine: LLM,
     return all(res)
 
 
+# This is an object pulled from tests/v1/engine/test_engine_core.py
+# Modified to strip the `load_model` method from its `_init_executor`
+# method. It's purely used as a dummy utility to run methods that test
+# Tensorizer functionality
 class DummyExecutor(UniProcExecutor):
 
     def _init_executor(self) -> None:

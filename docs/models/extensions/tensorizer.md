@@ -86,10 +86,9 @@ or `~/.aws/config` and `~/.aws/credentials` files (`boto3` and the
 such as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 and `AWS_ENDPOINT_URL_S3`.
 
-If only the model tensors are saved, you can still provide that as the only 
-artifact in your directory to load from, and vLLM will fetch the rest using the 
-`--model-loader-extra-config` CLI arg, passing a JSON string with the args 
-for `TensorizerConfig`.
+If only the `model.tensors` file exists, you can load exclusively that file
+by using the `--model-loader-extra-config` CLI parameter, which expects a
+JSON string with all the kwargs for a `TensorizerConfig` configuration object.
 
 ```bash
 #!/bin/sh

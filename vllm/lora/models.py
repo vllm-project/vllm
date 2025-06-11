@@ -246,7 +246,7 @@ class LoRAModel(AdapterModel):
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
             tensors = TensorDeserializer(lora_tensor_path,
                                          dtype=tensorizer_config.dtype,
-                                         **tensorizer_args.deserializer_params)
+                                         **tensorizer_args.deserialization_kwargs)
             check_unexpected_modules(tensors)
 
         elif os.path.isfile(lora_tensor_path):
