@@ -40,7 +40,7 @@ If other strategies don't solve the problem, it's likely that the vLLM instance 
 - `export VLLM_LOGGING_LEVEL=DEBUG` to turn on more logging.
 - `export CUDA_LAUNCH_BLOCKING=1` to identify which CUDA kernel is causing the problem.
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
-- `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs.
+- `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. Do not use this flag unless absolutely needed for debugging, it will cause significant delays in startup time.
 
 ## Incorrect network setup
 
