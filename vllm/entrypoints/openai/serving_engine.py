@@ -222,40 +222,17 @@ class OpenAIServing:
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
-        # self._tokenize_prompt_input_async = make_async(
-        #     self._tokenize_prompt_input, executor=self._tokenizer_executor)
-        # self._tokenize_prompt_input_or_inputs_async = make_async(
-        #     self._tokenize_prompt_input_or_inputs,
-        #     executor=self._tokenizer_executor)
-
-        # Track the current adapter to know when we need to update tokenizer
-        self._current_adapter_id: Optional[str] = None
         self._async_tokenizer: Optional[AsyncMicrobatchTokenizer] = None
 
-    def _set_tokenizer(self, tokenizer, adapter_id=None):
+    def _set_tokenizer(self, tokenizer):
         """Set or update the tokenizer.
-        
         Will only create a new AsyncMicrobatchTokenizer if:
         1. This is the first time a tokenizer is set
-        2. We're using a different adapter that needs a different tokenizer
-        
-        Args:
-            tokenizer: The HuggingFace tokenizer instance
-            adapter_id: Optional ID to identify the adapter (e.g. LoRA name)
+        2. We're using a different tokenizer
         """
-        # Only create a new tokenizer if needed
-        if self._async_tokenizer is None or (adapter_id is not None
-                                             and adapter_id
-                                             != self._current_adapter_id):
-            # Clean up existing tokenizer if we're replacing it
-            if self._async_tokenizer is not None:
-                logger.info("Replacing tokenizer for adapter %s", adapter_id)
-                # No cleanup needed since thread is daemon=True
-            # Create new tokenizer
+        if (self._async_tokenizer is None
+                or self._async_tokenizer.tokenizer != tokenizer):
             self._async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
-            self._current_adapter_id = adapter_id
-            logger.debug("Created new async tokenizer for adapter %s",
-                         adapter_id)
 
     async def _preprocess(
         self,
@@ -550,57 +527,6 @@ class OpenAIServing:
         input_text = await self._async_tokenizer.decode(input_ids)
 
         return self._validate_input(request, input_ids, input_text)
-
-    # def _normalize_prompt_text_to_input(
-    #     self,
-    #     request: AnyRequest,
-    #     tokenizer: AnyTokenizer,
-    #     prompt: str,
-    #     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
-    #     add_special_tokens: bool,
-    # ) -> TextTokensPrompt:
-    #     if (self.model_config.encoder_config is not None
-    #             and self.model_config.encoder_config.get(
-    #                 "do_lower_case", False)):
-    #         prompt = prompt.lower()
-
-    #     if truncate_prompt_tokens is None:
-    #         encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
-    #     elif truncate_prompt_tokens < 0:
-    #         # Negative means we cap at the model's max length
-    #         encoded = tokenizer(prompt,
-    #                             add_special_tokens=add_special_tokens,
-    #                             truncation=True,
-    #                             max_length=self.max_model_len)
-    #     else:
-    #         encoded = tokenizer(prompt,
-    #                             add_special_tokens=add_special_tokens,
-    #                             truncation=True,
-    #                             max_length=truncate_prompt_tokens)
-
-    #     input_ids = encoded.input_ids
-
-    #     input_text = prompt
-
-    #     return self._validate_input(request, input_ids, input_text)
-
-    # def _normalize_prompt_tokens_to_input(
-    #     self,
-    #     request: AnyRequest,
-    #     tokenizer: AnyTokenizer,
-    #     prompt_ids: list[int],
-    #     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
-    # ) -> TextTokensPrompt:
-    #     if truncate_prompt_tokens is None:
-    #         input_ids = prompt_ids
-    #     elif truncate_prompt_tokens < 0:
-    #         input_ids = prompt_ids[-self.max_model_len:]
-    #     else:
-    #         input_ids = prompt_ids[-truncate_prompt_tokens:]
-
-    #     input_text = tokenizer.decode(input_ids)
-
-    #     return self._validate_input(request, input_ids, input_text)
 
     def _validate_input(
         self,

@@ -98,8 +98,7 @@ class OpenAIServingPooling(OpenAIServing):
             ) = self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
-            adapter_id = lora_request.lora_name if lora_request else None
-            self._set_tokenizer(tokenizer, adapter_id)
+            self._set_tokenizer(tokenizer)
 
             if prompt_adapter_request is not None:
                 raise NotImplementedError("Prompt adapter is not supported "

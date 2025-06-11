@@ -53,9 +53,7 @@ class ClassificationMixin(OpenAIServing):
 
             ctx.tokenizer = await self.engine_client.get_tokenizer(
                 ctx.lora_request)
-            adapter_id = (ctx.lora_request.lora_name
-                          if ctx.lora_request else None)
-            self._set_tokenizer(ctx.tokenizer, adapter_id)
+            self._set_tokenizer(ctx.tokenizer)
 
             if ctx.prompt_adapter_request is not None:
                 raise NotImplementedError(
