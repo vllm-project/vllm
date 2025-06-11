@@ -3806,6 +3806,7 @@ class PassConfig:
     """Whether to enable sequence parallelism."""
     enable_async_tp: bool = False
     """Whether to enable async TP."""
+
     # TODO(luka) better pass enabling system.
 
     def uuid(self):
@@ -3829,6 +3830,7 @@ class PassConfig:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work")
+
 
 @config
 @dataclass
