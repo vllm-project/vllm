@@ -1466,7 +1466,7 @@ class FlexibleArgumentParser(ArgumentParser):
         pattern = re.compile(r"(?<=--)[^\.]*")
 
         # Convert underscores to dashes and vice versa in argument names
-        processed_args = []
+        processed_args = list[str]()
         for arg in args:
             if arg.startswith('--'):
                 if '=' in arg:
@@ -1483,7 +1483,7 @@ class FlexibleArgumentParser(ArgumentParser):
             else:
                 processed_args.append(arg)
 
-        def create_nested_dict(keys: list[str], value: str):
+        def create_nested_dict(keys: list[str], value: str) -> dict[str, Any]:
             """Creates a nested dictionary from a list of keys and a value.
 
             For example, `keys = ["a", "b", "c"]` and `value = 1` will create:
@@ -1494,7 +1494,10 @@ class FlexibleArgumentParser(ArgumentParser):
                 nested_dict = {key: nested_dict}
             return nested_dict
 
-        def recursive_dict_update(original: dict, update: dict):
+        def recursive_dict_update(
+            original: dict[str, Any],
+            update: dict[str, Any],
+        ):
             """Recursively updates a dictionary with another dictionary."""
             for k, v in update.items():
                 if isinstance(v, dict) and isinstance(original.get(k), dict):
@@ -1502,19 +1505,25 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     original[k] = v
 
-        delete = set()
-        dict_args: dict[str, dict] = defaultdict(dict)
+        delete = set[int]()
+        dict_args = defaultdict[str, dict[str, Any]](dict)
         for i, processed_arg in enumerate(processed_args):
             if processed_arg.startswith("--") and "." in processed_arg:
                 if "=" in processed_arg:
-                    processed_arg, value = processed_arg.split("=", 1)
+                    processed_arg, value_str = processed_arg.split("=", 1)
                     if "." not in processed_arg:
                         # False positive, . was only in the value
                         continue
                 else:
-                    value = processed_args[i + 1]
+                    value_str = processed_args[i + 1]
                     delete.add(i + 1)
+
                 key, *keys = processed_arg.split(".")
+                try:
+                    value = json.loads(value_str)
+                except json.decoder.JSONDecodeError:
+                    value = value_str
+
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
                 recursive_dict_update(dict_args[key], arg_dict)
