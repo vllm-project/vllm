@@ -17,8 +17,8 @@ import subprocess
 import time
 from multiprocessing import Event, Process
 
-from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
