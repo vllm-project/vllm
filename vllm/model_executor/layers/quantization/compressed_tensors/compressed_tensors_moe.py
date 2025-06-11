@@ -562,9 +562,12 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             (moe.num_experts + prepare_finalize.world_size - 1) //
             prepare_finalize.world_size)
         experts = CutlassExpertsFp8(
-            max_experts_per_worker, moe.in_dtype,
+            max_experts_per_worker,
+            moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
-            self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
+            self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
+            use_batched_format=True,
+        )
 
         if has_pplx and isinstance(
                 prepare_finalize,

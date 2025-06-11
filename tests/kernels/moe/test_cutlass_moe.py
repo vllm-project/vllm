@@ -29,6 +29,7 @@ MNK_FACTORS = [
     (224, 1024, 1536),
     (224, 3072, 1024),
     (224, 3072, 1536),
+    (1024 * 128, 1024, 1024),
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(
