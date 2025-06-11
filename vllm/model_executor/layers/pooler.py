@@ -156,7 +156,10 @@ class MeanPool(SimplePooler):
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = self.get_prompt_lens(hidden_states, pooling_metadata)
 
-        cumsum = torch.cumsum(hidden_states, dim=0)
+        # Use float32 for torch.cumsum in MeanPool,
+        # otherwise precision will be lost significantly.
+        cumsum = torch.cumsum(hidden_states, dim=0, dtype=torch.float32)
+
         start_indices = torch.cat([
             torch.tensor([0], device=hidden_states.device),
             torch.cumsum(prompt_lens[:-1], dim=0)
@@ -219,7 +222,6 @@ class PoolerHead(nn.Module):
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
-
         dimensions_list = [
             pooling_param.dimensions
             for _, pooling_param in pooling_metadata.seq_groups
