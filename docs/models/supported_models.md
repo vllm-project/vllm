@@ -387,18 +387,19 @@ See [this page](./pooling_models.md) for more information on how to use pooling 
 
 Specified using `--task embed`.
 
-| Architecture                                           | Models              | Example HF Models                                                                                                   | [LoRA][lora-adapter]   | [PP][distributed-serving]   |
-|--------------------------------------------------------|---------------------|---------------------------------------------------------------------------------------------------------------------|------------------------|-----------------------------|
-| `BertModel`                                            | BERT-based          | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc.                                                |                        |                             |
-| `Gemma2Model`                                          | Gemma 2-based       | `BAAI/bge-multilingual-gemma2`, etc.                                                                                | ✅︎                     |                             |
-| `GritLM`                                               | GritLM              | `parasail-ai/GritLM-7B-vllm`.                                                                                       | ✅︎                     | ✅︎                          |
-| `GteModel`                                             | Arctic-Embed-2.0-M  | `Snowflake/snowflake-arctic-embed-m-v2.0`.                                                                          | ︎                      |                             |
-| `GteNewModel`                                          | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc.                                                                           | ︎                      | ︎                           |
-| `ModernBertModel`                                      | ModernBERT-based    | `Alibaba-NLP/gte-modernbert-base`, etc.                                                                             | ︎                      | ︎                           |
-| `NomicBertModel`                                       | Nomic BERT          | `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc. | ︎                      | ︎                           |
-| `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc. | Llama-based         | `intfloat/e5-mistral-7b-instruct`, etc.                                                                             | ✅︎                     | ✅︎                          |
-| `Qwen2Model`, `Qwen2ForCausalLM`                       | Qwen2-based         | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.              | ✅︎                     | ✅︎                          |
-| `RobertaModel`, `RobertaForMaskedLM`                   | RoBERTa-based       | `sentence-transformers/all-roberta-large-v1`, etc.                                                                  |                        |                             |
+| Architecture                                           | Models              | Example HF Models                                                                                                   | [LoRA][lora-adapter] | [PP][distributed-serving] |
+|--------------------------------------------------------|---------------------|---------------------------------------------------------------------------------------------------------------------|----------------------|---------------------------|
+| `BertModel`                                            | BERT-based          | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc.                                                |                      |                           |
+| `Gemma2Model`                                          | Gemma 2-based       | `BAAI/bge-multilingual-gemma2`, etc.                                                                                | ✅︎                   |                           |
+| `GritLM`                                               | GritLM              | `parasail-ai/GritLM-7B-vllm`.                                                                                       | ✅︎                   | ✅︎                        |
+| `GteModel`                                             | Arctic-Embed-2.0-M  | `Snowflake/snowflake-arctic-embed-m-v2.0`.                                                                          | ︎                    |                           |
+| `GteNewModel`                                          | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc.                                                                           | ︎                    | ︎                         |
+| `ModernBertModel`                                      | ModernBERT-based    | `Alibaba-NLP/gte-modernbert-base`, etc.                                                                             | ︎                    | ︎                         |
+| `NomicBertModel`                                       | Nomic BERT          | `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc. | ︎                    | ︎                         |
+| `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc. | Llama-based         | `intfloat/e5-mistral-7b-instruct`, etc.                                                                             | ✅︎                   | ✅︎                        |
+| `Qwen2Model`, `Qwen2ForCausalLM`                       | Qwen2-based         | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.              | ✅︎                   | ✅︎                        |
+| `Qwen3Model`, `Qwen3ForCausalLM`                       | Qwen3-based         | `Qwen/Qwen3-Embedding-0.6B`, etc.                                                                                   | ✅︎                   | ✅︎                        |
+| `RobertaModel`, `RobertaForMaskedLM`                   | RoBERTa-based       | `sentence-transformers/all-roberta-large-v1`, etc.                                                                  |                      |                           |
 
 !!! note
     `ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
@@ -450,12 +451,19 @@ If your model is not in the above list, we will try to automatically convert the
 
 Specified using `--task score`.
 
-| Architecture                          | Models            | Example HF Models                            |
-|---------------------------------------|-------------------|----------------------------------------------|
-| `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. |
-| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.     |
-| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.              |
+| Architecture                          | Models            | Example HF Models                                                                    |
+|---------------------------------------|-------------------|--------------------------------------------------------------------------------------|
+| `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |
+| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. |
+| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |
+| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |
 
+!!! note
+    Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: <gh-file:examples/offline_inference/qwen3_reranker.py>.
+
+    ```bash
+    vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+    ```
 [](){ #supported-mm-models }
 
 ## List of Multimodal Language Models
