@@ -204,6 +204,9 @@ if [[ $commands == *"--shard-id="* ]]; then
     commands_gpu=${commands//"--shard-id= "/"--shard-id=${GPU} "}
     echo "Shard ${GPU} commands:$commands_gpu"
     echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+
+    echo "#:DEBUG: Running the following commands: ${commands}"
+    
     docker run \
         --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
         --network=host \
@@ -248,6 +251,7 @@ else
           -e HF_TOKEN \
           -e AWS_ACCESS_KEY_ID \
           -e AWS_SECRET_ACCESS_KEY \
+          -e "VLLM_USE_V1=${MYUSEV1}" \
           -v "${HF_CACHE}:${HF_MOUNT}" \
           -e "HF_HOME=${HF_MOUNT}" \
           -e "PYTHONPATH=${MYPYTHONPATH}" \
