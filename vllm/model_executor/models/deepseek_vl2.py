@@ -16,7 +16,6 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
@@ -33,7 +32,7 @@ from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
 from vllm.transformers_utils.processors.deepseek_vl2 import (
     DeepseekVLV2Processor)
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.utils import is_list_of
+from vllm.utils import is_list_of, set_default_torch_dtype
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,

@@ -28,8 +28,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import (ParamMapping,
-                                                    set_default_torch_dtype)
+from vllm.model_executor.model_loader.utils import ParamMapping
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
@@ -38,6 +37,7 @@ from vllm.model_executor.models import is_pooling_model
 from vllm.model_executor.utils import (get_packed_modules_mapping,
                                        set_weight_attrs)
 from vllm.platforms import current_platform
+from vllm.utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 

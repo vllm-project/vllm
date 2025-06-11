@@ -15,8 +15,8 @@ from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, deserialize_tensorizer_model, init_tensorizer_model,
     is_vllm_tensorized, serialize_vllm_model, tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
-                                                    initialize_model,
-                                                    set_default_torch_dtype)
+                                                    initialize_model)
+from vllm.utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
