@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -16,19 +17,62 @@ from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import (
-    FlashAttentionMetadata, FlashAttentionMetadataBuilder,
-    make_local_attention_virtual_batches)
+    FlashAttentionMetadata, make_local_attention_virtual_batches)
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
 
-class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+@dataclass
+class TritonAttentionMetadata:
+    # NOTE(sang): Definition of context_len, query_len, and seq_len.
+    # |---------- N-1 iteration --------|
+    # |---------------- N iteration ---------------------|
+    # |- tokenA -|......................|-- newTokens ---|
+    # |---------- context_len ----------|
+    # |-------------------- seq_len ---------------------|
+    #                                   |-- query_len ---|
+
+    num_actual_tokens: int  # Number of tokens excluding padding.
+    max_query_len: int
+    query_start_loc: torch.Tensor
+    max_seq_len: int
+    seq_lens: torch.Tensor
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
+
+    # For cascade attention.
+    use_cascade: bool
+    common_prefix_len: int
+    cu_prefix_query_lens: Optional[torch.Tensor]
+    prefix_kv_lens: Optional[torch.Tensor]
+    suffix_kv_lens: Optional[torch.Tensor]
+
+    # Optional aot scheduling
+    scheduler_metadata: Optional[torch.Tensor] = None
+    prefix_scheduler_metadata: Optional[torch.Tensor] = None
+
+    # for local attention
+    @dataclass
+    class LocalAttentionMetadata:
+        local_query_start_loc: torch.Tensor
+        local_seqused_k: torch.Tensor
+        local_block_table: torch.Tensor
+        local_max_query_len: int
+        local_max_seq_len: int
+        local_scheduler_metadata: Optional[torch.Tensor]
+
+    local_attn_metadata: Optional[LocalAttentionMetadata] = None
+
+
+class TritonAttentionMetadataBuilder:
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -61,6 +105,10 @@ class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
         return attn_metadata
+
+    def reorder_batch(self, input_batch: "InputBatch",
+                      scheduler_output: "SchedulerOutput") -> bool:
+        return False
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int,
@@ -98,7 +146,8 @@ class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
             local_max_query_len = seqlens_q_local_np.max()
             local_max_seq_len = virt_k_seqlens_np.max()
 
-            local_attn_metadata = FlashAttentionMetadata.LocalAttentionMetadata(
+            local_attn_metadata = TritonAttentionMetadata \
+                        .LocalAttentionMetadata(
                 local_query_start_loc=local_query_start_loc,
                 local_seqused_k=local_seqused_k,
                 local_block_table=virt_block_table_tensor,
@@ -126,7 +175,7 @@ class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
             suffix_kv_lens = None
             prefix_scheduler_metadata = None
 
-        attn_metadata = FlashAttentionMetadata(
+        attn_metadata = TritonAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -143,6 +192,9 @@ class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
             prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
         return attn_metadata
+
+    def use_cascade_attention(self, *args, **kwargs) -> bool:
+        return False
 
 
 class TritonAttentionBackend(AttentionBackend):
@@ -163,7 +215,7 @@ class TritonAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
-        return FlashAttentionMetadata
+        return TritonAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
