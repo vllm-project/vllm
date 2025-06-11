@@ -65,6 +65,7 @@ import zmq.asyncio
 from packaging import version
 from packaging.version import Version
 from torch.library import Library
+from transformers.tokenization_utils_base import BatchEncoding
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
@@ -609,9 +610,11 @@ class AsyncMicrobatchTokenizer:
                     """Tokenize the micro-batch in one call 
                     and split results."""
                     grouped = self.tokenizer(prompts, **kwargs_list[0])
-                    # HuggingFace BatchEncoding supports indexing
-                    # to get per-item views
-                    return [grouped[i] for i in range(len(prompts))]
+                    single__encodings = []
+                    for i in range(len(prompts)):
+                        data_i = {k: v[i] for k, v in grouped.items()}
+                        single__encodings.append(BatchEncoding(data_i))
+                    return single__encodings
 
                 encode_fn = _encode_batch_group if can_batch and len(
                     prompts) > 1 else _encode_batch_single
