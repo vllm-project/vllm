@@ -357,8 +357,7 @@ def cutlass_moe_fp8(
     """
     per_out_ch = w1_scale.numel() != w1_q.size(0)
 
-    num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(
-        0)
+    num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
 
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
