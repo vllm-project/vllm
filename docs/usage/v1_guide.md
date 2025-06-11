@@ -103,7 +103,7 @@ For a complete list of supported models, see the [list of supported models](http
 | **LoRA**                                    | <nobr>🚀 Optimized</nobr>                                                         |
 | **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
 | **FP8 KV Cache**                            | <nobr>🟢 Functional on Hopper devices ([PR #15191](https://github.com/vllm-project/vllm/pull/15191))</nobr>|
-| **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
+| **Spec Decode**                             | <nobr>🚀 Optimized</nobr>                                                         |
 | **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
 | **Structured Output Alternative Backends**  | <nobr>🟢 Functional</nobr>                                                        |
 | **Request-level Structured Output Backend** | <nobr>🔴 Deprecated</nobr>                                                        |
@@ -136,14 +136,6 @@ Support for logprobs with post-sampling adjustments is in progress and will be a
 **Prompt Logprobs with Prefix Caching**
 
 Currently prompt logprobs are only supported when prefix caching is turned off via `--no-enable-prefix-caching`. In a future release, prompt logprobs will be compatible with prefix caching, but a recomputation will be triggered to recover the full prompt logprobs even upon a prefix cache hit. See details in [RFC #13414](https://github.com/vllm-project/vllm/issues/13414).
-
-#### WIP Features
-
-These features are already supported in vLLM V1, but their optimization is still
-in progress.
-
-- **Spec Decode**: Currently, only ngram-based spec decode is supported in V1. There
-  will be follow-up work to support other types of spec decode (e.g., see [PR #13933](https://github.com/vllm-project/vllm/pull/13933)). We will prioritize the support for Eagle, MTP compared to draft model based spec decode.
 
 #### Deprecated Features
 
