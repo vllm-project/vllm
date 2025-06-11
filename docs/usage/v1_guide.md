@@ -1,6 +1,6 @@
 # vLLM V1
 
-!!! important
+!!! announcement
 
     We have started the process of deprecating V0. Please read [RFC #18571](https://github.com/vllm-project/vllm/issues/18571) for more details.
 
