@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 
@@ -12,7 +12,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 
@@ -78,8 +78,9 @@ class AWQConfig(QuantizationConfig):
             config, ["modules_to_not_convert"], None)
         return cls(weight_bits, group_size, zero_point, modules_to_not_convert)
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["LinearMethodBase"]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional[Union["LinearMethodBase", "QuantizeMethodBase"]]:
         if isinstance(layer, LinearBase):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
                 return UnquantizedLinearMethod()
