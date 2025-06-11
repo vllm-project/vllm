@@ -41,7 +41,7 @@ class QuickAllReduce:
         # On RocM bfloat16 kernels are slower than fp16
         # due to slower match operations
         # If environment is not set to 1 we convert input to fp16
-        self.use_bf16_kernels = envs.VLLM_ROCM_CA_CAST_BF16_TO_FP16
+        self.use_fp16_kernels = envs.VLLM_ROCM_CA_CAST_BF16_TO_FP16
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "QuickReduce should be attached to a non-NCCL group.")
         rank = dist.get_rank(group=self.group)
@@ -94,7 +94,7 @@ class QuickAllReduce:
             return None
 
         inp_dtype = inp.dtype
-        if inp_dtype == torch.bfloat16 and not self.use_bf16_kernels:
+        if inp_dtype == torch.bfloat16 and self.use_fp16_kernels:
             inp = inp.to(torch.float16)
         if out is None:
             out = torch.empty_like(inp)
