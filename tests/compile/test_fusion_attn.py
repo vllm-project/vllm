@@ -13,8 +13,9 @@ from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.platforms import current_platform
 
-backend = TestBackend()
-backend_unfused = TestBackend()
+# globals needed for string-import custom Dynamo backend field
+backend: TestBackend
+backend_unfused: TestBackend
 
 
 @pytest.mark.parametrize(
@@ -22,21 +23,24 @@ backend_unfused = TestBackend()
     [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)])
 @pytest.mark.parametrize(
     "use_triton_fa", [True, False] if current_platform.is_rocm() else [False])
-@pytest.mark.skipif(not current_platform.supports_fp8(),
-                    reason="Need FP8 support")
+@pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 @pytest.mark.skipif(not current_platform.is_cuda_alike(),
                     reason="Only test CUDA and ROCm")
 def test_attention_fusion(example_prompts, monkeypatch, model: str,
                           quant_key: QuantKey, use_triton_fa: bool):
-    # Clean Dynamo cache to avoid reusing other cases
+    # Clean Dynamo cache to avoid reusing other test cases
     # (for some reason the reset at the end is not enough)
     torch._dynamo.reset()
+
+    # Use global backends
+    global backend, backend_unfused
 
     use_v1 = False  # can be made a param once V1 support added
     monkeypatch.setenv("VLLM_USE_V1", str(int(use_v1)))
     monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
 
-    # Prompt 4 seems too open-ended
+    # Prompt 4 seems too open-ended, differs between fused and unfused
+    # (both outputs look reasonable though)
     prompts = example_prompts[:4] + example_prompts[5:]
 
     compile_config = CompilationConfig(
@@ -46,12 +50,12 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
         backend="tests.compile.test_fusion_attn.backend_unfused",
     )
     vllm_config = VllmConfig(compilation_config=compile_config)
-    backend_unfused.custom_passes = [NoOpEliminationPass(vllm_config)]
+    backend_unfused = TestBackend(NoOpEliminationPass(vllm_config))
 
     llm = LLM(model,
               enforce_eager=True,
               compilation_config=compile_config,
-              gpu_memory_utilization=0.4,
+              gpu_memory_utilization=0.9,
               max_model_len=2048)
 
     sampling_params = SamplingParams(temperature=0.0,
@@ -59,6 +63,7 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
                                      top_p=0.95)
 
     unfused_output = llm.generate(prompts, sampling_params)
+    backend_unfused = None  # Reset backend to make sure llm gets released
     del llm
 
     compile_config = CompilationConfig(
@@ -72,11 +77,11 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
     # AttnFusionPass needs attention layers to be registered in config upon init
     # so we initialize it during compilation.
     attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw)
-    backend.custom_passes = [NoOpEliminationPass(vllm_config), attn_pass]
+    backend = TestBackend(NoOpEliminationPass(vllm_config), attn_pass)
     llm2 = LLM(model,
                enforce_eager=True,
                compilation_config=compile_config,
-               gpu_memory_utilization=0.4,
+               gpu_memory_utilization=0.9,
                max_model_len=2048)
 
     # check support
@@ -117,7 +122,9 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
         name_0="unfused",
         name_1="fused",
     )
-    del llm2
 
     # Clean Dynamo cache to avoid polluting other case(s)
     torch._dynamo.reset()
+
+    # Reset backend to make sure llm2 gets released
+    backend = None
