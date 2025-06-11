@@ -185,8 +185,10 @@ class GPTQMarlinConfig(QuantizationConfig):
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            return get_moe_quant_method(self,layer, prefix, GPTQMarlinMoEMethod)
-        return get_linear_quant_method(self, layer, prefix, GPTQMarlinLinearMethod)
+            return get_moe_quant_method(self,layer, prefix,
+                                        GPTQMarlinMoEMethod)
+        return get_linear_quant_method(self, layer, prefix,
+                                       GPTQMarlinLinearMethod)
 
     @classmethod
     def is_gptq_marlin_compatible(cls, quant_config: dict[str, Any]):
