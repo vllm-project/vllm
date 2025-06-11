@@ -12,9 +12,9 @@ from vllm.v1.sample.logits_processor import (LogitBiasLogitsProcessor,
                                              MinTokensLogitsProcessor)
 
 # Logits processor id strsW
-STR_MIN_P_LOGITSPROC_ID = "min_p"
-STR_MIN_TOKENS_LOGITSPROC_ID = "min_tokens"
-STR_LOGITS_BIAS_LOGITSPROC_ID = "logit_bias"
+STR_MIN_P_LOGITPROC_ID = "min_p"
+STR_MIN_TOKENS_LOGITPROC_ID = "min_tokens"
+STR_LOGITS_BIAS_LOGITPROC_ID = "logit_bias"
 
 
 def sanity_check_mm_encoder_outputs(
@@ -175,8 +175,8 @@ def init_hard_coded_logitsprocs(
         max_num_reqs=max_num_reqs + 1)
     return LogitsProcessorObjects(
         greedy={
-            STR_MIN_TOKENS_LOGITSPROC_ID: min_tokens_logitproc,
-            STR_LOGITS_BIAS_LOGITSPROC_ID: logit_bias_logitproc
+            STR_MIN_TOKENS_LOGITPROC_ID: min_tokens_logitproc,
+            STR_LOGITS_BIAS_LOGITPROC_ID: logit_bias_logitproc
         },
-        nongreedy={STR_MIN_P_LOGITSPROC_ID: min_p_logitproc},
+        nongreedy={STR_MIN_P_LOGITPROC_ID: min_p_logitproc},
     )
