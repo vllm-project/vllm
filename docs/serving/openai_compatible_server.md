@@ -36,7 +36,7 @@ print(completion.choices[0].message)
     vLLM supports some parameters that are not supported by OpenAI, `top_k` for example.
     You can pass these parameters to vLLM using the OpenAI client in the `extra_body` parameter of your requests, i.e. `extra_body={"top_k": 50}` for `top_k`.
 
-!!! warning
+!!! important
     By default, the server applies `generation_config.json` from the Hugging Face model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
 
     To disable this behavior, please pass `--generation-config vllm` when launching the server.
@@ -250,7 +250,7 @@ and passing a list of `messages` in the request. Refer to the examples below for
       --chat-template examples/template_vlm2vec.jinja
     ```
 
-    !!! warning
+    !!! important
         Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embed`
         to run this model in embedding mode instead of text generation mode.
 
@@ -294,13 +294,13 @@ and passing a list of `messages` in the request. Refer to the examples below for
       --chat-template examples/template_dse_qwen2_vl.jinja
     ```
 
-    !!! warning
+    !!! important
         Like with VLM2Vec, we have to explicitly pass `--task embed`.
 
         Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
         by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
 
-    !!! warning
+    !!! important
         `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
         example below for details.
 
