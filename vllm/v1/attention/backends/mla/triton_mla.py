@@ -85,8 +85,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert self.triton_fa_func is not None
 
         # Triton Attention requires a padded V
-        padded_v = torch.nn.functional.pad(v,
-                                           [0, q.shape[-1] - v.shape[-1]],
+        padded_v = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                            value=0)
         # The output of triton_attention is a tuple of
         # [output_tensor, encoded_softmax] where encoded_softmax is always None
