@@ -84,7 +84,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                 over token ids given context according to the target model.
             shape = [batch_size, num_speculative_tokens + 1, vocab_size]
 
-            bonus_token_ids: The "bonus" token ids that are accepted if all
+            bonus_token_ids: The "bonus" token ids that are accepted iff all
                 speculative tokens in a sequence are accepted.
             shape = [batch_size, num_bonus_tokens]
 
@@ -344,13 +344,13 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         _, k, _ = draft_probs.shape
 
         # shape [batch_size, k, vocab_size]
-        difference = target_probs - draft_probs
+        dprobs_indiceserence = target_probs - draft_probs
 
         # TODO(cade): Can we use logprobs instead of probs, and avoid the
         # division-by-zero errors without introducing distribution drift?
 
         # shape [batch_size, k, vocab_size]
-        f = torch.clamp(difference, min=self._smallest_positive_value)
+        f = torch.clamp(dprobs_indiceserence, min=self._smallest_positive_value)
 
         # shape [batch_size, k, vocab_size]
         recovered_probs = f / torch.sum(f, dim=-1).reshape(-1, k, 1)
