@@ -10,9 +10,9 @@ This documentation includes information for running the popular Llama 3.1 series
 
 The pre-built image includes:
 
-- ROCm™ 6.3.1
+- ROCm™ 6.4.1
 - HipblasLT 0.15
-- vLLM 0.8.5
+- vLLM 0.9.0.1
 - PyTorch 2.7
 
 ## Pull latest Docker Image
@@ -21,10 +21,14 @@ Pull the most recent validated docker image with `docker pull rocm/vllm-dev:main
 
 ## What is New
 
-- AITER V1 engine performance improvement
+- Updated to ROCm 6.4.1 and vLLM v0.9.0.1
+- AITER MHA
+- IBM 3d kernel for unified attention
+- Full graph capture for split attention
 
 ## Known Issues and Workarounds
-- None
+
+- No AITER MoE. Do not use VLLM_ROCM_USE_AITER for Mixtral or DeepSeek models.
 
 ## Performance Results
 
@@ -37,14 +41,14 @@ The table below shows performance data where a local inference client is fed req
 
 | Model | Precision | TP Size | Input | Output | Num Prompts | Max Num Seqs | Throughput (tokens/s) |
 |-------|-----------|---------|-------|--------|-------------|--------------|-----------------------|
-| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 3200 | 3200 | 16622.2  |
-|       |           |         | 128   | 4096   | 1500        | 1500         | 13779.8               |
-|       |           |         | 500   | 2000   | 2000        | 2000         | 13424.9               |
-|       |           |         | 2048  | 2048   | 1500        | 1500         | 8356.5                |
-| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 1500 | 1500 | 4243.9 |
-|       |           |         | 128   | 4096   | 1500        | 1500         | 3394.4                |
-|       |           |         | 500   | 2000   | 2000        | 2000         | 3201.8                |
-|       |           |         | 2048  | 2048   | 500         | 500          | 2208.0                |
+| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 3200 | 3200 | 16581.5  |
+|       |           |         | 128   | 4096   | 1500        | 1500         | 13667.3               |
+|       |           |         | 500   | 2000   | 2000        | 2000         | 13367.1               |
+|       |           |         | 2048  | 2048   | 1500        | 1500         | 8352.6                |
+| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 1500 | 1500 | 4275.0 |
+|       |           |         | 128   | 4096   | 1500        | 1500         | 3356.7                |
+|       |           |         | 500   | 2000   | 2000        | 2000         | 3201.4                |
+|       |           |         | 2048  | 2048   | 500         | 500          | 2179.7                |
 
 *TP stands for Tensor Parallelism.*
 
@@ -54,38 +58,38 @@ The table below shows latency measurement, which typically involves assessing th
 
 | Model | Precision | TP Size | Batch Size | Input | Output | MI300X Latency (sec) |
 |-------|-----------|----------|------------|--------|---------|-------------------|
-| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 15.851 |
-| | | | 2 | 128 | 2048 | 16.995 |
-| | | | 4 | 128 | 2048 | 17.578 |
-| | | | 8 | 128 | 2048 | 19.277 |
-| | | | 16 | 128 | 2048 | 21.111 |
-| | | | 32 | 128 | 2048 | 23.902 |
-| | | | 64 | 128 | 2048 | 30.976 |
-| | | | 128 | 128 | 2048 | 44.107 |
-| | | | 1 | 2048 | 2048 | 15.981 |
-| | | | 2 | 2048 | 2048 | 17.322 |
-| | | | 4 | 2048 | 2048 | 18.025 |
-| | | | 8 | 2048 | 2048 | 20.218 |
-| | | | 16 | 2048 | 2048 | 22.690 |
-| | | | 32 | 2048 | 2048 | 27.407 |
-| | | | 64 | 2048 | 2048 | 37.099 |
-| | | | 128 | 2048 | 2048 | 56.659 |
-| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 45.929 |
-| | | | 2 | 128 | 2048 | 46.871 |
-| | | | 4 | 128 | 2048 | 48.763 |
-| | | | 8 | 128 | 2048 | 51.621 |
-| | | | 16 | 128 | 2048 | 54.822 |
-| | | | 32 | 128 | 2048 | 63.642 |
-| | | | 64 | 128 | 2048 | 82.256 |
-| | | | 128 | 128 | 2048 | 110.142 |
-| | | | 1 | 2048 | 2048 | 46.489 |
-| | | | 2 | 2048 | 2048 | 47.465 |
-| | | | 4 | 2048 | 2048 | 49.906 |
-| | | | 8 | 2048 | 2048 | 54.252 |
-| | | | 16 | 2048 | 2048 | 60.275 |
-| | | | 32 | 2048 | 2048 | 74.346 |
-| | | | 64 | 2048 | 2048 | 104.508 |
-| | | | 128 | 2048 | 2048 | 154.134 |
+| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 15.566 |
+| | | | 2 | 128 | 2048 | 16.858 |
+| | | | 4 | 128 | 2048 | 17.518 |
+| | | | 8 | 128 | 2048 | 18.898 |
+| | | | 16 | 128 | 2048 | 21.023 |
+| | | | 32 | 128 | 2048 | 23.896 |
+| | | | 64 | 128 | 2048 | 30.753 |
+| | | | 128 | 128 | 2048 | 43.767 |
+| | | | 1 | 2048 | 2048 | 15.496 |
+| | | | 2 | 2048 | 2048 | 17.380 |
+| | | | 4 | 2048 | 2048 | 17.983 |
+| | | | 8 | 2048 | 2048 | 19.771 |
+| | | | 16 | 2048 | 2048 | 22.702 |
+| | | | 32 | 2048 | 2048 | 27.392 |
+| | | | 64 | 2048 | 2048 | 36.879 |
+| | | | 128 | 2048 | 2048 | 57.003 |
+| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 45.828 |
+| | | | 2 | 128 | 2048 | 46.757 |
+| | | | 4 | 128 | 2048 | 48.322 |
+| | | | 8 | 128 | 2048 | 51.479 |
+| | | | 16 | 128 | 2048 | 54.861 |
+| | | | 32 | 128 | 2048 | 63.119 |
+| | | | 64 | 128 | 2048 | 82.362 |
+| | | | 128 | 128 | 2048 | 109.698 |
+| | | | 1 | 2048 | 2048 | 46.514 |
+| | | | 2 | 2048 | 2048 | 47.271 |
+| | | | 4 | 2048 | 2048 | 49.679 |
+| | | | 8 | 2048 | 2048 | 54.366 |
+| | | | 16 | 2048 | 2048 | 60.390 |
+| | | | 32 | 2048 | 2048 | 74.209 |
+| | | | 64 | 2048 | 2048 | 104.728 |
+| | | | 128 | 2048 | 2048 | 154.041 |
 
 *TP stands for Tensor Parallelism.*
 
@@ -487,7 +491,7 @@ To reproduce the release docker:
 ```bash
     git clone https://github.com/ROCm/vllm.git
     cd vllm
-    git checkout 91a56009841e11b84a2aeb9cc5aa305ab2808ede
+    git checkout 71faa188073d427c57862c45bf17745f3b54b1b1
     docker build -f docker/Dockerfile.rocm -t <your_tag> --build-arg USE_CYTHON=1 .
 ```
 
@@ -503,6 +507,12 @@ Use AITER release candidate branch instead:
 ```
 
 ## Changelog
+
+20250605_aiter:
+- Updated to ROCm 6.4.1 and vLLM v0.9.0.1
+- AITER MHA
+- IBM 3d kernel for unified attention
+- Full graph capture for split attention
 
 20250521_aiter:
 - AITER V1 engine performance improvement
