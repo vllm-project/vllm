@@ -263,6 +263,7 @@ class CoreEngineProcManager:
         try:
             for proc in self.processes:
                 proc.start()
+                logger.debug("Started process %s with pid %d", proc.name, proc.pid)
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
