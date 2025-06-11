@@ -64,15 +64,13 @@ Download the full log file from Buildkite locally.
 
 Strip timestamps and colorization:
 
-```bash
-# Strip timestamps
-sed -i 's/^\[[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}Z\] //' ci.log
+<gh-file:.buildkite/scripts/ci-clean-log.sh>
 
-# Strip colorization
-sed -i -r 's/\x1B\[[0-9;]*[mK]//g' ci.log
+```bash
+./ci-clean-log.sh ci.log
 ```
 
-Use a tool for quick copy-pasting:
+Use a tool [wl-clipboard](https://github.com/bugaevc/wl-clipboard) for quick copy-pasting:
 
 ```bash
 tail -525 ci_build.log | wl-copy
@@ -89,10 +87,10 @@ tail -525 ci_build.log | wl-copy
 
 CI test failures may be flaky. Use a bash loop to run repeatedly:
 
+<gh-file:.buildkite/scripts/rerun-test.sh>
+
 ```bash
-COUNT=1; while pytest -sv tests/v1/engine/test_engine_core_client.py::test_kv_cache_events[True-tcp]; do  
-  COUNT=$[$COUNT + 1]; echo "RUN NUMBER ${COUNT}";  
-done
+./rerun-test.sh tests/v1/engine/test_engine_core_client.py::test_kv_cache_events[True-tcp]
 ```
 
 ## Submitting a PR
