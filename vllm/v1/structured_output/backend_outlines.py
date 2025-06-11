@@ -164,11 +164,16 @@ def validate_structured_output_request_outlines(params: SamplingParams):
     elif gd_params.json:
         if isinstance(gd_params.json, str):
             try:
-                schema = json.loads(gd_params.json)
+                # make sure schema is valid json
+                json.loads(gd_params.json)
+                schema = gd_params.json
             except json.JSONDecodeError as e:
                 raise ValueError("Invalid JSON grammar specification.") from e
         else:
-            schema = gd_params.json
+            try:
+                schema = json.dumps(gd_params.json)
+            except Exception as e:
+                raise ValueError(f"Error serializing guided decoding jsonschema: {e}") from e
         pattern = json_schema.build_regex_from_schema(schema)
         validate_regex_is_buildable(pattern)
     elif gd_params.choice:
