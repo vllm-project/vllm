@@ -793,6 +793,9 @@ def test_custom_inputs_models(
     vllm_runner: type[VllmRunner],
     monkeypatch,
 ):
+    if current_platform.is_hpu(
+    ) and model_type == "qwen2_5_vl-windows-attention":
+        pytest.skip("skipping since its leads to OOM on hpu")
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]

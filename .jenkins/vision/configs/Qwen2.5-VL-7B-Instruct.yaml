@@ -1,0 +1,5 @@
+model_name: "/mnt/weka/data/pytorch/Qwen/Qwen2.5-VL-7B-Instruct/"
+dtype: "bfloat16"
+max_model_len: 32768
+max_num_seqs: 32
+num_prompts: 4
