@@ -592,7 +592,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
 
         assert moe is not None
 
-        # method on prepare_finalize?
+        # method on prepare_finalize?  sketchy getting world_size from prepare_finalize
         max_experts_per_worker = (
             (moe.num_experts + prepare_finalize.world_size - 1) //
             prepare_finalize.world_size)

@@ -219,6 +219,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
             per_act_token_quant=per_act_token_quant,
             block_shape=block_shape,
         )
+        assert max_experts_per_worker > 0
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
         self.per_out_ch_quant = per_out_ch_quant
@@ -250,7 +251,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
             workspace1 = (M * topk, max(2 * N, K))
             workspace2 = (M * topk, N)
             output = (M * topk, K)
-        return (workspace1, workspace2, output, self.out_dtype)
+        return (workspace1, workspace2, output, self.out_dtype if self.out_dtype is not None else a.dtype)
 
     def apply(
         self,
@@ -279,8 +280,9 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
                             activation_callable, global_num_experts,
                             expert_map, w1_scale, w2_scale, a1q_scale,
                             a2_scale, workspace13, workspace2,
-                            expert_num_tokens, self.out_dtype,
-                            self.per_act_token, self.per_out_ch,
+                            expert_num_tokens,
+                            self.out_dtype if self.out_dtype is not None else hidden_states.dtype,
+                            self.per_act_token_quant, self.per_out_ch_quant,
                             self.use_batched_format)
 
 
@@ -344,10 +346,12 @@ def cutlass_moe_fp8(
     if out_dtype is None:
         out_dtype = a.dtype
 
+    num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
+
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsFp8(
-            max_experts_per_worker=global_num_experts,
+            max_experts_per_worker=num_experts,
             out_dtype=out_dtype,
             per_act_token_quant=per_act_token,
             per_out_ch_quant=per_out_ch,
@@ -363,7 +367,7 @@ def cutlass_moe_fp8(
         topk_ids,
         False,
         activation,
-        global_num_experts if global_num_experts != -1 else w1_q.size(0),
+        num_experts,
         expert_map,
         w1_scale,
         w2_scale,

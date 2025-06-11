@@ -93,7 +93,7 @@ def pplx_cutlass_moe(
         num_experts=num_experts,
         experts_per_token=topk,
         rank=rank,
-        world_size=pgi.world_size,
+        world_size=world_size,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
         hidden_dim_bytes=hidden_dim,  # because a.dtype.itemsize == 1

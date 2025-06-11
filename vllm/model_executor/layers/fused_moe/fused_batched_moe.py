@@ -801,12 +801,12 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         max_num_tokens: int,
         world_size: int,
         dp_size: int,
-        use_fp8_w8a8: bool,
-        use_int8_w8a8: bool,
-        use_int8_w8a16: bool,
-        use_int4_w4a16: bool,
-        per_act_token_quant: bool,
-        block_shape: Optional[list[int]],
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        use_int4_w4a16: bool = False,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
     ):
         quant_dtype = get_config_quant_dtype(
             use_fp8_w8a8=use_fp8_w8a8,
