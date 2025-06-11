@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
-import os
 from typing import Union
 
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
@@ -36,13 +36,12 @@ class QuickAllReduce:
 
         self.max_size = ops.qr_max_size()
         self.group = group
-        self.quantized = os.environ.get("VLLM_ROCM_CA_QUANTIZED", "0") == "1"
+        self.quantized = envs.VLLM_ROCM_CA_QUANTIZED
 
         # On RocM bfloat16 kernels are slower than fp16
         # due to slower match operations
         # If environment is not set to 1 we convert input to fp16
-        self.use_bf16_kernels = os.environ.get("VLLM_ROCM_CA_BF16_KERNELS",
-                                               "0") == "1"
+        self.use_bf16_kernels = envs.VLLM_ROCM_CA_QUANTIZED
 
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "QuickReduce should be attached to a non-NCCL group.")
