@@ -33,7 +33,7 @@ def run_cutlass_moe_fp8(
     per_act_token: bool,
     per_out_ch: bool,
     use_batched_format: bool,
-) -> torch.Tensor:
+):
     a1q = hidden_states
 
     assert w1_scale is not None
@@ -95,6 +95,8 @@ def run_cutlass_moe_fp8(
     local_E = w1.shape[0]
 
     if use_batched_format:
+        assert expert_num_tokens is not None
+
         expert_offsets = torch.empty((local_E),
                                      dtype=torch.int32,
                                      device=device)
