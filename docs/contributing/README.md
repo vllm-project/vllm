@@ -130,7 +130,7 @@ pytest -s -v tests/test_logger.py
 
 If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
-!!! warning
+!!! important
     If you discover a security vulnerability, please follow the instructions [here](gh-file:SECURITY.md#reporting-a-vulnerability).
 
 ## Pull Requests & Code Reviews

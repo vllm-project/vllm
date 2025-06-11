@@ -379,7 +379,7 @@ Specified using `--task generate`.
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.
 
-!!! warning
+!!! important
     Since some model architectures support both generative and pooling tasks,
     you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 
@@ -432,7 +432,7 @@ Specified using `--task reward`.
 If your model is not in the above list, we will try to automatically convert the model using
 [as_reward_model][vllm.model_executor.models.adapters.as_reward_model]. By default, we return the hidden states of each token directly.
 
-!!! warning
+!!! important
     For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
     e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
@@ -485,7 +485,7 @@ On the other hand, modalities separated by `/` are mutually exclusive.
 
 See [this page][multimodal-inputs] on how to pass multi-modal inputs to the model.
 
-!!! warning
+!!! important
     **To enable multiple multi-modal items per text prompt in vLLM V0**, you have to set `limit_mm_per_prompt` (offline inference)
     or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
 
@@ -640,7 +640,7 @@ Specified using `--task generate`.
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.
 
-!!! warning
+!!! important
     Since some model architectures support both generative and pooling tasks,
     you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 
