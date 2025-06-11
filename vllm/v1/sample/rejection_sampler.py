@@ -214,8 +214,8 @@ class RejectionSampler(nn.Module):
 
     def _combine_outputs_with_spec_tokens(
         self,
-        output_token_ids: torch.Tensor,
-        spec_token_ids: torch.Tensor,
+        output_token_ids: list[list[int]],
+        spec_token_ids: list[list[int]],
     ):
         result = []
         for out, spec in zip(output_token_ids, spec_token_ids):
