@@ -25,8 +25,13 @@ Not currently supported:
 import torch
 
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx1x
 from vllm.triton_utils import tl, triton
+
+# Avoid misleading ROCm warning.
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx1x
+else:
+    on_gfx1x = lambda *args, **kwargs: False
 
 torch_dtype: tl.constexpr = torch.float16
 
