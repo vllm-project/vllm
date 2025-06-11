@@ -65,6 +65,26 @@ pull_request_rules:
       add:
         - multi-modality
 
+- name: label-rocm
+  description: Automatically apply rocm label
+  conditions:
+    - or:
+      - files~=^csrc/rocm/
+      - files~=^docker/Dockerfile.rocm
+      - files~=^requirements/rocm.*\.txt
+      - files~=^vllm/attention/backends/rocm.*\.py
+      - files~=^vllm/attention/ops/rocm.*\.py
+      - files~=^vllm/model_executor/layers/fused_moe/rocm.*\.py
+      - files~=^vllm/v1/attention/backends/mla/rocm.*\.py
+      - files~=^tests/kernels/.*_rocm.*\.py
+      - files=vllm/platforms/rocm.py
+      - title~=(?i)AMD
+      - title~=(?i)ROCm
+  actions:
+    label:
+      add:
+        - rocm
+
 - name: label-structured-output
   description: Automatically apply structured-output label
   conditions:
