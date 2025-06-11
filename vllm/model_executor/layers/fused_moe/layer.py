@@ -216,6 +216,11 @@ class MoEConfig:
 
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
 
+    def __post_init__(self):
+        if self.dp_size > 1:
+            logger.info("Using MOEConfig::max_num_tokens=%d",
+                        self.max_num_tokens)
+
     @property
     def tp_size(self):
         return self.moe_parallel_config.tp_size
