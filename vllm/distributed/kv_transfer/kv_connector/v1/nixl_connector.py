@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-<<<<<<< HEAD
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
-=======
 import base64
 import json
->>>>>>> a1eaf5a5e (attempt to background agent registration)
 import math
 import threading
 import time
@@ -15,7 +11,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
-from urllib.parse import urljoin
 import torch
 
 from vllm import envs
