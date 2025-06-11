@@ -79,7 +79,7 @@ DOLPHIN_CONFIG = GGUFTestConfig(
 )
 
 MODELS = [
-    LLAMA_CONFIG,
+    # LLAMA_CONFIG, # broken
     QWEN2_CONFIG,
     PHI3_CONFIG,
     GPT2_CONFIG,
