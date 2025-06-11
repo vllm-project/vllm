@@ -72,7 +72,7 @@ class BatchedMMTensors:
 
     @staticmethod
     def make_tensors(config: BatchedMMConfig):
-        if config.in_dtype == torch.torch.float8_e4m3fn:
+        if config.in_dtype == torch.float8_e4m3fn:
             config_in_dtype = torch.bfloat16
         else:
             config_in_dtype = config.in_dtype
@@ -103,8 +103,9 @@ class BatchedMMTensors:
                          [32, 64, 128, 192, 224, 256, 512])
 @pytest.mark.parametrize("K", [128, 256, 1024])
 @pytest.mark.parametrize("N", [128, 256, 512, 1024])
-@pytest.mark.parametrize("dtype",
-                         [torch.torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
 def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
