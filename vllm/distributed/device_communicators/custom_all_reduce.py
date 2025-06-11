@@ -328,8 +328,14 @@ class CustomAllreduce:
         if inp.dtype == torch.float16:
             return inp_size <= self.qr_max_size and inp_size >= self.qr_min_size
         elif inp.dtype == torch.bfloat16:
-            return (inp_size <= self.qr_max_size
-                    and inp_size > 1024 * 1024 * 16 and self.world_size == 2)
+            if self.cast_bf162half:
+                # cast2half, so the same condition
+                return inp_size <= self.qr_max_size and \
+                    inp_size >= self.qr_min_size
+            else:
+                return (inp_size <= self.qr_max_size
+                        and inp_size > 1024 * 1024 * 16
+                        and self.world_size == 2)
         return False
 
     def should_custom_allreduce(self, inp: torch.Tensor):
