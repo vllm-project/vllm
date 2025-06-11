@@ -14,29 +14,37 @@ from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.platforms import current_platform
 
 test_backend = TestBackend()
+test_backend_unfused = TestBackend()
 
 
 @pytest.mark.parametrize(
     "model, quant_key",
     [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)])
-# TODO llm not being freed correctly
-@pytest.mark.parametrize("use_triton_fa",
-                         [True] if current_platform.is_rocm() else [False])
+@pytest.mark.parametrize(
+    "use_triton_fa", [True, False] if current_platform.is_rocm() else [False])
 @pytest.mark.skipif(not current_platform.supports_fp8(),
                     reason="Need FP8 support")
 @pytest.mark.skipif(not current_platform.is_cuda_alike(),
                     reason="Only test CUDA and ROCm")
-def test_attention_fusion2(example_prompts, monkeypatch, model, quant_key,
-                           use_triton_fa):
+def test_attention_fusion(example_prompts, monkeypatch, model, quant_key,
+                          use_triton_fa):
     monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
 
     # Prompt 4 seems too open-ended
     prompts = example_prompts[:4] + example_prompts[5:]
 
+    compile_config = CompilationConfig(
+        # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
+        # DYNAMO_ONCE does not properly propagate shapes.
+        level=CompilationLevel.DYNAMO_AS_IS,
+        backend="tests.compile.test_fusion_attn.test_backend_unfused",
+    )
+    vllm_config = VllmConfig(compilation_config=compile_config)
+    test_backend.custom_passes += [NoOpEliminationPass(vllm_config)]
+
     llm = LLM(model,
               enforce_eager=True,
-              compilation_config=CompilationConfig(
-                  level=CompilationLevel.DYNAMO_AS_IS),
+              compilation_config=compile_config,
               gpu_memory_utilization=0.4,
               max_model_len=2048)
 
@@ -46,8 +54,6 @@ def test_attention_fusion2(example_prompts, monkeypatch, model, quant_key,
 
     unfused_output = llm.generate(prompts, sampling_params)
     del llm
-
-    torch._dynamo.reset()
 
     compile_config = CompilationConfig(
         # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
@@ -108,3 +114,6 @@ def test_attention_fusion2(example_prompts, monkeypatch, model, quant_key,
         name_1="fused",
     )
     del llm2
+
+    # Clean Dynamo cache to avoid polluting other case(s)
+    torch._dynamo.reset()
