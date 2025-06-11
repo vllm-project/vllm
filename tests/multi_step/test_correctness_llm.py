@@ -73,8 +73,8 @@ def test_multi_step_llm(
                     completions endpoint; `None` -> 1 logprob returned.
     """
     if current_platform.is_rocm() and \
-        (attention_backend=="FLASHINFER" or enable_chunked_prefill==True):
-        pytest.skip("Multi-Step + Chunked-Prefill not supported on ROCm")
+        (attention_backend == "FLASHINFER" or enable_chunked_prefill):
+        pytest.skip("Multi-Step with FLASHINFER or Chunked-Prefill is not supported on ROCm")
 
     with monkeypatch.context() as m:
         m.setenv(STR_BACKEND_ENV_VAR, attention_backend)
