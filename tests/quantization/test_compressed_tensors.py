@@ -326,7 +326,11 @@ def test_compressed_tensors_w4a16_marlin24(vllm_runner):
         assert output
 
 
-def test_compressed_tensors_fp8(vllm_runner):
+@pytest.mark.parametrize("use_rocm_aiter",
+                         ["0", "1"] if current_platform.is_rocm() else ["0"])
+def test_compressed_tensors_fp8(vllm_runner, use_rocm_aiter, monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+
     model_path = "nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test"
     with vllm_runner(model_path) as llm:
 
