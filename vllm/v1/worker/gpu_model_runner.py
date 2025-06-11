@@ -1482,10 +1482,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 "prompt tokens, tokens, please disable it when the requests "
                 "need prompt logprobs")
 
-        print("output_token_ids2",
-              self.input_batch.sampling_metadata.output_token_ids,
-              self.input_batch.sampling_metadata.last_spec_token_ids)
-
         # Prepare the decoder inputs.
         (attn_metadata, logits_indices, spec_decode_metadata,
          num_scheduled_tokens_np, spec_decode_common_attn_metadata,
