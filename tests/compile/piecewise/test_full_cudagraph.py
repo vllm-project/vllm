@@ -62,9 +62,10 @@ def generate_text(llm: LLM, batch_size: int, max_tokens: int):
     return llm.generate(prompts, sampling_params)
 
 
-@pytest.mark.skipif(current_platform.is_cuda()
-                    and current_platform.get_device_capability() != (9, 0),
-                    reason="Only Hopper GPUs support FlashAttention 3")
+@pytest.mark.skipif(not current_platform.is_cuda_alike() or
+                    (current_platform.is_cuda()
+                     and current_platform.get_device_capability() != (9, 0)),
+                    reason="Only run for Hopper GPUs and AMD GPUs")
 @pytest.mark.parametrize(("batch_size", "max_tokens"), [(1, 10), (7, 10),
                                                         (16, 10), (25, 10),
                                                         (32, 10), (45, 10),
@@ -92,7 +93,7 @@ def test_full_cudagraph(batch_size, max_tokens, full_cudagraph_llm,
             0].text == full_cudagraph_responses[i].outputs[0].text
 
 
-@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 def test_full_cudagraph_with_invalid_backend():
     with temporary_environ({
             "VLLM_USE_V1": "1",

@@ -59,8 +59,7 @@ class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
         # When doing full graph capture, setting seq_lens to
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
-        if self.use_full_cuda_graph:
-            attn_metadata.seq_lens.fill_(1)
+        attn_metadata.seq_lens.fill_(1)
         return attn_metadata
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
