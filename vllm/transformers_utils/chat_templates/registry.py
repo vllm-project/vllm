@@ -28,10 +28,9 @@ class TemplateInfo:
 
     def get_path(self, tokenizer_name_or_path: str) -> Optional[Path]:
         if callable(self.path):
-            chat_template = self.path(tokenizer_name_or_path)
-        else:
-            chat_template = self.path
-        return chat_template
+            return self.path(tokenizer_name_or_path)
+
+        return self.path
 
 
 # yapf: disable
