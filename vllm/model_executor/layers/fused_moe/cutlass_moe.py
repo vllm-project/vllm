@@ -13,160 +13,24 @@ from vllm.model_executor.layers.fused_moe.utils import _fp8_perm, _resize_cache
 from vllm.scalar_type import scalar_types
 
 
-def run_cutlass_moe_fp8(
-    output: torch.Tensor,
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_ids: torch.Tensor,
-    activation_callable: Callable,
-    global_num_experts: int,
-    expert_map: Optional[torch.Tensor],
-    w1_scale: Optional[torch.Tensor],
-    w2_scale: Optional[torch.Tensor],
-    a1q_scale: Optional[torch.Tensor],
-    a2_scale: Optional[torch.Tensor],
-    workspace13: torch.Tensor,
-    workspace2: torch.Tensor,
-    expert_num_tokens: Optional[torch.Tensor],
-    out_dtype: torch.dtype,
-    per_act_token: bool,
-    per_out_ch: bool,
-    ab_strides1: torch.Tensor,
-    c_strides1: torch.Tensor,
-    ab_strides_2: torch.Tensor,
-    c_strides_2: torch.Tensor,
-):
-    a1q = hidden_states
-
-    assert w1_scale is not None
-    assert w2_scale is not None
-    assert w1.dtype == torch.float8_e4m3fn
-    assert w2.dtype == torch.float8_e4m3fn
-    assert a1q.shape[1] == w1.shape[1], "Hidden size mismatch w1"
-    assert w1.shape[2] == w2.shape[1] * 2, "Hidden size mismatch w2"
-    assert w1.shape[0] == w2.shape[0], "Expert number mismatch"
-    assert a1q_scale is None or a1q_scale.dim(
-    ) == 0 or a1q_scale.shape[0] == 1 or a1q_scale.shape[0] == a1q.shape[
-        0], "Input scale shape mismatch"
-    assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 or w1_scale.shape[
-        1] == w1.shape[2], "W1 scale shape mismatch"
-    assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 or w2_scale.shape[
-        1] == w2.shape[2], "W2 scale shape mismatch"
-    assert w1.shape[0] == w2.shape[0], "Weights expert number mismatch"
-    assert w1.shape[0] == w1_scale.shape[
-        0], "w1 scales expert number mismatch"
-    assert w1.shape[0] == w2_scale.shape[
-        0], "w2 scales expert number mismatch"
-    assert a2_scale is None or a1q_scale is None or a2_scale.shape == a1q_scale.shape, "Intermediate scale shape mismatch"  # noqa: E501
-    assert ab_strides1.shape[0] == w1.shape[
-        0], "AB Strides 1 expert number mismatch"
-    assert c_strides1.shape[0] == w1.shape[
-        0], "C Strides 1 expert number mismatch"
-    assert ab_strides2.shape[0] == w2.shape[
-        0], "AB Strides 2 expert number  mismatch"
-    assert c_strides2.shape[0] == w2.shape[
-        0], "C Strides 2 expert number mismatch"
-    assert out_dtype in [torch.half,
-                         torch.bfloat16], "Invalid output dtype"
-
-    M = a1q.shape[0]
-    _, K, N = w2.shape
-    device = a1q.device
-
-    assert w1.shape[2] == K
-    assert global_num_experts != -1
-    assert a1q_scale is not None
-
-    if expert_map is not None:
-        "Translate info from expert_map to topk_ids"
-        local_topk_ids = torch.where(expert_map[topk_ids] != -1,
-                                     expert_map[topk_ids], -1)
-    else:
-        local_topk_ids = topk_ids
-
-    topk = local_topk_ids.shape[1]
-
-    per_act_token = a1q_scale.numel() != 1 if a1q_scale is not None else (
-        a2_scale.numel() != 1 if a2_scale is not None else False)
-
-    expert_offsets = torch.empty((global_num_experts + 1),
-                                 dtype=torch.int32,
-                                 device=device)
-    problem_sizes1 = torch.empty((global_num_experts, 3),
-                                 dtype=torch.int32,
-                                 device=device)
-    problem_sizes2 = torch.empty((global_num_experts, 3),
-                                 dtype=torch.int32,
-                                 device=device)
-
-    # With expert_map each Rank processes only a subset of experts. As
-    # a result not all of a_map and c2 tensors are filled. We fill it
-    # zeros for correctness.
-    if expert_map is not None:
-        a_map = torch.zeros((local_topk_ids.numel()),
-                            dtype=torch.int32,
-                            device=device)
-    else:
-        a_map = torch.empty((local_topk_ids.numel()),
-                            dtype=torch.int32,
-                            device=device)
-
-    c_map = torch.empty((local_topk_ids.numel()),
-                        dtype=torch.int32,
-                        device=device)
-
-    ops.get_cutlass_moe_mm_data(local_topk_ids, expert_offsets,
-                                problem_sizes1, problem_sizes2, a_map,
-                                c_map, global_num_experts, N, K)
-
-    a1q = _fp8_perm(a1q, a_map)
-    a1q_scale = a1q_scale[a_map] if per_act_token else a1q_scale
-
-    c1 = _resize_cache(workspace13, (M * topk, N * 2))
-    c2 = _resize_cache(workspace2, (M * topk, N))
-    c3 = _resize_cache(workspace13, (M * topk, K))
-
-    ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale, w1_scale, expert_offsets,
-                       problem_sizes1, ab_strides1, ab_strides1, c_strides1,
-                       per_act_token, per_out_ch)
-
-    activation_callable(c2, c1)
-
-    a2q, a2q_scale = ops.scaled_fp8_quant(
-        c2, a2_scale, use_per_token_if_dynamic=per_act_token)
-
-    if expert_map is not None:
-        c3.fill_(0)
-
-    ops.cutlass_moe_mm(c3, a2q, w2, a2q_scale, w2_scale, expert_offsets,
-                       problem_sizes2, ab_strides2, ab_strides2, c_strides2,
-                       per_act_token, per_out_ch)
-
-    # We can't do this inplace because output may point to the same tensor
-    # as c3.
-    output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
-
-
 class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
+
     def __init__(
         self,
-        out_dtype: torch.dtype,
-        per_act_token: bool,
-        per_out_ch: bool,
         ab_strides1: torch.Tensor,
         c_strides1: torch.Tensor,
-        ab_strides_2: torch.Tensor,
-        c_strides_2: torch.Tensor,
+        ab_strides2: torch.Tensor,
+        c_strides2: torch.Tensor,
+        out_dtype: torch.dtype,
+        per_act_token: bool,
     ):
         super().__init__()
-        self.out_dtype = out_dtype
-        self.per_act_token = per_act_token
-        self.per_out_ch = per_out_ch
         self.ab_strides1 = ab_strides1
         self.c_strides1 = c_strides1
-        self.ab_strides_2 = ab_strides_2
-        self.c_strides_2 = c_strides_2
+        self.ab_strides2 = ab_strides2
+        self.c_strides2 = c_strides2
+        self.out_dtype = out_dtype
+        self.per_act_token = per_act_token
 
     def supports_chunking(self) -> bool:
         return True
@@ -174,13 +38,14 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     def workspace_shapes(
         self,
         a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        # Note that K, N are transposed
+        N, K = K, N
         workspace1 = (M * topk, max(2 * N, K))
         workspace2 = (M * topk, N)
         output = (M * topk, K)
@@ -206,17 +71,115 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
     ):
-        assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
-        assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
-        activation_callable = lambda i, o: self.activation(activation, i, o)
-        run_cutlass_moe_fp8(output, hidden_states, w1, w2, topk_ids,
-                            activation_callable, global_num_experts,
-                            expert_map, w1_scale, w2_scale, a1q_scale,
-                            a2_scale, workspace13, workspace2,
-                            expert_num_tokens, self.out_dtype,
-                            self.per_act_token, self.per_out_ch,
-                            self.ab_strides1, self.c_strides1,
-                            self.ab_strides_2, self.c_strides_2)
+        a1q = hidden_states
+
+        assert w1_scale is not None
+        assert w2_scale is not None
+        assert w1.dtype == torch.float8_e4m3fn
+        assert w2.dtype == torch.float8_e4m3fn
+        assert a1q.shape[1] == w1.shape[1], "Hidden size mismatch w1"
+        assert w1.shape[2] == w2.shape[1] * 2, "Hidden size mismatch w2"
+        assert w1.shape[0] == w2.shape[0], "Expert number mismatch"
+        assert a1q_scale is None or a1q_scale.dim(
+        ) == 0 or a1q_scale.shape[0] == 1 or a1q_scale.shape[0] == a1q.shape[
+            0], "Input scale shape mismatch"
+        assert w1_scale.dim() == 1 or w1_scale.shape[1] == 1 or w1_scale.shape[
+            1] == w1.shape[2], "W1 scale shape mismatch"
+        assert w2_scale.dim() == 1 or w2_scale.shape[1] == 1 or w2_scale.shape[
+            1] == w2.shape[2], "W2 scale shape mismatch"
+        assert w1.shape[0] == w2.shape[0], "Weights expert number mismatch"
+        assert w1.shape[0] == w1_scale.shape[
+            0], "w1 scales expert number mismatch"
+        assert w1.shape[0] == w2_scale.shape[
+            0], "w2 scales expert number mismatch"
+        assert a2_scale is None or a1q_scale is None or a2_scale.shape == a1q_scale.shape, "Intermediate scale shape mismatch"  # noqa: E501
+        assert self.ab_strides1.shape[0] == w1.shape[
+            0], "AB Strides 1 expert number mismatch"
+        assert self.c_strides1.shape[0] == w1.shape[
+            0], "C Strides 1 expert number mismatch"
+        assert self.ab_strides2.shape[0] == w2.shape[
+            0], "AB Strides 2 expert number  mismatch"
+        assert self.c_strides2.shape[0] == w2.shape[
+            0], "C Strides 2 expert number mismatch"
+        assert self.out_dtype in [torch.half, torch.bfloat16], \
+                "Invalid output dtype"
+
+        M = a1q.shape[0]
+        _, N, K = w2.shape  # because w1 + w2 are transposed
+        device = a1q.device
+
+        assert w1.shape[1] == K
+        assert global_num_experts != -1
+        assert a1q_scale is not None
+
+        if expert_map is not None:
+            "Translate info from expert_map to topk_ids"
+            local_topk_ids = torch.where(expert_map[topk_ids] != -1,
+                                         expert_map[topk_ids], -1)
+        else:
+            local_topk_ids = topk_ids
+
+        topk = local_topk_ids.shape[1]
+
+        per_act_token = a1q_scale.numel() != 1 if a1q_scale is not None else (
+            a2_scale.numel() != 1 if a2_scale is not None else False)
+
+        expert_offsets = torch.empty((global_num_experts + 1),
+                                     dtype=torch.int32,
+                                     device=device)
+        problem_sizes1 = torch.empty((global_num_experts, 3),
+                                     dtype=torch.int32,
+                                     device=device)
+        problem_sizes2 = torch.empty((global_num_experts, 3),
+                                     dtype=torch.int32,
+                                     device=device)
+
+        # With expert_map each Rank processes only a subset of experts. As
+        # a result not all of a_map and c2 tensors are filled. We fill it
+        # zeros for correctness.
+        if expert_map is not None:
+            a_map = torch.zeros((local_topk_ids.numel()),
+                                dtype=torch.int32,
+                                device=device)
+        else:
+            a_map = torch.empty((local_topk_ids.numel()),
+                                dtype=torch.int32,
+                                device=device)
+
+        c_map = torch.empty((local_topk_ids.numel()),
+                            dtype=torch.int32,
+                            device=device)
+
+        ops.get_cutlass_moe_mm_data(local_topk_ids, expert_offsets,
+                                    problem_sizes1, problem_sizes2, a_map,
+                                    c_map, global_num_experts, N, K)
+
+        a1q = _fp8_perm(a1q, a_map)
+        a1q_scale = a1q_scale[a_map] if per_act_token else a1q_scale
+
+        c1 = _resize_cache(workspace13, (M * topk, N * 2))
+        c2 = _resize_cache(workspace2, (M * topk, N))
+        c3 = _resize_cache(workspace13, (M * topk, K))
+
+        ops.cutlass_moe_mm(c1, a1q, w1, a1q_scale, w1_scale,
+                           expert_offsets[:-1], problem_sizes1,
+                           self.ab_strides1, self.ab_strides1, self.c_strides1)
+
+        self.activation(activation, c2, c1)
+
+        a2q, a2q_scale = ops.scaled_fp8_quant(
+            c2, a2_scale, use_per_token_if_dynamic=per_act_token)
+
+        if expert_map is not None:
+            c3.fill_(0)
+
+        ops.cutlass_moe_mm(c3, a2q, w2, a2q_scale, w2_scale,
+                           expert_offsets[:-1], problem_sizes2,
+                           self.ab_strides2, self.ab_strides2, self.c_strides2)
+
+        # We can't do this inplace because output may point to the same tensor
+        # as c3.
+        output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
 
 
 #TODO make the grouped gemm kernel consistent with scaled gemm kernel
@@ -288,14 +251,12 @@ def cutlass_moe_fp8(
             quant_dtype=torch.float8_e4m3fn,
         ),
         CutlassExpertsFp8(
-            out_dtype=out_dtype,
-            per_act_token=per_act_token,
-            per_out_ch=per_out_ch,
             ab_strides1=ab_strides1,
             c_strides1=c_strides1,
             ab_strides2=ab_strides2,
             c_strides2=c_strides2,
             out_dtype=out_dtype,
+            per_act_token=per_act_token,
         ),
     )
 
