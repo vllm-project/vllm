@@ -28,7 +28,7 @@ def reset_default_device():
     torch.set_default_device(original_device)
 
 
-def test_topk_impl_equivalance():
+def test_topk_impl_equivalence():
 
     torch.set_default_device(DEVICE)
     generator = Generator(device=DEVICE).manual_seed(33)
