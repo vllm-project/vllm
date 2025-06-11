@@ -452,7 +452,6 @@ void quant_impl(void* output, void* output_scale, void* input,
   int const blockRepeat =
       (totalWorkSize + block.x * grid.x - 1) / (block.x * grid.x);
   if (blockRepeat > 1) {
-    // Calculate shared memory size for large m_topk kernels
     size_t shared_mem_size = (n_experts + 1) * sizeof(uint32_t);
     if (n_experts >= 4) {
       cvt_fp16_to_fp4<T, false, false>
@@ -475,7 +474,6 @@ void quant_impl(void* output, void* output_scale, void* input,
           n_experts);
     }
   } else {
-    // Use standard version for smaller m_topk (no shared memory needed)
     if (n_experts >= 16) {
       cvt_fp16_to_fp4<T, false, false><<<grid, block, 0, stream>>>(
           m_topk, k, reinterpret_cast<T*>(input),
