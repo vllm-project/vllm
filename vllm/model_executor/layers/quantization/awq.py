@@ -86,7 +86,7 @@ class AWQConfig(QuantizationConfig):
             return AWQLinearMethod(self)
         elif isinstance(layer, FusedMoE):
             # Lazy import to avoid circular import.
-            from .awq_marlin import AWQMoEMethod
+            from .awq_marlin import AWQMoEMethod,AWQMarlinConfig
             from .moe_wna16 import MoeWNA16Config
             from .utils.marlin_utils import check_moe_marlin_supports_layer
             if not check_moe_marlin_supports_layer(layer, self.group_size):
@@ -102,7 +102,18 @@ class AWQConfig(QuantizationConfig):
                 }
                 return MoeWNA16Config.from_config(config).get_quant_method(
                     layer, prefix)
-            return AWQMoEMethod(layer.quant_config)
+            marlin_compatible_config_dict = {
+                "quant_method": "awq",
+                "bits": self.weight_bits,
+                "group_size": self.group_size,
+                "zero_point": self.zero_point,
+                "lm_head": False,
+                "modules_to_not_convert": self.modules_to_not_convert,
+            }
+            awq_marlin_config = AWQMarlinConfig.from_config(
+                marlin_compatible_config_dict
+            )
+            return AWQMoEMethod(awq_marlin_config)
         return None
 
 
