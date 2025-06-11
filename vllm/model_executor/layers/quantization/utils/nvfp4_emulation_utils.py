@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-__all__ = [
-    "break_fp4_bytes",
-    "dequantize_to_dtype",
-]
+from vllm.scalar_type import scalar_types
+
+__all__ = ["break_fp4_bytes", "dequantize_to_dtype", "ref_nvfp4_quant"]
+
+FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 
 kE2M1ToFloat = torch.tensor([0., 0.5, 1., 1.5, 2., 3., 4., 6.],
                             dtype=torch.float32)
@@ -59,3 +61,44 @@ def dequantize_to_dtype(tensor_fp4,
     # scale the tensor
     out = (tensor_f32 * tensor_sf_dtype.unsqueeze(-1)).reshape(m, k)
     return out.to(dtype)
+
+
+def get_reciprocal(x):
+    if isinstance(x, torch.Tensor):
+        return torch.where(x == 0, torch.tensor(0.0, dtype=x.dtype), 1.0 / x)
+    elif isinstance(x, (float, int)):
+        return 0.0 if x == 0 else 1.0 / x
+    else:
+        raise TypeError("Input must be a float, int, or a torch.Tensor.")
+
+
+def cast_to_fp4(x):
+    sign = torch.sign(x)
+    x = torch.abs(x)
+    x[(x >= 0.0) & (x <= 0.25)] = 0.0
+    x[(x > 0.25) & (x < 0.75)] = 0.5
+    x[(x >= 0.75) & (x <= 1.25)] = 1.0
+    x[(x > 1.25) & (x < 1.75)] = 1.5
+    x[(x >= 1.75) & (x <= 2.5)] = 2.0
+    x[(x > 2.5) & (x < 3.5)] = 3.0
+    x[(x >= 3.5) & (x <= 5.0)] = 4.0
+    x[x > 5.0] = 6.0
+    return x * sign
+
+
+def ref_nvfp4_quant(x, global_scale, block_size):
+    assert global_scale.dtype == torch.float32
+    assert x.ndim == 2
+    m, n = x.shape
+    x = torch.reshape(x, (m, n // block_size, block_size))
+    vec_max = torch.max(torch.abs(x), dim=-1,
+                        keepdim=True)[0].to(torch.float32)
+    scale = global_scale * (vec_max * get_reciprocal(FLOAT4_E2M1_MAX))
+    scale = torch.clamp(scale, max=448, min=-448)
+    scale = scale.to(torch.float8_e4m3fn).to(torch.float32)
+    output_scale = get_reciprocal(scale * get_reciprocal(global_scale))
+
+    scaled_x = x.to(torch.float32) * output_scale
+    clipped_x = torch.clamp(scaled_x, -6.0, 6.0).reshape(m, n)
+    # both outputs are float32
+    return cast_to_fp4(clipped_x), scale.squeeze(-1)

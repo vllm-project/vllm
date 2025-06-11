@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import numpy as np
 import torch
@@ -104,17 +105,19 @@ class MultiGroupBlockTable:
 
     def __init__(self, max_num_reqs: int, max_model_len: int,
                  max_num_batched_tokens: int, pin_memory: bool,
-                 device: torch.device, block_size: int) -> None:
+                 device: torch.device, block_sizes: list[int]) -> None:
         self.block_tables = [
             BlockTable(max_num_reqs, cdiv(max_model_len, block_size),
                        max_num_batched_tokens, pin_memory, device)
+            for block_size in block_sizes
         ]
 
-    def append_row(self, block_ids: list[list[int]], row_idx: int) -> None:
+    def append_row(self, block_ids: tuple[list[int], ...],
+                   row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
             block_table.append_row(block_ids[i], row_idx)
 
-    def add_row(self, block_ids: list[list[int]], row_idx: int) -> None:
+    def add_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
             block_table.add_row(block_ids[i], row_idx)
 
