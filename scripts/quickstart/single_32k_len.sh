@@ -41,7 +41,7 @@ block_size=128
 # DO NOT change ends...
 
 # memory footprint tunning params
-export VLLM_GPU_MEMORY_UTILIZATION=0.8
+export VLLM_GPU_MEMORY_UTILIZATION=0.75
 export VLLM_GRAPH_RESERVED_MEM=0.2
 export VLLM_GRAPH_PROMPT_RATIO=0
 export VLLM_MLA_DISABLE_REQUANTIZATION=0
