@@ -218,8 +218,8 @@ class MoEConfig:
 
     def __post_init__(self):
         if self.dp_size > 1:
-            logger.info("Using MOEConfig::max_num_tokens=%d",
-                        self.max_num_tokens)
+            logger.debug("Using MOEConfig::max_num_tokens=%d",
+                         self.max_num_tokens)
 
     @property
     def tp_size(self):
