@@ -274,7 +274,7 @@ def mteb_test_rerank_models(hf_runner,
         ):
             # vllm and st both remove the prompt, fair comparison.
             prompts = [(s[0], s[1]) for s in sentences]
-            return hf_model_predict(prompts, *args, **kwargs)
+            return hf_model_predict(prompts, *args, **kwargs, batch_size=8)
 
         hf_model.predict = _predict
 
