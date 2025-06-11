@@ -60,16 +60,12 @@ def test_fast_inc_detok_invalid_utf8_err_case():
         2555, 513, 236789, 602, 31118, 569
     ]
 
-    try:
-        output = ""
-        for i, token_id in enumerate(test_tokens):
-            detokenizer.update([token_id], False)
+    output = ""
+    for i, token_id in enumerate(test_tokens):
+        detokenizer.update([token_id], False)
 
-            finished = i == len(test_tokens) - 1
-            output += detokenizer.get_next_output_text(finished, delta=True)
-    except Exception as e:
-        print("TYPE IS", type(e))
-        raise e
+        finished = i == len(test_tokens) - 1
+        output += detokenizer.get_next_output_text(finished, delta=True)
 
 
 # fmt: off
@@ -77,8 +73,8 @@ def test_fast_inc_detok_invalid_utf8_err_case():
   {
     "source": "Résultats",
     "source_type": "CONCEPT",
-    # "source_description": "Résultats de l'analyse de l'impact des opérations israéliennes sur la frontière libanaise",
-    "target": "Israël",72
+    "source_description": "Résultats de l'analyse de l'impact des opérations israéliennes sur la frontière libanaise",
+    "target": "Israël",
     "target_type": "ORGANIZATION",
     "target_description": "Pays qui a obtenu à sa frontière libanaise « un niveau de calme inédit depuis les années 1960 »",
     "relationship": "Obtention d'un niveau de'''
