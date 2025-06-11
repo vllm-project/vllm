@@ -3,7 +3,7 @@
 
 import pickle
 from collections.abc import Iterable, Mapping
-from typing import cast
+from typing import Union, cast
 
 import numpy as np
 import torch
@@ -24,7 +24,7 @@ A dictionary containing hashes for items in each modality.
 class MultiModalHasher:
 
     @classmethod
-    def serialize_item(cls, obj: object) -> bytes | memoryview:
+    def serialize_item(cls, obj: object) -> Union[bytes, memoryview]:
         # Simple cases
         if isinstance(obj, str):
             return obj.encode("utf-8")
@@ -66,7 +66,7 @@ class MultiModalHasher:
         cls,
         key: str,
         obj: object,
-    ) -> Iterable[tuple[bytes, bytes | memoryview]]:
+    ) -> Iterable[tuple[bytes, Union[bytes, memoryview]]]:
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):
