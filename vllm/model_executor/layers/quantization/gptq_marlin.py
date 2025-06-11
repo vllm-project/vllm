@@ -59,6 +59,7 @@ def get_moe_quant_method(
         return moe_method_cls(cloned_config)
     return None
 
+
 class GPTQMarlinConfig(QuantizationConfig):
     """Config class for GPTQ Marlin"""
 
