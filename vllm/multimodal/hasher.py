@@ -3,7 +3,7 @@
 
 import pickle
 from collections.abc import Iterable, Mapping
-from typing import Union, cast
+from typing import Union
 
 import numpy as np
 import torch
@@ -75,7 +75,7 @@ class MultiModalHasher:
             for k, v in obj.items():
                 yield from cls.iter_item_to_bytes(f"{key}.{k}", v)
         else:
-            key_bytes = cast(bytes, cls.serialize_item(key))
+            key_bytes = key.encode("utf-8")
             value_bytes = cls.serialize_item(obj)
             yield key_bytes, value_bytes
 
