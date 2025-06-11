@@ -344,16 +344,12 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         if self.VLLM_USE_FP8_MATMUL:
             self.latent_cache_k_nodeq = VLLMKVCache()
-            self.latent_cache_v_nodeq = VLLMKVCache()
             self.latent_cache_k_nodeq = initialize_fp8_kv_cache(
                 self.latent_cache_k_nodeq)
-            self.latent_cache_v_nodeq = initialize_fp8_kv_cache(
-                self.latent_cache_v_nodeq)
             self.matmul_qk_decode = initialize_fp8_matmul(self.matmul_qk)
             self.matmul_av_decode = initialize_fp8_matmul(self.matmul_av)
         else:
             self.latent_cache_k = VLLMKVCache()
-            self.latent_cache_v = VLLMKVCache()
 
         self.prefill_use_fusedsdpa = "fsdpa" in enabled_flags()
         HPUFusedSDPA = kernels.fsdpa()
@@ -500,7 +496,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         output = flat_pa_mla(
             query=q,
             key_cache=kv_cache[0],
-            value_cache=kv_cache[1],
+            value_cache=None,
             block_list=attn_metadata.block_list,
             block_mapping=attn_metadata.block_mapping,
             block_bias=attn_metadata.attn_bias,
@@ -516,9 +512,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             keys_fetch_func=self.latent_cache_k.fetch_from_cache
             if not self.VLLM_USE_FP8_MATMUL else
             self.latent_cache_k_nodeq.fetch_from_cache,
-            values_fetch_func=self.latent_cache_v.fetch_from_cache
-            if not self.VLLM_USE_FP8_MATMUL else
-            self.latent_cache_v_nodeq.fetch_from_cache,
+            values_fetch_func=None,
             kv_lora_rank=self.kv_lora_rank,
             kv_in_fp8=self.VLLM_USE_FP8_MATMUL,
         )
