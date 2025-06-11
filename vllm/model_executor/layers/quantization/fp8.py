@@ -1017,6 +1017,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             else:
                 x_fp8 = x
             topk_weights = topk_weights.to(torch.bfloat16)
+            if layer.dp_size > 1:
+                cu_tokens_across_dp_cpu = get_forward_context(
+                ).dp_metadata.cu_tokens_across_dp_cpu
+
+                topk_ids_across_dp = get_forward_context(
+                ).dp_metadata.topk_ids_across_dp
+                topk_ids = layer.multicast_fn(topk_ids,
+                                              cu_tokens_across_dp_cpu,
+                                              topk_ids_across_dp)
+
+                topk_weights_across_dp = get_forward_context(
+                ).dp_metadata.topk_weights_across_dp
+                topk_weights = layer.multicast_fn(topk_weights,
+                                                  cu_tokens_across_dp_cpu,
+                                                  topk_weights_across_dp)
+
             batched_tokens = x.shape[0]
             selected_experts = (topk_ids.to(torch.int64) - ep_shift)
             if batched_tokens > self.moe_slice_length:
