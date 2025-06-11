@@ -341,9 +341,13 @@ class FlashAttentionMetadataBuilder(
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
     def build(
-        self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-        common_prefix_len: int, common_attn_metadata: CommonAttentionMetadata
+        self, common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata
     ) -> FlashAttentionMetadata:
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
         max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens

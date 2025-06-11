@@ -669,7 +669,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         seq_lens = self.seq_lens[:num_reqs]
 
         common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=query_start_loc, seq_lens=seq_lens)
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+        )
 
         attn_metadata: dict[str, Any] = {}
         # Prepare the attention metadata for each KV cache group and make layers
@@ -690,11 +695,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             attn_metadata_i = (
                 self.attn_metadata_builders[kv_cache_group_id].build(
-                    num_reqs=num_reqs,
-                    num_actual_tokens=total_num_scheduled_tokens,
-                    max_query_len=max_num_scheduled_tokens,
                     common_prefix_len=common_prefix_len,
-                    common_attn_metadata=common_attn_metadata))
+                    common_attn_metadata=common_attn_metadata,
+                ))
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
@@ -1809,7 +1812,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             seq_lens = self.seq_lens[:num_reqs]
 
             common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc, seq_lens=seq_lens)
+                query_start_loc=query_start_loc,
+                seq_lens=seq_lens,
+                num_reqs=num_reqs,
+                num_actual_tokens=num_tokens,
+                max_query_len=num_tokens,
+            )
 
             attn_metadata = {}
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -1817,10 +1825,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
                 attn_metadata_i = self.attn_metadata_builders[
                     kv_cache_group_id].build_for_cudagraph_capture(
-                        num_reqs=num_reqs,
-                        num_tokens=num_tokens,
-                        common_attn_metadata=common_attn_metadata,
-                    )
+                        common_attn_metadata)
                 for layer_name in kv_cache_group_spec.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 

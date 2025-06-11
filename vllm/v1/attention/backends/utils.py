@@ -26,6 +26,13 @@ class CommonAttentionMetadata:
     """(batch_size,), the length of each request including both computed tokens
     and newly scheduled tokens"""
 
+    num_reqs: int
+    """Number of requests"""
+    num_actual_tokens: int
+    """Total number of tokens in batch"""
+    max_query_len: int
+    """Longest query in batch"""
+
 
 M = TypeVar("M")
 
@@ -33,8 +40,7 @@ M = TypeVar("M")
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
 
     @abstractmethod
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
+    def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata) -> M:
         """
         Central method that builds attention metadata.
@@ -43,14 +49,14 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         raise NotImplementedError
 
     def build_for_cudagraph_capture(
-            self, num_reqs: int, num_tokens: int,
-            common_attn_metadata: CommonAttentionMetadata) -> M:
+            self, common_attn_metadata: CommonAttentionMetadata) -> M:
         """
         Build attention metadata for CUDA graph capture. Uses build by default.
-        Subclasses that override this method should call self.build.
+        Subclasses that override this method should call self.build or
+        super().build_for_cudagraph_capture.
         """
-        return self.build(num_reqs, num_tokens, num_tokens, 0,
-                          common_attn_metadata)
+        return self.build(common_prefix_len=0,
+                          common_attn_metadata=common_attn_metadata)
 
     def use_cascade_attention(
         self,

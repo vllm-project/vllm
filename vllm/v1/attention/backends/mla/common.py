@@ -459,26 +459,31 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         )
 
     def build_for_cudagraph_capture(
-            self, num_reqs: int, num_tokens: int,
-            common_attn_metadata: CommonAttentionMetadata) -> M:
+            self, common_attn_metadata: CommonAttentionMetadata) -> M:
         """
         This method builds the metadata for full cudagraph capture.
         Currently, only decode is supported for full cudagraphs with MLA.
         """
-        assert num_reqs == num_tokens, \
+        m = common_attn_metadata
+        assert m.num_reqs == m.num_actual_tokens, \
             "MLA only supports decode-only full CUDAGraph capture. " \
             "Make sure all cudagraph capture sizes <= max_num_seq."
 
+        m.max_query_len = 1  # decode-only
+
         # Update state usually set in reorder_batch.
-        self._num_decodes = num_tokens
-        self._num_decode_tokens = num_tokens
+        self._num_decodes = m.num_reqs
+        self._num_decode_tokens = m.num_actual_tokens
         self._num_prefills = 0
         self._num_prefill_tokens = 0
-        return self.build(num_tokens, num_tokens, 1, 0, common_attn_metadata)
+        return self.build(0, m)
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
+    def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata) -> M:
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
         assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
