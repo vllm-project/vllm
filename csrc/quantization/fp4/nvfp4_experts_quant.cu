@@ -250,13 +250,14 @@ cvt_fp16_to_fp4(
 
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int colsPerRow = numCols / CVT_FP4_ELTS_PER_THREAD;
-  
+
   // Each global thread processes one element
-  for (int globalIdx = tid; globalIdx < numRows * colsPerRow; globalIdx += gridDim.x * blockDim.x) {
+  for (int globalIdx = tid; globalIdx < numRows * colsPerRow;
+       globalIdx += gridDim.x * blockDim.x) {
     // Calculate which row and column this global thread should process
     int rowIdx = globalIdx / colsPerRow;
     int colIdx = globalIdx % colsPerRow;
-    
+
     int64_t inOffset = rowIdx * colsPerRow + colIdx;
     PackedVec in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
     // Get the output tensor offset.
@@ -264,43 +265,49 @@ cvt_fp16_to_fp4(
     int64_t outOffset = inOffset;
     auto& out_pos = out[outOffset];
 
-    // Find index within the experts using different strategies based on expert count
+    // Find index within the experts using different strategies based on expert
+    // count
     int rowIdx_in_expert = 0;
     int expert_idx = 0;
-    
-    if constexpr (SMALL_NUM_EXPERTS){
+
+    if constexpr (SMALL_NUM_EXPERTS) {
       for (int i = 0; i < n_experts; i++) {
         uint32_t current_offset = __ldca(&input_offset_by_experts[i]);
         uint32_t next_offset = __ldca(&input_offset_by_experts[i + 1]);
         if (rowIdx >= current_offset && rowIdx < next_offset) {
           rowIdx_in_expert = rowIdx - current_offset;
           expert_idx = i;
-          goto expert_found;
+          break;
         }
       }
-    }
-    else {
+    } else {
       uint32_t local_offsets[17];
       for (int chunk_start = 0; chunk_start < n_experts; chunk_start += 16) {
-        *reinterpret_cast<int4*>(local_offsets) = __ldca(reinterpret_cast<const int4*>(&input_offset_by_experts[chunk_start]));
-        *reinterpret_cast<int4*>(local_offsets + 4) = __ldca(reinterpret_cast<const int4*>(&input_offset_by_experts[chunk_start + 4]));
-        *reinterpret_cast<int4*>(local_offsets + 8) = __ldca(reinterpret_cast<const int4*>(&input_offset_by_experts[chunk_start + 8]));
-        *reinterpret_cast<int4*>(local_offsets + 12) = __ldca(reinterpret_cast<const int4*>(&input_offset_by_experts[chunk_start + 12]));
+        *reinterpret_cast<int4*>(local_offsets) =
+            __ldca(reinterpret_cast<const int4*>(
+                &input_offset_by_experts[chunk_start]));
+        *reinterpret_cast<int4*>(local_offsets + 4) =
+            __ldca(reinterpret_cast<const int4*>(
+                &input_offset_by_experts[chunk_start + 4]));
+        *reinterpret_cast<int4*>(local_offsets + 8) =
+            __ldca(reinterpret_cast<const int4*>(
+                &input_offset_by_experts[chunk_start + 8]));
+        *reinterpret_cast<int4*>(local_offsets + 12) =
+            __ldca(reinterpret_cast<const int4*>(
+                &input_offset_by_experts[chunk_start + 12]));
         local_offsets[16] = __ldca(&input_offset_by_experts[chunk_start + 16]);
 
-        // Check against the 16 loaded offsets
-        #pragma unroll
+  // Check against the 16 loaded offsets
+  #pragma unroll
         for (int i = 0; i < 16; i++) {
           if (rowIdx >= local_offsets[i] && rowIdx < local_offsets[i + 1]) {
             rowIdx_in_expert = rowIdx - local_offsets[i];
             expert_idx = chunk_start + i;
-            goto expert_found;
+            break;
           }
         }
       }
-    } 
-
-    expert_found:
+    }
 
     // Get the global scaling factor, which will be applied to the SF.
     // Note SFScale is the same as next GEMM's alpha, which is
@@ -319,8 +326,7 @@ cvt_fp16_to_fp4(
                                            CVT_FP4_NUM_THREADS_PER_SF>(
             rowIdx_in_expert, colIdx, numCols, SFout_in_expert);
 
-    out_pos =
-        cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, SFScaleVal, sf_out);
+    out_pos = cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, SFScaleVal, sf_out);
   }
 #endif
 }
@@ -342,35 +348,34 @@ cvt_fp16_to_fp4(
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
-  // Use dynamic shared memory
   extern __shared__ uint32_t shared_input_offsets[];
-   
+
   if constexpr (SMALL_NUM_EXPERTS) {
     for (int i = threadIdx.x; i < n_experts + 1; i += blockDim.x) {
       shared_input_offsets[i] = input_offset_by_experts[i];
     }
-  }
-  else {
+  } else {
     for (int i = threadIdx.x * 4; i < n_experts; i += blockDim.x * 4) {
-      *reinterpret_cast<int4*>(&shared_input_offsets[i]) = 
+      *reinterpret_cast<int4*>(&shared_input_offsets[i]) =
           *reinterpret_cast<const int4*>(&input_offset_by_experts[i]);
     }
     if (threadIdx.x == 0) {
       shared_input_offsets[n_experts] = input_offset_by_experts[n_experts];
     }
-  } 
+  }
 
   __syncthreads();
 
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int colsPerRow = numCols / CVT_FP4_ELTS_PER_THREAD;
-  
+
   // Each global thread processes one element
-  for (int globalIdx = tid; globalIdx < numRows * colsPerRow; globalIdx += gridDim.x * blockDim.x) {
+  for (int globalIdx = tid; globalIdx < numRows * colsPerRow;
+       globalIdx += gridDim.x * blockDim.x) {
     // Calculate which row and column this global thread should process
     int rowIdx = globalIdx / colsPerRow;
     int colIdx = globalIdx % colsPerRow;
-    
+
     int64_t inOffset = rowIdx * colsPerRow + colIdx;
     PackedVec in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
     int64_t outOffset = inOffset;
@@ -379,27 +384,26 @@ cvt_fp16_to_fp4(
     // Find expert using binary search for better performance with large m_topk
     int rowIdx_in_expert = 0;
     int expert_idx = 0;
-    
+
     // Binary search through experts using shared memory
-    int left = 0, right = n_experts -1;
+    int left = 0, right = n_experts - 1;
     while (left <= right) {
       int mid = (left + right) / 2;
-      // Get offsets: shared_input_offsets[i] corresponds to input_offset_by_experts[i]
+      // Get offsets: shared_input_offsets[i] corresponds to
+      // input_offset_by_experts[i]
       uint32_t mid_offset = shared_input_offsets[mid];
       uint32_t next_offset = shared_input_offsets[mid + 1];
-      
+
       if (rowIdx >= mid_offset && rowIdx < next_offset) {
         rowIdx_in_expert = rowIdx - mid_offset;
         expert_idx = mid;
-        goto expert_found;
+        break;
       } else if (rowIdx < mid_offset) {
         right = mid - 1;
       } else {
         left = mid + 1;
       }
     }
-
-    expert_found:
 
     float const SFScaleVal = SFScale == nullptr ? 1.0f : SFScale[expert_idx];
 
@@ -414,8 +418,7 @@ cvt_fp16_to_fp4(
                                            CVT_FP4_NUM_THREADS_PER_SF>(
             rowIdx_in_expert, colIdx, numCols, SFout_in_expert);
 
-    out_pos =
-        cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, SFScaleVal, sf_out);
+    out_pos = cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, SFScaleVal, sf_out);
   }
 #endif
 }
@@ -439,25 +442,28 @@ void quant_impl(void* output, void* output_scale, void* input,
   dim3 block(std::min(workSizePerRow, 512));
   // Get number of blocks per SM (assume we can fully utilize the SM).
   int const numBlocksPerSM = 2048 / block.x;
-  dim3 grid(std::min(static_cast<int>((totalWorkSize + block.x - 1)/block.x), 
+  dim3 grid(std::min(static_cast<int>((totalWorkSize + block.x - 1) / block.x),
                      multiProcessorCount * numBlocksPerSM));
   while (grid.x <= multiProcessorCount && block.x > 64) {
     grid.x *= 2;
     block.x = (block.x + 1) / 2;
   }
 
-  int const blockRepeat = (totalWorkSize+ block.x * grid.x -1) / (block.x * grid.x);
+  int const blockRepeat =
+      (totalWorkSize + block.x * grid.x - 1) / (block.x * grid.x);
   if (blockRepeat > 1) {
     // Calculate shared memory size for large m_topk kernels
     size_t shared_mem_size = (n_experts + 1) * sizeof(uint32_t);
     if (n_experts >= 4) {
-      cvt_fp16_to_fp4<T, false, false><<<grid, block, shared_mem_size, stream>>>(
-          m_topk, k, reinterpret_cast<T*>(input),
-          reinterpret_cast<float*>(input_global_scale),
-          reinterpret_cast<uint32_t*>(output),
-          reinterpret_cast<uint32_t*>(output_scale),
-          reinterpret_cast<uint32_t*>(input_offset_by_experts),
-          reinterpret_cast<uint32_t*>(output_scale_offset_by_experts), n_experts);
+      cvt_fp16_to_fp4<T, false, false>
+          <<<grid, block, shared_mem_size, stream>>>(
+              m_topk, k, reinterpret_cast<T*>(input),
+              reinterpret_cast<float*>(input_global_scale),
+              reinterpret_cast<uint32_t*>(output),
+              reinterpret_cast<uint32_t*>(output_scale),
+              reinterpret_cast<uint32_t*>(input_offset_by_experts),
+              reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
+              n_experts);
     } else {
       cvt_fp16_to_fp4<T, false, true><<<grid, block, shared_mem_size, stream>>>(
           m_topk, k, reinterpret_cast<T*>(input),
@@ -465,7 +471,8 @@ void quant_impl(void* output, void* output_scale, void* input,
           reinterpret_cast<uint32_t*>(output),
           reinterpret_cast<uint32_t*>(output_scale),
           reinterpret_cast<uint32_t*>(input_offset_by_experts),
-          reinterpret_cast<uint32_t*>(output_scale_offset_by_experts), n_experts);
+          reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
+          n_experts);
     }
   } else {
     // Use standard version for smaller m_topk (no shared memory needed)
@@ -476,7 +483,8 @@ void quant_impl(void* output, void* output_scale, void* input,
           reinterpret_cast<uint32_t*>(output),
           reinterpret_cast<uint32_t*>(output_scale),
           reinterpret_cast<uint32_t*>(input_offset_by_experts),
-          reinterpret_cast<uint32_t*>(output_scale_offset_by_experts), n_experts, true);
+          reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
+          n_experts, true);
     } else {
       cvt_fp16_to_fp4<T, false, true><<<grid, block, 0, stream>>>(
           m_topk, k, reinterpret_cast<T*>(input),
@@ -484,7 +492,8 @@ void quant_impl(void* output, void* output_scale, void* input,
           reinterpret_cast<uint32_t*>(output),
           reinterpret_cast<uint32_t*>(output_scale),
           reinterpret_cast<uint32_t*>(input_offset_by_experts),
-          reinterpret_cast<uint32_t*>(output_scale_offset_by_experts), n_experts, true);
+          reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
+          n_experts, true);
     }
   }
 }
