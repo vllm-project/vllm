@@ -31,7 +31,6 @@ from vllm.platforms import current_platform
 
 from .deepep_utils import ProcessGroupInfo, parallel_launch
 
-
 requires_pplx = pytest.mark.skipif(
     not has_pplx,
     reason="Requires PPLX kernels",
