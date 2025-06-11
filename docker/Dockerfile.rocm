@@ -1,7 +1,5 @@
 # default base image
 ARG REMOTE_VLLM="0"
-ARG USE_CYTHON="0"
-ARG BUILD_RPD="1"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 
@@ -15,7 +13,7 @@ RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl
 # Remove sccache    
-RUN python3 -m pip install --upgrade pip && pip install setuptools_scm
+RUN python3 -m pip install --upgrade pip
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
@@ -30,18 +28,17 @@ ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_BRANCH="main"
 ONBUILD RUN git clone ${VLLM_REPO} \
 	    && cd vllm \
-	    && git checkout ${VLLM_BRANCH}
+	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
+	    && git checkout FETCH_HEAD
 FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
-ARG USE_CYTHON
 # Build vLLM
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
     && python3 setup.py clean --all  \
-    && if [ ${USE_CYTHON} -eq "1" ]; then python3 tests/build_cython.py build_ext --inplace; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
@@ -90,13 +87,6 @@ RUN case "$(which python3)" in \
         *) ;; esac
 
 RUN python3 -m pip install --upgrade huggingface-hub[cli]
-ARG BUILD_RPD
-RUN if [ ${BUILD_RPD} -eq "1" ]; then \
-    git clone -b nvtx_enabled https://github.com/ROCm/rocmProfileData.git \
-    && cd rocmProfileData/rpd_tracer \
-    && pip install -r requirements.txt && cd ../ \
-    && make && make install \
-    && cd hipMarker && python3 setup.py install ; fi
 
 # Install vLLM
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
@@ -116,12 +106,6 @@ ENV TOKENIZERS_PARALLELISM=false
 
 # ENV that can improve safe tensor loading, and end-to-end time
 ENV SAFETENSORS_FAST_GPU=1
-
-# User-friendly environment setting for multi-processing to avoid below RuntimeError.
-# RuntimeError: Cannot re-initialize CUDA in forked subprocess. To use CUDA with multiprocessing,
-# you must use the 'spawn' start method 
-# See https://pytorch.org/docs/stable/notes/multiprocessing.html#cuda-in-multiprocessing
-ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1

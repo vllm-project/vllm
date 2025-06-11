@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import importlib.util
 from typing import Optional
@@ -11,8 +12,8 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
-                                                        _resize_cache)
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache, per_token_group_quant_fp8)
 from vllm.utils import round_up
 
 logger = init_logger(__name__)
@@ -33,10 +34,8 @@ def _valid_deep_gemm_shape(M: int, N: int, K: int):
     return align <= M and N % align == 0 and K % align == 0
 
 
-def _valid_deep_gemm(hidden_states: torch.Tensor,
-                     w1: torch.Tensor,
-                     w2: torch.Tensor,
-                     expert_map: Optional[torch.Tensor] = None) -> bool:
+def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
+                     w2: torch.Tensor) -> bool:
     """
     Check if the given problem size is supported by the DeepGemm grouped
     gemm kernel.  All of M, N, K and the quantization block_shape must be
@@ -44,10 +43,6 @@ def _valid_deep_gemm(hidden_states: torch.Tensor,
     """
     if not has_deep_gemm:
         logger.debug("DeepGemm disabled: deep_gemm not available.")
-        return False
-
-    if expert_map is not None:
-        logger.debug("DeepGemm disabled: expert map NYI.")
         return False
 
     M = hidden_states.size(0)
@@ -78,17 +73,20 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def workspace_shapes(
         self,
         a: torch.Tensor,
+        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         num_experts: int,
     ) -> tuple[int, int, torch.dtype]:
+
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
         workspace1 = M_sum * max(N * 2, K)
-        workspace2 = M_sum * N
+        workspace2 = M_sum * max(N, K)
+
         return (workspace1, workspace2, a.dtype)
 
     def apply(
@@ -115,7 +113,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a1q = hidden_states
         _, N, K = w1.size()
 
-        assert global_num_experts != -1
+        if global_num_experts == -1:
+            global_num_experts = w1.size(0)
+
         assert w2.size(1) == K
 
         a1q, a1q_scale, _, expert_ids, inv_perm = _moe_permute(
@@ -127,28 +127,41 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             self.block_shape[0],
         )
 
+        if expert_map is not None:
+            # DeepGemm (Grouped Contiguous) kernel needs a valid B index
+            # for all rows of A. To that effect, simply compute with
+            # the 0th weight matrix.
+            # Note that this relies on the fact that corresponding topk
+            # weights would be 0 during weight multiplication.
+            expert_ids = torch.where(expert_ids == -1, 0, expert_ids)
+
         # Note: M_sum is different than the pre-permuted shape of a1q.
         M_sum = a1q.size(0)
-        workspace1 = _resize_cache(workspace13, (M_sum, N))
-        workspace2 = _resize_cache(workspace2, (M_sum, N // 2))
-        workspace3 = _resize_cache(workspace13, (M_sum, K))
+
+        mm1_out = _resize_cache(workspace13, (M_sum, N))
+        act_out = _resize_cache(workspace2, (M_sum, N // 2))
+        quant_out = _resize_cache(workspace13.view(dtype=torch.float8_e4m3fn),
+                                  (M_sum, N // 2))
+        mm2_out = _resize_cache(workspace2, (M_sum, K))
+        out = _resize_cache(workspace13, (inv_perm.size(0), K))
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (a1q, a1q_scale), (w1, w1_scale), workspace1, expert_ids)
+            (a1q, a1q_scale), (w1, w1_scale), mm1_out, expert_ids)
 
-        self.activation(activation, workspace2, workspace1.view(-1, N))
+        self.activation(activation, act_out, mm1_out.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None
-
-        a2q, a2q_scale = _fp8_quantize(workspace2, a2_scale, False,
-                                       self.block_shape)
+        a2q, a2q_scale = per_token_group_quant_fp8(act_out,
+                                                   self.block_shape[1],
+                                                   column_major_scales=True,
+                                                   out_q=quant_out)
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (a2q, a2q_scale), (w2, w2_scale), workspace3, expert_ids)
+            (a2q, a2q_scale), (w2, w2_scale), mm2_out, expert_ids)
 
-        workspace3 = workspace3[inv_perm, ...]
+        torch.index_select(mm2_out, 0, inv_perm, out=out)
 
-        return workspace3
+        return out
 
 
 def deep_gemm_moe_fp8(

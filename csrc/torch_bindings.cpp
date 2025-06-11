@@ -170,6 +170,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
+  // Apply repetition penalties to logits in-place
+  ops.def(
+      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
+      "Tensor output_mask, Tensor repetition_penalties) -> ()");
+  ops.impl("apply_repetition_penalties_", torch::kCUDA,
+           &apply_repetition_penalties_);
+
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
@@ -428,7 +435,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_moe_mm(Tensor! out_tensors, Tensor a_tensors, Tensor b_tensors, "
       "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
       "               Tensor problem_sizes, Tensor a_strides, "
-      "               Tensor b_strides, Tensor c_strides) -> ()",
+      "               Tensor b_strides, Tensor c_strides, bool per_act_token, "
+      "               bool per_out_ch) -> ()",
       {stride_tag});
   ops.impl("cutlass_moe_mm", torch::kCUDA, &cutlass_moe_mm);
 
@@ -443,9 +451,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
       "                        Tensor! input_permutation, "
       "                        Tensor! output_permutation, int num_experts, "
-      "                        int n, int k) -> ()",
+      "                        int n, int k, Tensor? blockscale_offsets) -> ()",
       {stride_tag});
   ops.impl("get_cutlass_moe_mm_data", torch::kCUDA, &get_cutlass_moe_mm_data);
+
+  // A function that computes data required to run fused MoE with w8a8 grouped
+  // GEMM and PPLX. It takes expert_num_tokens and non_zero_expert_idxs
+  // as an input, and computes expert_offsets (token start indices of each
+  // expert). In addition to this, it computes problem sizes for each expert's
+  // multiplication used by the two mms called from fused MoE operation.
+  ops.def(
+      "get_cutlass_pplx_moe_mm_data(Tensor! expert_offsets, "
+      "                             Tensor! problem_sizes1, "
+      "                             Tensor! problem_sizes2, "
+      "                             Tensor expert_num_tokens, "
+      "                             int num_local_experts, int padded_m, "
+      "                             int n, int k) -> ()",
+      {stride_tag});
+  ops.impl("get_cutlass_pplx_moe_mm_data", torch::kCUDA,
+           &get_cutlass_pplx_moe_mm_data);
 
   // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
   ops.def(
@@ -481,41 +505,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                   Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
       "                   Tensor page_table, float scale) -> ()");
   ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
-
-  // Mamba selective scan kernel
-  ops.def(
-      "selective_scan_fwd(Tensor! u, Tensor! delta,"
-      "Tensor! A, Tensor! B, Tensor! C,"
-      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
-      "bool delta_softplus,"
-      "Tensor? query_start_loc,"
-      "Tensor? cache_indices,"
-      "Tensor? has_initial_state,"
-      "Tensor! ssm_states,"
-      "int pad_slot_id) -> ()");
-  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
-
-  ops.def(
-      "causal_conv1d_update(Tensor! x,"
-      "Tensor! conv_state,"
-      "Tensor! weight,"
-      "Tensor? bias_,"
-      "bool silu_activation,"
-      "Tensor? cache_seqlens_,"
-      "Tensor? conv_state_indices,"
-      "int pad_slot_id) -> ()");
-  ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
-
-  ops.def(
-      "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
-      "Tensor? bias_,"
-      "Tensor!? conv_states,"
-      "Tensor? query_start_loc,"
-      "Tensor? cache_indices,"
-      "Tensor? has_initial_state,"
-      "bool silu_activation,"
-      "int pad_slot_id) -> ()");
-  ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 
   // Compute NVFP4 block quantized tensor.
   ops.def(
@@ -583,6 +572,41 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
+
+  // Mamba selective scan kernel
+  ops.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "Tensor! ssm_states,"
+      "int pad_slot_id) -> ()");
+  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
+
+  ops.def(
+      "causal_conv1d_update(Tensor! x,"
+      "Tensor! conv_state,"
+      "Tensor! weight,"
+      "Tensor? bias_,"
+      "bool silu_activation,"
+      "Tensor? cache_seqlens_,"
+      "Tensor? conv_state_indices,"
+      "int pad_slot_id) -> ()");
+  ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
+
+  ops.def(
+      "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
+      "Tensor? bias_,"
+      "Tensor!? conv_states,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "bool silu_activation,"
+      "int pad_slot_id) -> ()");
+  ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 
 #ifndef USE_ROCM
   // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer ROCm GPUs."""
 import itertools
 from dataclasses import dataclass
@@ -493,8 +494,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0.")
         if use_irope:
             logger.warning_once(
                 "Using irope in ROCm Flash Attention is not supported yet, it "
@@ -770,8 +774,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                                       and layer._v_scale and layer._prob_scale
                                       and self.kv_cache_dtype == "fp8")
                     full_scales = (
-                        layer._q_scale, layer._k_scale, layer._v_scale,
-                        layer._prob_scale) if use_fp8_scales else None
+                        layer._q_scale.item(), layer._k_scale.item(),
+                        layer._v_scale.item(),
+                        layer._prob_scale.item()) if use_fp8_scales else None
                     self.triton_attn_func(
                         query,
                         key,

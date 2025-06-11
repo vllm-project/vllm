@@ -55,7 +55,9 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 ##### Install the latest code using `pip`
 
 ```console
-pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+pip install -U vllm \
+    --pre \
+    --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
 `--pre` is required for `pip` to consider pre-released versions.
@@ -63,7 +65,9 @@ pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 Another way to install the latest code is to use `uv`:
 
 ```console
-uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly
+uv pip install -U vllm \
+    --torch-backend=auto \
+    --extra-index-url https://wheels.vllm.ai/nightly
 ```
 
 ##### Install specific revisions using `pip`
@@ -83,7 +87,9 @@ If you want to access the wheels for previous commits (e.g. to bisect the behavi
 
 ```console
 export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
-uv pip install vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
+uv pip install vllm \
+    --torch-backend=auto \
+    --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
 ```
 
 The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-remember command. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
@@ -192,7 +198,11 @@ Additionally, if you have trouble building vLLM, we recommend using the NVIDIA P
 
 ```console
 # Use `--ipc=host` to make sure the shared memory is large enough.
-docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.10-py3
+docker run \
+    --gpus all \
+    -it \
+    --rm \
+    --ipc=host nvcr.io/nvidia/pytorch:23.10-py3
 ```
 
 If you don't want to use docker, it is recommended to have a full installation of CUDA Toolkit. You can download and install it from [the official website](https://developer.nvidia.com/cuda-toolkit-archive). After installation, set the environment variable `CUDA_HOME` to the installation path of CUDA Toolkit, and make sure that the `nvcc` compiler is in your `PATH`, e.g.:

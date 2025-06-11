@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
 import json
@@ -324,7 +325,7 @@ async def async_request_openai_completions(
 
                                 most_recent_timestamp = timestamp
                                 generated_text += text or ""
-                            elif usage := data.get("usage"):
+                            if usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
                     if first_chunk_received:
                         output.success = True
@@ -611,6 +612,7 @@ ASYNC_REQUEST_FUNCS = {
     "tensorrt-llm": async_request_trt_llm,
     "scalellm": async_request_openai_completions,
     "sglang": async_request_openai_completions,
+    "llama.cpp": async_request_openai_completions,
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [

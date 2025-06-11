@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from unittest import mock
 
@@ -8,6 +9,7 @@ import torch
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
+from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
@@ -112,21 +114,26 @@ def test_prepare_inputs():
     assert torch.equal(token_indices, expected_token_indices)
 
 
-@pytest.mark.parametrize(
-    "method,proposer_helper,draft_model_dir,target_attribute_path", [
-        ("eagle", lambda k: _create_proposer("eagle", k), eagle_dir,
-         ('lm_head', )),
-        ("eagle3", lambda k: _create_proposer("eagle3", k), eagle3_dir,
-         ('model', 'embed_tokens')),
-    ])
+@pytest.mark.parametrize("method,proposer_helper", [
+    ("eagle", lambda k: _create_proposer("eagle", k)),
+    ("eagle3", lambda k: _create_proposer("eagle3", k)),
+])
+@pytest.mark.parametrize("pp_size", [1, 2])
+@pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
 @mock.patch('vllm.v1.spec_decode.eagle.get_pp_group')
 @mock.patch('vllm.v1.spec_decode.eagle.get_layers_from_vllm_config')
 @mock.patch('vllm.v1.spec_decode.eagle.get_model')
 def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
-                    proposer_helper, draft_model_dir, target_attribute_path):
-
-    # Setup model mock
+                    proposer_helper, pp_size, use_distinct_embed_tokens):
+    # Setup draft model mock
     mock_model = mock.MagicMock()
+    if use_distinct_embed_tokens:
+        # Some models can have a different hidden size than the target model,
+        # so we test that their embed_tokens doesn't get overwritten
+        mock_model.model.embed_tokens.weight.shape = (131072, 2048)
+    else:
+        mock_model.model.embed_tokens.weight.shape = (131072, 4096)
+
     mock_get_model.return_value = mock_model
 
     # Setup mocks for attention layers
@@ -144,22 +151,24 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 
     # Setup mock for pp group to return the appropriate value for world size
     mock_pp_group = mock.MagicMock()
-    mock_pp_group.world_size = 2 if method == "eagle" else 1
+    mock_pp_group.world_size = pp_size
     mock_get_pp_group.return_value = mock_pp_group
 
-    # Setup target model with the appropriate attributes
-    target_model = mock.MagicMock()
+    # Setup the target model mock with a custom class so that
+    # isinstance() checks match the expected type.
+    class _TargetModelStub(LlamaForCausalLM):
+        model: mock.MagicMock
+        lm_head: mock.MagicMock
 
-    # Create the necessary attributes on the target model
-    current_obj = target_model
-    for i, attr in enumerate(target_attribute_path):
-        if i == len(target_attribute_path) - 1:
-            # Set the last attribute in the path to a MagicMock
-            setattr(current_obj, attr, mock.MagicMock())
-        else:
-            # Create intermediate objects if needed
-            setattr(current_obj, attr, mock.MagicMock())
-            current_obj = getattr(current_obj, attr)
+    target_model = mock.create_autospec(_TargetModelStub, instance=True)
+    target_model.model = mock.MagicMock()
+    target_model.model.embed_tokens.weight.shape = (131072, 4096)
+
+    from vllm.model_executor.models import SupportsMultiModal
+    assert not isinstance(target_model, SupportsMultiModal)
+
+    if method == "eagle":
+        target_model.lm_head = mock.MagicMock()
 
     # Create proposer using the helper function
     proposer = proposer_helper(k=8)
@@ -170,10 +179,18 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     # Verify common interactions
     mock_get_model.assert_called_once()
 
-    # Verify the specific attribute sharing based on the method
+    # Verify that EAGLE models gain the lm head from the target model
     if method == "eagle":
         assert proposer.model.lm_head == target_model.lm_head
+
+    # Verify that the embed tokens are set correctly
+    # If pp_size is > 1, the embed tokens should be distinct
+    if pp_size > 1 or use_distinct_embed_tokens:
+        assert proposer.model.model.embed_tokens != \
+            target_model.model.embed_tokens
     else:
+        # When pp_size is 1 and the draft and target models have
+        # embed_tokens of the same shape, they should be shared.
         assert proposer.model.model.embed_tokens == \
             target_model.model.embed_tokens
 

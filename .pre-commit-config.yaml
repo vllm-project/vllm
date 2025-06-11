@@ -11,13 +11,15 @@ repos:
   hooks:
   - id: yapf
     args: [--in-place, --verbose]
+    # Keep the same list from yapfignore here to avoid yapf failing without any inputs
+    exclude: '(.buildkite|benchmarks|build|examples)/.*'
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.11.7
   hooks:
   - id: ruff
     args: [--output-format, github, --fix]
   - id: ruff-format
-    files: ^(.buildkite|benchmarks)/.*
+    files: ^(.buildkite|benchmarks|examples)/.*
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.1
   hooks:
@@ -58,7 +60,7 @@ repos:
     entry: tools/mypy.sh 0 "local"
     language: python
     types: [python]
-    additional_dependencies: &mypy_deps [mypy==1.11.1, types-cachetools, types-setuptools, types-PyYAML, types-requests]
+    additional_dependencies: &mypy_deps [mypy==1.11.1, types-cachetools, types-setuptools, types-PyYAML, types-requests, pydantic]
     stages: [pre-commit] # Don't run in CI
   - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.9
@@ -128,6 +130,21 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/update-dockerfile-graph.sh
     language: script
+  - id: enforce-import-regex-instead-of-re
+    name: Enforce import regex as re
+    entry: python tools/enforce_regex_import.py
+    language: python
+    types: [python]
+    pass_filenames: false
+    additional_dependencies: [regex]
+  # forbid directly import triton
+  - id: forbid-direct-triton-import
+    name: "Forbid direct 'import triton'"
+    entry: python tools/check_triton_import.py
+    language: python
+    types: [python]
+    pass_filenames: false
+    additional_dependencies: [regex]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

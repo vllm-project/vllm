@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-import re
-
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import regex as re
 from mkdocs.config.defaults import MkDocsConfig
 from mkdocs.structure.files import Files
 from mkdocs.structure.pages import Page

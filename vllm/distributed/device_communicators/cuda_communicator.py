@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
@@ -66,6 +67,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import PPLXAll2AllManager
                 self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
                 logger.info("Using PPLX all2all manager.")
+            elif all2all_backend == "deepep_high_throughput":
+                from .all2all import DeepEPHTAll2AllManager
+                self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
+                logger.info("Using DeepEP High-Throughput all2all manager.")
+            elif all2all_backend == "deepep_low_latency":
+                from .all2all import DeepEPLLAll2AllManager
+                self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
+                logger.info("Using DeepEP Low-Latency all2all manager.")
             else:
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 

@@ -7,7 +7,9 @@ We recommend installing the latest torchao nightly with
 ```console
 # Install the latest TorchAO nightly build
 # Choose the CUDA version that matches your system (cu126, cu128, etc.)
-pip install --pre torchao>=10.0.0 --index-url https://download.pytorch.org/whl/nightly/cu126
+pip install \
+    --pre torchao>=10.0.0 \
+    --index-url https://download.pytorch.org/whl/nightly/cu126
 ```
 
 ## Quantizing HuggingFace Models
@@ -20,7 +22,12 @@ from torchao.quantization import Int8WeightOnlyConfig
 
 model_name = "meta-llama/Meta-Llama-3-8B"
 quantization_config = TorchAoConfig(Int8WeightOnlyConfig())
-quantized_model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto", device_map="auto", quantization_config=quantization_config)
+quantized_model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    torch_dtype="auto",
+    device_map="auto",
+    quantization_config=quantization_config
+)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 input_text = "What are we having for dinner?"
 input_ids = tokenizer(input_text, return_tensors="pt").to("cuda")

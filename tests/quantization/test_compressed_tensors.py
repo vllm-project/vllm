@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test model set-up and weight loading for llmcompressor-quantized models.
 
 Run `pytest tests/quantization/test_compressed_tensors.py`.
@@ -13,9 +14,10 @@ from compressed_tensors.quantization import QuantizationType
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensors24, CompressedTensorsLinearMethod,
-    CompressedTensorsW4A16Fp4, CompressedTensorsW4A16Sparse24,
-    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
-    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
+    CompressedTensorsW4A4Fp4, CompressedTensorsW4A16Fp4,
+    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
+    CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     sparse_cutlass_supported)
 from vllm.platforms import current_platform
@@ -650,9 +652,13 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
         assert output
 
 
-def test_compressed_tensors_nvfp4a16(vllm_runner):
-    # run weight only example
-    model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP4"
+@pytest.mark.parametrize(
+    "args",
+    [("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16",
+      CompressedTensorsW4A16Fp4),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4)])
+def test_compressed_tensors_nvfp4(vllm_runner, args):
+    model, scheme = args
     with vllm_runner(model, enforce_eager=True) as llm:
 
         def check_model(model):
@@ -661,7 +667,7 @@ def test_compressed_tensors_nvfp4a16(vllm_runner):
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method,
                               CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW4A16Fp4)
+            assert isinstance(qkv_proj.scheme, scheme)
             assert qkv_proj.scheme.group_size == 16
 
         llm.apply_model(check_model)

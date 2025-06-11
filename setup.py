@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
 import importlib.util
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from shutil import which
 
-import regex as re
 import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
@@ -251,11 +252,8 @@ class cmake_build_ext(build_ext):
 
             # CMake appends the extension prefix to the install path,
             # and outdir already contains that prefix, so we need to remove it.
-            # We assume only the final component of extension prefix is added by
-            # CMake, this is currently true for current extensions but may not
-            # always be the case.
             prefix = outdir
-            if '.' in ext.name:
+            for _ in range(ext.name.count('.')):
                 prefix = prefix.parent
 
             # prefix here should actually be the same for all components
@@ -690,6 +688,7 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
+        "bench": ["pandas", "datasets"],
         "tensorizer": ["tensorizer>=2.9.0"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],

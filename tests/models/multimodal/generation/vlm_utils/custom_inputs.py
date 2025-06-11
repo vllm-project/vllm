@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom input builders for edge-cases in different models."""
 from io import BytesIO
 from typing import Callable

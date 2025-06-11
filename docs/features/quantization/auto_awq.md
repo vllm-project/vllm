@@ -42,7 +42,9 @@ print(f'Model is quantized and saved at "{quant_path}"')
 To run an AWQ model with vLLM, you can use [TheBloke/Llama-2-7b-Chat-AWQ](https://huggingface.co/TheBloke/Llama-2-7b-Chat-AWQ) with the following command:
 
 ```console
-python examples/offline_inference/llm_engine_example.py --model TheBloke/Llama-2-7b-Chat-AWQ --quantization awq
+python examples/offline_inference/llm_engine_example.py \
+    --model TheBloke/Llama-2-7b-Chat-AWQ \
+    --quantization awq
 ```
 
 AWQ models are also supported directly through the LLM entrypoint:

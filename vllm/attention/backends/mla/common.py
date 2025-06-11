@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 # MLA Common Components
 
@@ -999,6 +1000,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         blocksparse_params: Optional[Dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
         # MLA Specific Arguments
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
@@ -1008,6 +1010,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing not supported in V0.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -1092,10 +1096,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         rest = None
         if isinstance(attn_out, tuple):
             attn_out, *rest = attn_out
-
-        # unpad if necessary
-        if self._pad_v:
-            attn_out = attn_out[..., :v.shape[-1]]
 
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.
@@ -1293,6 +1293,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
             )
+
+        # unpad if necessary
+        if self._pad_v:
+            output = output[..., :v.shape[-1]]
 
         return output.flatten(start_dim=-2)
 

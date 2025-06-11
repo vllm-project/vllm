@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import os
@@ -28,12 +29,14 @@ if not current_platform.supports_v1(engine_args.create_model_config()):
                 allow_module_level=True)
 
 
-async def generate(engine: AsyncLLM,
-                   request_id: str,
-                   prompt: PromptType,
-                   output_kind: RequestOutputKind,
-                   max_tokens: int,
-                   prompt_logprobs: Optional[int] = None) -> tuple[int, str]:
+async def generate(
+        engine: AsyncLLM,
+        request_id: str,
+        prompt: PromptType,
+        output_kind: RequestOutputKind,
+        max_tokens: int,
+        prompt_logprobs: Optional[int] = None,
+        data_parallel_rank: Optional[int] = None) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
 
@@ -45,7 +48,8 @@ async def generate(engine: AsyncLLM,
                                      prompt_logprobs=prompt_logprobs)
     async for out in engine.generate(request_id=request_id,
                                      prompt=prompt,
-                                     sampling_params=sampling_params):
+                                     sampling_params=sampling_params,
+                                     data_parallel_rank=data_parallel_rank):
 
         num_tokens = len(out.outputs[0].token_ids)
         if output_kind == RequestOutputKind.DELTA:
@@ -59,14 +63,22 @@ async def generate(engine: AsyncLLM,
 
 
 @pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+    "output_kind",
+    [
+        RequestOutputKind.DELTA,
+        RequestOutputKind.FINAL_ONLY,
+    ],
+)
+@pytest.mark.parametrize("data_parallel_backend", ["mp", "ray"])
 @pytest.mark.asyncio
-async def test_load(output_kind: RequestOutputKind):
+async def test_load(output_kind: RequestOutputKind,
+                    data_parallel_backend: str):
 
     with ExitStack() as after:
 
         prompt = "This is a test of data parallel"
 
+        engine_args.data_parallel_backend = data_parallel_backend
         engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
@@ -80,9 +92,12 @@ async def test_load(output_kind: RequestOutputKind):
         for request_id in request_ids:
             tasks.append(
                 asyncio.create_task(
-                    generate(engine, request_id, prompt, output_kind,
-                             NUM_EXPECTED_TOKENS)))
-
+                    generate(engine,
+                             request_id,
+                             prompt,
+                             output_kind,
+                             NUM_EXPECTED_TOKENS,
+                             data_parallel_rank=0)))
         # Confirm that we got all the EXPECTED tokens from the requests.
         done, pending = await asyncio.wait(tasks,
                                            return_when=asyncio.FIRST_EXCEPTION)

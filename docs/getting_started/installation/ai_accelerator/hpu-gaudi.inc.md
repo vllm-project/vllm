@@ -45,7 +45,15 @@ Use the following commands to run a Docker image:
 
 ```console
 docker pull vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
-docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --ipc=host vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
+docker run \
+  -it \
+  --runtime=habana \
+  -e HABANA_VISIBLE_DEVICES=all \
+  -e OMPI_MCA_btl_vader_single_copy_mechanism=none \
+  --cap-add=sys_nice \
+  --net=host \
+  --ipc=host \
+  vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
 ```
 
 # --8<-- [end:requirements]
@@ -91,7 +99,14 @@ Currently, there are no pre-built Intel Gaudi images.
 
 ```console
 docker build -f docker/Dockerfile.hpu -t vllm-hpu-env  .
-docker run -it --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice --net=host --rm vllm-hpu-env
+docker run \
+  -it \
+  --runtime=habana \
+  -e HABANA_VISIBLE_DEVICES=all \
+  -e OMPI_MCA_btl_vader_single_copy_mechanism=none \
+  --cap-add=sys_nice \
+  --net=host \
+  --rm vllm-hpu-env
 ```
 
 !!! tip

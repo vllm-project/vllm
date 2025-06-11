@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 from contextlib import ExitStack
@@ -192,7 +193,7 @@ class CUDAPiecewiseBackend:
             entry.output = weak_ref_tensors(output)
             entry.cudagraph = cudagraph
 
-            compilation_counter.num_cudagraph_caputured += 1
+            compilation_counter.num_cudagraph_captured += 1
 
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly

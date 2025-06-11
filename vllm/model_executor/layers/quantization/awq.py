@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any, Optional
 
@@ -101,7 +102,13 @@ class AWQLinearMethod(LinearMethodBase):
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        if input_size_per_partition % self.quant_config.group_size != 0:
+        # Normalize group_size
+        if self.quant_config.group_size != -1:
+            group_size = self.quant_config.group_size
+        else:
+            group_size = input_size
+
+        if input_size_per_partition % group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
@@ -127,9 +134,11 @@ class AWQLinearMethod(LinearMethodBase):
             packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
+        num_groups = input_size_per_partition // group_size
+
         qzeros = PackedvLLMParameter(
             data=torch.empty(
-                input_size_per_partition // self.quant_config.group_size,
+                num_groups,
                 output_size_per_partition // self.quant_config.pack_factor,
                 dtype=torch.int32,
             ),
@@ -140,7 +149,7 @@ class AWQLinearMethod(LinearMethodBase):
             weight_loader=weight_loader)
 
         scales = GroupQuantScaleParameter(data=torch.empty(
-            input_size_per_partition // self.quant_config.group_size,
+            num_groups,
             output_size_per_partition,
             dtype=params_dtype,
         ),

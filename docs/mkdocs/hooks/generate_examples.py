@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+import regex as re
+
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
 ROOT_DIR_RELATIVE = '../../../../..'
 EXAMPLE_DIR = ROOT_DIR / "examples"
-EXAMPLE_DOC_DIR = ROOT_DIR / "docs/getting_started/examples"
+EXAMPLE_DOC_DIR = ROOT_DIR / "docs/examples"
 print(ROOT_DIR.resolve())
 print(EXAMPLE_DIR.resolve())
 print(EXAMPLE_DOC_DIR.resolve())

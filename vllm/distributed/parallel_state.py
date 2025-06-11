@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2023 The vLLM team.
 # Adapted from
@@ -41,8 +42,8 @@ from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.utils import (direct_register_custom_op, resolve_obj_by_qualname,
-                        supports_custom_op)
+from vllm.utils import (direct_register_custom_op, get_distributed_init_method,
+                        resolve_obj_by_qualname, supports_custom_op)
 
 
 @dataclass
@@ -929,7 +930,7 @@ def init_distributed_environment(
         world_size = parallel_config.world_size_across_dp
         ip = parallel_config.data_parallel_master_ip
         port = parallel_config.get_next_dp_init_port()
-        distributed_init_method = f"tcp://{ip}:{port}"  # noqa
+        distributed_init_method = get_distributed_init_method(ip, port)
         logger.info(
             "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
             world_size, rank, distributed_init_method)
@@ -1203,7 +1204,8 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     if empty_cache is not None:
         empty_cache()
     try:
-        torch._C._host_emptyCache()
+        if not current_platform.is_cpu():
+            torch._C._host_emptyCache()
     except AttributeError:
         logger.warning(
             "torch._C._host_emptyCache() only available in Pytorch >=2.5")

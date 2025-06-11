@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import torch
@@ -28,13 +29,15 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                            per_channel_quant=per_channel_quant,
                                            block_shape=block_shape,
                                            block_m=block_m)
-        self.deep_gemm_expert = DeepGemmExperts()
         self.allow_deep_gemm = allow_deep_gemm
         self.use_fp8_w8a8 = use_fp8_w8a8
+        self.deep_gemm_expert = DeepGemmExperts(
+        ) if self.allow_deep_gemm else None
 
     def workspace_shapes(
         self,
         a: torch.Tensor,
+        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -45,10 +48,11 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
         if self.allow_deep_gemm and _valid_deep_gemm_shape(M, N, K):
+            assert self.deep_gemm_expert is not None
             return self.deep_gemm_expert.workspace_shapes(
-                a, M, N, K, topk, num_experts)
+                a, aq, M, N, K, topk, num_experts)
         else:
-            return self.triton_expert.workspace_shapes(a, M, N, K, topk,
+            return self.triton_expert.workspace_shapes(a, aq, M, N, K, topk,
                                                        num_experts)
 
     def apply(
@@ -72,7 +76,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         N = w1.size(1)
         if (self.allow_deep_gemm and self.use_fp8_w8a8 and N > 512
-                and _valid_deep_gemm(hidden_states, w1, w2, expert_map)):
+                and _valid_deep_gemm(hidden_states, w1, w2)):
+            assert self.deep_gemm_expert is not None
             return self.deep_gemm_expert.apply(
                 hidden_states,
                 w1,

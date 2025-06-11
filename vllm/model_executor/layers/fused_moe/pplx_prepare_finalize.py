@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import pplx_kernels as pplx
@@ -20,7 +21,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  rank: int,
                  dp_size: int,
                  quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None):
+                 block_shape: Optional[list[int]] = None,
+                 per_act_token: bool = False):
         super().__init__()
         assert max_num_tokens > 0
         self.a2a = a2a
@@ -30,6 +32,13 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.rank = rank
         self.dp_size = dp_size
         self.quant_dtype = quant_dtype
+        self.per_act_token = per_act_token
+
+    def max_num_tokens_per_rank(self) -> Optional[int]:
+        return self.max_num_tokens
+
+    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+        return torch.uint32
 
     def prepare(
         self,
@@ -41,7 +50,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
+               Optional[torch.Tensor], Optional[torch.Tensor]]:
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
 
@@ -58,13 +68,14 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * rank_topk_weights.to(a1.dtype)
 
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
+        repeat_cols = 4
+        repeat_rows = 1 if self.per_act_token else a1.shape[0]
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1, (None if self.per_act_token else a1_scale), self.quant_dtype,
+            self.per_act_token, self.block_shape)
 
-        a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
-                                                   self.quant_dtype,
-                                                   per_act_token,
-                                                   self.block_shape)
+        if a1q_scale is not None:
+            a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
         # rem_experts need to be 0 for pplx to work properly.
         rem_experts = num_experts % self.world_size
@@ -92,7 +103,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                           else 1) * float32_size
             expert_x_scale = torch.empty(
                 (
-                    num_experts,
+                    num_local_experts,
                     expert_x.size(1),
                     (expert_x.size(2) + block_size - 1) // block_size,
                 ),
@@ -113,8 +124,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=rank_topk_ids,
             bound_m=bound_m,
         )
+        if expert_x_scale is not None:
+            expert_x_scale = expert_x_scale[:, :, 0:1]
 
-        return expert_x, expert_x_scale, expert_num_tokens
+        return expert_x, expert_x_scale, expert_num_tokens, None, None
 
     def finalize(
         self,

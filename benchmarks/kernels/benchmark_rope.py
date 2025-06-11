@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from itertools import accumulate
 from typing import Optional
@@ -22,7 +23,7 @@ def benchmark_rope_kernels_multi_lora(
     seed: int,
     device: str,
     max_position: int = 8192,
-    base: int = 10000,
+    base: float = 10000,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)

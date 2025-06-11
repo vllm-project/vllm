@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from typing import Optional, Union
@@ -70,7 +71,7 @@ class EAGLEConfig(PretrainedConfig):
 
         if self.model is not None:
             for k, v in self.model.to_dict().items():
-                if not hasattr(self, k):
+                if k not in kwargs:
                     setattr(self, k, v)
 
     @classmethod

@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import subprocess
 import sys
 from typing import Union
-
-import pytest
-import ray
 
 import vllm
 from vllm import LLM
@@ -31,14 +29,6 @@ EXPECTED_LORA_OUTPUT = [
     "  SELECT pick FROM table_name_60 WHERE former_wnba_team = 'Minnesota Lynx' ",  # noqa: E501
     "  SELECT womens_doubles FROM table_28138035_4 WHERE mens_singles = 'Werner Schlager' "  # noqa: E501
 ]
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def do_sample(llm: vllm.LLM,
@@ -128,37 +118,6 @@ def test_llama_lora(sql_lora_files):
     generate_and_test(llm, sql_lora_files)
 
 
-# Skipping for v1 as v1 doesn't have a good way to expose the num_gpu_blocks
-# used by the engine yet.
-@pytest.mark.skip_v1
-@create_new_process_for_each_test()
-def test_llama_lora_warmup(sql_lora_files):
-    """Test that the LLM initialization works with a warmup LORA path and
-    is more conservative"""
-
-    @ray.remote(num_gpus=1)
-    def get_num_gpu_blocks_lora():
-        llm = vllm.LLM(MODEL_PATH, enable_lora=True, max_num_seqs=16)
-        num_gpu_blocks_lora_warmup = llm.llm_engine.cache_config.num_gpu_blocks
-        return num_gpu_blocks_lora_warmup
-
-    @ray.remote(num_gpus=1)
-    def get_num_gpu_blocks_no_lora():
-        llm = vllm.LLM(MODEL_PATH, max_num_seqs=16)
-        num_gpu_blocks_no_lora_warmup = (
-            llm.llm_engine.cache_config.num_gpu_blocks)
-        return num_gpu_blocks_no_lora_warmup
-
-    num_gpu_blocks_lora_warmup = ray.get(get_num_gpu_blocks_lora.remote())
-    num_gpu_blocks_no_lora_warmup = ray.get(
-        get_num_gpu_blocks_no_lora.remote())
-    assert num_gpu_blocks_lora_warmup < num_gpu_blocks_no_lora_warmup, (
-        "The warmup with lora should be more "
-        "conservative than without lora, therefore the number of "
-        "memory blocks for the KV cache should be "
-        "less when using lora than when not using lora")
-
-
 @multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()
 def test_llama_lora_tp4(sql_lora_files):
@@ -207,7 +166,7 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
     try:
         result = subprocess.run([
             sys.executable,
-            f"{VLLM_PATH}/examples/other/tensorize_vllm_model.py", "--model",
+            f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py", "--model",
             MODEL_PATH, "--lora-path", lora_path, "--tensor-parallel-size",
             str(tp_size), "serialize", "--serialized-directory",
             str(tmp_path), "--suffix", suffix

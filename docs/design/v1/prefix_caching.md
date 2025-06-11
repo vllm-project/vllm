@@ -104,7 +104,7 @@ class KVCacheBlock:
     block_id: int
     # The block hash (will be assigned when the block is full,
     # and will be reset when the block is evicted).
-    block_hash: BlockHashType
+    block_hash: BlockHash
     # The number of requests using this block now.
     ref_cnt: int
 
@@ -144,7 +144,7 @@ As a result, we will have the following components when the KV cache manager is 
 
 **Running request:** Workflow for the scheduler to schedule a running request with KV cache block allocation:
 
-1. The scheduler calls `kv_cache_manager.append_slots()`. It does the following steps:  
+1. The scheduler calls `kv_cache_manager.allocate_slots()`. It does the following steps:  
    1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.  
    2. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.  
    3. Append token IDs to the slots in existing blocks as well as the new blocks. If a block is full, we add it to the Cache Block to cache it.

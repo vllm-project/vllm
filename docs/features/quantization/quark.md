@@ -1,5 +1,5 @@
 ---
-title: AMD QUARK
+title: AMD Quark
 ---
 [](){ #quark }
 

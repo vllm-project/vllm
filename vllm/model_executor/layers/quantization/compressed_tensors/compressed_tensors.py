@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import suppress
 from typing import Any, Literal, Optional, cast
@@ -23,10 +24,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS, CompressedTensors24,
-    CompressedTensorsScheme, CompressedTensorsW4A16Fp4,
-    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
-    CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
-    CompressedTensorsWNA16)
+    CompressedTensorsScheme, CompressedTensorsW4A4Fp4,
+    CompressedTensorsW4A16Fp4, CompressedTensorsW4A16Sparse24,
+    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
@@ -217,19 +218,39 @@ class CompressedTensorsConfig(QuantizationConfig):
         else:
             return False
 
+    def _is_fp4a4_nvfp4(self, weight_quant: BaseModel, input_quant: BaseModel):
+
+        if weight_quant is None or input_quant is None:
+            return False
+
+        is_tensor_group_quant = (weight_quant.strategy
+                                 == QuantizationStrategy.TENSOR_GROUP.value
+                                 and input_quant.strategy
+                                 == QuantizationStrategy.TENSOR_GROUP.value)
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+
+        is_group_size_16 = (weight_quant.group_size == 16
+                            and input_quant.group_size == 16)
+        is_float_type = (weight_quant.type == QuantizationType.FLOAT
+                         and input_quant.type == QuantizationType.FLOAT.value)
+        is_4_bits = weight_quant.num_bits == 4 and input_quant.num_bits == 4
+
+        return (is_tensor_group_quant and is_float_type and is_4_bits
+                and is_group_size_16 and is_symmetric)
+
     def _is_fp4a16_nvfp4(self, weight_quant: BaseModel,
                          input_quant: BaseModel):
 
         is_weight_only = weight_quant is not None and input_quant is None
-        is_group_quant = (
-            weight_quant.strategy == QuantizationStrategy.GROUP.value)
+        is_tensor_group_quant = (
+            weight_quant.strategy == QuantizationStrategy.TENSOR_GROUP.value)
         is_symmetric = weight_quant.symmetric
 
         is_group_size_16 = weight_quant.group_size == 16
         is_float_type = weight_quant.type == QuantizationType.FLOAT
         is_4_bits = weight_quant.num_bits == 4
 
-        return (is_weight_only and is_group_quant and is_float_type
+        return (is_weight_only and is_tensor_group_quant and is_float_type
                 and is_4_bits and is_group_size_16 and is_symmetric)
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
@@ -352,6 +373,9 @@ class CompressedTensorsConfig(QuantizationConfig):
                     actorder=weight_quant.actorder)
 
         if is_activation_quantization_format(self.quant_format):
+            if self._is_fp4a4_nvfp4(weight_quant, input_quant):
+                return CompressedTensorsW4A4Fp4()
+
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
                     CompressedTensorsW8A8Fp8.get_min_capability(), error=False)

@@ -9,6 +9,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 * [Deployment with GPUs](#deployment-with-gpus)
 
 Alternatively, you can deploy vLLM to Kubernetes using any of the following:
+
 * [Helm](frameworks/helm.md)
 * [InftyAI/llmaz](integrations/llmaz.md)
 * [KServe](integrations/kserve.md)

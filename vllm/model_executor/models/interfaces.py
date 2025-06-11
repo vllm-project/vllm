@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
@@ -226,9 +227,11 @@ class SupportsPP(Protocol):
         intermediate_tensors: Optional["IntermediateTensors"],
     ) -> Union[Tensor, "IntermediateTensors"]:
         """
-        Accept {class}`IntermediateTensors` when PP rank > 0.
+        Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
+        PP rank > 0.
 
-        Return {class}`IntermediateTensors` only for the last PP rank.
+        Return [`IntermediateTensors`][vllm.sequence.IntermediateTensors] only
+        for the last PP rank.
         """
         ...
 

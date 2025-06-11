@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 KV cache helper for store.
 """
+
 import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -89,3 +91,18 @@ class model_aware_kv_ops_helper:
                 layer.self_attn.attn._k_scale,
                 layer.self_attn.attn._v_scale,
             )
+
+
+def get_kv_connector_cache_layout():
+    vllm_config = get_current_vllm_config()
+    kv_config = vllm_config.kv_transfer_config
+    if vllm_config.model_config is None:
+        logger.warning("Unable to detect current VLLM config. " \
+        "Defaulting to NHD kv cache layout.")
+    else:
+        use_mla = vllm_config.model_config.use_mla
+        if not use_mla and kv_config.kv_connector == "NixlConnector":
+            logger.info("NixlConnector detected. Setting KV cache " \
+            "layout to HND for better xfer performance.")
+            return "HND"
+    return "NHD"
