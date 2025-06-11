@@ -84,7 +84,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                 over token ids given context according to the target model.
             shape = [batch_size, num_speculative_tokens + 1, vocab_size]
 
-            bonus_token_ids: The "bonus" token ids that are accepted iff all
+            bonus_token_ids: The "bonus" token ids that are accepted if all
                 speculative tokens in a sequence are accepted.
             shape = [batch_size, num_bonus_tokens]
 
@@ -283,14 +283,14 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         batch_size, k, _ = draft_probs.shape
         batch_indices = torch.arange(batch_size,
                                      device=target_probs.device)[:, None]
-        probs_indicies = torch.arange(k, device=target_probs.device)
+        probs_indices = torch.arange(k, device=target_probs.device)
 
         # shape [batch_size, k]
-        selected_draft_probs = draft_probs[batch_indices, probs_indicies,
+        selected_draft_probs = draft_probs[batch_indices, probs_indices,
                                            draft_token_ids]
 
         # shape [batch_size, k]
-        selected_target_probs = target_probs[batch_indices, probs_indicies,
+        selected_target_probs = target_probs[batch_indices, probs_indices,
                                              draft_token_ids]
 
         uniform_rand = self._create_uniform_samples(seeded_seqs, batch_size,
