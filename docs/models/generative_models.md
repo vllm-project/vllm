@@ -51,7 +51,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-!!! warning
+!!! important
     By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the huggingface model repository if it exists. In most cases, this will provide you with the best results by default if [SamplingParams][vllm.SamplingParams] is not specified.
 
     However, if vLLM's default sampling parameters are preferred, please pass `generation_config="vllm"` when creating the [LLM][vllm.LLM] instance.
@@ -81,7 +81,7 @@ The [chat][vllm.LLM.chat] method implements chat functionality on top of [genera
 In particular, it accepts input similar to [OpenAI Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
 and automatically applies the model's [chat template](https://huggingface.co/docs/transformers/en/chat_templating) to format the prompt.
 
-!!! warning
+!!! important
     In general, only instruction-tuned models have a chat template.
     Base models may perform poorly as they are not trained to respond to the chat conversation.
 
