@@ -1350,6 +1350,7 @@ class MllamaForCausalLM(nn.Module):
         full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
                                                       torch.Tensor]],
         skip_cross_attention: bool,
+        **kwargs: object,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids=input_ids,
