@@ -98,7 +98,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
     git clone https://github.com/pytorch/pytorch.git && \
     cd pytorch && \
-    git checkout v2.7.0 && \
+    git checkout v2.7.1 && \
     git submodule sync && \
     git submodule update --init --recursive && \
     uv pip install cmake ninja && \
@@ -109,7 +109,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python-install AS torch-vision
 # Install torchvision
 ARG TORCH_VERSION=2.7.1
-ARG TORCH_VISION_VERSION=v0.20.1
+ARG TORCH_VISION_VERSION=v0.22.1
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=torch,source=/tmp/pytorch/dist,target=/tmp/torch-wheels/ \
