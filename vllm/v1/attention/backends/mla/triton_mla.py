@@ -114,7 +114,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                          softmax_scale=None,
                                          **kwargs):
         if current_platform.is_rocm() \
-            and self.use_triton_flash_attn  \
+            and self.use_triton_flash_attn \
             and not return_softmax_lse:
             return self._flash_attn_varlen_diff_headdims_rocm(
                 q,
