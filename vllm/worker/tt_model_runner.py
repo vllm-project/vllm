@@ -377,7 +377,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if self.dp_kv_cache:
             # Prepare finished request ids
             finished_requests_seq_ids = [
-                self.req_id_to_seq_id[req_id] for req_id in finished_requests_ids
+                self.req_id_to_seq_id[req_id]
+                for req_id in finished_requests_ids
             ]
 
             # Delete the finished requests from req_id_to_seq_id

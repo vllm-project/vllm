@@ -482,9 +482,9 @@ class GlobalStatLogger(StatLoggerBase):
     def log_out(self):
         ttft = self.time_to_first_token
         tpot = self.time_per_output_token
-        if not ttft.count == 0:
+        if ttft.count != 0:
             logger.info(f"Average time to first token (batch): {ttft.avg} s")
-        if not tpot.count == 0:
+        if tpot.count != 0:
             decode_throughput = 1 / tpot.avg if tpot.avg != 0 else 0
             logger.info(
                 f"Average decode throughput: {decode_throughput} t/s/u")

@@ -485,5 +485,5 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             ttnn.close_mesh_device(self.mesh_device)
             del self.mesh_device
 
-        if hasattr(super(TTWorker, self), '__del__'):
+        if hasattr(super(), '__del__'):
             super().__del__()

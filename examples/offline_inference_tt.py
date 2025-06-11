@@ -177,7 +177,7 @@ def run_inference(
         "max_model_len": max_model_len,
         "disable_log_stats": False,
         "max_num_batched_tokens": max_num_batched_tokens,
-        "log_global_stats": True if measure_perf else False,
+        "log_global_stats": measure_perf,
         "num_scheduler_steps": num_scheduler_steps,
         "disable_async_output_proc": disable_async_output_proc,
     }
@@ -190,7 +190,7 @@ def run_inference(
         raise ValueError(f"Invalid JSON string for override_tt_config: {e}")
 
     # Generation args
-    ignore_eos = True if measure_perf else False
+    ignore_eos = measure_perf
 
     if greedy_sampling:
         sampling_params = SamplingParams(max_tokens=max_tokens,

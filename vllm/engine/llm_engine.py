@@ -21,6 +21,7 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          VllmConfig)
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.metrics import GlobalStatLogger
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
@@ -1199,8 +1200,10 @@ class LLMEngine:
         # Log and reset global stats if there are no unfinished requests left
         if not self.has_unfinished_requests():
             if self.log_stats and 'global' in self.stat_loggers:
-                self.stat_loggers['global'].log_out()
-                self.stat_loggers['global'].reset()
+                global_stat_logger = cast(GlobalStatLogger,
+                                          self.stat_loggers['global'])
+                global_stat_logger.log_out()
+                global_stat_logger.reset()
 
         # For multi-step without streaming, don't create outputs each iteration
         if not is_last_step and not ctx.multi_step_stream_outputs:
