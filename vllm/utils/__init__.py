@@ -610,11 +610,11 @@ class AsyncMicrobatchTokenizer:
                     """Tokenize the micro-batch in one call 
                     and split results."""
                     grouped = self.tokenizer(prompts, **kwargs_list[0])
-                    single__encodings = []
+                    single_encodings = []
                     for i in range(len(prompts)):
                         data_i = {k: v[i] for k, v in grouped.items()}
-                        single__encodings.append(BatchEncoding(data_i))
-                    return single__encodings
+                        single_encodings.append(BatchEncoding(data_i))
+                    return single_encodings
 
                 encode_fn = _encode_batch_group if can_batch and len(
                     prompts) > 1 else _encode_batch_single
@@ -650,6 +650,12 @@ class AsyncMicrobatchTokenizer:
             # If queue is empty, exit and let new requests spawn a fresh task
             if self._queue.empty():
                 return
+
+    def __del__(self):
+        if (self._batcher_task is None
+                or not asyncio.get_running_loop().is_running()):
+            return
+        self._batcher_task.cancel()
 
 
 def make_async(
