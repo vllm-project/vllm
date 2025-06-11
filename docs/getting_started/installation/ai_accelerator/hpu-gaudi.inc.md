@@ -19,7 +19,8 @@ to set up the execution environment. To achieve the best performance,
 please follow the methods outlined in the
 [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
 
-## Configure a new environment
+# --8<-- [end:requirements]
+# --8<-- [start:configure-a-new-environment]
 
 ### Environment verification
 
@@ -56,7 +57,7 @@ docker run \
   vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
 ```
 
-# --8<-- [end:requirements]
+# --8<-- [end:configure-a-new-environment]
 # --8<-- [start:set-up-using-python]
 
 # --8<-- [end:set-up-using-python]
@@ -183,7 +184,6 @@ Currently in vLLM for HPU we support four execution modes, depending on selected
 |                    0 |                 0 | torch.compile      |
 |                    0 |                 1 | PyTorch eager mode |
 |                    1 |                 0 | HPU Graphs         |
-  <figcaption>vLLM execution modes</figcaption>
 
 !!! warning
     In 1.18.0, all modes utilizing `PT_HPU_LAZY_MODE=0` are highly experimental and should be only used for validating functional correctness. Their performance will be improved in the next releases. For obtaining the best performance in 1.18.0, please use HPU Graphs, or PyTorch lazy mode.
