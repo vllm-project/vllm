@@ -22,6 +22,7 @@ logger = init_logger(__name__)
 USE_FAST_DETOKENIZER = version.parse(
     tokenizers.__version__) >= version.parse("0.21.1")
 
+# Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 
 
