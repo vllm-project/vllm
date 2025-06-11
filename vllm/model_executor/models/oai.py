@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections.abc import Iterable
 from typing import Optional
 
@@ -13,8 +14,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 # from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -27,7 +26,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import OAIModelConfig
 
 from .utils import extract_layer_index, maybe_prefix
-import math
 
 
 class RMSNorm(torch.nn.Module):
@@ -284,19 +282,13 @@ class OAIAttention(nn.Module):
         return output + hidden_states
 
 
-def swiglu(x, alpha: float = 1.702):
-    # Note we add an extra bias of 1 to the linear layer
-    x_glu, x_linear = torch.chunk(x, 2, dim=-1)
-    out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-    return out_glu * (x_linear + 1)
-
-
 class MLPBlock(torch.nn.Module):
 
     def __init__(
         self,
         config: OAIModelConfig,
         layer_idx: int,
+        quant_config: QuantizationConfig,
         prefix: str = "",
     ):
         super().__init__()
@@ -309,65 +301,26 @@ class MLPBlock(torch.nn.Module):
                                     config.num_experts,
                                     dtype=torch.bfloat16)
         assert config.intermediate_size % self.world_size == 0
-        self.mlp1_weight = torch.nn.Parameter(
-            torch.empty(
-                (
-                    config.num_experts,
-                    config.intermediate_size * 2 // self.world_size,
-                    config.hidden_size,
-                ),
-                dtype=torch.bfloat16,
-            ))
-        self.mlp1_bias = torch.nn.Parameter(
-            torch.empty(
-                (config.num_experts,
-                 config.intermediate_size * 2 // self.world_size),
-                dtype=torch.bfloat16,
-            ))
-        self.mlp2_weight = torch.nn.Parameter(
-            torch.empty(
-                (
-                    config.num_experts,
-                    config.hidden_size,
-                    config.intermediate_size // self.world_size,
-                ),
-                dtype=torch.bfloat16,
-            ))
-        self.mlp2_bias = torch.nn.Parameter(
-            torch.empty(
-                (config.num_experts, config.hidden_size),
-                dtype=torch.bfloat16,
-            ))
+        self.experts = FusedMoE(num_experts=config.num_experts,
+                                top_k=config.num_experts_per_token,
+                                hidden_size=config.hidden_size,
+                                intermediate_size=config.intermediate_size,
+                                reduce_results=True,
+                                renormalize=True,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.experts",
+                                use_triton_kernels=True,
+                                apply_router_weight_on_input=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t = self.norm(x)
-        post_norm_t = t.clone()
         g = self.gate(t)
-        experts = torch.topk(g, k=self.experts_per_token, dim=-1, sorted=True)
-        expert_weights = torch.nn.functional.softmax(experts.values, dim=1)
-        expert_indices = experts.indices
-
         # if dist.is_initialized() and dist.get_rank() == 0:
         #     print(
         #         f"layer {self.layer_idx} expert_indices: {expert_indices}, expert_weights: {expert_weights}"
         #     )
 
-        # MLP #1
-        mlp1_weight = self.mlp1_weight[expert_indices, ...]
-        mlp1_bias = self.mlp1_bias[expert_indices, ...]
-        t = torch.einsum("beck,bk->bec", mlp1_weight, t) + mlp1_bias
-        t = swiglu(t)
-
-        # MLP #2
-        mlp2_weight = self.mlp2_weight[expert_indices, ...]
-        mlp2_bias = self.mlp2_bias[expert_indices, ...]
-        t = torch.einsum("beck,bek->bec", mlp2_weight, t)
-        if self.world_size > 1:
-            dist.all_reduce(t, op=dist.ReduceOp.SUM)
-        t += mlp2_bias
-
-        # Weighted sum of experts
-        t = torch.einsum("bec,be->bc", t, expert_weights)
+        t = self.experts(hidden_states=t, router_logits=g)
 
         # if dist.is_initialized() and dist.get_rank(
         # ) == 0 and self.layer_idx == 0:
@@ -390,12 +343,16 @@ class TransformerBlock(torch.nn.Module):
     def __init__(
         self,
         config: OAIModelConfig,
+        quant_config: QuantizationConfig,
         prefix: str = "",
     ):
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)
         self.attn = OAIAttention(config, prefix=f"{prefix}.attn")
-        self.mlp = MLPBlock(config, self.layer_idx, prefix=f"{prefix}.mlp")
+        self.mlp = MLPBlock(config,
+                            self.layer_idx,
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.mlp")
 
     def forward(self, hidden_states: torch.Tensor,
                 positions: torch.Tensor) -> torch.Tensor:
@@ -418,6 +375,7 @@ class OAIForCausalLM(nn.Module):
     ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         self.embedding = VocabParallelEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,
@@ -425,6 +383,7 @@ class OAIForCausalLM(nn.Module):
         self.block = torch.nn.ModuleList([
             TransformerBlock(
                 self.config,
+                quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, f"block.{layer_idx}"),
             ) for layer_idx in range(self.config.num_hidden_layers)
         ])
@@ -487,22 +446,30 @@ class OAIForCausalLM(nn.Module):
             weight = weight.cuda()  # make the narrowing to TP faster
 
             if "mlp1_weight" in name:
-                for i in range(self.config.num_experts):
-                    if using_oai_mlp:
-                        narrow_weight = torch.cat((
-                            weight[:, my_rank *
-                                   per_rank_intermediate_size:(my_rank + 1) *
-                                   per_rank_intermediate_size, ...],
-                            weight[:, my_rank * per_rank_intermediate_size +
-                                   self.config.intermediate_size:
-                                   (my_rank + 1) * per_rank_intermediate_size +
-                                   self.config.intermediate_size, ...],
-                        ),
-                                                  dim=1)
-                        param = params_dict[name]
-                        param.data.copy_(narrow_weight)
-                        loaded_params.add(name)
-                    else:
+                if using_oai_mlp:
+                    new_name = name.replace("mlp1_weight",
+                                            "experts.w13_weight")
+                    narrow_weight = torch.cat((
+                        weight[:, my_rank *
+                               per_rank_intermediate_size:(my_rank + 1) *
+                               per_rank_intermediate_size, ...],
+                        weight[:, my_rank * per_rank_intermediate_size +
+                               self.config.intermediate_size:(my_rank + 1) *
+                               per_rank_intermediate_size +
+                               self.config.intermediate_size, ...],
+                    ),
+                                              dim=1)
+                    param = params_dict[new_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param,
+                                  narrow_weight,
+                                  weight_name=new_name,
+                                  shard_id=None,
+                                  expert_id=None)
+                    loaded_params.add(new_name)
+                else:
+                    for i in range(self.config.num_experts):
                         new_name = name.replace("mlp1_weight",
                                                 f"experts.{i}.mlp1.weight")
                         param = params_dict[new_name]
@@ -510,13 +477,20 @@ class OAIForCausalLM(nn.Module):
                         loaded_params.add(new_name)
             elif "mlp2_weight" in name:
                 if using_oai_mlp:
+                    new_name = name.replace("mlp2_weight", "experts.w2_weight")
                     narrow_weight = weight[
                         ...,
                         my_rank * per_rank_intermediate_size:(my_rank + 1) *
                         per_rank_intermediate_size]
-                    param = params_dict[name]
-                    param.data.copy_(narrow_weight)
-                    loaded_params.add(name)
+                    param = params_dict[new_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param,
+                                  narrow_weight,
+                                  weight_name=new_name,
+                                  shard_id=None,
+                                  expert_id=None)
+                    loaded_params.add(new_name)
                 else:
                     for i in range(self.config.num_experts):
                         new_name = name.replace("mlp2_weight",
@@ -526,6 +500,7 @@ class OAIForCausalLM(nn.Module):
                         loaded_params.add(new_name)
             elif "mlp1_bias" in name:
                 if using_oai_mlp:
+                    new_name = name.replace("mlp1_bias", "experts.w13_bias")
                     narrow_weight = torch.cat((
                         weight[:, my_rank *
                                per_rank_intermediate_size:(my_rank + 1) *
@@ -536,9 +511,15 @@ class OAIForCausalLM(nn.Module):
                                self.config.intermediate_size],
                     ),
                                               dim=1)
-                    param = params_dict[name]
-                    param.data.copy_(narrow_weight)
-                    loaded_params.add(name)
+                    param = params_dict[new_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param,
+                                  narrow_weight,
+                                  weight_name=new_name,
+                                  shard_id=None,
+                                  expert_id=None)
+                    loaded_params.add(new_name)
                 else:
                     for i in range(self.config.num_experts):
                         new_name = name.replace("mlp1_bias",
@@ -548,9 +529,20 @@ class OAIForCausalLM(nn.Module):
                         loaded_params.add(new_name)
             elif "mlp2_bias" in name:
                 if using_oai_mlp:
-                    param = params_dict[name]
-                    param.data.copy_(weight)
-                    loaded_params.add(name)
+                    # load bias only on rank 0 to aviod duplicated addition
+                    if dist.get_rank() != 0:
+                        weight.zero_()
+
+                    new_name = name.replace("mlp2_bias", "experts.w2_bias")
+                    param = params_dict[new_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param,
+                                  weight,
+                                  weight_name=new_name,
+                                  shard_id=None,
+                                  expert_id=None)
+                    loaded_params.add(new_name)
                 else:
                     for i in range(self.config.num_experts):
                         new_name = name.replace("mlp2_bias",
