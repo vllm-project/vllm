@@ -1440,7 +1440,8 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
             return False
 
-        # Non-[CUDA, TPU] may be supported on V1, but off by default for now.
+        # Non-[CUDA, TPU, x86 CPU] may be supported on V1,
+        # but off by default for now.
         v0_hardware = not any(
             (current_platform.is_cuda_alike(), current_platform.is_tpu(),
              (current_platform.is_cpu()
