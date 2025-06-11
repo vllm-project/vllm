@@ -61,7 +61,6 @@ def moe_mmk(
     if use_w8a8:
         # block-wise
         if group_k > 0 and group_n > 0:
-            # + (expert_id * stride_ase) ??
             a_scale_ptrs = a_scale_ptr + (offs_m * stride_asm) #+ (expert_id * stride_ase)
             offs_bsn = offs_n // group_n
             b_scale_ptrs = (b_scale_ptr + offs_bsn * stride_bsn) + expert_id * stride_bse
@@ -376,12 +375,18 @@ def invoke_moe_batched_triton_kernel(
             triton.cdiv(B.size(1), BLOCK_N))
 
     assert A_scale is None or A_scale.ndim == 3, f"{0 if A_scale is None else A_scale.shape}"
-    assert B_scale is None or B_scale.ndim == 3, f"{0 if B_scale is None else B_scale.shape}"
+    assert B_scale is None or B_scale.ndim == 1 or B_scale.ndim == 3, f"{0 if B_scale is None else B_scale.shape}"
+    #assert B_scale is None or B_scale.ndim == 3, f"{0 if B_scale is None else (A.shape, B_scale.shape)}"
 
     if B_scale is not None:
-        stride_bse = B_scale.stride(0)
-        stride_bsn = B_scale.stride(1)
-        stride_bsk = B_scale.stride(2)
+        if B_scale.ndim == 1:
+            stride_bse = 1
+            stride_bsn = 0
+            stride_bsk = 0
+        else:
+            stride_bse = B_scale.stride(0)
+            stride_bsn = B_scale.stride(1)
+            stride_bsk = B_scale.stride(2)
     else:
         stride_bse = 0
         stride_bsk = 0
@@ -509,7 +514,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             device=a1.device)
 
         if quant_dtype is not None:
-            if self.block_shape is not None:
+            if block_shape is not None:
                 _, block_k = block_shape
                 k_tiles = (hidden_dim + block_k - 1) // block_k
                 scale_shape = (num_local_experts, self.max_num_tokens, k_tiles)

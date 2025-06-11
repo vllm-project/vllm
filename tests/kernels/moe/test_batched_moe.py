@@ -56,7 +56,7 @@ class BatchedMMTensors:
 
     @staticmethod
     def make_tensors(config: BatchedMMConfig):
-        if config.in_dtype == torch.torch.float8_e4m3fn:
+        if config.in_dtype == torch.float8_e4m3fn:
             config_in_dtype = torch.bfloat16
         else:
             config_in_dtype = config.in_dtype
@@ -126,13 +126,13 @@ def ref_impl(
 def make_quantized_test_activations(E, m, k, dtype, block_shape, per_act_token):
     assert not per_act_token, "NYI"
 
-    a_type = torch.bfloat16 if dtype == torch.torch.float8_e4m3fn else dtype
+    a_type = torch.bfloat16 if dtype == torch.float8_e4m3fn else dtype
 
     a = torch.randn((E, m, k), device="cuda", dtype=a_type) / 10
     a_q = a
     a_scale = None
 
-    if dtype == torch.torch.float8_e4m3fn:
+    if dtype == torch.float8_e4m3fn:
         a_q = torch.zeros_like(a, dtype=dtype)
         a_scale = [None] * E
         for e in range(E):
@@ -153,13 +153,13 @@ def make_quantized_test_activations(E, m, k, dtype, block_shape, per_act_token):
 @pytest.mark.parametrize("N", [128, 256, 512, 1024])
 @pytest.mark.parametrize(
     "dtype",
-    [torch.torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
+    [torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
                     N: int, dtype: torch.dtype, block_shape: list[int]):
     current_platform.seed_everything(7)
 
-    use_fp8_w8a8 = dtype == torch.torch.float8_e4m3fn
+    use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
     per_act_token_quant = False
 
@@ -328,7 +328,7 @@ def _make_test_weights(
     n: int,
     k: int,
     block_size: list[int],
-    dtype=torch.torch.float8_e4m3fn,
+    dtype=torch.float8_e4m3fn,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Return weights w1, w2, w1q, w2q, w1_scale, w2_scale
@@ -371,7 +371,7 @@ def _make_test_weights(
 
 
 def make_test_weights(e, n, k, block_shape, dtype):
-    use_fp8_w8a8 = dtype == torch.torch.float8_e4m3fn
+    use_fp8_w8a8 = dtype == torch.float8_e4m3fn
     w_dtype = torch.bfloat16 if use_fp8_w8a8 else dtype
 
     w1_16 = torch.randn((e, 2 * n, k), device="cuda", dtype=w_dtype) / 15
@@ -456,7 +456,7 @@ def test_fused_moe_batched_experts(
 ):
     current_platform.seed_everything(7)
 
-    use_fp8_w8a8 = dtype == torch.torch.float8_e4m3fn
+    use_fp8_w8a8 = dtype == torch.float8_e4m3fn
     quant_type = torch.float8_e4m3fn if use_fp8_w8a8 else None
 
     if not use_fp8_w8a8 and per_act_token_quant and block_shape is not None:

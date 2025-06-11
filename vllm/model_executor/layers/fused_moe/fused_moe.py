@@ -1626,9 +1626,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
         super().__init__(
-            quant_dtype,
-            per_act_token_quant,
-            block_shape,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
         )
 
         self.use_fp8_w8a8 = use_fp8_w8a8
@@ -1763,7 +1763,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2q_scale: Optional[torch.Tensor] = None
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
-            intermediate_cache2, a2_scale, self.qtype,
+            intermediate_cache2, a2_scale, self.quant_dtype,
             self.per_act_token_quant, self.block_shape)
 
         invoke_fused_moe_kernel(qintermediate_cache2,
@@ -1796,12 +1796,6 @@ def modular_triton_fused_moe(
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> mk.FusedMoEModularKernel:
-    quant_dtype = get_config_quant_dtype(
-        use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
-        use_int4_w4a16=use_int4_w4a16,
-    )
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         TritonExperts(

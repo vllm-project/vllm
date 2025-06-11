@@ -349,8 +349,8 @@ def cutlass_moe_fp8(
         CutlassExpertsFp8(
             max_experts_per_worker=global_num_experts,
             out_dtype=out_dtype,
-            per_act_token=per_act_token,
-            per_out_ch=per_out_ch,
+            per_act_token_quant=per_act_token,
+            per_out_ch_quant=per_out_ch,
             use_batched_format=False,
         ),
     )

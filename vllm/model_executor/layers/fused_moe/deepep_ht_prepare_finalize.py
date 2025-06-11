@@ -51,13 +51,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             return None
         return deep_ep.Buffer.get_combine_config(self.dp_size)
 
-    def _do_quant(self, tokens: torch.Tensor,
-                  token_scales: Optional[torch.Tensor], per_act_token: bool):
-        tokens, token_scales = moe_kernel_quantize_input(
-            tokens, token_scales, self.quant_dtype, per_act_token,
-            self.block_shape)
-        return tokens, token_scales
-
     def _do_dispatch(self, tokens: torch.Tensor,
                      token_scales: Optional[torch.Tensor],
                      rank_topk_ids: torch.Tensor,
@@ -147,19 +140,25 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # Check if there is a block_shape / or if we can infer the quantization
         # schemes from the scales.
         per_token_quant = None
-        if all([x is None for x in [self.block_shape, a1_scale, a2_scale]
-                ]) and self.quant_dtype is not None:
+        if all([x is None for x in [block_shape, a1_scale, a2_scale]
+                ]) and quant_dtype is not None:
             # Quantization required despite none of the inputs suggesting
             # quantization. Fallback to per_token_dynamic quant.
             per_token_quant = True
         else:
-            per_token_quant = ((self.block_shape is not None) or
+            per_token_quant = ((block_shape is not None) or
                                (a1_scale is not None and a1_scale.numel() != 1)
                                or (a2_scale is not None
                                    and a2_scale.numel() != 1))
 
         if per_token_quant:
-            a1q, a1q_scale = self._do_quant(a1, a1_scale, per_act_token=True)
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                a1_scale,
+                quant_dtype=quant_dtype,
+                per_act_token_quant=False,
+                block_shape=block_shape,
+            )
             (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1q,
@@ -180,9 +179,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # quantize now
             expert_x_scale = None
             if expert_x.numel() != 0:
-                expert_x, expert_x_scale = self._do_quant(expert_x,
-                                                          a1_scale,
-                                                          per_act_token=False)
+                expert_x, expert_x_scale = moe_kernel_quantize_input(
+                    expert_x,
+                    a1_scale,
+                    quant_dtype=quant_dtype,
+                    per_act_token=False,
+                    block_shape=block_shape
+                )
 
         return (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
                 expert_topk_weights)
