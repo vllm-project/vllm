@@ -234,9 +234,9 @@ __device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal,
 template <class Type, bool UE8M0_SF = false, bool SMALL_NUM_EXPERTS = false>
 __global__ void
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(512, 4) cvt_expert_fp16_to_fp4(
+__launch_bounds__(512, 4) cvt_fp16_to_fp4(
 #else
-cvt_expert_fp16_to_fp4(
+cvt_fp16_to_fp4(
 #endif
     int32_t numRows, int32_t numCols, Type const* in, float const* SFScale,
     uint32_t* out, uint32_t* SFout, uint32_t* input_offset_by_experts,
@@ -329,9 +329,9 @@ cvt_expert_fp16_to_fp4(
 template <class Type, bool UE8M0_SF = false, bool SMALL_NUM_EXPERTS = false>
 __global__ void
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(1024, 4) cvt_expert_fp16_to_fp4(
+__launch_bounds__(1024, 4) cvt_fp16_to_fp4(
 #else
-cvt_expert_fp16_to_fp4(
+cvt_fp16_to_fp4(
 #endif
     int32_t numRows, int32_t numCols, Type const* in, float const* SFScale,
     uint32_t* out, uint32_t* SFout, uint32_t* input_offset_by_experts,
@@ -451,7 +451,7 @@ void quant_impl(void* output, void* output_scale, void* input,
     // Calculate shared memory size for large m_topk kernels
     size_t shared_mem_size = (n_experts + 1) * sizeof(uint32_t);
     if (n_experts >= 4) {
-      cvt_expert_fp16_to_fp4<T, false, false><<<grid, block, shared_mem_size, stream>>>(
+      cvt_fp16_to_fp4<T, false, false><<<grid, block, shared_mem_size, stream>>>(
           m_topk, k, reinterpret_cast<T*>(input),
           reinterpret_cast<float*>(input_global_scale),
           reinterpret_cast<uint32_t*>(output),
@@ -459,7 +459,7 @@ void quant_impl(void* output, void* output_scale, void* input,
           reinterpret_cast<uint32_t*>(input_offset_by_experts),
           reinterpret_cast<uint32_t*>(output_scale_offset_by_experts), n_experts);
     } else {
-      cvt_expert_fp16_to_fp4<T, false, true><<<grid, block, shared_mem_size, stream>>>(
+      cvt_fp16_to_fp4<T, false, true><<<grid, block, shared_mem_size, stream>>>(
           m_topk, k, reinterpret_cast<T*>(input),
           reinterpret_cast<float*>(input_global_scale),
           reinterpret_cast<uint32_t*>(output),
@@ -470,7 +470,7 @@ void quant_impl(void* output, void* output_scale, void* input,
   } else {
     // Use standard version for smaller m_topk (no shared memory needed)
     if (n_experts >= 16) {
-      cvt_expert_fp16_to_fp4<T, false, false><<<grid, block, 0, stream>>>(
+      cvt_fp16_to_fp4<T, false, false><<<grid, block, 0, stream>>>(
           m_topk, k, reinterpret_cast<T*>(input),
           reinterpret_cast<float*>(input_global_scale),
           reinterpret_cast<uint32_t*>(output),
@@ -478,7 +478,7 @@ void quant_impl(void* output, void* output_scale, void* input,
           reinterpret_cast<uint32_t*>(input_offset_by_experts),
           reinterpret_cast<uint32_t*>(output_scale_offset_by_experts), n_experts, true);
     } else {
-      cvt_expert_fp16_to_fp4<T, false, true><<<grid, block, 0, stream>>>(
+      cvt_fp16_to_fp4<T, false, true><<<grid, block, 0, stream>>>(
           m_topk, k, reinterpret_cast<T*>(input),
           reinterpret_cast<float*>(input_global_scale),
           reinterpret_cast<uint32_t*>(output),
