@@ -43,7 +43,6 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def workspace_shapes(
         self,
         a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -56,9 +55,9 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if self.allow_deep_gemm and _valid_deep_gemm_shape(M, N, K):
             assert self.deep_gemm_expert is not None
             return self.deep_gemm_expert.workspace_shapes(
-                a, aq, M, N, K, topk, num_experts)
+                a, M, N, K, topk, num_experts)
         else:
-            return self.triton_expert.workspace_shapes(a, aq, M, N, K, topk,
+            return self.triton_expert.workspace_shapes(a, M, N, K, topk,
                                                        num_experts)
 
     def apply(
