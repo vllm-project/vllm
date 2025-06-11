@@ -160,10 +160,10 @@ class CustomOp(nn.Module):
 
     # Decorator to register custom ops.
     @classmethod
-    def register(cls, name: str, custom_op=False):
+    def register(cls, name: str, is_oot_custom_op=False):
 
         def decorator(op_cls):
-            if custom_op:
+            if is_oot_custom_op:
                 assert name not in cls.op_registry_oot, \
                     f"Duplicate op name: {name}"
                 op_cls.name = name
