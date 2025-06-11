@@ -418,7 +418,7 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         if self.trace_mode:
             # Set the most common value as default, override later
-            device_params["trace_region_size"] = 23887872
+            device_params["trace_region_size"] = 25000000
             if override_tt_config and "trace_region_size" in override_tt_config:
                 device_params["trace_region_size"] = override_tt_config[
                     "trace_region_size"]
