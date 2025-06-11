@@ -28,7 +28,7 @@ import os
 import time
 from dataclasses import asdict
 
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME
 
 from vllm import LLM, SamplingParams
