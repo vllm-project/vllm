@@ -392,7 +392,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def _get_bnb_target_modules(self, model: nn.Module) -> None:
 
         for name, module in model.named_modules():
-            if isinstance(module, (LinearBase, )):
+            if (isinstance(module, LinearBase) and
+                    hasattr(module.quant_method, "quant_config")):
                 if modules_info := self.modules_mapping.get_sub_modules(name):
                     # Map vllm's names to transformers's names.
                     rep_name, sub_modules = modules_info

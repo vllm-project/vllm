@@ -143,7 +143,9 @@ def list_repo_files(
                     modelscope_list_repo_files)
                 return modelscope_list_repo_files(repo_id,
                                                   revision=revision,
-                                                  token=token)
+                                                  token=os.getenv(
+                                                      "MODELSCOPE_API_TOKEN",
+                                                      None))
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
