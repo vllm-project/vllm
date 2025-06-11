@@ -210,7 +210,7 @@ def parse_args():
         required=False,
         help=("A JSON string containing additional keyword arguments to "
               "pass to Tensorizer's `TensorDeserializer` during "
-              "serialization."))
+              "deserialization."))
 
     TensorizerArgs.add_cli_args(deserialize_parser)
 
