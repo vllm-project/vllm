@@ -79,6 +79,28 @@ class BenchmarkMetrics:
     percentiles_e2el_ms: list[tuple[float, float]]
 
 
+def _get_current_request_rate(
+    ramp_up_strategy: Optional[str],
+    ramp_up_start_rps: Optional[float],
+    ramp_up_end_rps: Optional[float],
+    request_index: int,
+    total_requests: int,
+    request_rate: float,
+) -> float:
+    if (ramp_up_strategy and ramp_up_start_rps is not None
+            and ramp_up_end_rps is not None):
+        progress = request_index / max(total_requests - 1, 1)
+        if ramp_up_strategy == "linear":
+            increase = (ramp_up_end_rps - ramp_up_start_rps) * progress
+            return ramp_up_start_rps + increase
+        elif ramp_up_strategy == "exponential":
+            ratio = ramp_up_end_rps / ramp_up_start_rps
+            return ramp_up_start_rps * (ratio**progress)
+        else:
+            raise ValueError(f"Unknown ramp-up strategy: {ramp_up_strategy}")
+    return request_rate
+
+
 async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
@@ -124,22 +146,12 @@ async def get_request(
 
     for request in input_requests:
         # Determine current request rate based on ramp-up strategy
-        current_request_rate = request_rate
-        if (ramp_up_strategy and ramp_up_start_rps is not None
-                and ramp_up_end_rps is not None):
-            # Calculate progress through the requests (0 to 1)
-            progress = request_index / max(total_requests - 1, 1)
-
-            if ramp_up_strategy == "linear":
-                current_request_rate = ramp_up_start_rps + (
-                    ramp_up_end_rps - ramp_up_start_rps) * progress
-            elif ramp_up_strategy == "exponential":
-                # Exponential interpolation: start * (end/start)^progress
-                ratio = ramp_up_end_rps / ramp_up_start_rps
-                current_request_rate = ramp_up_start_rps * (ratio**progress)
-            else:
-                raise ValueError(
-                    f"Unknown ramp-up strategy: {ramp_up_strategy}")
+        current_request_rate = _get_current_request_rate(ramp_up_strategy,
+                                                      ramp_up_start_rps,
+                                                      ramp_up_end_rps,
+                                                      request_index,
+                                                      total_requests,
+                                                      request_rate)
 
         yield request, current_request_rate
 
@@ -954,20 +966,20 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "ramp up the request rate from initial RPS to final "
         "RPS rate (specified by --ramp-up-start-rps and "
         "--ramp-up-end-rps.) over the duration of the benchmark."
-        "This argument specifies the ramp-up strategy. ")
+    )
     parser.add_argument(
         "--ramp-up-start-rps",
         type=float,
         default=None,
         help="The starting request rate for ramp-up (RPS). "
-        "Needs to be specified when --ramp-up is used.",
+        "Needs to be specified when --ramp-up-strategy is used.",
     )
     parser.add_argument(
         "--ramp-up-end-rps",
         type=float,
         default=None,
         help="The ending request rate for ramp-up (RPS). "
-        "Needs to be specified when --ramp-up is used.",
+        "Needs to be specified when --ramp-up-strategy is used.",
     )
 
 
@@ -981,11 +993,14 @@ def main(args: argparse.Namespace):
         if args.request_rate != float("inf"):
             raise ValueError(
                 "When using ramp-up, do not specify --request-rate. "
-                "The request rate will be controlled by ramp-up parameters.")
+                "The request rate will be controlled by ramp-up parameters. "
+                "Please remove the --request-rate argument."
+            )
         if args.ramp_up_start_rps is None or args.ramp_up_end_rps is None:
             raise ValueError(
-                "When using --ramp-up, both --ramp-up-start-rps and "
-                "--ramp-up-end-rps must be specified")
+                "When using --ramp-up-strategy, both --ramp-up-start-rps and "
+                "--ramp-up-end-rps must be specified"
+            )
         if args.ramp_up_start_rps < 0 or args.ramp_up_end_rps < 0:
             raise ValueError("Ramp-up start and end RPS must be non-negative")
         if args.ramp_up_start_rps > args.ramp_up_end_rps:
