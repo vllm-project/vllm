@@ -211,7 +211,7 @@ for o in outputs:
 
 Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
 
-!!! warning
+!!! important
     A chat template is **required** to use Chat Completions API.
     For HF format models, the default chat template is defined inside `chat_template.json` or `tokenizer_config.json`.
 
