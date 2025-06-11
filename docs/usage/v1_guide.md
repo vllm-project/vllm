@@ -103,7 +103,7 @@ For a complete list of supported models, see the [list of supported models](http
 | **LoRA**                                    | <nobr>🚀 Optimized</nobr>                                                         |
 | **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
 | **FP8 KV Cache**                            | <nobr>🟢 Functional on Hopper devices ([PR #15191](https://github.com/vllm-project/vllm/pull/15191))</nobr>|
-| **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
+| **Spec Decode**                             | <nobr>🚀 Optimized</nobr>                                                         |
 | **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
 | **Structured Output Alternative Backends**  | <nobr>🟢 Functional</nobr>                                                        |
 | **Request-level Structured Output Backend** | <nobr>🔴 Deprecated</nobr>                                                        |
