@@ -6,15 +6,15 @@ import torch._dynamo
 from tests.compile.backend import TestBackend
 from tests.models.utils import check_outputs_equal
 from vllm import LLM, SamplingParams
-from vllm.compilation.fusion import QUANT_OPS, kFp8StaticTensorSym
+from vllm.compilation.fusion import QUANT_OPS, QuantKey, kFp8StaticTensorSym
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.platforms import current_platform
 
-test_backend = TestBackend()
-test_backend_unfused = TestBackend()
+backend = TestBackend()
+backend_unfused = TestBackend()
 
 
 @pytest.mark.parametrize(
@@ -26,8 +26,14 @@ test_backend_unfused = TestBackend()
                     reason="Need FP8 support")
 @pytest.mark.skipif(not current_platform.is_cuda_alike(),
                     reason="Only test CUDA and ROCm")
-def test_attention_fusion(example_prompts, monkeypatch, model, quant_key,
-                          use_triton_fa):
+def test_attention_fusion(example_prompts, monkeypatch, model: str,
+                          quant_key: QuantKey, use_triton_fa: bool):
+    # Clean Dynamo cache to avoid reusing other cases
+    # (for some reason the reset at the end is not enough)
+    torch._dynamo.reset()
+
+    use_v1 = False  # can be made a param once V1 support added
+    monkeypatch.setenv("VLLM_USE_V1", str(int(use_v1)))
     monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", str(int(use_triton_fa)))
 
     # Prompt 4 seems too open-ended
@@ -37,10 +43,10 @@ def test_attention_fusion(example_prompts, monkeypatch, model, quant_key,
         # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
         # DYNAMO_ONCE does not properly propagate shapes.
         level=CompilationLevel.DYNAMO_AS_IS,
-        backend="tests.compile.test_fusion_attn.test_backend_unfused",
+        backend="tests.compile.test_fusion_attn.backend_unfused",
     )
     vllm_config = VllmConfig(compilation_config=compile_config)
-    test_backend.custom_passes += [NoOpEliminationPass(vllm_config)]
+    backend_unfused.custom_passes = [NoOpEliminationPass(vllm_config)]
 
     llm = LLM(model,
               enforce_eager=True,
@@ -59,14 +65,14 @@ def test_attention_fusion(example_prompts, monkeypatch, model, quant_key,
         # DYNAMO_AS_IS triggers custom backend & does full Dynamo compilation
         # DYNAMO_ONCE does not properly propagate shapes.
         level=CompilationLevel.DYNAMO_AS_IS,
-        backend="tests.compile.test_fusion_attn.test_backend",
+        backend="tests.compile.test_fusion_attn.backend",
     )
     vllm_config = VllmConfig(compilation_config=compile_config)
 
     # AttnFusionPass needs attention layers to be registered in config upon init
     # so we initialize it during compilation.
     attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw)
-    test_backend.custom_passes += [NoOpEliminationPass(vllm_config), attn_pass]
+    backend.custom_passes = [NoOpEliminationPass(vllm_config), attn_pass]
     llm2 = LLM(model,
                enforce_eager=True,
                compilation_config=compile_config,
@@ -81,16 +87,14 @@ def test_attention_fusion(example_prompts, monkeypatch, model, quant_key,
         for key, layer in compile_config.static_forward_context.items()
     ]
 
-    print(attn_fusion_supported)
+    print(f"{attn_fusion_supported=}")
     if any(attn_fusion_supported):
         # Check quant ops
-        test_backend.check_before_ops([QUANT_OPS[quant_key]],
-                                      fully_replaced=False)
+        backend.check_before_ops([QUANT_OPS[quant_key]], fully_replaced=False)
 
     # attention ops present in both, just output_scale param changes
-    attn_nodes_pre = list(find_op_nodes(ATTN_OP, test_backend.graph_pre_pass))
-    attn_nodes_post = list(find_op_nodes(ATTN_OP,
-                                         test_backend.graph_post_pass))
+    attn_nodes_pre = list(find_op_nodes(ATTN_OP, backend.graph_pre_pass))
+    attn_nodes_post = list(find_op_nodes(ATTN_OP, backend.graph_post_pass))
     assert len(attn_nodes_pre) == len(attn_nodes_post)
 
     for i in range(len(attn_nodes_pre)):
@@ -104,8 +108,8 @@ def test_attention_fusion(example_prompts, monkeypatch, model, quant_key,
     fused_output = llm2.generate(prompts, sampling_params)
 
     # transform outputs to format expected by check_outputs_equal
-    req_outs = lambda ro: [(list(s.token_ids), s.text) for s in ro.outputs]
-    outs_lst = lambda ros: [tuple(zip(*req_outs(ro))) for ro in ros]
+    sample_outs = lambda s: (list(s.token_ids), s.text)
+    outs_lst = lambda ros: [sample_outs(ro.outputs[0]) for ro in ros]
 
     check_outputs_equal(
         outputs_0_lst=outs_lst(unfused_output),
