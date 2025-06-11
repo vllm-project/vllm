@@ -1228,10 +1228,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         multi_modal_placeholder_maps: Dict[
             str, MultiModalPlaceholderMap] = collections.defaultdict(
                 MultiModalPlaceholderMap)
+        encoder_seq_lens: List[int] = []
+        cross_slot_mapping: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
 
+        is_enc_dec_model = self.model_config.is_encoder_decoder
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -1290,6 +1293,22 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             input_positions.append(list(range(context_len, seq_len)))
 
             seq_data_mrope_positions: Optional[List[List[int]]] = None
+
+            if is_enc_dec_model:
+                encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len(
+                ) if seq_group_metadata.encoder_seq_data else 0
+                encoder_seq_lens.append(encoder_seq_len)
+                # Build slot mapping
+                if seq_group_metadata.cross_block_table is None:
+                    cross_slot_mapping.extend([_PAD_SLOT_ID] * encoder_seq_len)
+                else:
+                    for i in range(0, encoder_seq_len):
+                        block_number = seq_group_metadata.cross_block_table[
+                            i // self.block_size]
+                        block_offset = i % self.block_size
+                        slot = block_number * self.block_size + block_offset
+                        cross_slot_mapping.append(slot)
+
             if seq_group_metadata.multi_modal_data:
                 positions = input_positions[0]
                 mm_data, placeholder_maps = MultiModalPlaceholderMap \
@@ -1359,6 +1378,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     block_offset = i % self.block_size
                     slot = block_number * self.block_size + block_offset
                     slot_mapping[-1].append(slot)
+
+        if is_enc_dec_model:
+            real_batch_size = len(seq_group_metadata_list)
+            batch_size_padded = self.bucketing_ctx.get_padded_batch_size(
+                real_batch_size, True)
+            batch_size_padding = batch_size_padded - real_batch_size
+            if batch_size_padding > 0:
+                encoder_seq_lens.extend(encoder_seq_lens[0]
+                                        for _ in range(batch_size_padding))
 
         if self.use_merged_prefill:
             target_query_len = sum(query_lens)
@@ -1431,6 +1459,18 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                        dtype=torch.long,
                                        flat=self.use_merged_prefill)
 
+        if is_enc_dec_model:
+            encoder_seq_lens_tensor = torch.tensor(encoder_seq_lens,
+                                                   dtype=torch.int32,
+                                                   device='cpu')
+            cross_slot_mapping = torch.tensor(cross_slot_mapping,
+                                              dtype=torch.long,
+                                              device='cpu')
+        else:
+            encoder_seq_lens = []
+            encoder_seq_lens_tensor = None
+            cross_slot_mapping = []
+
         attn_bias = None
         seq_lens_tensor = None
         context_lens_tensor = None
@@ -1470,6 +1510,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         slot_mapping = self.move_to_device(slot_mapping)
         context_lens_tensor = self.move_to_device(context_lens_tensor)
         attn_bias = self.move_to_device(attn_bias)
+        if is_enc_dec_model:
+            cross_slot_mapping = self.move_to_device(cross_slot_mapping)
+            encoder_seq_lens_tensor = self.move_to_device(
+                encoder_seq_lens_tensor)
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
@@ -1481,6 +1525,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             attn_bias=attn_bias,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
+            encoder_seq_lens=encoder_seq_lens,
+            encoder_seq_lens_tensor=encoder_seq_lens_tensor,
+            cross_slot_mapping=cross_slot_mapping,
             context_lens_tensor=context_lens_tensor,
             num_prefills=real_num_seqs,
             num_prefill_tokens=num_prefill_tokens,

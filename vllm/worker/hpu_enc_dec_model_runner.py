@@ -210,6 +210,7 @@ class HPUEncoderDecoderModelRunner(
     def _maybe_wrap_in_hpu_graph(self, *args, **kwargs):
         return HpuModelAdapterEncoderDecoder(*args, **kwargs)
 
+    @torch.inference_mode()
     def prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -222,13 +223,7 @@ class HPUEncoderDecoderModelRunner(
                 self.profiler_counter_helper.capture_seq_group_metadata_stats(
                     seq_group_metadata_list=seq_group_metadata_list)
             model_input, sampling_metadata = self.prepare_input_tensors(
-                seq_group_metadata_list)
-            attn_metadata = self._prepare_encoder_model_input_tensors(
-                seq_group_metadata_list, model_input)
-            model_input = dataclasses.replace(
-                model_input,
-                attn_metadata=attn_metadata,
-            )
+                seq_group_metadata_list, finished_requests_ids)
             assert model_input.attn_metadata is not None
             is_prompt = model_input.attn_metadata.is_prompt
 
@@ -236,106 +231,6 @@ class HPUEncoderDecoderModelRunner(
                                    sampling_metadata=sampling_metadata,
                                    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
-
-    def _prepare_encoder_model_input_tensors(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        model_input: ModelInputForHPUWithSamplingMetadata,
-    ):
-        if len(seq_group_metadata_list) == 0:
-            return None
-
-        # Since we are not supporting chunked prefill either the entire
-        # batch is prefill or it is decode
-        is_prompt = seq_group_metadata_list[0].is_prompt
-        # Build encoder inputs
-        encoder_seq_lens: List[int] = []
-        cross_block_tables: List[List[int]] = []
-        cross_slot_mapping: List[int] = []
-        attn_metadata = model_input.attn_metadata
-        assert attn_metadata is not None
-        if is_prompt:
-            for seq_group_metadata in seq_group_metadata_list:
-                # Build seq lens
-                encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len(
-                ) if seq_group_metadata.encoder_seq_data else 0
-                encoder_seq_lens.append(encoder_seq_len)
-                # Build slot mapping
-                if seq_group_metadata.cross_block_table is None:
-                    cross_slot_mapping.extend([_PAD_SLOT_ID] * encoder_seq_len)
-                else:
-                    for i in range(0, encoder_seq_len):
-                        block_number = seq_group_metadata.cross_block_table[
-                            i // self.block_size]
-                        block_offset = i % self.block_size
-                        slot = block_number * self.block_size + block_offset
-                        cross_slot_mapping.append(slot)
-            attn_metadata.cross_slot_mapping = torch.tensor(cross_slot_mapping,
-                                                            dtype=torch.long,
-                                                            device=self.device)
-        else:
-            for seq_group_metadata in seq_group_metadata_list:
-                for _ in range(len(seq_group_metadata.seq_data)):
-                    encoder_seq_len = (
-                        seq_group_metadata.encoder_seq_data.get_len()
-                        if seq_group_metadata.encoder_seq_data else 0)
-                    encoder_seq_lens.append(encoder_seq_len)
-                    cross_block_table = seq_group_metadata.cross_block_table
-                    cross_block_tables.append([] if (
-                        cross_block_table is None) else cross_block_table)
-
-            last_block_usage = [(encoder_seq_len - 1) % self.block_size + 1
-                                for encoder_seq_len in encoder_seq_lens]
-            block_groups = [[i] * len(bt)
-                            for i, bt in enumerate(cross_block_tables)]
-            block_usage = [
-                [self.block_size] * (len(bt) - 1) + [lbu]
-                for bt, lbu in zip(cross_block_tables, last_block_usage) if bt
-            ]
-
-            block_list = self._flatten(cross_block_tables)
-            block_groups = self._flatten(block_groups)
-            block_usage = self._flatten(block_usage)
-
-            assert len(block_list) == len(block_groups)
-            assert len(block_list) == len(block_usage)
-
-            block_list = torch.tensor(block_list,
-                                      dtype=torch.int,
-                                      device='cpu')
-            block_groups = torch.tensor(block_groups,
-                                        dtype=torch.int,
-                                        device='cpu')
-            block_usage = torch.tensor(block_usage,
-                                       dtype=self.model_config.dtype,
-                                       device='cpu')
-
-            block_list = block_list.to(  # type: ignore
-                self.device, non_blocking=True)
-            block_groups = block_groups.to(  # type: ignore
-                self.device, non_blocking=True)
-            block_usage = block_usage.to(  # type: ignore
-                self.device, non_blocking=True)
-
-            attn_metadata.cross_block_list = block_list
-            attn_metadata.cross_block_groups = block_groups
-            attn_metadata.cross_block_usage = block_usage
-
-        # add padding to align with language model shapes
-        real_batch_size = len(seq_group_metadata_list)
-        batch_size_padded = self.bucketing_ctx.get_padded_batch_size(
-            real_batch_size, is_prompt)
-        batch_size_padding = batch_size_padded - real_batch_size
-        if batch_size_padding > 0:
-            encoder_seq_lens.extend(encoder_seq_lens[0]
-                                    for _ in range(batch_size_padding))
-
-        encoder_seq_lens_tensor = self._list_to_int32_tensor(encoder_seq_lens)
-        attn_metadata.encoder_seq_lens = encoder_seq_lens
-        attn_metadata.encoder_seq_lens_tensor = encoder_seq_lens_tensor
-        attn_metadata.max_encoder_seq_len = max(encoder_seq_lens, default=0)
-
-        return attn_metadata
 
     def profile_run(self) -> None:
         num_layers = self.model_config.get_num_layers(self.parallel_config)
