@@ -405,19 +405,44 @@ class FusedMoEModularKernel(torch.nn.Module):
                 CHUNK_SIZE = M
                 num_chunks = 1
 
+            # Batched experts don't support chunking at this level as the
+            # chunking had already happened at an higher level - in
+            # fused_moe/layer.py
+            is_batched_fused_experts = not self.fused_experts.supports_chunking(
+            )
+
+            # TODO (varun): In the case of a non-batched fused_experts
+            # implementation the input tokens are usually aligned to a
+            # "block-size" by moe_align_block_size. In the case of
+            # expert_parallel, moe_align_block_size initially considers all
+            # experts as valid and aligns all tokens appropriately. Before
+            # moe_align_block_size returns it marks the experts_ids that are
+            # not in the current GPU rank as -1 so the MoE matmuls could skip
+            # those blocks. This is sub-optimal.
+            # Due to how moe_align_block_size is implemented at the
+            # moment, it is required that we use `global_num_experts` in the
+            # workspace calculations. However for the batched case, we don't
+            # use `moe_align_block_size`, as the input is already aligned
+            # (batched). This lets us use `local_num_experts`, which is
+            # much lesser than global_num_experts, in the workspace
+            # calculation.
+            num_experts_workspace = w1.size(
+                0) if is_batched_fused_experts else global_num_experts
+
             if num_chunks == 1:
                 (workspace13_shape, workspace2_shape, fused_out_shape,
                  workspace_dtype) = self.fused_experts.workspace_shapes(
-                     a1, a1q, M, N, K, top_k, global_num_experts)
+                     a1, a1q, M, N, K, top_k, num_experts_workspace)
             else:
                 # Use the full M to get the final output shape.
                 _, _, fused_out_shape, _ = (
                     self.fused_experts.workspace_shapes(
-                        a1, a1q, M, N, K, top_k, global_num_experts))
+                        a1, a1q, M, N, K, top_k, num_experts_workspace))
                 # Use the CHUNK_SIZE to get the workspace shapes.
                 workspace13_shape, workspace2_shape, _, workspace_dtype = (
                     self.fused_experts.workspace_shapes(
-                        a1, a1q, CHUNK_SIZE, N, K, top_k, global_num_experts))
+                        a1, a1q, CHUNK_SIZE, N, K, top_k,
+                        num_experts_workspace))
 
             # We can reuse the memory between cache1 and cache3 because by the
             # time we need cache3, we're done with cache1.

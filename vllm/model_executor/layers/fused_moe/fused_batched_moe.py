@@ -524,7 +524,7 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        num_dp = self.world_size // self.dp_size
+        num_dp = self.dp_size
         workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
         workspace2 = (self.max_num_tokens * num_dp, N)
         return (workspace13, workspace2, workspace13, a.dtype)

@@ -50,7 +50,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        num_dp = self.world_size // self.dp_size
+        num_dp = self.dp_size
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
@@ -83,9 +83,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         a1q = hidden_states
         _, N, K = w1.size()
-
-        if global_num_experts == -1:
-            global_num_experts = w1.size(0)
 
         assert w2.size(1) == K
 
