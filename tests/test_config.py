@@ -13,32 +13,32 @@ from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
 
-class TestConfig1:
+class _TestConfig1:
     pass
 
 
 @dataclass
-class TestConfig2:
+class _TestConfig2:
     a: int
     """docstring"""
 
 
 @dataclass
-class TestConfig3:
+class _TestConfig3:
     a: int = 1
 
 
 @dataclass
-class TestConfig4:
+class _TestConfig4:
     a: Union[Literal[1], Literal[2]] = 1
     """docstring"""
 
 
 @pytest.mark.parametrize(("test_config", "expected_error"), [
-    (TestConfig1, "must be a dataclass"),
-    (TestConfig2, "must have a default"),
-    (TestConfig3, "must have a docstring"),
-    (TestConfig4, "must use a single Literal"),
+    (_TestConfig1, "must be a dataclass"),
+    (_TestConfig2, "must have a default"),
+    (_TestConfig3, "must have a docstring"),
+    (_TestConfig4, "must use a single Literal"),
 ])
 def test_config(test_config, expected_error):
     with pytest.raises(Exception, match=expected_error):
@@ -57,23 +57,23 @@ def test_compile_config_repr_succeeds():
     assert 'inductor_passes' in val
 
 
+@dataclass
+class _TestConfigFields:
+    a: int
+    b: dict = field(default_factory=dict)
+    c: str = "default"
+
+
 def test_get_field():
-
-    @dataclass
-    class TestConfig:
-        a: int
-        b: dict = field(default_factory=dict)
-        c: str = "default"
-
     with pytest.raises(ValueError):
-        get_field(TestConfig, "a")
+        get_field(_TestConfigFields, "a")
 
-    b = get_field(TestConfig, "b")
+    b = get_field(_TestConfigFields, "b")
     assert isinstance(b, Field)
     assert b.default is MISSING
     assert b.default_factory is dict
 
-    c = get_field(TestConfig, "c")
+    c = get_field(_TestConfigFields, "c")
     assert isinstance(c, Field)
     assert c.default == "default"
     assert c.default_factory is MISSING
