@@ -35,18 +35,31 @@ REQS_PER_COMBO = 10
 
 
 class TestFakes(NamedTuple):
+    """Wraps fake data structures to support testing"""
     logits: torch.Tensor
     sampling_metadata: SamplingMetadata
 
     def get_logitsproc_by_id(self, id: str) -> LogitsProcessor:
+        """Shorthand for getting a specific logitproc from SamplingMetadata"""
         return self.sampling_metadata.logitsprocs.get_logitsproc_by_id(id)
 
 
-class RequestSpec(NamedTuple):
-    index: int
-    combo: set[str]
-    out_tokens: list[int]
-    params: SamplingParams
+class RequestParams:
+    """Encapsulates key params for a single request in a batch.
+    
+    Params can be customized based on the enabled logitsprocs
+    """
+    batch_index: int
+    combo: set[str]  # Logitsprocs enabled, specified by str id
+    out_tokens: list[int]  # Output tokens required for min tokens test
+    params: SamplingParams  # Settings customized for logitsprocs combo
+
+    def __init__(self, batch_index: int, combo: set[str]):
+        self.batch_index = batch_index
+        self.combo = combo
+        self.out_tokens = ([0] *
+                           (MIN_TOKENS_LEN_THRESHOLD * random.randint(0, 1)))
+        self.params = _sampling_params_from_combo(combo)
 
 
 def _create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:
@@ -206,6 +219,7 @@ def _min_tokens_params(kwargs: dict) -> None:
 
 
 class LogitsprocTestHelpers(NamedTuple):
+    """Supports setting up and validating logitsprocs unit tests."""
     gen_request_fxn: Optional[Callable] = None
     eval_fxn: Optional[Callable] = None
 
@@ -221,35 +235,50 @@ logitsprocs_test_mapping = {
 
 
 def _sampling_params_from_combo(combo: set[str]) -> SamplingParams:
+    """Customize SamplingParams for a specified combo of logitsprocs"""
     # SamplingParams for req with no logitsprocs
     kwargs = {"min_p": 0, "logit_bias": None, "min_tokens": 0}
     for id in combo:
-        # Update SamplingParams based on logitsprocs configs
+        # Update SamplingParams for each enabled logitproc
         fxn = logitsprocs_test_mapping[id].gen_request_fxn
         fxn(kwargs)
     return SamplingParams(**kwargs)
 
 
-def _generate_req_spec(idx: int, combo: set[str]) -> RequestSpec:
-    return RequestSpec(index=idx,
-                       combo=combo,
-                       out_tokens=[0] *
-                       (MIN_TOKENS_LEN_THRESHOLD * random.randint(0, 1)),
-                       params=_sampling_params_from_combo(combo))
-
-
-def _generate_batch_spec(
+def _generate_mixed_logitsprocs_batch_params(
     reqs_per_combo: int,
     logitsprocs_ids: set[str],
-) -> list[RequestSpec]:
+) -> list[RequestParams]:
+    """Define key params for a batch of requests with different
+    combinations of logitsprocs enabled per request.
+    
+    The batch will have `reqs_per_combo` repeats for all possible
+    combinations of the `logitsprocs_ids`, including the case where
+    no logitsprocs are enabled. The batch is randomly shuffled. The
+    size of the batch is `reqs_per_combo`
+    $\times \sum_{k=0}^n \binom{n}{k}$ where `n = len(logitsprocs_ids)`
+
+    Args:
+      reqs_per_combo: number of repeats of each combo of enabled logitsprocs
+      logitsprocs_ids: available logitsprocs, to enable in different
+                       combinations
+
+    Returns:
+      List of per-request params which configure the engine for that request's
+      enabled logitsprocs
+    """
+    # List of $\binom{n}{k}$ for $k \in [0,n]$ where `n = len(logitsprocs_ids)`
     all_combos = [
         set(combo) for k in range(len(logitsprocs_ids) + 1)
         for combo in combinations(logitsprocs_ids, k)
     ]
     batch_size = len(all_combos) * reqs_per_combo
+    # Generate multiple repeats of key params for each combo of
+    # logits procs; apply random inverse permutation to the iteration
+    # over logitsprocs combos, yielding shuffled batch
     batch_perm = random.sample(range(batch_size), k=batch_size)
     return [
-        _generate_req_spec(idx, all_combos[pdx // reqs_per_combo])
+        RequestParams(batch_index=idx, combo=all_combos[pdx // reqs_per_combo])
         for idx, pdx in enumerate(batch_perm)
     ]
 
@@ -260,8 +289,8 @@ def _generate_batch_spec(
                          [set(logitsprocs_test_mapping.keys())])
 def test_mixed_batch_with_reordering(device: str, reqs_per_combo: int,
                                      logitsprocs_under_test: set[str]):
-    batch_spec = _generate_batch_spec(reqs_per_combo=reqs_per_combo,
-                                      logitsprocs_ids=logitsprocs_under_test)
+    batch_spec = _generate_mixed_logitsprocs_batch_params(
+        reqs_per_combo=reqs_per_combo, logitsprocs_ids=logitsprocs_under_test)
     print(batch_spec)
 
 
@@ -270,9 +299,7 @@ def test_mixed_batch_with_reordering(device: str, reqs_per_combo: int,
 @pytest.mark.parametrize("bias_value", [-0.1, 1.2])
 def test_logit_bias(device: str, batch_size: int, bias_value: float):
     """
-    Test to verify that when the repetition penalty is enabled, tokens
-    are penalized based on their presence in the prompt or the existing
-    output.
+    Test to verify logit bias logits processor
     """
     torch.set_default_device(device)
 
