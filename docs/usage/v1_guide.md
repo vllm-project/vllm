@@ -32,9 +32,9 @@ Upgrade to vLLM’s Core Architecture](https://blog.vllm.ai/2025/01/27/v1-alpha-
 
 This living user guide outlines a few known **important changes and limitations** introduced by vLLM V1. The team has been working actively to bring V1 as the default engine, therefore this guide will be updated constantly as more features get supported on vLLM V1.
 
-### Current Status
+## Current Status
 
-For each item, our progress towards V1 support falls into one of the following categories:
+For each item, our progress towards V1 support falls into one of the following states:
 
 - **🚀 Optimized**: Nearly fully optimized, with no further work currently planned.
 - **🟢 Functional**: Fully operational, with ongoing optimizations.  
@@ -43,7 +43,7 @@ For each item, our progress towards V1 support falls into one of the following c
 - **🟠 Delayed**: Temporarily dropped in V1 but planned to be re-introduced later.
 - **🔴 Deprecated**: Not planned for V1 unless there is strong demand.
 
-#### Hardware
+### Hardware
 
 | Hardware   | Status                             |
 |------------|------------------------------------|
@@ -62,7 +62,7 @@ For each item, our progress towards V1 support falls into one of the following c
 
     Please check their corresponding repositories for more details.
 
-#### Models
+### Models
 
 | Model Type | Status |
 |-----------------|-----------------------------------------------------------------------------------|
@@ -72,7 +72,7 @@ For each item, our progress towards V1 support falls into one of the following c
 | **Mamba Models**                            | <nobr>🚧 WIP ([PR #19327](https://github.com/vllm-project/vllm/pull/19327))</nobr> |
 | **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                                                         |
 
-#### Features
+### Features
 
 | Feature | Status |
 |-----------------|-----------------------------------------------------------------------------------|
@@ -95,9 +95,9 @@ allocate a fixed token budget per request, enabling features like chunked prefil
 prefix caching, and speculative decoding without a strict separation between prefill
 and decode phases.
 
-### Semantic Changes and Deprecated Features
+## Semantic Changes and Deprecated Features
 
-#### Logprobs
+### Logprobs
 
 vLLM V1 supports logprobs and prompt logprobs. However, there are some important semantic
 differences compared to V0:
@@ -115,7 +115,7 @@ Support for logprobs with post-sampling adjustments is in progress and will be a
 
 Currently prompt logprobs are only supported when prefix caching is turned off via `--no-enable-prefix-caching`. In a future release, prompt logprobs will be compatible with prefix caching, but a recomputation will be triggered to recover the full prompt logprobs even upon a prefix cache hit. See details in [RFC #13414](https://github.com/vllm-project/vllm/issues/13414).
 
-#### Deprecated Features
+### Deprecated Features
 
 As part of the major architectural rework in vLLM V1, several legacy features have been deprecated.
 
@@ -137,11 +137,11 @@ to handle request preemptions.
 - **Request-level Structured Output Backend**: Deprecated, alternative backends
   (outlines, guidance) with fallbacks is WIP.
 
-### Feature & Model Support in Progress
+## Feature & Model Support in Progress
 
 Although we have re-implemented and partially optimized many features and models from V0 in vLLM V1, optimization work is still ongoing for some, and others remain unsupported.
 
-#### Features to Be Optimized
+### Features to Be Optimized
 
 These features are already supported in vLLM V1, but their optimization is still
 in progress.
@@ -152,7 +152,7 @@ in progress.
 - **Multimodal Models**: V1 is almost fully compatible with V0 except that interleaved modality input is not supported yet.
   See [here](https://github.com/orgs/vllm-project/projects/8) for the status of upcoming features and optimizations.
 
-#### Models to Be Supported
+### Models to Be Supported
 
 vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol,
 and the majority fall into the following categories. V1 support for these models will be added eventually.
