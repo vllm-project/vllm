@@ -923,12 +923,22 @@ class NixlConnectorWorker:
                 if engine_id in self._pending_requests:
                     pending_reqs = self._pending_requests[engine_id]
                     logger.debug(
-                        "Handshake completed for %s, clearing %d pending requests "
-                        "(will retry naturally on next start_load_kv)",
+                        "Handshake completed for %s, immediately retrying %d pending requests",
                         engine_id, len(pending_reqs))
                     
-                    # clear pending requests - they'll be retried naturally 
-                    # by the event loop on the next start_load_kv() call
+                    for req_id, meta in pending_reqs:
+                        logger.debug("Immediately retrying request %s for engine %s", 
+                                   req_id, engine_id)
+                        try:
+                            self._read_blocks(
+                                request_id=req_id,
+                                dst_engine_id=meta.remote_engine_id,
+                                local_block_ids=meta.local_block_ids,
+                                remote_block_ids=meta.remote_block_ids,
+                            )
+                        except Exception as e:
+                            logger.error("Failed to retry request %s: %s", req_id, e)
+                    
                     del self._pending_requests[engine_id]
         
         for engine_id in completed_engines:
