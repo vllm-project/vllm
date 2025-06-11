@@ -159,6 +159,13 @@ class CustomOp(nn.Module):
     op_registry_oot: dict[str, type['CustomOp']] = {}
 
     # Decorator to register custom ops.
+    # For OOT custom ops:
+    #   if in-tree layer class is registered with an oot_custom_op layer,
+    #   the oot_custom_op layer will be used instead.
+    #   use `name=<In-Tree Layer class Name>` and `is_oot_custom_op=True`
+    # Examples:
+    # - @CustomOp.register("UnquantizedFusedMoEMethod", is_oot_custom_op=True)
+    # - @CustomOp.register("RMSNorm", is_oot_custom_op=True)
     @classmethod
     def register(cls, name: str, is_oot_custom_op=False):
 
