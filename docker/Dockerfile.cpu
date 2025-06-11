@@ -98,6 +98,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_TARGET_DEVICE=cpu python3 setup.py develop 
 
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
+    cp requirements/test.in requirements/test-cpu.in && \
+    sed -i '/mamba_ssm/d' requirements/test-cpu.in && \
+    uv pip compile requirements/test-cpu.in -o requirements/test.txt && \
     uv pip install -r requirements/dev.txt && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
