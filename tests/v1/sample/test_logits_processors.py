@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import random
 from collections.abc import Callable, Sequence
+from itertools import combinations
 from typing import NamedTuple, Optional
 
 import numpy as np
@@ -28,6 +30,8 @@ CUDA_DEVICES = [
 ]
 MAX_NUM_PROMPT_TOKENS = 64
 STR_NO_LOGITSPROC = "none"
+MIN_TOKENS_LEN_THRESHOLD = 5
+REQS_PER_COMBO = 10
 
 
 class TestFakes(NamedTuple):
@@ -36,6 +40,13 @@ class TestFakes(NamedTuple):
 
     def get_logitsproc_by_id(self, id: str) -> LogitsProcessor:
         return self.sampling_metadata.logitsprocs.get_logitsproc_by_id(id)
+
+
+class RequestSpec(NamedTuple):
+    index: int
+    combo: set[str]
+    out_tokens: list[int]
+    params: SamplingParams
 
 
 def _create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:
@@ -182,17 +193,76 @@ def _test_setup(batch_size: int, device: str) -> TestFakes:
     )
 
 
+def _min_p_params(kwargs: dict) -> None:
+    kwargs["min_p"] = 0.1
+
+
+def _logit_bias_params(kwargs: dict) -> None:
+    pass
+
+
+def _min_tokens_params(kwargs: dict) -> None:
+    pass
+
+
 class LogitsprocTestHelpers(NamedTuple):
-    gen_request_fxn: Callable
-    eval_fxn: Callable
+    gen_request_fxn: Optional[Callable] = None
+    eval_fxn: Optional[Callable] = None
 
 
 logitsprocs_test_mapping = {
-    STR_NO_LOGITSPROC: None,
-    STR_LOGITS_BIAS_LOGITSPROC_ID: LogitsprocTestHelpers(),
-    STR_MIN_P_LOGITSPROC_ID: LogitsprocTestHelpers(),
-    STR_MIN_TOKENS_LOGITSPROC_ID: LogitsprocTestHelpers(),
+    STR_LOGITS_BIAS_LOGITSPROC_ID:
+    LogitsprocTestHelpers(gen_request_fxn=_min_p_params),
+    STR_MIN_P_LOGITSPROC_ID:
+    LogitsprocTestHelpers(gen_request_fxn=_min_p_params),
+    STR_MIN_TOKENS_LOGITSPROC_ID:
+    LogitsprocTestHelpers(gen_request_fxn=_min_p_params),
 }
+
+
+def _sampling_params_from_combo(combo: set[str]) -> SamplingParams:
+    # SamplingParams for req with no logitsprocs
+    kwargs = {"min_p": 0, "logit_bias": None, "min_tokens": 0}
+    for id in combo:
+        # Update SamplingParams based on logitsprocs configs
+        fxn = logitsprocs_test_mapping[id].gen_request_fxn
+        fxn(kwargs)
+    return SamplingParams(**kwargs)
+
+
+def _generate_req_spec(idx: int, combo: set[str]) -> RequestSpec:
+    return RequestSpec(index=idx,
+                       combo=combo,
+                       out_tokens=[0] *
+                       (MIN_TOKENS_LEN_THRESHOLD * random.randint(0, 1)),
+                       params=_sampling_params_from_combo(combo))
+
+
+def _generate_batch_spec(
+    reqs_per_combo: int,
+    logitsprocs_ids: set[str],
+) -> list[RequestSpec]:
+    all_combos = [
+        set(combo) for k in range(len(logitsprocs_ids) + 1)
+        for combo in combinations(logitsprocs_ids, k)
+    ]
+    batch_size = len(all_combos) * reqs_per_combo
+    batch_perm = random.sample(range(batch_size), k=batch_size)
+    return [
+        _generate_req_spec(idx, all_combos[pdx // reqs_per_combo])
+        for idx, pdx in enumerate(batch_perm)
+    ]
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("reqs_per_combo", [REQS_PER_COMBO])
+@pytest.mark.parametrize("logitsprocs_under_test",
+                         [set(logitsprocs_test_mapping.keys())])
+def test_mixed_batch_with_reordering(device: str, reqs_per_combo: int,
+                                     logitsprocs_under_test: set[str]):
+    batch_spec = _generate_batch_spec(reqs_per_combo=reqs_per_combo,
+                                      logitsprocs_ids=logitsprocs_under_test)
+    print(batch_spec)
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -335,6 +405,3 @@ def test_min_tokens_penalty(device: str, batch_size: int):
                 assert logits[batch_idx][token_id] == -float("inf")
             else:
                 assert logits[batch_idx][token_id] != -float("inf")
-
-
-# def test_mixed_batch_with_reordering(device: str, batch_size: int):
