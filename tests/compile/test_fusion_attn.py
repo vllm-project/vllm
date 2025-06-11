@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from typing import Optional
 
 import pytest
 import torch._dynamo
@@ -14,8 +15,8 @@ from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.platforms import current_platform
 
 # globals needed for string-import custom Dynamo backend field
-backend: TestBackend
-backend_unfused: TestBackend
+backend: Optional[TestBackend] = None
+backend_unfused: Optional[TestBackend] = None
 
 
 @pytest.mark.parametrize(
