@@ -77,12 +77,14 @@ one can simply do:
 vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 --load-format=tensorizer
 ```
 
-Please note that authentication to S3 is still required. Tensorizer will 
-automatically look for a `~/.s3cfg` or `~/.aws/config` and `~/.aws/credentials`
-file locally to authenticate, but also can be given the environment variables 
-`AWS_ACCESS_KEY_ID` or `S3_ACCESS_KEY_ID` for the object storage access key,
-`AWS_SECRET_ACCESS_KEY` or `S3_SECRET_ACCESS_KEY` for the object storage 
-secret key, and `AWS_S3_ENDPOINT_URL` or `S3_ENDPOINT_URL` for the endpoint url.
+Please note that object storage authentication is still required.
+To authenticate, Tensorizer searches for a `~/.s3cfg` configuration file
+([s3cmd](https://s3tools.org/kb/item14.htm)'s format),
+or `~/.aws/config` and `~/.aws/credentials` files (`boto3` and the
+`aws` CLI's format), but authentication can also be configured using
+[any normal `boto3` environment variables](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html#using-environment-variables),
+such as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+and `AWS_ENDPOINT_URL_S3`.
 
 If only the model tensors are saved, you can still provide that as the only 
 artifact in your directory to load from, and vLLM will fetch the rest using the 
