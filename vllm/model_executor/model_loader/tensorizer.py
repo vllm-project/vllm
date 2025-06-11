@@ -69,6 +69,7 @@ def tensorizer_kwargs_arg(value):
             f"deserialization_kwargs must be "
             f"deserializable from a JSON string to a dictionary. "
         )
+    return loaded
 
 class MetaTensorMode(TorchDispatchMode):
 

@@ -8,7 +8,7 @@ vLLM model tensors that have been serialized to disk, an HTTP/HTTPS endpoint, or
 at runtime extremely quickly directly to the GPU, resulting in significantly
 lower Pod startup times and CPU memory usage. Tensor encryption is also supported.
 
-vLLM fully integrates Tensorizer in to its model loading machinery. The
+vLLM fully integrates Tensorizer in its model loading machinery. The
 following will give a brief overview on how to get started with using
 Tensorizer on vLLM.
 
@@ -74,7 +74,6 @@ pass that directory with the model artifacts to `vllm serve` in the case above,
 one can simply do:
 
 ```bash
-#!/bin/bash
 vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 --load-format=tensorizer
 ```
 
@@ -91,7 +90,7 @@ artifact in your directory to load from, and vLLM will fetch the rest using the
 for `TensorizerConfig`.
 
 ```bash
-#!/bin/bash
+#!/bin/sh
 
 MODEL_LOADER_EXTRA_CONFIG='{
   "tensorizer_uri": "s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors",

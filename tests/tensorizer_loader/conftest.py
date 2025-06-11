@@ -19,7 +19,6 @@ from vllm.worker.worker_base import WorkerWrapperBase
 
 @pytest.fixture(autouse=True)
 def allow_insecure_serialization(monkeypatch):
-    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 @pytest.fixture(autouse=True)

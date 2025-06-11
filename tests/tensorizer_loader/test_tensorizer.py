@@ -75,7 +75,6 @@ def patch_init_and_catch_error(self, obj, method, expected_error: Exception):
 
     def wrapper(*args, **kwargs):
         try:
-            breakpoint()
             return original(*args, **kwargs)
         except expected_error:
             raise TensorizerCaughtError
