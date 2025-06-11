@@ -833,7 +833,10 @@ struct AllReduceTwoshot {
       int const rank,           // rank index
       uint8_t** __restrict__ buffer_list,  // communication buffers
       long const data_offset,              // offset to start of the data buffer
-      int flag_color) {
+      int flag_color,
+      bool cast_bf162half)  // cast_bf162half to utilize the float16 assembly
+                            // instruction
+  {
     // Topology
     int thread = threadIdx.x + threadIdx.y * kWavefront;
     uint8_t* rank_buffer = buffer_list[rank];
@@ -850,6 +853,15 @@ struct AllReduceTwoshot {
     for (int i = 0; i < kAtoms; i++) {
       tA[i] = buffer_load_dwordx4(src_buffer.descriptor, src_offset, 0, 0);
       src_offset += kAtomStride * sizeof(int32x4_t);
+      if (cast_bf162half) {
+        const nv_bfloat162* tmx = reinterpret_cast<const nv_bfloat162*>(&tA[i]);
+        half2 tmx_fp162[4];
+        for (int j = 0; j < 4; ++j) {
+          float2 f = __bfloat1622float2(tmx[j]);
+          tmx_fp162[j] = __float22half2_rn(f);
+        }
+        tA[i] = *reinterpret_cast<const int32x4_t*>(tmx_fp162);
+      }
     }
 
     // --------------------------------------------------------
@@ -954,164 +966,18 @@ struct AllReduceTwoshot {
     int dst_offset = block * kTileSize + thread * sizeof(int32x4_t);
 
     for (int i = 0; i < kAtoms; i++) {
-      buffer_store_dwordx4(tA[i], dst_buffer.descriptor, dst_offset, 0, 0);
-      dst_offset += kAtomStride * sizeof(int32x4_t);
-    }
-  }
-};
-
-// ============================================================
-// Oneshot
-// ============================================================
-// MARK: Oneshot All Reduce
-template <typename T>
-struct AllReduceOneshot {
-  // Fixed magic implementation.
-  // We will use a workgroup of 256 threads (standard kBlock) across 8 atoms of
-  // work.
-  static int constexpr kAtoms = 8;
-
-  // Size and atom stride of data that the workgroup will process.
-  static int constexpr kTileSize = 256 * kAtoms * sizeof(int32x4_t);
-  static int constexpr kAtomStride = 256;
-
-  __device__ static void run(
-      T const* __restrict__ A,             // input
-      T* __restrict__ B,                   // output
-      int const N,                         // number of elements
-      int const block,                     // this block's index
-      int const num_blocks,                // total number of blocks
-      int const world_size,                // total number of ranks
-      int const rank,                      // this rank's index
-      uint8_t** __restrict__ buffer_list,  // communication buffers
-      long const data_offset,              // offset to start of the data buffer
-      int flag_color                       // Flag color for the network barrier
-  ) {
-    // Topology
-    int thread = threadIdx.x + threadIdx.y * kWavefront;
-
-    long data_stride = num_blocks * kTileSize;
-    long flags_stride = num_blocks * sizeof(int);
-
-    uint8_t* rank_buffer = buffer_list[rank];
-
-    // --------------------------------------------------------
-    // Read A into registers
-    int32x4_t tA[kAtoms];
-
-    BufferResource src_buffer(const_cast<T*>(A), N * sizeof(T));
-    int src_offset = block * kTileSize + thread * sizeof(int32x4_t);
-
-    for (int i = 0; i < kAtoms; i++) {
-      tA[i] = buffer_load_dwordx4(src_buffer.descriptor, src_offset, 0, 0);
-      src_offset += kAtomStride * sizeof(int32x4_t);
-    }
-
-    // --------------------------------------------------------
-    // Write rank data into this rank segment of every rank's communication
-    // buffer.
-    long comm_data_offset =
-        data_offset + rank * data_stride + block * kTileSize;
-    long comm_flags_offset = rank * flags_stride + block * sizeof(int);
-
-    if (thread < world_size) {
-      int r = thread;
-      int* flag_ptr =
-          reinterpret_cast<int*>(buffer_list[r] + comm_flags_offset);
-      while (__atomic_load_n(flag_ptr, __ATOMIC_RELAXED) != flag_color - 1) {
-      }
-    }
-    __syncthreads();
-
-    for (int r = 0; r < world_size; r++) {
-      int32x4_t* send_buffer =
-          reinterpret_cast<int32x4_t*>(buffer_list[r] + comm_data_offset);
-      for (int i = 0; i < kAtoms; i++) {
-        __builtin_nontemporal_store(tA[i], send_buffer + thread);
-        send_buffer += kAtomStride;
-      }
-    }
-
-    // Inform the other ranks that th data has been posted.
-    __syncthreads();
-    if (thread < world_size) {
-      int r = thread;
-      int* flag_ptr =
-          reinterpret_cast<int*>(buffer_list[r] + comm_flags_offset);
-      __atomic_store_n(flag_ptr, flag_color, __ATOMIC_RELEASE);
-    }
-
-    // --------------------------------------------------------
-    // Read and reduce the data from this rank's communication buffer.
-    int32x4_t tB[kAtoms];
-
-    {
-      int r = 0;
-
-      // Wait for the flags to be set.
-      int* flag_ptr = reinterpret_cast<int*>(rank_buffer + r * flags_stride +
-                                             block * sizeof(int));
-      if (thread == 0) {
-        while (__atomic_load_n(flag_ptr, __ATOMIC_RELAXED) != flag_color) {
+      if (cast_bf162half) {
+        const half2* tmx = reinterpret_cast<const half2*>(&tA[i]);
+        nv_bfloat162 tmx_bf16[4];
+        for (int j = 0; j < 4; ++j) {
+          float2 f = __half22float2(tmx[j]);
+          tmx_bf16[j] = __float22bfloat162_rn(f);
         }
+        const int32x4_t tmy = *reinterpret_cast<const int32x4_t*>(tmx_bf16);
+        buffer_store_dwordx4(tmy, dst_buffer.descriptor, dst_offset, 0, 0);
+      } else {
+        buffer_store_dwordx4(tA[i], dst_buffer.descriptor, dst_offset, 0, 0);
       }
-      __syncthreads();
-
-      // Read posted data from the rank's communication buffer.
-      int32x4_t* recv_buffer = reinterpret_cast<int32x4_t*>(
-          rank_buffer + data_offset + r * data_stride + block * kTileSize);
-
-      for (int i = 0; i < kAtoms; i++) {
-        tB[i] = __builtin_nontemporal_load(recv_buffer + thread);
-        recv_buffer += kAtomStride;
-      }
-    }
-
-    for (int r = 1; r < world_size; r++) {
-      // Wait for the flags to be set.
-      int* flag_ptr = reinterpret_cast<int*>(rank_buffer + r * flags_stride +
-                                             block * sizeof(int));
-      if (thread == 0) {
-        while (__atomic_load_n(flag_ptr, __ATOMIC_RELAXED) != flag_color) {
-        }
-      }
-      __syncthreads();
-
-      // Read posted data from the rank's communication buffer.
-      int32x4_t* recv_buffer = reinterpret_cast<int32x4_t*>(
-          rank_buffer + data_offset + r * data_stride + block * kTileSize);
-
-      for (int i = 0; i < kAtoms; i++) {
-        tA[i] = __builtin_nontemporal_load(recv_buffer + thread);
-        recv_buffer += kAtomStride;
-      }
-
-      // Reduce.
-      for (int i = 0; i < kAtoms; i++) {
-        int32x4_t& tA_fragment = tA[i];
-        int32x4_t& tB_fragment = tB[i];
-        tB_fragment[0] = pk_add<T>(tB_fragment[0], tA_fragment[0]);
-        tB_fragment[1] = pk_add<T>(tB_fragment[1], tA_fragment[1]);
-        tB_fragment[2] = pk_add<T>(tB_fragment[2], tA_fragment[2]);
-        tB_fragment[3] = pk_add<T>(tB_fragment[3], tA_fragment[3]);
-      }
-    }
-
-    __syncthreads();
-    if (thread < world_size) {
-      int r = thread;
-      int* flag_ptr = reinterpret_cast<int*>(rank_buffer + r * flags_stride +
-                                             block * sizeof(int));
-      __atomic_store_n(flag_ptr, flag_color, __ATOMIC_RELAXED);
-    }
-
-    // --------------------------------------------------------
-    // Write the result to B.
-    BufferResource dst_buffer(B, N * sizeof(T));
-    int dst_offset = block * kTileSize + thread * sizeof(int32x4_t);
-
-    for (int i = 0; i < kAtoms; i++) {
-      buffer_store_dwordx4(tB[i], dst_buffer.descriptor, dst_offset, 0, 0);
       dst_offset += kAtomStride * sizeof(int32x4_t);
     }
   }

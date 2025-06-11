@@ -196,7 +196,6 @@ class CustomAllreduce:
                     "warning, specify disable_custom_all_reduce=True "
                     "explicitly.")
                 return
-        # TODO: in some case, cr is disabled, but qr is avail???
         self.disabled = False
         # Buffers memory are owned by this Python class and passed to C++.
         # Meta data composes of two parts: meta data for synchronization and a
@@ -229,23 +228,24 @@ class CustomAllreduce:
         if dtype not in [torch.float16, torch.bfloat16]:
             self._QR_SHOULD_INIT = False
 
-        self.qr_level: int = envs.VLLM_QUICK_ALLREDUCE_LEVEL
-        if self.qr_level == 0: # close qr
+        self.qr_level: int = envs.VLLM_ROCM_QR_LEVEL
+        self.cast_bf162half: bool = envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16
+        if self.qr_level == 0:  # close qr
             self._QR_SHOULD_INIT = False
         if self.qr_level not in [1, 2, 3, 4, 5] and self._QR_SHOULD_INIT:
             logger.warning(
                 "Quick AllReduce is not initialized because the quant "
                 "level %s is invalid. It must be one of "
                 "[0, 1, 2, 3, 4, 5]. You can change this via "
-                "`envs.VLLM_QUICK_ALLREDUCE_LEVEL`.", self.qr_level)
+                "`envs.VLLM_ROCM_QR_LEVEL`.", self.qr_level)
             self._QR_SHOULD_INIT = False
 
         if self._QR_SHOULD_INIT:
             if self.qr_level != 5 and world_size == 8:
                 logger.warning(
-                    "When world_size=8, only VLLM_QUICK_ALLREDUCE_LEVEL=5 "
+                    "When world_size=8, only VLLM_ROCM_QR_LEVEL=5 "
                     "for quick allreduce is effective for performance "
-                    "improvement. set `envs.VLLM_QUICK_ALLREDUCE_LEVEL = 5`"
+                    "improvement. set `envs.VLLM_ROCM_QR_LEVEL = 5`"
                     " for speedup.")
             # These numbers are based on kernel tests.
             if world_size == 4:
@@ -265,13 +265,14 @@ class CustomAllreduce:
                 dist.broadcast_object_list(all_handles[src], src=src)
             comm_handles = [h[0] for h in all_handles]
             ops.qr_set_comm_handles(self._qr_ptr, comm_handles)
-            if dtype == torch.bfloat16:
+            if dtype == torch.bfloat16 and self.cast_bf162half:
                 logger.info(
                     "quick allreduce: due to the lack of bf16 assembly "
                     "instruction set, the performance gain of bf16 is "
-                    "limited. You may try using '--dtype=float16' to "
-                    "load the model and enable float16 kernels for "
-                    "better acceleration.")
+                    "limited. We convert bfloat16 to float16 to speed "
+                    "up quick allreduce. You can set "
+                    "envs.VLLM_ROCM_QR_CR_CAST_BF16_TO_FP16=0 to turn "
+                    "this conversion off.")
             # There is no case where qr is initialized and
             # cr is not initialized
 
@@ -375,7 +376,8 @@ class CustomAllreduce:
         """Performs an out-of-place quick all reduce."""
         if out is None:
             out = torch.empty_like(inp)
-        ops.qr_all_reduce(self._qr_ptr, self.qr_level, inp, out)
+        ops.qr_all_reduce(self._qr_ptr, self.qr_level, inp, out,
+                          self.cast_bf162half)
         return out
 
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:

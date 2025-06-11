@@ -367,7 +367,7 @@ torch::Tensor qr_get_comm_handle(fptr_t _fa);
 void qr_set_comm_handles(fptr_t _fa,
                          std::vector<torch::Tensor> const& comm_handles);
 void qr_all_reduce(fptr_t _fa, int64_t profile, torch::Tensor const& inp,
-                   torch::Tensor& out);
+                   torch::Tensor& out, bool cast_bf162half);
 void qr_destroy(fptr_t _fa);
 void is_quickreduce_available();
 #endif

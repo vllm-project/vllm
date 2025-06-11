@@ -1774,10 +1774,10 @@ def qr_set_comm_handles(fa: int, handles: list[torch.Tensor]) -> None:
     torch.ops._C_quick_ar.qr_set_comm_handles(fa, handles)
 
 
-def qr_all_reduce(fa: int, profile: int, inp: torch.Tensor,
-                  out: torch.Tensor) -> None:
+def qr_all_reduce(fa: int, profile: int, inp: torch.Tensor, out: torch.Tensor,
+                  cast_bf162half: bool) -> None:
     """Perform all-reduce across devices with optional profile."""
-    torch.ops._C_quick_ar.qr_all_reduce(fa, profile, inp, out)
+    torch.ops._C_quick_ar.qr_all_reduce(fa, profile, inp, out, cast_bf162half)
 
 
 def qr_destroy(fa: int) -> None:

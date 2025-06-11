@@ -734,7 +734,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _quick_ar), quick_ar) {
   quick_ar.def("qr_get_comm_handle(int _fa) -> Tensor");
   quick_ar.def("qr_set_comm_handles(int _fa, Tensor[] handles) -> ()");
   quick_ar.def(
-      "qr_all_reduce(int _fa, int profile, Tensor inp, Tensor out) -> ()");
+      "qr_all_reduce(int _fa, int profile, Tensor inp, Tensor out, bool "
+      "cast_bf162half) -> ()");
   quick_ar.def("qr_destroy(int _fa) -> ()");
   quick_ar.def("is_quickreduce_available() -> ()");
   quick_ar.impl("init_quick_ar", &init_quick_ar);
