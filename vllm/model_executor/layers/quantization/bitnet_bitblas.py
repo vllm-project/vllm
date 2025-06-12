@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import enum
 from enum import Enum
-from typing import Any, Literal, Optional, dict
+from typing import Any, Optional, dict
 
 import torch
 from torch.nn.parameter import Parameter
@@ -71,9 +71,8 @@ class BITNETBitBLASConfig(QuantizationConfig):
         return cls(weight_bits, is_sym)
 
     @classmethod
-    def override_quantization_method(
-            cls, hf_quant_cfg,
-            user_quant) -> Optional[Literal["bitnet_bitblas"]]:
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
         can_convert = cls.is_bitblas_compatible(hf_quant_cfg)
 
         is_valid_user_quant = user_quant is None or user_quant == "bitblas"
