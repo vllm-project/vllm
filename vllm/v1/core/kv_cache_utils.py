@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
+import heapq
 import os
 from collections import deque
 from collections.abc import Sequence
@@ -261,6 +262,73 @@ class FreeKVCacheBlockQueue:
             ret.append(curr_block)
             curr_block = curr_block.next_free_block
         return ret
+
+
+class FreeKVCacheBlockQueueHPU:
+    """This class is a HPU implementation for block queue. In some cases 
+    (Contiguous PA) we need our blocks to be ordered by their block_id, 
+    so we use a heapq to maintain the order of free blocks. 
+    In the beginning the blocks are also ordered by their block_id.
+    
+    Args:
+        blocks: A list of KVCacheBlock objects.
+    """
+
+    def __init__(self, blocks: list[KVCacheBlock]) -> None:
+        self.free_blocks_ids_queue = [block.block_id for block in blocks]
+        self.block_list = blocks
+        heapq.heapify(self.free_blocks_ids_queue)
+
+    def pop(self) -> KVCacheBlock:
+        """Pop block with lowest id from the free list
+
+        Returns:
+            The first free block.
+        """
+
+        if len(self.free_blocks_ids_queue) == 0:
+            raise ValueError("No free blocks available")
+
+        return self.block_list[heapq.heappop(self.free_blocks_ids_queue)]
+
+    def popleft(self) -> KVCacheBlock:
+        """Alias for pop() to match with the FreeKVCacheBlockQueue.
+        
+        Returns:
+            The first free block.
+        """
+        return self.pop()
+
+    def append(self, block: KVCacheBlock) -> None:
+        """Put a block's id back into the free list
+
+        Args:
+            block: The block to append.
+        """
+        heapq.heappush(self.free_blocks_ids_queue, block.block_id)
+
+    def remove(self, block: KVCacheBlock) -> None:
+        """Remove a block's id from the free list.
+
+        Args:
+            block: The block to remove.
+        """
+        self.free_blocks_ids_queue.remove(block.block_id)
+
+    def get_all_free_blocks(self) -> list[KVCacheBlock]:
+        """Get all free blocks in the free list. Mainly used for testing.
+
+        Returns:
+            A list of free blocks.
+        """
+        return [
+            block for block in self.block_list
+            if block.block_id in self.free_blocks_ids_queue
+        ]
+
+    @property
+    def num_free_blocks(self):
+        return len(self.free_blocks_ids_queue)
 
 
 def need_extra_keys(request: Request) -> bool:
