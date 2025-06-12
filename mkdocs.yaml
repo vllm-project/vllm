@@ -33,6 +33,7 @@ theme:
     - content.tabs.link
     - navigation.tracking
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.prune
     - navigation.top
