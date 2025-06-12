@@ -16,7 +16,6 @@ from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import zmq
-import zmq.asyncio
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
