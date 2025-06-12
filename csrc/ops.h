@@ -239,6 +239,14 @@ void cutlass_moe_mm(
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
     bool per_act_token, bool per_out_ch);
 
+void cutlass_moe_blockwise_mm(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch);
+
 void cutlass_fp4_group_mm(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,

@@ -548,6 +548,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;10.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
+             "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x_with_blockwise_scaling.cu"
              "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"

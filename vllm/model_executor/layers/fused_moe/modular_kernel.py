@@ -313,6 +313,14 @@ class FusedMoEModularKernel(torch.nn.Module):
             self.fused_experts.workspace_shapes(a1, a1q, M, N, K, top_k,
                                                 global_num_experts))
 
+        print("fused experts:", self.fused_experts)
+        print("a1 shape:", a1.shape)
+        print("a1q shape:", a1q.shape)
+        print("M, N, K, top_k:", M, N, K, top_k)
+        print("global_num_experts:", global_num_experts)
+
+        print("workspace shapes:", workspace13_shape, workspace2_shape)
+
         # We can reuse the memory between cache1 and cache3 because by the time
         # we need cache3, we're done with cache1
         workspace13 = torch.zeros(workspace13_shape,

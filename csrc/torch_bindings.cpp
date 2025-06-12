@@ -440,6 +440,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       {stride_tag});
   ops.impl("cutlass_moe_mm", torch::kCUDA, &cutlass_moe_mm);
 
+  // CUTLASS w8a8 blockwise-scaled grouped GEMM
+  ops.def(
+      "cutlass_moe_blockwise_mm(Tensor! out_tensors, Tensor a_tensors, Tensor "
+      "b_tensors, "
+      "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
+      "               Tensor problem_sizes, Tensor a_strides, "
+      "               Tensor b_strides, Tensor c_strides, bool per_act_token, "
+      "               bool per_out_ch) -> ()",
+      {stride_tag});
+  ops.impl("cutlass_moe_blockwise_mm", torch::kCUDA, &cutlass_moe_blockwise_mm);
+
   // A function that computes data required to run fused MoE with w8a8 grouped
   // GEMM. It takes topk_ids as an input, and computes expert_offsets
   // (token start indices of each expert). In addition to this, it computes

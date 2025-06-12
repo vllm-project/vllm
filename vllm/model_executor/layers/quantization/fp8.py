@@ -438,10 +438,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe import fused_experts
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
+        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
-        self.use_marlin = (not current_platform.has_device_capability(89)
+        self.use_marlin = (not self.cutlass_block_fp8_supported
+                           and not current_platform.has_device_capability(89)
                            or envs.VLLM_TEST_FORCE_FP8_MARLIN)
         # Disable marlin for rocm
         if current_platform.is_rocm():
@@ -859,6 +861,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
                 block_shape=self.quant_config.weight_block_size)
+        elif self.cutlass_block_fp8_supported:
+            from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+                cutlass_moe_blocked_fp8)
+            return cutlass_moe_blocked_fp8(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                (layer.w13_weight_scale_inv
+                 if self.block_quant else layer.w13_weight_scale),
+                (layer.w2_weight_scale_inv
+                 if self.block_quant else layer.w2_weight_scale),
+                activation,
+                layer.w13_input_scale,
+                layer.w2_input_scale,
+                apply_router_weight_on_input,
+                global_num_experts,
+            )
         elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
