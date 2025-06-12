@@ -225,7 +225,7 @@ def _sequence_length(request: Request) -> int:
 
 @pytest.mark.parametrize("test_case", test_cases)
 def test_forward_inplace(test_case: ForwardInplaceTestCase):
-    stream = torch.cuda.Stream()
+    stream = torch.cuda.current_stream()
 
     rotary_embedding = RotaryEmbedding()
     rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
