@@ -1,6 +1,5 @@
-from typing import List, Optional, Tuple, Union, Iterable, Dict
+from typing import List, Optional, Tuple, Union, Iterable
 import math
-import copy
 
 import torch
 import torch.nn as nn
@@ -17,7 +16,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear,
                                                ColumnParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -30,10 +29,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn, selective_state_update)
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
-from vllm.vllm_flash_attn import (flash_attn_varlen_func,
-                                  flash_attn_with_kvcache)
+from vllm.attention.backends.abstract import (AttentionMetadata, AttentionType)
 
 from vllm.logger import init_logger
 from .utils import (maybe_prefix, make_layers)
@@ -52,6 +48,7 @@ class SwiGLUActivation(nn.Module):
         # print(f"x1 shape: {x1.shape}, x2 shape: {x2.shape}")
         return x1 * nn.functional.silu(x2)
     
+
 class SambaMLP(nn.Module):
     """Gated Linear Unit.
 
@@ -77,9 +74,11 @@ class SambaMLP(nn.Module):
         return self.fc2(y)
 
 
-class SambaAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+def get_virtual_engine():
+    forward_context: ForwardContext = get_forward_context()
+    return forward_context.virtual_engine
 
+class SambaAttention(nn.Module):
     def __init__(self, 
                  config, 
                  layer_idx: Optional[int] = None, 
@@ -87,24 +86,16 @@ class SambaAttention(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  prefix: str = ""):
         super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
         if layer_idx is None:
             logger.warning_once(
                 f"Instantiating {self.__class__.__name__} without passing a `layer_idx` is not recommended and will "
                 "lead to errors during the forward call if caching is used. Please make sure to provide a `layer_idx` "
                 "when creating this class."
             )
-        
-        self.attention_dropout = config.attention_dropout
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
-        self.is_causal = True
         self.yoco_cross = yoco_cross
         
         if (self.head_dim * self.num_heads) != self.hidden_size:
@@ -119,8 +110,6 @@ class SambaAttention(nn.Module):
             self.Wqkv =  nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=True)
         else:
             self.Wqkv = nn.Linear(self.hidden_size, op_size, bias=True)
-
-        assert self.config.attention_dropout == 0.0, 'Attention dropout is not supported for now'
 
         # disable sliding window for the second half of the model
         sliding_window = config.interleaved_sliding_window[layer_idx]
@@ -161,9 +150,6 @@ class SambaAttention(nn.Module):
             **params
         )
 
-        self._k_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._v_scale = torch.tensor(1.0, dtype=torch.float32)
-
     def lambda_init_fn(self, depth):
         return 0.8 - 0.6 * math.exp(-0.3 * depth)
 
@@ -181,8 +167,9 @@ class SambaAttention(nn.Module):
             attn_output = self.attn(q, k, v)
         else: # re-use the kv cache, full attention
             q = self.Wqkv(hidden_states)
-            if self.attn.kv_cache[0].numel() == 0:
-                 self.attn.kv_cache = [kv_cache]
+            virtual_engine = get_virtual_engine()
+            if self.attn.kv_cache[virtual_engine].numel() == 0:
+                 self.attn.kv_cache[virtual_engine] = kv_cache
             attn_output = self.attn(q, None, None)
         attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
         return self.out_proj(attn_output)
@@ -227,16 +214,6 @@ class Phi3Mamba(nn.Module):
             self.in_proj = MergedColumnParallelLinear(self.d_model, [self.d_inner], bias=bias, **factory_kwargs)
             self.out_proj = RowParallelLinear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
             return
-        # self.conv1d = nn.Conv1d(
-        #     in_channels=self.d_inner,
-        #     out_channels=self.d_inner,
-        #     bias=conv_bias,
-        #     kernel_size=d_conv,
-        #     groups=self.d_inner,
-        #     padding=d_conv - 1,
-        #     **factory_kwargs,
-        # )
-
         self.conv1d = ColumnParallelLinear(
             input_size=d_conv,
             output_size=self.d_inner,
@@ -249,16 +226,12 @@ class Phi3Mamba(nn.Module):
         # doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        # self.in_proj = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
         self.in_proj = MergedColumnParallelLinear(self.d_model,
                                                   [self.d_inner] * 2,
                                                   bias=bias,
                                                   params_dtype=dtype,
                                                  )
 
-        # self.x_proj = nn.Linear(
-        #     self.d_inner, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs
-        # )
         # selective projection used to make dt, B and C input dependent
         self.x_proj = RowParallelLinear(
             self.d_inner,
@@ -267,7 +240,6 @@ class Phi3Mamba(nn.Module):
             params_dtype=dtype,
         )
 
-        # self.dt_proj = nn.Linear(self.dt_rank, self.d_inner, bias=True, **factory_kwargs)
         # time step projection (discretization) -
         # In the forward we need to apply dt_proj without the bias,
         # as the bias is added in the selective scan kernel.
@@ -297,7 +269,6 @@ class Phi3Mamba(nn.Module):
             ))
         self.D = nn.Parameter(torch.ones(self.d_inner, dtype=torch.float32))
 
-        # self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
         self.out_proj = RowParallelLinear(
             self.d_inner,
             self.d_model,
@@ -305,7 +276,6 @@ class Phi3Mamba(nn.Module):
             input_is_parallel=True,
             params_dtype=dtype,
         )
-        print(f"-------- layer_idx {layer_idx}")
         self.activation = "silu"
 
     def forward(
@@ -451,9 +421,6 @@ class SambaDecoderLayer(nn.Module):
                                   yoco_cross=self.yoco_cross, yoco_kv=self.yoco_mb, **factory_kwargs)
         else:
             self.attn = SambaAttention(config, layer_idx=layer_idx, yoco_cross=self.yoco_cross, cache_config=cache_config, prefix=f"{prefix}.self_attn")
-
-        self.resid_attn_dropout = nn.Dropout(config.resid_pdrop)
-        self.resid_mlp_dropout = nn.Dropout(config.resid_pdrop)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
@@ -488,21 +455,11 @@ class SambaDecoderLayer(nn.Module):
                 kv_cache,
                 attn_metadata,
             )
-        try:
-            hidden_states = residual + self.resid_attn_dropout(attn_outputs)
-        except Exception as e:
-            print('>>> exception: ', e)    
-            print('>>>', hidden_states.shape)
-            print('>>>', self.layer_idx)
-            print('>>>', residual.shape)
-            print('>>>', self.resid_attn_dropout)
-            print('>>>', attn_outputs)
-            raise
-
+        hidden_states = residual + attn_outputs
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states.to(dtype=self.post_attention_layernorm.weight.dtype))
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + self.resid_mlp_dropout(hidden_states)
+        hidden_states = residual + hidden_states
 
         return hidden_states, ssm_output
 
@@ -523,19 +480,14 @@ class SambaModel(nn.Module):
         prefix: str = ""
     ) -> None:
         super().__init__()
-
         self.config = config
-
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-
-        # self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
-        self.embed_dropout = nn.Dropout(config.embd_pdrop)
+
         # Pipeline parallel is not supported since the second half of the layers share the kv cache.
         if get_pp_group().world_size != 1:
             raise ValueError("Pipeline Parallel not supported")
@@ -591,10 +543,6 @@ class SambaModel(nn.Module):
                     hidden_states = hidden_states.index_select(0, selected_token_indices)
                     ssm_output = ssm_output.index_select(0, selected_token_indices)
 
-
-            # start_env = torch.cuda.Event(enable_timing=True)
-            # end_env = torch.cuda.Event(enable_timing=True)
-            # start_env.record()
             if layer.use_mamba:
                 if i < self.config.num_hidden_layers // 2:
                     mamba_cache = mamba_cache_params.at_layer_idx(mamba_state_idx)
@@ -637,9 +585,6 @@ class SambaModel(nn.Module):
                     None, # mamba_cache_params
                     ssm_output = ssm_output
                 )
-            # end_env.record()
-            # torch.cuda.synchronize()
-            # print('>>> layer', i, 'time', start_env.elapsed_time(end_env))
 
         hidden_states = self.final_layernorm(hidden_states.to(dtype=self.final_layernorm.weight.dtype))
         return hidden_states
@@ -690,7 +635,6 @@ class SambaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size,
                                                 logits_as_input=False)
-        # self.sampler = Sampler()
         self.sampler = get_sampler()
 
     def forward(
@@ -767,7 +711,6 @@ class SambaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         weights: Iterable[Tuple[str, torch.Tensor]],
     ):
         weights = {name: weight for name, weight in weights}
-        print(f"--------- num of keys: {len(weights.keys())}")
         adjusted_weights = {}
         for name, weight in weights.items():
             if "A_log" in name:
@@ -777,31 +720,13 @@ class SambaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
                 name = name.replace("inner_cross_attn.", "")
             adjusted_weights[name] = weight
         adjusted_weights["lm_head.weight"] = weights["model.embed_tokens.weight"]
-        for name, loaded_weight in adjusted_weights.items():
-            print(name, loaded_weight.shape)
-
-        params_dict = dict(self.named_parameters())
-        
-        print(f"{adjusted_weights.keys() - params_dict.keys()} not in model")
-        print(f"{params_dict.keys() - adjusted_weights.keys()} not in weights")
-
         loaded_params: Set[str] = set()
-
         for name, param in self.named_parameters():
             weight = adjusted_weights.get(name, None)
             if weight is not None and weight.shape != param.shape:
-                print(f"Shape mismatch: {name} {weight.shape} {param.shape}")
+                logger.warning(f"Shape mismatch: {name} {weight.shape} {param.shape}")
             loaded_params.add(name)
         missing_keys, unexpected_keys = self.load_state_dict(adjusted_weights, strict=False)
-        print(f"--------------- missing keys {missing_keys}")
-        print("--------------- unexpected keys ---------------")
-        for key in unexpected_keys:
-            print(key)
-            if not key.endswith("bias"):
-                print("------- not bias -------")
-        # assert missing_keys == ['embedding_bias', 'lm_head.weight',], f"Missing keys: {missing_keys}"
-        # assert unexpected_keys == ['lm_head.bias',], f"Unexpected keys: {unexpected_keys}"
-        # self.lm_head.weight.data.copy_(adjusted_weights['model.embed_tokens.weight'])
-        # self.embedding_bias.data.copy_(adjusted_weights['lm_head.bias'])
-        # self.embedding_bias = None
+        assert len(unexpected_keys) == 0, f"Unexpected keys: {unexpected_keys}"
+        assert len(missing_keys) == 0, f"Missing keys: {missing_keys}"
         return loaded_params
