@@ -75,6 +75,7 @@ RUN --mount=type=bind,source=.git,target=.git \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/workspace/vllm/.deps,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel 
 
@@ -85,7 +86,7 @@ WORKDIR /workspace/vllm
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get install -y --no-install-recommends vim numactl
+    apt-get install -y --no-install-recommends vim numactl xz-utils
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -97,6 +98,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_TARGET_DEVICE=cpu python3 setup.py develop 
 
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
+    cp requirements/test.in requirements/test-cpu.in && \
+    sed -i '/mamba_ssm/d' requirements/test-cpu.in && \
+    uv pip compile requirements/test-cpu.in -o requirements/test.txt && \
     uv pip install -r requirements/dev.txt && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
@@ -108,8 +113,11 @@ FROM base AS vllm-test
 WORKDIR /workspace/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/test.txt,target=requirements/test.txt \
-    uv pip install -r requirements/test.txt
+    --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
+    cp requirements/test.in requirements/test-cpu.in && \
+    sed -i '/mamba_ssm/d' requirements/test-cpu.in && \
+    uv pip compile requirements/test-cpu.in -o requirements/cpu-test.txt && \
+    uv pip install -r requirements/cpu-test.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=vllm-build,src=/workspace/vllm/dist,target=dist \

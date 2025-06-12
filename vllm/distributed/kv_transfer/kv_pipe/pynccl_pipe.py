@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
     This module implements a PyNccl pipe for sending and receiving
     Optional[torch.Tensor] between distributed ranks with advanced

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import functools
@@ -276,7 +277,7 @@ class StatefulModelInput(BroadcastableModelInput):
         assert fmi.input_tokens.shape[0] >= self.num_seqs
         fmi_new_input_tokens: torch.Tensor = fmi.input_tokens[:self.num_seqs]
 
-        # Update frozen_model_input::input_positons.
+        # Update frozen_model_input::input_positions.
         assert fmi.input_positions is not None
         assert fmi.input_positions.shape[0] >= self.num_seqs
         fmi_new_input_positions: torch.Tensor = fmi.input_positions[:self.
@@ -733,12 +734,13 @@ def _pythonize_sampler_output(
     logprobs_tensor: Optional[torch.Tensor],
     cache: Optional[PythonizationCache],
 ) -> None:
-    """ This function is only called when the output tensors are ready. 
-    See {class}`ModelOutput`. 
-    
-    Modifies `output.outputs` and `pinned_sampled_token_buffer` in-place, 
+    """ This function is only called when the output tensors are ready.
+    See [`ModelOutput`][vllm.worker.multi_step_model_runner.ModelOutput].
+
+    Modifies `output.outputs` and `pinned_sampled_token_buffer` in-place,
     adding a Pythonized output data structure
-    ({class}`CompletionSequenceGroupOutput`) for each {class}`SequenceGroup`.
+    ([`CompletionSequenceGroupOutput`][vllm.sequence.CompletionSequenceGroupOutput])
+    for each [`SequenceGroup`][vllm.sequence.SequenceGroup].
 
     Args:
       model_input
