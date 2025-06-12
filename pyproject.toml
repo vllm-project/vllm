@@ -8,34 +8,35 @@ requires = [
     "setuptools-scm>=8.0",
     "torch == 2.7.0",
     "wheel",
+    "jinja2",
 ]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "vllm"
-authors = [{ name = "vLLM Team" }]
+authors = [{name = "vLLM Team"}]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 readme = "README.md"
 description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
 classifiers = [
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Intended Audience :: Developers",
-  "Intended Audience :: Information Technology",
-  "Intended Audience :: Science/Research",
-  "Topic :: Scientific/Engineering :: Artificial Intelligence",
-  "Topic :: Scientific/Engineering :: Information Analysis",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 requires-python = ">=3.9,<3.13"
-dynamic = ["version", "dependencies", "optional-dependencies"]
+dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
-Homepage = "https://github.com/vllm-project/vllm"
-Documentation = "https://docs.vllm.ai/en/latest/"
-Slack = "https://slack.vllm.ai/"
+Homepage="https://github.com/vllm-project/vllm"
+Documentation="https://docs.vllm.ai/en/latest/"
+Slack="https://slack.vllm.ai/"
 
 [project.scripts]
 vllm = "vllm.entrypoints.cli.main:main"
@@ -51,7 +52,12 @@ where = ["."]
 include = ["vllm*"]
 
 [tool.yapfignore]
-ignore_patterns = [".buildkite/**", "benchmarks/**", "build/**", "examples/**"]
+ignore_patterns = [
+    ".buildkite/**",
+    "benchmarks/**",
+    "build/**",
+    "examples/**",
+]
 
 [tool.ruff]
 # Allow lines to be as long as 80.
@@ -74,33 +80,32 @@ line-length = 80
 
 [tool.ruff.lint]
 select = [
-  # pycodestyle
-  "E",
-  # Pyflakes
-  "F",
-  # pyupgrade
-  "UP",
-  # flake8-bugbear
-  "B",
-  # flake8-simplify
-  "SIM",
-  # isort
-  # "I",
-  # flake8-logging-format
-  "G",
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    # "I",
+    # flake8-logging-format
+    "G",
 ]
 ignore = [
-  # star imports
-  "F405",
-  "F403",
-  # lambda expression assignment
-  "E731",
-  # Loop control variable not used within loop body
-  "B007",
-  # f-string format
-  "UP032",
-  # Can remove once 3.10+ is the minimum Python version
-  "UP007",
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+    # Can remove once 3.10+ is the minimum Python version
+    "UP007",
 ]
 
 [tool.mypy]
@@ -112,50 +117,54 @@ follow_imports = "silent"
 # After fixing type errors resulting from follow_imports: "skip" -> "silent",
 # move the directory here and remove it from tools/mypy.sh
 files = [
-  "vllm/*.py",
-  "vllm/adapter_commons",
-  "vllm/assets",
-  "vllm/entrypoints",
-  "vllm/core",
-  "vllm/inputs",
-  "vllm/logging_utils",
-  "vllm/multimodal",
-  "vllm/platforms",
-  "vllm/transformers_utils",
-  "vllm/triton_utils",
-  "vllm/usage",
+    "vllm/*.py",
+    "vllm/adapter_commons",
+    "vllm/assets",
+    "vllm/entrypoints",
+    "vllm/core",
+    "vllm/inputs",
+    "vllm/logging_utils",
+    "vllm/multimodal",
+    "vllm/platforms",
+    "vllm/transformers_utils",
+    "vllm/triton_utils",
+    "vllm/usage",
 ]
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 exclude = [
-  "vllm/model_executor/parallel_utils/|vllm/model_executor/models/",
-  # Ignore triton kernels in ops.
-  'vllm/attention/ops/.*\.py$',
+    "vllm/model_executor/parallel_utils/|vllm/model_executor/models/",
+    # Ignore triton kernels in ops.
+    'vllm/attention/ops/.*\.py$'
 ]
 
 [tool.isort]
-skip_glob = [".buildkite/*", "benchmarks/*", "examples/*"]
+skip_glob = [
+    ".buildkite/*",
+    "benchmarks/*",
+    "examples/*",
+]
 use_parentheses = true
 skip_gitignore = true
 
 [tool.pytest.ini_options]
 markers = [
-  "skip_global_cleanup",
-  "core_model: enable this model test in each PR instead of only nightly",
-  "cpu_model: enable this model test in CPU tests",
-  "split: run this test as part of a split",
-  "distributed: run this test only in distributed GPU tests",
-  "skip_v1: do not run this test with v1",
-  "optional: optional tests that are automatically skipped, include --optional to run them",
+    "skip_global_cleanup",
+    "core_model: enable this model test in each PR instead of only nightly",
+    "cpu_model: enable this model test in CPU tests",
+    "split: run this test as part of a split",
+    "distributed: run this test only in distributed GPU tests",
+    "skip_v1: do not run this test with v1",
+    "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
 
 [tool.pymarkdown]
-plugins.md004.style = "sublist"              # ul-style
-plugins.md007.indent = 4                     # ul-indent
-plugins.md007.start_indented = true          # ul-indent
-plugins.md013.enabled = false                # line-length
-plugins.md041.enabled = false                # first-line-h1
-plugins.md033.enabled = false                # inline-html
-plugins.md046.enabled = false                # code-block-style
+plugins.md004.style = "sublist" # ul-style
+plugins.md007.indent = 4 # ul-indent
+plugins.md007.start_indented = true # ul-indent
+plugins.md013.enabled = false # line-length
+plugins.md041.enabled = false # first-line-h1
+plugins.md033.enabled = false # inline-html
+plugins.md046.enabled = false # code-block-style
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
 
 [tool.ty.src]
