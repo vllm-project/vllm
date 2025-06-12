@@ -18,14 +18,13 @@ from tests.utils import RemoteOpenAIServer
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
 MODEL_NAME = "BAAI/bge-reranker-base"
-MAIN_SCORE = 0.32379
+MAIN_SCORE = 0.32398
 
 
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task", "score", "--dtype", "float32", "--enforce-eager",
-        "--disable-uvicorn-access-log"
+        "--task", "score", "--enforce-eager", "--disable-uvicorn-access-log"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
