@@ -415,7 +415,10 @@ def _merge_multimodal_embeddings(
             f"Attempted to assign {expr} = {flattened.shape[0]} "
             f"multimodal tokens to {num_expected_tokens} placeholders")
 
-    inputs_embeds[is_multimodal] = flattened
+    # Equivalent to `inputs_embeds[is_multimodal] = flattened`
+    # but without host to GPU sync
+    indices = is_multimodal.nonzero_static(size=num_expected_tokens)
+    inputs_embeds[indices.squeeze(1)] = flattened
     return inputs_embeds
 
 
