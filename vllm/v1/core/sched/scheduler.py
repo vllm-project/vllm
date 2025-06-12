@@ -15,6 +15,8 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorWorkerEvents, KVConnectorWorkerEventType)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -159,6 +161,14 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+
+        # Complete transfer tracker. Used by to track finished requests
+        # [req_id -> n_finished_workers]
+        world_size = vllm_config.parallel_config.world_size
+        self._recv_remaining_count: defaultdict[str, int] = defaultdict(
+            lambda: world_size)
+        self._send_remaining_count: defaultdict[str, int] = defaultdict(
+            lambda: world_size)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -861,8 +871,9 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
         self.running = new_running
 
-        # KV Connector: update state for finished KV Transfers.
-        self._update_from_kv_xfer_finished(model_runner_output)
+        # KV Connector: update state from KV connector worker events.
+        self._update_from_kv_connector_worker_events(
+            model_runner_output.kv_connector_worker_events)
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -1066,21 +1077,51 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids.remove(request.request_id)
         return True
 
-    def _update_from_kv_xfer_finished(self,
-                                      model_runner_output: ModelRunnerOutput):
+    def _update_from_kv_connector_worker_events(
+            self, worker_events: KVConnectorWorkerEvents):
         """
-        KV Connector: update the scheduler state based on the output.
+        KV Connector: update the scheduler state based on worker events.
 
-        The Worker side connectors add finished_recving and
-        finished_sending reqs to the output.
-        * if finished_sending: free the blocks
-        # if finished_recving: add to state so we can
-            scheduler the request during the next step.
+        The Worker side connectors notifies on finished requests.
+        * first, notify the connector about worker events
+        * for requests that finished sending: free the blocks
+        * for requests that finished receiving: add to state so we can
+            schedule the request during the next step.
         """
-        # KV Connector:: update recv and send status from last step.
-        for req_id in (model_runner_output.finished_recving or ()):
+        if not worker_events:
+            return
+
+        if self.connector is not None:
+            self.connector.update_worker_events(worker_events)
+
+        for req_id, event in worker_events.get(
+                KVConnectorWorkerEventType.REQUEST_FINISHED_RECVING,
+            {}).items():
+            assert event.is_success
+            assert event.n_workers > 0
+
+            remaining = self._recv_remaining_count[req_id] - event.n_workers
+            self._recv_remaining_count[req_id] = remaining
+            if remaining > 0:
+                continue
+
+            assert remaining == 0
+            del self._recv_remaining_count[req_id]
             logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_kv_req_ids.add(req_id)
-        for req_id in (model_runner_output.finished_sending or ()):
+
+        for req_id, event in worker_events.get(
+                KVConnectorWorkerEventType.REQUEST_FINISHED_SENDING,
+            {}).items():
+            assert event.is_success
+            assert event.n_workers > 0
+
+            remaining = self._send_remaining_count[req_id] - event.n_workers
+            self._send_remaining_count[req_id] = remaining
+            if remaining > 0:
+                continue
+
+            assert remaining == 0
+            del self._send_remaining_count[req_id]
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])

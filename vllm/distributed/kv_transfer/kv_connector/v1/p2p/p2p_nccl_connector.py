@@ -8,7 +8,8 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole,
+    KVConnectorWorkerEvents)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
     P2pNcclEngine)
 from vllm.distributed.parallel_state import get_world_group
@@ -16,6 +17,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -269,25 +271,12 @@ class P2pNcclConnector(KVConnectorBase_V1):
             assert self.p2p_nccl_engine is not None
             self.p2p_nccl_engine.wait_for_sent()
 
-    def get_finished(
-            self, finished_req_ids: set[str],
-            **kwargs) -> tuple[Optional[set[str]], Optional[set[str]]]:
-        """
-        Notifies worker-side connector ids of requests that have
-        finished generating tokens.
-
-        Returns:
-            ids of requests that have finished asynchronous transfer,
-            tuple of (sending/saving ids, recving/loading ids).
-            The finished saves/sends req ids must belong to a set provided in a
-            call to this method (this call or a prior one).
-        """
-
+    def build_worker_events(
+        self,
+        model_runner_output: ModelRunnerOutput,
+    ) -> Optional[KVConnectorWorkerEvents]:
         assert self.p2p_nccl_engine is not None
-
-        forward_context: ForwardContext = get_forward_context()
-        return self.p2p_nccl_engine.get_finished(finished_req_ids,
-                                                 forward_context)
+        return self.p2p_nccl_engine.build_worker_events(model_runner_output)
 
     # ==============================
     # Scheduler-side methods
@@ -425,6 +414,12 @@ class P2pNcclConnector(KVConnectorBase_V1):
         #                      block_ids=block_ids,
         #                      block_size=self._block_size)
 
+        if scheduler_output.finished_req_ids:
+            assert self.p2p_nccl_engine is not None
+            forward_context: ForwardContext = get_forward_context()
+            self.p2p_nccl_engine.update_finished_requests(
+                scheduler_output.finished_req_ids, forward_context)
+
         self._requests_need_load.clear()
         return meta
 
@@ -438,8 +433,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
-            should not be freed until the request_id is returned from
-            get_finished().
+            should not be freed until the all workers report it finished using
+            build_worker_events().
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """

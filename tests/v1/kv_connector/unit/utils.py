@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from typing import Any, Optional
 
 import torch
@@ -7,10 +8,13 @@ import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorWorkerEvent, KVConnectorWorkerEvents,
+    KVConnectorWorkerEventType)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -159,6 +163,28 @@ def create_request(
     return req
 
 
+def create_worker_events(
+    finished_sending: Optional[list[str]] = None,
+    finished_recving: Optional[list[str]] = None
+) -> Optional[KVConnectorWorkerEvents]:
+    if not finished_recving and not finished_sending:
+        return None
+
+    events: KVConnectorWorkerEvents = {}
+    if finished_recving:
+        recv_events = events.setdefault(
+            KVConnectorWorkerEventType.REQUEST_FINISHED_RECVING, {})
+        for req_id in finished_recving:
+            recv_events[req_id] = KVConnectorWorkerEvent()
+    if finished_sending:
+        send_events = events.setdefault(
+            KVConnectorWorkerEventType.REQUEST_FINISHED_SENDING, {})
+        for req_id in finished_sending:
+            send_events[req_id] = KVConnectorWorkerEvent()
+
+    return events
+
+
 def create_model_runner_output(
     reqs: list[Request],
     finished_sending: Optional[list[str]] = None,
@@ -175,6 +201,10 @@ def create_model_runner_output(
     sampled_token = EOS_TOKEN_ID if use_eos else 0
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
+    # Make worker events
+    kv_connector_worker_events = create_worker_events(finished_sending,
+                                                      finished_recving)
+
     # Make output data structure.
     return ModelRunnerOutput(
         req_ids=req_ids,
@@ -184,6 +214,21 @@ def create_model_runner_output(
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=None,
-        finished_sending=finished_sending,
-        finished_recving=finished_recving,
+        kv_connector_worker_events=kv_connector_worker_events,
     )
+
+
+def create_empty_model_runner_output(
+    finished_sending: Optional[list[str]] = None,
+    finished_recving: Optional[list[str]] = None,
+) -> ModelRunnerOutput:
+    """Make dummy empty model runner output for testing."""
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+
+    # Make worker events
+    kv_connector_worker_events = create_worker_events(finished_sending,
+                                                      finished_recving)
+
+    model_runner_output.kv_connector_worker_events = kv_connector_worker_events
+
+    return model_runner_output

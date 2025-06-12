@@ -2,9 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorWorkerEvents)
 
 
 class LogprobsLists(NamedTuple):
@@ -104,12 +108,11 @@ class ModelRunnerOutput:
     # [num_reqs, hidden_size]
     pooler_output: list[Optional[torch.Tensor]]
 
-    # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
-
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
+
+    # Events reported by workers' KV connector.
+    kv_connector_worker_events: Optional["KVConnectorWorkerEvents"] = None
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
@@ -119,6 +122,5 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],
-                                              finished_sending=None,
-                                              finished_recving=None,
-                                              num_nans_in_logits=None)
+                                              num_nans_in_logits=None,
+                                              kv_connector_worker_events=None)
