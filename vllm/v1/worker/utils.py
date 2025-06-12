@@ -160,3 +160,79 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+def copy_kv_cache_for_layers(
+    kv_caches: dict[str, torch.Tensor],
+    kv_sharing_layers_mapping: dict[str, str],
+    copy_positions_mask: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """
+    Copies values from one set of layers to another
+    based on a mapping and a mask.
+
+    This function is primarily used when KV sharing
+    is enabled especially for spec decoding to copy 
+    target model's cache for the specified positions into
+    corresponding draft model layer's KV cache.
+
+    Args:
+        kv_caches:
+            Dictionary mapping layer names to their cache tensors.
+        kv_sharing_layers_mapping:
+            Mapping the target layers to the source layers.
+        copy_positions_mask:
+            Boolean mask where True indicates positions to copy.
+        slot_mapping:
+            Mapping tensor that maps positions to cache slots.
+    """
+    # Get the positions to copy
+    positions = torch.nonzero(copy_positions_mask, as_tuple=True)[0]
+
+    if positions.numel() == 0:
+        # No positions to copy
+        return
+
+    # Get the corresponding slot mappings for the positions
+    slots = slot_mapping[positions]
+
+    # Copy KV cache values from source layers to target layers
+    for target_layer, source_layer in kv_sharing_layers_mapping.items():
+        if target_layer not in kv_caches or source_layer not in kv_caches:
+            continue
+
+        target_kv_cache = kv_caches[target_layer]
+        source_kv_cache = kv_caches[source_layer]
+
+        block_size = source_kv_cache.shape[2]
+
+        kv_dim = 2
+        # Process in smaller batches to reduce memory overhead
+        batch_size = 8192
+        num_positions = positions.size(0)
+
+        for start_idx in range(0, num_positions, batch_size):
+            end_idx = min(start_idx + batch_size, num_positions)
+
+            # Get batch of slots
+            batch_slots = slots[start_idx:end_idx]
+            batch_block_indices = batch_slots // block_size
+            batch_block_offsets = batch_slots % block_size
+
+            # Create batch-sized indexing tensors
+            batch_block_indices_expanded = batch_block_indices.view(
+                1, -1, 1, 1, 1)
+            batch_block_offsets_expanded = batch_block_offsets.view(
+                1, 1, -1, 1, 1)
+
+            # Copy values for this batch
+            for kv_idx in range(kv_dim):
+                target_kv_cache[
+                    kv_idx,
+                    batch_block_indices_expanded.squeeze(),
+                    batch_block_offsets_expanded.squeeze(), :, :] = (
+                        source_kv_cache[
+                            kv_idx,
+                            batch_block_indices_expanded.squeeze(),
+                            batch_block_offsets_expanded.squeeze(), :, :])

@@ -150,6 +150,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
+    VLLM_DECODE_ONLY_ATTN: bool = False
 
 
 def get_default_cache_root():
@@ -1046,6 +1047,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE":
     lambda: bool(int(os.getenv(\
             "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "0"))),
+    
+    "VLLM_DECODE_ONLY_ATTN":
+    lambda: os.environ.get("VLLM_DECODE_ONLY_ATTN", "0") == "1"
 }
 
 # --8<-- [end:env-vars-definition]
