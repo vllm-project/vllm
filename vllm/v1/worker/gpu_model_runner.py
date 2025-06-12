@@ -1813,7 +1813,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
         skip_attn: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor, int, np.ndarray]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
@@ -1910,8 +1910,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter.dummy_run(num_tokens)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
-        return hidden_states, hidden_states[
-            logit_indices], num_reqs, num_scheduled_tokens
+        return hidden_states, hidden_states[logit_indices]
 
     @torch.inference_mode()
     def _dummy_sampler_run(
@@ -1993,16 +1992,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def _dummy_pooler_run(
         self,
-        num_tokens: int,
-        num_reqs: int,
         hidden_states: torch.Tensor,
-        num_scheduled_tokens: np.ndarray,
     ) -> torch.Tensor:
 
-        num_reqs = num_scheduled_tokens.shape[0]
+        num_tokens = hidden_states.shape[0]
+        max_num_reqs = self.scheduler_config.max_num_seqs
+        num_reqs = min(num_tokens, max_num_reqs)
+        min_tokens_per_req = num_tokens // num_reqs
+        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
+        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        assert sum(num_scheduled_tokens_list) == num_tokens
+        assert len(num_scheduled_tokens_list) == num_reqs
 
         hidden_states_list = torch.split(hidden_states,
-                                         num_scheduled_tokens.tolist())
+                                         num_scheduled_tokens_list)
 
         req_num_tokens = num_tokens // num_reqs
 
@@ -2098,13 +2101,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-        hidden_states, last_hidden_states, num_reqs, num_scheduled_tokens \
+        hidden_states, last_hidden_states \
             = self._dummy_run(self.max_num_tokens)
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
-                output = self._dummy_pooler_run(self.max_num_tokens, num_reqs,
-                                                hidden_states,
-                                                num_scheduled_tokens)
+                output = self._dummy_pooler_run(hidden_states)
             else:
                 output = self._dummy_sampler_run(last_hidden_states)
         else:
