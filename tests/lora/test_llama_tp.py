@@ -210,7 +210,8 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
             f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py", "--model",
             MODEL_PATH, "--lora-path", lora_path, "--tensor-parallel-size",
             str(tp_size), "serialize", "--serialized-directory",
-            str(tmp_path), "--suffix", suffix
+            str(tmp_path), "--suffix", suffix, "--serialization-kwargs",
+            '{"limit_cpu_concurrency": 4}'
         ],
                                 check=True,
                                 capture_output=True,

@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import asyncio
 import gc
 import json
 import os
 import pathlib
 import subprocess
+import sys
+from typing import Any, Type
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
-from vllm import SamplingParams, LLMEngine
+import vllm.model_executor.model_loader.tensorizer
+from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-# yapf conflicts with isort for this docstring
 # yapf: disable
 from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          TensorSerializer,
@@ -20,18 +22,29 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          load_with_tensorizer,
                                                          open_stream,
                                                          tensorize_vllm_model)
+from vllm.model_executor.model_loader.tensorizer_loader import (
+    BLACKLISTED_TENSORIZER_ARGS)
 # yapf: enable
 from vllm.utils import PlaceholderModule
 
 from ..utils import VLLM_PATH, RemoteOpenAIServer
+from .conftest import DummyExecutor, assert_from_collective_rpc
 
 try:
+    import tensorizer
     from tensorizer import EncryptionParams
 except ImportError:
     tensorizer = PlaceholderModule("tensorizer")  # type: ignore[assignment]
     EncryptionParams = tensorizer.placeholder_attr("EncryptionParams")
 
+
+class TensorizerCaughtError(Exception):
+    pass
+
+
 EXAMPLES_PATH = VLLM_PATH / "examples"
+
+pytest_plugins = "pytest_asyncio",
 
 prompts = [
     "Hello, my name is",
@@ -41,6 +54,39 @@ prompts = [
 ]
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
+
+
+def patch_init_and_catch_error(self, obj, method_name,
+                               expected_error: Type[Exception]):
+    original = getattr(obj, method_name, None)
+    if original is None:
+        raise ValueError("Method '{}' not found.".format(method_name))
+
+    def wrapper(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        except expected_error:
+            raise TensorizerCaughtError
+
+    setattr(obj, method_name, wrapper)
+
+    self.load_model()
+
+
+def assert_specific_tensorizer_error_is_raised(
+    executor,
+    obj: Any,
+    method_name: str,
+    expected_error: Type[Exception],
+):
+    with pytest.raises(TensorizerCaughtError):
+        executor.collective_rpc(patch_init_and_catch_error,
+                                args=(
+                                    obj,
+                                    method_name,
+                                    expected_error,
+                                ))
+
 
 def is_curl_installed():
     try:
@@ -92,8 +138,8 @@ def test_can_deserialize_s3(vllm_runner):
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
-def test_deserialized_encrypted_vllm_model_has_same_outputs(model_ref,
-        vllm_runner, tmp_path, model_path):
+def test_deserialized_encrypted_vllm_model_has_same_outputs(
+        model_ref, vllm_runner, tmp_path, model_path):
     args = EngineArgs(model=model_ref)
     with vllm_runner(model_ref) as vllm_model:
         key_path = tmp_path / model_ref / "model.key"
@@ -122,7 +168,8 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(model_ref,
 
 
 def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
-                                                tmp_path, model_ref, model_path):
+                                                tmp_path, model_ref,
+                                                model_path):
     with hf_runner(model_ref) as hf_model:
         max_tokens = 50
         outputs = hf_model.generate_greedy(prompts, max_tokens=max_tokens)
@@ -160,7 +207,8 @@ def test_load_without_tensorizer_load_format(vllm_runner, capfd, model_ref):
         torch.cuda.empty_cache()
 
 
-def test_raise_value_error_on_invalid_load_format(vllm_runner, capfd, model_ref):
+def test_raise_value_error_on_invalid_load_format(vllm_runner, capfd,
+                                                  model_ref):
     model = None
     try:
         model = vllm_runner(
@@ -252,16 +300,12 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
 
 
 @pytest.mark.flaky(reruns=3)
-def test_vllm_tensorized_model_has_same_outputs(
-    model_ref,
-    vllm_runner,
-    tmp_path,
-    model_path
-):
+def test_vllm_tensorized_model_has_same_outputs(model_ref, vllm_runner,
+                                                tmp_path, model_path):
     gc.collect()
     torch.cuda.empty_cache()
     config = TensorizerConfig(tensorizer_uri=str(model_path))
-    args = EngineArgs(model=model_ref, device="cuda")
+    args = EngineArgs(model=model_ref)
 
     with vllm_runner(model_ref) as vllm_model:
         outputs = vllm_model.generate(prompts, sampling_params)
@@ -278,6 +322,7 @@ def test_vllm_tensorized_model_has_same_outputs(
 
         assert outputs == deserialized_outputs
 
+
 def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):
     # For backwards compatibility, ensure Tensorizer can be still be loaded
     # for inference by passing the model reference name, not a local/S3 dir,
@@ -285,15 +330,14 @@ def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):
 
     model_dir = just_serialize_model_tensors
 
-    extra_config = {
-        "tensorizer_uri": f"{model_dir}/model.tensors"
-    }
-
+    extra_config = {"tensorizer_uri": f"{model_dir}/model.tensors"}
 
     ## Start OpenAI API server
     args = [
-        "--load-format", "tensorizer",
-        "--model-loader-extra-config", json.dumps(extra_config),
+        "--load-format",
+        "tensorizer",
+        "--model-loader-extra-config",
+        json.dumps(extra_config),
     ]
 
     with RemoteOpenAIServer(model_ref, args):
@@ -302,4 +346,217 @@ def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):
         pass
 
 
+def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
 
+    serialization_params = {
+        "limit_cpu_concurrency": 2,
+    }
+    model_ref = "facebook/opt-125m"
+    model_path = tmp_path / (model_ref + ".tensors")
+    config = TensorizerConfig(tensorizer_uri=str(model_path),
+                              serialization_kwargs=serialization_params)
+    llm = LLM(model=model_ref, )
+
+    def serialization_test(self, *args, **kwargs):
+        # This is performed in the ephemeral worker process, so monkey-patching
+        # will actually work, and cleanup is guaranteed so don't
+        # need to reset things
+
+        original_dict = serialization_params
+        to_compare = {}
+
+        original = tensorizer.serialization.TensorSerializer.__init__
+
+        def tensorizer_serializer_wrapper(self, *args, **kwargs):
+            nonlocal to_compare
+            to_compare = kwargs.copy()
+            return original(self, *args, **kwargs)
+
+        tensorizer.serialization.TensorSerializer.__init__ = tensorizer_serializer_wrapper
+
+        tensorizer_config = TensorizerConfig(**kwargs["tensorizer_config"])
+        self.save_tensorized_model(tensorizer_config=tensorizer_config, )
+        return to_compare | original_dict == to_compare
+
+    kwargs = {"tensorizer_config": config.to_dict()}
+
+    assert assert_from_collective_rpc(llm, serialization_test, kwargs)
+
+
+def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(
+        tmp_path, capfd):
+
+    expected_error = TypeError
+
+    deserialization_kwargs = {
+        "num_readers": "bar",  # illegal value
+    }
+
+    serialization_params = {
+        "limit_cpu_concurrency": 2,
+    }
+
+    model_ref = "facebook/opt-125m"
+    model_path = tmp_path / (model_ref + ".tensors")
+    config = TensorizerConfig(tensorizer_uri=str(model_path),
+                              serialization_kwargs=serialization_params)
+
+    args = EngineArgs(model=model_ref)
+    tensorize_vllm_model(args, config)
+
+    loader_tc = TensorizerConfig(
+        tensorizer_uri=str(model_path),
+        deserialization_kwargs=deserialization_kwargs,
+    )
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        load_format="tensorizer",
+        model_loader_extra_config=loader_tc.to_dict(),
+    )
+
+    vllm_config = engine_args.create_engine_config()
+    executor = DummyExecutor(vllm_config)
+
+    assert_specific_tensorizer_error_is_raised(
+        executor,
+        tensorizer.serialization.TensorDeserializer,
+        "__init__",
+        TypeError,
+    )
+
+
+def test_assert_stream_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
+
+    deserialization_kwargs = {
+        "num_readers": 1,
+    }
+
+    serialization_params = {
+        "limit_cpu_concurrency": 2,
+    }
+
+    model_ref = "facebook/opt-125m"
+    model_path = tmp_path / (model_ref + ".tensors")
+    config = TensorizerConfig(tensorizer_uri=str(model_path),
+                              serialization_kwargs=serialization_params)
+
+    args = EngineArgs(model=model_ref)
+    tensorize_vllm_model(args, config)
+
+    stream_kwargs = {"mode": "foo"}
+
+    loader_tc = TensorizerConfig(
+        tensorizer_uri=str(model_path),
+        deserialization_kwargs=deserialization_kwargs,
+        stream_kwargs=stream_kwargs,
+    )
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        load_format="tensorizer",
+        model_loader_extra_config=loader_tc.to_dict(),
+    )
+
+    vllm_config = engine_args.create_engine_config()
+    executor = DummyExecutor(vllm_config)
+
+    assert_specific_tensorizer_error_is_raised(
+        executor,
+        vllm.model_executor.model_loader.tensorizer,
+        "open_stream",
+        ValueError,
+    )
+
+
+@pytest.mark.asyncio
+async def test_serialize_and_serve_entrypoints(tmp_path):
+    model_ref = "facebook/opt-125m"
+
+    suffix = "test"
+    try:
+        result = subprocess.run([
+            sys.executable,
+            f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py", "--model",
+            model_ref, "serialize", "--serialized-directory",
+            str(tmp_path), "--suffix", suffix, "--serialization-kwargs",
+            '{"limit_cpu_concurrency": 4}'
+        ],
+                                check=True,
+                                capture_output=True,
+                                text=True)
+    except subprocess.CalledProcessError as e:
+        print("Tensorizing failed.")
+        print("STDOUT:\n", e.stdout)
+        print("STDERR:\n", e.stderr)
+        raise
+
+    assert "Successfully serialized" in result.stdout
+
+    # Next, try to serve with vllm serve
+    model_uri = tmp_path / "vllm" / model_ref / suffix / "model.tensors"
+
+    model_loader_extra_config = {
+        "tensorizer_uri": str(model_uri),
+        "stream_kwargs": {
+            "force_http": False,
+        },
+        "deserialization_kwargs": {
+            "verify_hash": True,
+            "num_readers": 8,
+        }
+    }
+
+    cmd = [
+        "-m", "vllm.entrypoints.cli.main", "serve", "--host", "localhost",
+        "--load-format", "tensorizer", model_ref,
+        "--model-loader-extra-config",
+        json.dumps(model_loader_extra_config, indent=2)
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    try:
+        async with asyncio.timeout(180):
+            await proc.stdout.readuntil(b"Application startup complete.")
+    except asyncio.TimeoutError:
+        pytest.fail("Server did not start successfully")
+    finally:
+        proc.terminate()
+    await proc.communicate()
+
+
+@pytest.mark.parametrize("illegal_value", BLACKLISTED_TENSORIZER_ARGS)
+def test_blacklisted_parameter_for_loading(tmp_path, vllm_runner, capfd,
+                                           illegal_value):
+
+    serialization_params = {
+        "limit_cpu_concurrency": 2,
+    }
+
+    model_ref = "facebook/opt-125m"
+    model_path = tmp_path / (model_ref + ".tensors")
+    config = TensorizerConfig(tensorizer_uri=str(model_path),
+                              serialization_kwargs=serialization_params)
+
+    args = EngineArgs(model=model_ref)
+    tensorize_vllm_model(args, config)
+
+    loader_tc = {"tensorizer_uri": str(model_path), illegal_value: "foo"}
+
+    try:
+        vllm_runner(
+            model_ref,
+            load_format="tensorizer",
+            model_loader_extra_config=loader_tc,
+        )
+    except RuntimeError:
+        out, err = capfd.readouterr()
+        combined_output = out + err
+        assert (f"ValueError: {illegal_value} is not an allowed "
+                f"Tensorizer argument.") in combined_output

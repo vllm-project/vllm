@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import json
+import logging
 import os
 import uuid
 
@@ -14,8 +15,12 @@ from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
     tensorize_lora_adapter,
     tensorize_vllm_model,
+    tensorizer_kwargs_arg,
 )
 from vllm.utils import FlexibleArgumentParser
+
+logger = logging.getLogger()
+
 
 # yapf conflicts with isort for this docstring
 # yapf: disable
@@ -140,7 +145,7 @@ def get_parser():
 
     )
 
-    subparsers = parser.add_subparsers(dest='command')
+    subparsers = parser.add_subparsers(dest='command', required=True)
 
     serialize_parser = subparsers.add_parser(
         'serialize', help="Serialize a model to `--serialized-directory`")
@@ -169,6 +174,14 @@ def get_parser():
         "be saved to `dir/vllm/EleutherAI/gpt-j-6B/suffix/model.tensors`, "
         "where `suffix` is given by `--suffix` or a random UUID if not "
         "provided.")
+
+    serialize_parser.add_argument(
+        "--serialization-kwargs",
+        type=tensorizer_kwargs_arg,
+        required=False,
+        help=("A JSON string containing additional keyword arguments to "
+              "pass to Tensorizer's `TensorSerializer` during "
+              "serialization."))
 
     serialize_parser.add_argument(
         "--keyfile",
@@ -203,11 +216,27 @@ def get_parser():
         help=("Path to a binary key to use to decrypt the model weights,"
               " if the model was serialized with encryption"))
 
+    deserialize_parser.add_argument(
+        "--deserialization-kwargs",
+        type=tensorizer_kwargs_arg,
+        required=False,
+        help=("A JSON string containing additional keyword arguments to "
+              "pass to Tensorizer's `TensorDeserializer` during "
+              "deserialization."))
+
     TensorizerArgs.add_cli_args(deserialize_parser)
 
     return parser
 
-
+def merge_extra_config_with_tensorizer_config(extra_cfg: dict,
+                                              cfg: TensorizerConfig):
+    for k, v in extra_cfg.items():
+        if hasattr(cfg, k):
+            setattr(cfg, k, v)
+            logger.info(
+                f"Updating TensorizerConfig with {k} from "
+                f"--model-loader-extra-config provided"
+            )
 
 def deserialize():
     if args.lora_path:
@@ -275,17 +304,13 @@ if __name__ == '__main__':
     else:
         keyfile = None
 
-    config = {}
+    extra_config = {}
     if args.model_loader_extra_config:
-        config = json.loads(args.model_loader_extra_config)
-        tensorizer_args = \
-            TensorizerConfig(**config)._construct_tensorizer_args()
-        tensorizer_args.tensorizer_uri = args.path_to_tensors
-    else:
-        tensorizer_args = None
+        extra_config = json.loads(args.model_loader_extra_config)
 
-    tensorizer_dir = args.serialized_directory or config.get("tensorizer_dir")
-    tensorizer_uri = args.path_to_tensors or config.get("tensorizer_uri")
+
+    tensorizer_dir = args.serialized_directory or extra_config.get("tensorizer_dir")
+    tensorizer_uri = args.path_to_tensors or extra_config.get("tensorizer_uri")
 
     if tensorizer_dir and tensorizer_uri:
         parser.error("--serialized-directory and --path-to-tensors cannot both be provided")
@@ -313,22 +338,24 @@ if __name__ == '__main__':
         tensorizer_config = TensorizerConfig(
             tensorizer_uri=model_path,
             encryption_keyfile=keyfile,
-            **credentials)
+            serialization_kwargs=args.serialization_kwargs or {},
+            **credentials
+        )
 
         if args.lora_path:
             tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
             tensorize_lora_adapter(args.lora_path, tensorizer_config)
 
+        merge_extra_config_with_tensorizer_config(extra_config, tensorizer_config)
         tensorize_vllm_model(engine_args, tensorizer_config)
 
     elif args.command == "deserialize":
-        if not tensorizer_args:
-            tensorizer_config = TensorizerConfig(
-                tensorizer_uri=tensorizer_uri,
-                tensorizer_dir=tensorizer_dir,
-                encryption_keyfile=keyfile,
-                **credentials
-            )
+        tensorizer_config = TensorizerConfig(
+            tensorizer_uri=args.path_to_tensors,
+            encryption_keyfile=keyfile,
+            deserialization_kwargs=args.deserialization_kwargs or {},
+            **credentials
+        )
+
+        merge_extra_config_with_tensorizer_config(extra_config, tensorizer_config)
         deserialize()
-    else:
-        raise ValueError("Either serialize or deserialize must be specified.")

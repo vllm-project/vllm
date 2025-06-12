@@ -4,21 +4,18 @@ import argparse
 import contextlib
 import contextvars
 import dataclasses
-import io
-from pathlib import Path
 import json
 import os
 import tempfile
 import threading
 import time
-from collections.abc import Generator
-from dataclasses import dataclass, field, fields, asdict
-from functools import partial
-from typing import Any, BinaryIO, Optional, Union
-from collections.abc import MutableMapping
+from collections.abc import Generator, MutableMapping
+from dataclasses import asdict, dataclass, field, fields
+from typing import Any, Optional, Union
 
 import regex as re
 import torch
+from huggingface_hub import snapshot_download
 from torch import nn
 from torch.utils._python_dispatch import TorchDispatchMode
 from transformers import PretrainedConfig
@@ -28,9 +25,7 @@ from vllm.config import ModelConfig, ParallelConfig, set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding
-)
-from huggingface_hub import snapshot_download
+    VocabParallelEmbedding)
 from vllm.utils import FlexibleArgumentParser, PlaceholderModule
 
 try:
@@ -40,10 +35,6 @@ try:
     from tensorizer.utils import (convert_bytes, get_mem_usage,
                                   no_init_or_tensor)
 
-    _read_stream, _write_stream = (partial(
-        open_stream,
-        mode=mode,
-    ) for mode in ("rb", "wb+"))
 except ImportError:
     tensorizer = PlaceholderModule("tensorizer")
     DecryptionParams = tensorizer.placeholder_attr("DecryptionParams")
@@ -55,9 +46,6 @@ except ImportError:
     get_mem_usage = tensorizer.placeholder_attr("utils.get_mem_usage")
     no_init_or_tensor = tensorizer.placeholder_attr("utils.no_init_or_tensor")
 
-    _read_stream = tensorizer.placeholder_attr("_read_stream")
-    _write_stream = tensorizer.placeholder_attr("_write_stream")
-
 __all__ = [
     'EncryptionParams', 'DecryptionParams', 'TensorDeserializer',
     'TensorSerializer', 'open_stream', 'convert_bytes', 'get_mem_usage',
@@ -66,9 +54,21 @@ __all__ = [
 
 logger = init_logger(__name__)
 
+
 def is_valid_deserialization_uri(uri: str) -> bool:
     scheme = uri.lower().split("://")[0]
     return scheme in {"s3", "http", "https"} or os.path.exists(uri)
+
+
+def tensorizer_kwargs_arg(value):
+    loaded = json.loads(value)
+    if not isinstance(loaded, dict):
+        raise argparse.ArgumentTypeError(
+            f"Not deserializable to dict: {value}. serialization_kwargs and "
+            f"deserialization_kwargs must be "
+            f"deserializable from a JSON string to a dictionary. ")
+    return loaded
+
 
 class MetaTensorMode(TorchDispatchMode):
 
@@ -152,10 +152,16 @@ class TensorizerConfig(MutableMapping):
     s3_secret_access_key: Optional[str] = None
     s3_endpoint: Optional[str] = None
     lora_dir: Optional[str] = None
-    _extra_serialization_attrs: Optional[dict[str, Any]] = field(init=False, default=None)
-    _model_cls: Optional[type[torch.nn.Module]] = field(init=False, default=None)
+    stream_kwargs: Optional[dict[str, Any]] = None
+    serialization_kwargs: Optional[dict[str, Any]] = None
+    deserialization_kwargs: Optional[dict[str, Any]] = None
+    _extra_serialization_attrs: Optional[dict[str, Any]] = field(init=False,
+                                                                 default=None)
+    _model_cls: Optional[type[torch.nn.Module]] = field(init=False,
+                                                        default=None)
     _hf_config: Optional[PretrainedConfig] = field(init=False, default=None)
-    _model_cls_dtype: Optional[Union[str, torch.dtype]] = field(init=False, default=None)
+    _model_cls_dtype: Optional[Union[str, torch.dtype]] = field(init=False,
+                                                                default=None)
     _is_sharded: bool = field(init=False, default=None)
     """
     Args for the TensorizerConfig class. These are used to configure the 
@@ -211,14 +217,12 @@ class TensorizerConfig(MutableMapping):
         if self.tensorizer_dir and self.tensorizer_uri:
             raise ValueError(
                 "Either tensorizer_dir or tensorizer_uri must be provided, "
-                "not both."
-            )
+                "not both.")
         if self.tensorizer_dir and self.lora_dir:
             raise ValueError(
                 "Only one of tensorizer_dir or lora_dir may be specified. "
                 "Use lora_dir exclusively when serializing LoRA adapters, "
-                "and tensorizer_dir otherwise."
-            )
+                "and tensorizer_dir otherwise.")
         if not self.tensorizer_uri:
             if self.lora_dir:
                 self.tensorizer_uri = f"{self.lora_dir}/adapter_model.tensors"
@@ -233,6 +237,11 @@ class TensorizerConfig(MutableMapping):
         else:
             self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
 
+        if not self.serialization_kwargs:
+            self.serialization_kwargs = {}
+        if not self.deserialization_kwargs:
+            self.deserialization_kwargs = {}
+
     def to_serializable(self) -> dict[str, Any]:
         # Due to TensorizerConfig needing to be msgpack-serializable, it needs
         # support for morphing back and forth between itself and its dict
@@ -242,7 +251,6 @@ class TensorizerConfig(MutableMapping):
         # linked to TensorizerConfig in such a way that the following is
         # technically initializable:
         # TensorizerConfig(**my_tensorizer_cfg.to_serializable())
-
 
         # This means the dict must not retain non-initializable parameters
         # and post-init attribute states
@@ -261,12 +269,8 @@ class TensorizerConfig(MutableMapping):
 
         tc_dict = {}
         for k, v in raw_tc_dict.items():
-            if (
-                k not in blacklisted
-                and k not in tc_dict
-                and not k.startswith("_")
-                and v is not None
-            ):
+            if (k not in blacklisted and k not in tc_dict
+                    and not k.startswith("_") and v is not None):
                 tc_dict[k] = v
 
         return tc_dict
@@ -297,7 +301,7 @@ class TensorizerConfig(MutableMapping):
             tensorizer_args = self._construct_tensorizer_args()
 
         return open_stream(self.tensorizer_uri,
-                           **tensorizer_args.stream_params)
+                           **tensorizer_args.stream_kwargs)
 
     def __len__(self):
         return len(fields(self))
@@ -314,6 +318,7 @@ class TensorizerConfig(MutableMapping):
     def __delitem__(self, key, /):
         delattr(self, key)
 
+
 def load_with_tensorizer(tensorizer_config: TensorizerConfig,
                          **extra_kwargs) -> nn.Module:
     tensorizer = TensorizerAgent(tensorizer_config, **extra_kwargs)
@@ -321,6 +326,7 @@ def load_with_tensorizer(tensorizer_config: TensorizerConfig,
 
 
 class TensorizerArgs:
+
     def __init__(self, tensorizer_config: TensorizerConfig):
         for k, v in tensorizer_config.items():
             setattr(self, k, v)
@@ -329,26 +335,32 @@ class TensorizerArgs:
         self.s3_secret_access_key = (tensorizer_config.s3_secret_access_key
                                      or envs.S3_SECRET_ACCESS_KEY)
         self.s3_endpoint = tensorizer_config.s3_endpoint or envs.S3_ENDPOINT_URL
-        self.stream_params = {
+
+        self.stream_kwargs = {
             "s3_access_key_id": tensorizer_config.s3_access_key_id,
             "s3_secret_access_key": tensorizer_config.s3_secret_access_key,
             "s3_endpoint": tensorizer_config.s3_endpoint,
+            **(tensorizer_config.stream_kwargs or {})
         }
 
-        self.deserializer_params = {
-            "verify_hash": tensorizer_config.verify_hash,
-            "encryption": tensorizer_config.encryption_keyfile,
-            "num_readers": tensorizer_config.num_readers
+        self.deserialization_kwargs = {
+            "verify_hash":
+            tensorizer_config.verify_hash,
+            "encryption":
+            tensorizer_config.encryption_keyfile,
+            "num_readers":
+            tensorizer_config.num_readers**(
+                tensorizer_config.deserialization_kwargs or {})
         }
 
         if self.encryption_keyfile:
             with open_stream(
                     tensorizer_config.encryption_keyfile,
-                    **self.stream_params,
+                    **self.stream_kwargs,
             ) as stream:
                 key = stream.read()
                 decryption_params = DecryptionParams.from_key(key)
-                self.deserializer_params['encryption'] = decryption_params
+                self.deserialization_kwargs['encryption'] = decryption_params
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -487,32 +499,33 @@ class TensorizerAgent:
         Deserialize the model using the TensorDeserializer. This method is
         specifically for vLLM models using tensorizer's plaid_mode.
 
-        The deserializer makes use of tensorizer_args.stream_params
+        The deserializer makes use of tensorizer_args.stream_kwargs
         to configure the behavior of the stream when loading tensors from a
-        serialized model. The deserializer_params are used to configure the
+        serialized model. The deserialization_kwargs are used to configure the
         behavior of the TensorDeserializer when loading tensors themselves.
         Documentation on these params can be found in TensorizerArgs
 
         Returns:
             nn.Module: The deserialized model.
         """
-        if not is_valid_deserialization_uri(self.tensorizer_config.tensorizer_uri):
+        if not is_valid_deserialization_uri(
+                self.tensorizer_config.tensorizer_uri):
             raise ValueError(
                 f"{self.tensorizer_config.tensorizer_uri} is not a valid "
                 f"tensorizer URI. Please check that the URI is correct. "
                 f"It must either point to a local existing file, or have a "
-                f"S3, HTTP or HTTPS scheme."
-            )
+                f"S3, HTTP or HTTPS scheme.")
         before_mem = get_mem_usage()
         start = time.perf_counter()
-        with _read_stream(
+        with open_stream(
                 self.tensorizer_config.tensorizer_uri,
-                **self.tensorizer_args.stream_params
+                mode="rb",
+                **self.tensorizer_args.stream_kwargs
         ) as stream, TensorDeserializer(
                 stream,
                 dtype=self.tensorizer_config._model_cls_dtype,
-                device=f'cuda:{torch.cuda.current_device()}',
-                **self.tensorizer_args.deserializer_params) as deserializer:
+                device=torch.device("cuda", torch.cuda.current_device()),
+                **self.tensorizer_args.deserialization_kwargs) as deserializer:
             deserializer.load_into_module(self.model)
             end = time.perf_counter()
 
@@ -542,9 +555,9 @@ def tensorizer_weights_iterator(
                    "examples/others/tensorize_vllm_model.py example script "
                    "for serializing vLLM models.")
 
-    deserializer_args = tensorizer_args.deserializer_params
-    stream_params = tensorizer_args.stream_params
-    stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
+    deserializer_args = tensorizer_args.deserialization_kwargs
+    stream_kwargs = tensorizer_args.stream_kwargs
+    stream = open_stream(tensorizer_args.tensorizer_uri, **stream_kwargs)
     with TensorDeserializer(stream, **deserializer_args,
                             device="cpu") as state:
         yield from state.items()
@@ -565,8 +578,8 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
     """
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
     deserializer = TensorDeserializer(open_stream(
-        tensorizer_args.tensorizer_uri, **tensorizer_args.stream_params),
-                                      **tensorizer_args.deserializer_params,
+        tensorizer_args.tensorizer_uri, **tensorizer_args.stream_kwargs),
+                                      **tensorizer_args.deserialization_kwargs,
                                       lazy_load=True)
     if tensorizer_config.vllm_tensorized:
         logger.warning(
@@ -581,26 +594,19 @@ def serialize_extra_artifacts(tensorizer_args: TensorizerArgs,
                               served_model_name: str) -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        snapshot_download(
-            served_model_name,
-            local_dir=tmpdir,
-            ignore_patterns=[
-                "*.pt",
-                "*.safetensors",
-                "*.bin",
-                "*.cache",
-                "*.gitattributes",
-                "*.md"
-            ]
-        )
+        snapshot_download(served_model_name,
+                          local_dir=tmpdir,
+                          ignore_patterns=[
+                              "*.pt", "*.safetensors", "*.bin", "*.cache",
+                              "*.gitattributes", "*.md"
+                          ])
         for artifact in os.scandir(tmpdir):
             if not artifact.is_file():
                 continue
             with open(artifact.path, "rb") as f:
                 with _write_stream(
-                    f"{tensorizer_args.tensorizer_dir}/{artifact.name}",
-                    **tensorizer_args.stream_params
-                ) as stream:
+                        f"{tensorizer_args.tensorizer_dir}/{artifact.name}",
+                        **tensorizer_args.stream_params) as stream:
                     logger.info("Writing artifact %s", artifact.name)
                     stream.write(f.read())
 
@@ -627,13 +633,15 @@ def serialize_vllm_model(
         from vllm.distributed import get_tensor_model_parallel_rank
         output_file = output_file % get_tensor_model_parallel_rank()
 
-    with _write_stream(output_file, **tensorizer_args.stream_params) as stream:
-        serializer = TensorSerializer(stream, encryption=encryption_params)
+    with open_stream(output_file, mode="wb+",
+                     **tensorizer_args.stream_kwargs) as stream:
+        serializer = TensorSerializer(stream,
+                                      encryption=encryption_params,
+                                      **tensorizer_config.serialization_kwargs)
         serializer.write_module(model)
         serializer.close()
 
     serialize_extra_artifacts(tensorizer_args, model_config.served_model_name)
-
 
     logger.info("Successfully serialized model to %s", str(output_file))
     return model
@@ -656,8 +664,9 @@ def tensorize_vllm_model(engine_args: EngineArgs,
     if generate_keyfile and (keyfile :=
                              tensorizer_config.encryption_keyfile) is not None:
         encryption_params = EncryptionParams.random()
-        with _write_stream(
+        with open_stream(
                 keyfile,
+                mode="wb+",
                 s3_access_key_id=tensorizer_config.s3_access_key_id,
                 s3_secret_access_key=tensorizer_config.s3_secret_access_key,
                 s3_endpoint=tensorizer_config.s3_endpoint,
@@ -720,14 +729,14 @@ def tensorize_lora_adapter(lora_path: str,
 
     with open_stream(f"{tensorizer_config.lora_dir}/adapter_config.json",
                      mode="wb+",
-                     **tensorizer_args.stream_params) as f:
+                     **tensorizer_args.stream_kwargs) as f:
 
         f.write(json.dumps(config).encode("utf-8"))
 
     lora_uri = (f"{tensorizer_config.lora_dir}"
                 f"/adapter_model.tensors")
     with open_stream(lora_uri, mode="wb+",
-                     **tensorizer_args.stream_params) as f:
+                     **tensorizer_args.stream_kwargs) as f:
         serializer = TensorSerializer(f)
         serializer.write_state_dict(tensors)
         serializer.close()
