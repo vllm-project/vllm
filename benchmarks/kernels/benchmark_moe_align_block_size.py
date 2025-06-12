@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import itertools
 
@@ -87,8 +89,8 @@ configs = list(itertools.product(num_tokens_range, num_experts_range, topk_range
         x_names=["num_tokens", "num_experts", "topk"],
         x_vals=configs,
         line_arg="provider",
-        line_vals=["vllm", "triton"],     # "sgl", "triton"
-        line_names=["VLLM", "Triton"],    # "SGL", "Triton"
+        line_vals=["vllm", "triton"],  # "sgl", "triton"
+        line_names=["VLLM", "Triton"],  # "SGL", "Triton"
         plot_name="moe-align-block-size-performance",
         args={},
     )

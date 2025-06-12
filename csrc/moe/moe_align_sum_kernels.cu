@@ -205,8 +205,7 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
               num_tokens_post_pad.data_ptr<int32_t>(), num_experts, block_size,
               topk_ids.numel());
         } else {
-          auto align_kernel =
-              vllm::moe::moe_align_block_size_kernel<scalar_t>;
+          auto align_kernel = vllm::moe::moe_align_block_size_kernel<scalar_t>;
 
           size_t num_warps = CEILDIV(padded_num_experts, experts_per_warp);
           size_t shared_mem_size =
@@ -242,9 +241,8 @@ void sgl_moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                               torch::Tensor sorted_token_ids,
                               torch::Tensor experts_ids,
                               torch::Tensor num_tokens_post_pad) {
-  moe_align_block_size(
-      topk_ids, num_experts, block_size, sorted_token_ids, experts_ids,
-      num_tokens_post_pad);
+  moe_align_block_size(topk_ids, num_experts, block_size, sorted_token_ids,
+                       experts_ids, num_tokens_post_pad);
 }
 
 void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]

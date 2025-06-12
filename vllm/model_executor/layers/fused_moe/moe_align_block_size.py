@@ -4,7 +4,6 @@ from typing import Optional
 
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.triton_utils import tl, triton
 from vllm.utils import round_up
@@ -217,7 +216,7 @@ def moe_align_block_size(
                                       device=topk_ids.device)
 
     ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
-                                 expert_ids, num_tokens_post_pad)
+                             expert_ids, num_tokens_post_pad)
     if expert_map is not None:
         expert_ids = expert_map[expert_ids]
 
