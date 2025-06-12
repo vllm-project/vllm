@@ -143,6 +143,7 @@ def apply_w8a8_block_fp8_linear(
             column_major_scales=True,
         )
 
+        import vllm.model_executor.layers.quantization.deepgemm  # noqa: F401
         output = torch.ops.vllm.w8a8_block_fp8_matmul_deepgemm(
             q_input,
             weight,
