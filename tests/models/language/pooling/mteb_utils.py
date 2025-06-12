@@ -264,7 +264,7 @@ def mteb_test_rerank_models(hf_runner,
     with hf_runner(model_info.name, is_cross_encoder=True,
                    dtype="float32") as hf_model:
 
-        hf_model_predict = hf_model.predict
+        original_predict = hf_model.predict
 
         def _predict(
             sentences: list[tuple[str, str,
@@ -274,9 +274,10 @@ def mteb_test_rerank_models(hf_runner,
         ):
             # vllm and st both remove the prompt, fair comparison.
             prompts = [(s[0], s[1]) for s in sentences]
-            return hf_model_predict(prompts, *args, **kwargs, batch_size=8)
+            return original_predict(prompts, *args, **kwargs, batch_size=8)
 
         hf_model.predict = _predict
+        hf_model.original_predict = original_predict
 
         if hf_model_callback is not None:
             hf_model_callback(hf_model)

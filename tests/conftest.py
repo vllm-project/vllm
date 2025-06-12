@@ -727,8 +727,12 @@ class HfRunner:
                **kwargs) -> list[list[torch.Tensor]]:
         return self.model.encode(prompts, *args, **kwargs)
 
-    def predict(self, prompts: list[list[str]], *args, **kwargs) -> torch.Tensor:
-        return self.model.predict(prompts, *args, convert_to_tensor=True, **kwargs)
+    def predict(self, prompts: list[list[str]], *args,
+                **kwargs) -> torch.Tensor:
+        return self.model.predict(prompts,
+                                  *args,
+                                  convert_to_tensor=True,
+                                  **kwargs)
 
     def __enter__(self):
         return self
