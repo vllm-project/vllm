@@ -751,7 +751,7 @@ tomli==2.2.1
     # via schemathesis
 tomli-w==1.2.0
     # via schemathesis
-torch==2.7.0
+torch==2.7.0+cu128
     # via
     #   -r requirements/test.in
     #   accelerate
