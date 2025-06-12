@@ -25,20 +25,20 @@ build-vllm-image:
 
 vllm-setup:
 	VLLM_USE_PRECOMPILED=1 pip install --editable .
-	pip install "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git" --force-reinstall
+	pip install "bok @ git+ssh://git@gitlab-master.nvidia.com:12051/jdebache/bok.git" --force-reinstall --no-input
 	pip install flashinfer-python --index-url https://gitlab-master.nvidia.com/api/v4/projects/179694/packages/pypi/simple
 
 run-vllm:
 	docker run -it --gpus all \
-		-v $(shell pwd):/workspace \
+		-v $(shell pwd):$(shell pwd) \
 		-v $(shell pwd)/vllm/utils/docker/:/dockercmd:ro \
 		-v $(shell pwd)/tmp/hf_cache:/llm_cache/ \
 		-v $(SSH_AUTH_SOCK):/ssh-agent \
 		-e SSH_AUTH_SOCK=/ssh-agent \
 		-e HF_TOKEN=$(HF_TOKEN) \
-		-e HF_HOME=/workspace/tmp/hf_cache \
+		-e HF_HOME=$(shell pwd)/tmp/hf_cache \
 		--ipc=host \
-		-w /workspace \
+		-w $(shell pwd) \
 		--entrypoint /bin/bash \
 		myimage-dblanaru 
 
@@ -61,7 +61,10 @@ push-flashinfer-wheel:
 vllm-sample:
 	VLLM_ATTENTION_BACKEND=FLASHINFER python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt
 
-bok-sample:
+vllm-sample-flashattn:
+	VLLM_ATTENTION_BACKEND=FLASHATTN python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt
+
+vllm-sample-bok:
 	VLLM_ATTENTION_BACKEND=BOK python vllm_sample.py --model meta-llama/Llama-3.1-8B --enforce-eager --batch-size 3 --output-len 2 --num-iters 1 --num-iters-warmup 0 --prompts-file sample_prompts.txt 
 
 build-model8b-edgar4:
