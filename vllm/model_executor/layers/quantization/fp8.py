@@ -11,7 +11,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     BatchedTritonOrDeepGemmExperts, FusedMoE, FusedMoEActivationFormat,
@@ -820,7 +820,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             return TritonOrDeepGemmExperts(
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
-                per_act_token=False, #?
+                per_act_token=False,  #?
                 allow_deep_gemm=self.allow_deep_gemm,
             )
 

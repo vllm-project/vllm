@@ -3,9 +3,6 @@
 
 import enum
 from enum import Enum
-
-import functools
-
 from typing import Callable, Optional
 
 import torch
@@ -600,8 +597,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             use_fp8_w8a8=True,
             block_shape=self.quant_config.weight_block_size,
             per_act_token_quant=(
-                self.input_quant.strategy == QuantizationStrategy.TOKEN
-            ),
+                self.input_quant.strategy == QuantizationStrategy.TOKEN),
         )
 
     def apply(
@@ -871,7 +867,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
 
         experts = CutlassExpertsFp8(
             num_experts,
-            moe.in_dtype,
+            None, #moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
             use_batched_format=use_batched_format,

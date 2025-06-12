@@ -83,6 +83,7 @@ def _moe_problem_size(
 
     return E, M, N, K, topk
 
+
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
 
 class FusedMoEActivationFormat(Enum):

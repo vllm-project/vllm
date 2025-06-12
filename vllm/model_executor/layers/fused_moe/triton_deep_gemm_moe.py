@@ -8,10 +8,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    TritonExperts)
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig)
+from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 
 
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -84,7 +81,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
         if (self.allow_deep_gemm and N > 512
-            and _valid_deep_gemm_shape(M, N, K)):
+                and _valid_deep_gemm_shape(M, N, K)):
             return self.deep_gemm_expert.workspace_shapes(
                 a, aq, M, N, K, topk, global_num_experts, local_num_experts)
         else:

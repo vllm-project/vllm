@@ -37,7 +37,6 @@ from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
 
 from .modular_kernel import (FusedMoEModularKernel,
-                             FusedMoEPrepareAndFinalize,
                              FusedMoEPermuteExpertsUnpermute,
                              FusedMoEPrepareAndFinalize)
 
