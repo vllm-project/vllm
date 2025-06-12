@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
 from typing import Optional
@@ -9,7 +10,6 @@ from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -94,13 +94,11 @@ class LlamaModel(nn.Module):
             speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
-        # if PP disabled then draft will share embed with target
-        if get_pp_group().world_size > 1:
-            self.embed_tokens = VocabParallelEmbedding(
-                self.config.vocab_size,
-                self.config.hidden_size,
-                prefix=maybe_prefix(prefix, "embed_tokens"),
-            )
+        self.embed_tokens = VocabParallelEmbedding(
+            self.config.vocab_size,
+            self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
+        )
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
@@ -175,13 +173,15 @@ class LlamaModel(nn.Module):
 
 class Eagle3LlamaForCausalLM(LlamaForCausalLM):
 
-    def __init__(self, *, vllm_config: VllmConfig, start_layer_id: int = 0):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config. \
             speculative_config.draft_model_config.hf_config
+        target_layer_num = vllm_config.model_config.get_num_layers(
+            vllm_config.parallel_config)
         self.model = LlamaModel(vllm_config=vllm_config,
-                                start_layer_id=start_layer_id,
-                                prefix="model")
+                                prefix="model",
+                                start_layer_id=target_layer_num)
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.lm_head = ParallelLMHead(
@@ -193,8 +193,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         self.logits_processor = LogitsProcessor(self.config.draft_vocab_size,
                                                 scale=logit_scale)
         self.draft_id_to_target_id = nn.Parameter(
-            torch.zeros((self.config.draft_vocab_size),
-                        dtype=torch.long).type(torch.LongTensor),
+            torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
             requires_grad=False,
         )
 
@@ -213,6 +212,12 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
+        if self.draft_id_to_target_id is None:
+            assert logits.shape[1] == self.config.vocab_size, \
+                "Expected logits to have shape " \
+                f"(*, {self.config.vocab_size}), but got {logits.shape}"
+            return logits
+
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
         targets = base + self.draft_id_to_target_id
         logits_new = logits.new_full((
@@ -230,19 +235,29 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=None,
-        )
-
         model_weights = {}
+        includes_draft_id_mapping = False
+        includes_embed_tokens = False
         for name, loaded_weight in weights:
             if "t2d" in name:
                 continue
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
+                includes_draft_id_mapping = True
             elif "lm_head" not in name:
                 name = "model." + name
+            if "embed_tokens" in name:
+                includes_embed_tokens = True
             model_weights[name] = loaded_weight
 
-        return loader.load_weights(model_weights.items())
+        skip_substrs = []
+        if not includes_draft_id_mapping:
+            skip_substrs.append("draft_id_to_target_id")
+        if not includes_embed_tokens:
+            skip_substrs.append("embed_tokens")
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=None,
+            skip_substrs=skip_substrs,
+        )
+        loader.load_weights(model_weights.items())

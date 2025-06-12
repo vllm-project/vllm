@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from unittest.mock import patch
 
@@ -84,7 +85,10 @@ def test_env(
                        CpuPlatform()):
                 backend = get_attn_backend(16, torch.float16, torch.float16,
                                            block_size, False)
-            assert backend.get_name() == "TORCH_SDPA"
+            if use_v1:
+                assert backend.get_name() == "TORCH_SDPA_VLLM_V1"
+            else:
+                assert backend.get_name() == "TORCH_SDPA"
 
         elif device == "hip":
             with patch("vllm.attention.selector.current_platform",

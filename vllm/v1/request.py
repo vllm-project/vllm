@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -26,12 +27,13 @@ class Request:
         multi_modal_placeholders: Optional[list[PlaceholderRange]],
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
-        arrival_time: float,
+        client_index: int = 0,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
     ) -> None:
         self.request_id = request_id
+        self.client_index = client_index
         self.sampling_params = sampling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
@@ -77,6 +79,10 @@ class Request:
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
 
+        # State
+        # The number of tokens with prefix cache hits.
+        self.num_cached_tokens = -1
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         if request.mm_inputs is not None:
@@ -86,13 +92,13 @@ class Request:
 
         return cls(
             request_id=request.request_id,
+            client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
             sampling_params=request.sampling_params,
             eos_token_id=request.eos_token_id,
-            arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),

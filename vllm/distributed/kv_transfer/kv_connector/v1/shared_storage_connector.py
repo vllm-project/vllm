@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import hashlib
 import os
 from dataclasses import dataclass
@@ -288,7 +289,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         for new_req in scheduler_output.scheduled_new_reqs:
             if new_req.req_id in self._requests_need_load:
                 meta.add_request(token_ids=new_req.prompt_token_ids,
-                                 block_ids=new_req.block_ids,
+                                 block_ids=new_req.block_ids[0],
                                  block_size=self._block_size,
                                  is_store=False)
                 total_need_load += 1
@@ -299,7 +300,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # the original prompt tokens.
                 if not self._found_match_for_request(new_req):
                     meta.add_request(token_ids=new_req.prompt_token_ids,
-                                     block_ids=new_req.block_ids,
+                                     block_ids=new_req.block_ids[0],
                                      block_size=self._block_size,
                                      is_store=True)
 
@@ -319,7 +320,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
-                block_ids = cached_req.new_block_ids
+                block_ids = cached_req.new_block_ids[0]
 
                 meta.add_request(token_ids=token_ids,
                                  block_ids=block_ids,

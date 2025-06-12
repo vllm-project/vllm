@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import huggingface_hub
+import regex as re
 from huggingface_hub import HfApi, hf_hub_download
 
 from vllm.logger import init_logger
@@ -156,7 +157,11 @@ def make_mistral_chat_completion_request(
     #
     # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
     for message in messages:
-        if message.get("role") == "assistant":
+        # Remove reasoning_content as unsupported by Mistral
+        _ = message.pop("reasoning_content", None)  # type: ignore
+
+        # Convert list text content to string
+        if message.get("role") in ("assistant", "tool"):
             content = message.get("content")
             if isinstance(content, list):
                 content = "\n".join(chunk.get("text") for chunk in content)
@@ -182,6 +187,8 @@ class MistralTokenizer(TokenizerBase):
     def __init__(self, tokenizer: "PublicMistralTokenizer") -> None:
         self.mistral = tokenizer
         self.instruct = tokenizer.instruct_tokenizer
+        _mistral_version_str = self.instruct.tokenizer.version.value
+        self.version: int = int(_mistral_version_str.split("v")[-1])
 
         tokenizer_ = tokenizer.instruct_tokenizer.tokenizer
         from mistral_common.tokens.tokenizers.tekken import (

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import ray
 
@@ -46,11 +47,14 @@ def test_engine_log_metrics_ray(
                 engine_args, stat_loggers=[RayPrometheusStatLogger])
 
             for i, prompt in enumerate(example_prompts):
-                engine.generate(
+                results = engine.generate(
                     request_id=f"request-id-{i}",
                     prompt=prompt,
                     sampling_params=SamplingParams(max_tokens=max_tokens),
                 )
+
+                async for _ in results:
+                    pass
 
     # Create the actor and call the async method
     actor = EngineTestActor.remote()  # type: ignore[attr-defined]

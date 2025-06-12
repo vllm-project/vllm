@@ -1,27 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Script to test add_lora, remove_lora, pin_lora, list_loras functions.
 """
-
-import os
-
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.entrypoints.openai.api_server import (
+    build_async_engine_client_from_engine_args)
 from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 LORA_MODULE_PATH = "yard1/llama-2-7b-sql-lora-test"
 LORA_RANK = 8
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def make_lora_request(lora_id: int):
@@ -78,22 +70,6 @@ def test_lora_functions_sync():
 
 @pytest.mark.asyncio
 async def test_lora_functions_async():
-
-    if os.getenv("VLLM_USE_V1") == "0":
-        pytest.skip(
-            reason=
-            "V0 AsyncLLMEngine does not expose remove/list/pin LoRA functions")
-
-    # The run_with_both_engines_lora fixture sets up the `VLLM_USE_V1`
-    # environment variable. reload vllm.enging.async_llm_engine as
-    # vllm.engine.async_llm_engine.AsyncLLMEgnine changes depending on the
-    # env var.
-    import importlib
-
-    import vllm.engine.async_llm_engine
-    importlib.reload(vllm.engine.async_llm_engine)
-    from vllm.entrypoints.openai.api_server import (
-        build_async_engine_client_from_engine_args)
 
     max_loras = 4
     engine_args = AsyncEngineArgs(model=MODEL_PATH,

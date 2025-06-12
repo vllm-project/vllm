@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -112,6 +113,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[int] = None,
         use_irope: bool = False,
     ) -> None:
         if use_irope:
@@ -127,6 +129,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
         self.logits_soft_cap = logits_soft_cap
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -158,6 +161,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: PallasMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
 
@@ -170,6 +174,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for PallasAttentionBackendImpl")
+
         # For determine_available_memory case.
         if kv_cache.numel() == 0:
             if output is None:
@@ -180,7 +189,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
         num_tokens, hidden_size = query.shape
         query = query.view(num_tokens, self.num_heads, self.head_size)
 
-        if kv_cache.numel() > 0:
+        if self.kv_sharing_target_layer_name is None and kv_cache.numel() > 0:
+            # Write input keys and values to the KV cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
             slot_mapping = attn_metadata.slot_mapping
             write_to_kv_cache(key, value, kv_cache, slot_mapping)
 

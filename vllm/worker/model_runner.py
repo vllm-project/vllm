@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import gc
@@ -1845,8 +1846,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     inputs_embeds=model_input.inputs_embeds,
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
-                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                                 device=self.device),
+                    **MultiModalKwargs.as_kwargs(
+                        multi_modal_kwargs,
+                        device=self.device,
+                    ),
                     **seqlen_agnostic_kwargs,
                     **model_kwargs,
                 )
