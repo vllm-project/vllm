@@ -82,6 +82,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         assert isinstance(x, torch.Tensor)
 
+        # TODO (bnell):
         # Check if there is a block_shape / or if we can infer the quantization
         # schemes from the scales.
         # per_token_quant = None

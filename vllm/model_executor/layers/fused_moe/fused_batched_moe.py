@@ -303,7 +303,8 @@ def batched_triton_kernel(
         if (group_k > 0 and group_n > 0) or per_channel_quant:
             a_scale_ptr = a_scale_ptr + (expert_id *
                                          stride_ase) + cta_m_start * stride_asm
-            #b_scale_ptr = b_scale_ptr + (expert_id * stride_bse) # + cta_n_start * stride_bsn?
+            #b_scale_ptr = b_scale_ptr + (expert_id * stride_bse)
+            # (?) b_scale_ptr = b_scale_ptr + cta_n_start * stride_bsn
         # channel-wise or tensor-wise
         else:
             a_scale_ptr = a_scale_ptr + (expert_id * stride_ase)
@@ -379,9 +380,10 @@ def invoke_moe_batched_triton_kernel(
     grid = (expert_num_tokens.size(0), triton.cdiv(max_num_tokens, BLOCK_M) *
             triton.cdiv(B.size(1), BLOCK_N))
 
-    assert A_scale is None or A_scale.ndim == 3, f"{0 if A_scale is None else A_scale.shape}"
-    assert B_scale is None or B_scale.ndim == 1 or B_scale.ndim == 3, f"{0 if B_scale is None else B_scale.shape}"
-    #assert B_scale is None or B_scale.ndim == 3, f"{0 if B_scale is None else (A.shape, B_scale.shape)}"
+    assert A_scale is None or A_scale.ndim == 3, (
+        f"{0 if A_scale is None else A_scale.shape}")
+    assert B_scale is None or B_scale.ndim == 1 or B_scale.ndim == 3, (
+        f"{0 if B_scale is None else B_scale.shape}")
 
     if B_scale is not None:
         if B_scale.ndim == 1:
@@ -522,7 +524,10 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 k_tiles = (hidden_dim + block_k - 1) // block_k
                 scale_shape = (num_local_experts, self.max_num_tokens, k_tiles)
             else:
-                num = self.max_num_tokens if quant_config.per_act_token_quant else 1
+                if quant_config.per_act_token_quant:
+                    num = self.max_num_tokens
+                else:
+                    num = 1
                 scale_shape = (num_local_experts, num, 1)
 
             #print(f"SCALE_SHAPE {block_shape} {b_a1.shape} {scale_shape}")
@@ -555,7 +560,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     quant_config.per_act_token_quant,
                     quant_config.block_shape,
                 ))
-                if quant_config.block_shape is None and not quant_config.per_act_token_quant:
+                if (quant_config.block_shape is None and
+                    not quant_config.per_act_token_quant):
                     b_a1_scale[idx] = b_s
                 else:
                     #print(f"XXXXX rhs={rhs.shape} b_s={b_s.shape}")

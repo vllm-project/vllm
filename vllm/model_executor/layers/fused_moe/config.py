@@ -242,20 +242,32 @@ class FusedMoEConfig:
     max_num_tokens: int = MOE_DP_CHUNK_SIZE
 
     @property
-    def quant_dtype(self):
-        return self.quant_config.quant_dtype if self.quant_config is not None else None
+    def quant_dtype(self) -> Optional[torch.dtype]:
+        if self.quant_config is not None:
+            return self.quant_config.quant_dtype
+        else:
+            return None
 
     @property
-    def block_shape(self):
-        return self.quant_config.block_shape if self.quant_config is not None else None
+    def block_shape(self) -> Optional[list[int]]:
+         if self.quant_config is not None:
+             return self.quant_config.block_shape
+         else:
+             return None
 
     @property
-    def per_act_token_quant(self):
-        return self.quant_config.per_act_token_quant if self.quant_config is not None else False
+    def per_act_token_quant(self) -> bool:
+        if self.quant_config is not None:
+            return self.quant_config.per_act_token_quant
+        else:
+            return False
 
     @property
-    def per_out_ch_quant(self):
-        return self.quant_config.per_out_ch_quant if self.quant_config is not None else False
+    def per_out_ch_quant(self) -> bool:
+        if self.quant_config is not None:
+            return self.quant_config.per_out_ch_quant
+        else:
+            return False
 
     @property
     def tp_size(self):
@@ -338,7 +350,8 @@ class FusedMoEConfig:
                 quant_dtype = torch.float8_e4m3fn
 
             if weight_quant is not None:
-                per_out_ch_quant = weight_quant.strategy == QuantizationStrategy.CHANNEL
+                per_out_ch_quant = (
+                    weight_quant.strategy == QuantizationStrategy.CHANNEL)
 
             assert quant_dtype is not None
 

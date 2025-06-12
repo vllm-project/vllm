@@ -556,8 +556,9 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
 
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
-        #        assert (block_shape is None or triton.cdiv(B.shape[-2], block_shape[0])
-        #                == B_scale.shape[-2]), f"{block_shape[0]} {B.shape[-2]} {B_scale.shape[-2]}"
+        assert (block_shape is None or triton.cdiv(B.shape[-2], block_shape[0])
+                == B_scale.shape[-2]), (
+                    f"{block_shape[0]} {B.shape[-2]} {B_scale.shape[-2]}")
         assert (block_shape is None or triton.cdiv(B.shape[-1], block_shape[1])
                 == B_scale.shape[-1])
 
