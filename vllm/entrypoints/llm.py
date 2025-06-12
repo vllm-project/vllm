@@ -509,11 +509,11 @@ class LLM:
         Run a function directly on the model inside each worker,
         returning the result for each of them.
 
-        :::{important}
-        To reduce the overhead of data transfer, avoid returning large arrays
-        or tensors from this method. If you must return them, make sure you
-        move them to CPU first to avoid taking up additional VRAM! 
-        :::
+        !!! warning
+            To reduce the overhead of data transfer, avoid returning large
+            arrays or tensors from this method. If you must return them,
+            make sure you move them to CPU first to avoid taking up additional
+            VRAM!
         """
         return self.llm_engine.apply_model(func)
 
