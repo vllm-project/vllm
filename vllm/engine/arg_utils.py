@@ -54,7 +54,7 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
     def _parse_type(val: str) -> T:
         try:
-            if return_type is json.loads and not re.match("^{.*}$", val):
+            if return_type is json.loads and not re.match(r"(?s)^\s*{.*}\s*$", val):
                 return cast(T, nullable_kvs(val))
             return return_type(val)
         except ValueError as e:
@@ -76,7 +76,7 @@ def optional_type(
 
 
 def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
-    if not re.match("^{.*}$", val):
+    if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
 

@@ -19,6 +19,19 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 
 logger = init_logger(__name__)
 
+BLACKLISTED_TENSORIZER_ARGS = {
+    "device", # vLLM decides this
+    "dtype",  # vLLM decides this
+    "mode",   # Not meant to be configurable by the user
+}
+
+def validate_config(config: dict):
+    for k, v in config.items():
+        if v is not None and k in BLACKLISTED_TENSORIZER_ARGS:
+            raise ValueError(
+                f"{k} is not an allowed Tensorizer argument."
+            )
+
 
 class TensorizerLoader(BaseModelLoader):
     """Model loader using CoreWeave's tensorizer library."""
@@ -28,6 +41,7 @@ class TensorizerLoader(BaseModelLoader):
         if isinstance(load_config.model_loader_extra_config, TensorizerConfig):
             self.tensorizer_config = load_config.model_loader_extra_config
         else:
+            validate_config(load_config.model_loader_extra_config)
             self.tensorizer_config = TensorizerConfig(
                 **load_config.model_loader_extra_config)
 
