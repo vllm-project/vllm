@@ -76,7 +76,7 @@ def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
 
     assert model_info.architecture == "Qwen3ForSequenceClassification"
 
-    vllm_extra_kwargs: dict[str: Any] = {
+    vllm_extra_kwargs: dict[str:Any] = {
         "hf_overrides": {
             "architectures": ["Qwen3ForSequenceClassification"],
             "classifier_from_token": ["no", "yes"],
