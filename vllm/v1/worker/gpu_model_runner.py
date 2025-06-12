@@ -18,7 +18,6 @@ import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
-from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -555,7 +554,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[dict[str, Any], torch.Tensor, Optional[SpecDecodeMetadata]]:
+    ) -> tuple[dict[str, Any], bool, torch.Tensor,
+               Optional[SpecDecodeMetadata]]:
+        """
+        :return: tuple[
+        attn_metadata: layer-to-attention_metadata mapping,
+        attention_cuda_graphs: whether attention can run in captured cudagraph
+        logits_indices, spec_decode_metadata
+        ]
+        """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -677,6 +684,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         attn_metadata: dict[str, Any] = {}
+        attention_cuda_graphs = []
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -684,20 +692,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Prepare for cascade attention if enabled & beneficial.
             common_prefix_len = 0
+            builder = self.attn_metadata_builders[kv_cache_group_id]
             if self.cascade_attn_enabled:
                 common_prefix_len = self._compute_cascade_attn_prefix_len(
                     num_scheduled_tokens,
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id],
                     kv_cache_group_spec.kv_cache_spec,
-                    self.attn_metadata_builders[kv_cache_group_id],
+                    builder,
                 )
 
-            attn_metadata_i = (
-                self.attn_metadata_builders[kv_cache_group_id].build(
-                    common_prefix_len=common_prefix_len,
-                    common_attn_metadata=common_attn_metadata,
-                ))
+            attn_metadata_i = (builder.build(
+                common_prefix_len=common_prefix_len,
+                common_attn_metadata=common_attn_metadata,
+            ))
+            attention_cuda_graphs.append(
+                builder.can_run_in_cudagraph(common_attn_metadata))
+
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
@@ -729,7 +740,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return attn_metadata, logits_indices, spec_decode_metadata
+        return attn_metadata, all(
+            attention_cuda_graphs), logits_indices, spec_decode_metadata
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1189,8 +1201,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices, spec_decode_metadata = (
-            self._prepare_inputs(scheduler_output))
+        (attn_metadata, attention_cuda_graphs, logits_indices,
+         spec_decode_metadata) = (self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1255,11 +1267,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True)
 
-        # Some attention backends only support CUDA graphs in pure decode.
-        # Assume cuda_graph_supported is false if it does not exist.
-        attention_cuda_graphs = all(
-            getattr(m, "cuda_graph_supported", False)
-            for _, m in attn_metadata.items())
+        # Some attention backends only support CUDA Graphs in pure decode.
+        # If attention doesn't support CUDA Graphs for this batch, but we
+        # compiled with full CUDA graphs, we have to skip them entirely.
         skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
 
         # Run the decoder.
@@ -2100,20 +2110,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     "Non-Attention backend is not supported by V1 "
                     "GPUModelRunner.")
 
-            if self.compilation_config.full_cuda_graph:
-                attn_backend_name = attn_backend_i.__name__
-                flash_attn_version = get_flash_attn_version()
-                if ((attn_backend_name != "FlashAttentionBackend"
-                     or flash_attn_version != 3)
-                        and attn_backend_name != "FlashMLABackend"):
-                    raise ValueError(
-                        f"Full CUDAGraph is only supported with FA3 or FlashMLA"
-                        f". Current attention backend is {attn_backend_name}, "
-                        f"FlashAttention version is {flash_attn_version}.")
-
             block_table_i = self.input_batch.block_table[i]
             attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-                weakref.proxy(self), kv_cache_spec, block_table_i)
+                weakref.proxy(self),
+                kv_cache_spec,
+                block_table_i,
+            )
+
+            if (self.full_cuda_graph
+                    and not attn_metadata_builder_i.full_cudagraph_supported):
+                raise ValueError(
+                    f"Full CUDAGraph not supported for "
+                    f"{attn_backend_i.__name__}. Turn off CompilationConfig."
+                    f"full_cuda_graph or use a different attention backend.")
+
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
 

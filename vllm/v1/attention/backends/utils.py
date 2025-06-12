@@ -3,7 +3,7 @@
 import abc
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
 import numpy as np
 import torch
@@ -38,6 +38,8 @@ M = TypeVar("M")
 
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
+    # Does this backend/builder support CUDA Graphs for attention.
+    full_cudagraph_supported: ClassVar[bool] = False
 
     @abstractmethod
     def build(self, common_prefix_len: int,
@@ -47,6 +49,13 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         Some builders (MLA) require reorder_batch to be called prior to build.
         """
         raise NotImplementedError
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        """
+        Can this batch (with given metadata) use CUDA Graphs for attention.
+        """
+        return False
 
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata) -> M:

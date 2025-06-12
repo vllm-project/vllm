@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import numpy as np
 import torch
@@ -126,10 +126,6 @@ class FlashAttentionMetadata:
         local_scheduler_metadata: Optional[torch.Tensor]
 
     local_attn_metadata: Optional[LocalAttentionMetadata] = None
-
-    # Supported for prefill and decode.
-    # Backend (FA2 vs FA3 vs Triton) support checked separately.
-    cuda_graph_supported: bool = True
 
 
 #
@@ -311,6 +307,7 @@ def _get_sliding_window_configs(
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
+    full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() == 3
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -500,6 +497,11 @@ class FlashAttentionMetadataBuilder(
             prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
         return attn_metadata
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        # Full CUDA Graph always supported (FA2 support checked separately)
+        return True
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)

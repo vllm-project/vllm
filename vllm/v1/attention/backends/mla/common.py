@@ -326,13 +326,6 @@ class MLACommonMetadata(Generic[D]):
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
 
-    @property
-    def cuda_graph_supported(self):
-        """
-        Full CUDA Graphs (including attention) only supported for pure decode.
-        """
-        return self.num_prefills == 0
-
 
 M = TypeVar("M", bound=MLACommonMetadata)
 
@@ -597,6 +590,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             prefill=prefill_metadata,
             decode=decode_metadata,
         )
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        return common_attn_metadata.max_query_len == 1
 
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
