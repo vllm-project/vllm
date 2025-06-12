@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import json
+import logging
 import os
 import uuid
 
@@ -14,10 +15,9 @@ from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
     tensorize_lora_adapter,
     tensorize_vllm_model,
-    tensorizer_kwargs_arg
+    tensorizer_kwargs_arg,
 )
 from vllm.utils import FlexibleArgumentParser
-import logging
 
 logger = logging.getLogger()
 
@@ -123,7 +123,7 @@ vllm serve <model_path> \
 """
 
 
-def parse_args():
+def get_parser():
     parser = FlexibleArgumentParser(
         description="An example script that can be used to serialize and "
         "deserialize vLLM models. These models "
@@ -198,8 +198,16 @@ def parse_args():
     deserialize_parser.add_argument(
         "--path-to-tensors",
         type=str,
-        required=True,
+        required=False,
         help="The local path or S3 URI to the model tensors to deserialize. ")
+
+    deserialize_parser.add_argument(
+        "--serialized-directory",
+        type=str,
+        required=False,
+        help="Directory with model artifacts for loading. Assumes a "
+             "model.tensors file exists therein. Can supersede "
+             "--path-to-tensors.")
 
     deserialize_parser.add_argument(
         "--keyfile",
@@ -218,7 +226,7 @@ def parse_args():
 
     TensorizerArgs.add_cli_args(deserialize_parser)
 
-    return parser.parse_args()
+    return parser
 
 def merge_extra_config_with_tensorizer_config(extra_cfg: dict,
                                               cfg: TensorizerConfig):
@@ -271,7 +279,8 @@ def deserialize():
 
 
 if __name__ == '__main__':
-    args = parse_args()
+    parser = get_parser()
+    args = parser.parse_args()
 
     s3_access_key_id = (getattr(args, 's3_access_key_id', None)
                         or os.environ.get("S3_ACCESS_KEY_ID", None))
@@ -300,6 +309,16 @@ if __name__ == '__main__':
         extra_config = json.loads(args.model_loader_extra_config)
 
 
+    tensorizer_dir = args.serialized_directory or extra_config.get("tensorizer_dir")
+    tensorizer_uri = args.path_to_tensors or extra_config.get("tensorizer_uri")
+
+    if tensorizer_dir and tensorizer_uri:
+        parser.error("--serialized-directory and --path-to-tensors cannot both be provided")
+
+    if not tensorizer_dir and not tensorizer_uri:
+        parser.error("Either --serialized-directory or --path-to-tensors must be provided")
+
+
     if args.command == "serialize":
         eng_args_dict = {f.name: getattr(args, f.name) for f in
                         dataclasses.fields(EngineArgs)}
@@ -308,7 +327,7 @@ if __name__ == '__main__':
             argparse.Namespace(**eng_args_dict)
         )
 
-        input_dir = args.serialized_directory.rstrip('/')
+        input_dir = tensorizer_dir.rstrip('/')
         suffix = args.suffix if args.suffix else uuid.uuid4().hex
         base_path = f"{input_dir}/vllm/{model_ref}/{suffix}"
         if engine_args.tensor_parallel_size > 1:
