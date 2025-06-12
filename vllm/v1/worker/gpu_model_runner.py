@@ -558,9 +558,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                Optional[SpecDecodeMetadata]]:
         """
         :return: tuple[
-        attn_metadata: layer-to-attention_metadata mapping,
-        attention_cuda_graphs: whether attention can run in captured cudagraph
-        logits_indices, spec_decode_metadata
+            attn_metadata: layer-to-attention_metadata mapping,
+            attention_cuda_graphs: whether attention can run in cudagraph
+            logits_indices, spec_decode_metadata
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -684,7 +684,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         attn_metadata: dict[str, Any] = {}
-        attention_cuda_graphs = []
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -706,11 +705,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 common_prefix_len=common_prefix_len,
                 common_attn_metadata=common_attn_metadata,
             ))
-            attention_cuda_graphs.append(
-                builder.can_run_in_cudagraph(common_attn_metadata))
 
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
+
+        attention_cuda_graphs = all(
+            b.can_run_in_cudagraph(common_attn_metadata)
+            for b in self.attn_metadata_builders)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -740,8 +741,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return attn_metadata, all(
-            attention_cuda_graphs), logits_indices, spec_decode_metadata
+        return (attn_metadata, attention_cuda_graphs, logits_indices,
+                spec_decode_metadata)
 
     def _compute_cascade_attn_prefix_len(
         self,

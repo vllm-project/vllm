@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 @dataclass
 class CommonAttentionMetadata:
     """
-    Attention metadata attributes that can be shared by layers in different KV
-    cache groups and thus having different block table.
+    Per-batch attention metadata, shared across layers and backends.
+    AttentionMetadataBuilder instances use it to construct per-layer metadata.
     """
 
     query_start_loc: torch.Tensor
