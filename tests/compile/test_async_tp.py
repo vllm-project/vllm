@@ -223,7 +223,7 @@ def test_async_tp_pass_correctness(
         "VLLM_USE_V1": "1",
     }
 
-    aysnc_tp_args = [
+    async_tp_args = [
         *common_args,
         "--tensor-parallel-size",
         str(tp_size),
@@ -242,7 +242,7 @@ def test_async_tp_pass_correctness(
     ]
 
     compare_two_settings(model_id,
-                         aysnc_tp_args,
+                         async_tp_args,
                          tp_args,
                          async_tp_env,
                          tp_env,

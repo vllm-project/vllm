@@ -197,7 +197,7 @@ class EAGLE(nn.Module):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        # This implementation is incompitable with https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B
+        # This implementation is incompatible with https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B
         # due to missing lm_head weights and its config being that of a
         # Llama model. Here's a compatible version with the same weights:
         # https://huggingface.co/abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm

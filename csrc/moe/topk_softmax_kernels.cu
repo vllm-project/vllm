@@ -425,7 +425,7 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
 
 #define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB)                       \
     topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB>(         \
-        gating_output, nullptr, topk_weights, topk_indicies,            \
+        gating_output, nullptr, topk_weights, topk_indices,            \
         token_expert_indices, num_tokens, topk, 0, num_experts,         \
         stream);
 
@@ -433,7 +433,7 @@ template <typename IndType>
 void topkGatingSoftmaxKernelLauncher(
     const float* gating_output,
     float* topk_weights,
-    IndType* topk_indicies,
+    IndType* topk_indices,
     int* token_expert_indices,
     float* softmax_workspace,
     const int num_tokens,
@@ -476,7 +476,7 @@ void topkGatingSoftmaxKernelLauncher(
             moeSoftmax<TPB><<<num_tokens, TPB, 0, stream>>>(
                 gating_output, nullptr, softmax_workspace, num_experts);
             moeTopK<TPB><<<num_tokens, TPB, 0, stream>>>(
-                softmax_workspace, nullptr, topk_weights, topk_indicies, token_expert_indices,
+                softmax_workspace, nullptr, topk_weights, topk_indices, token_expert_indices,
                 num_experts, topk, 0, num_experts);
         }
     }
