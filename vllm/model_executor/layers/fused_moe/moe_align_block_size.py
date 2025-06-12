@@ -99,6 +99,7 @@ def moe_align_block_size_stage4(
 
 # Triton implementation based on:
 # https://github.com/sgl-project/sglang/commit/ba5112ff691d791a9e38c6c71f59324a5fcb49d0
+# TODO(wentao): Deprecated this function in the future.
 def moe_align_block_size_triton(
     topk_ids: torch.Tensor,
     num_experts: int,
@@ -214,28 +215,8 @@ def moe_align_block_size(
     num_tokens_post_pad = torch.empty((1),
                                       dtype=torch.int32,
                                       device=topk_ids.device)
-    if num_experts >= 224:
-        if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts != 256:
-            moe_align_block_size_triton(
-                topk_ids,
-                num_experts,
-                block_size,
-                sorted_ids,
-                expert_ids,
-                num_tokens_post_pad,
-            )
-        else:
-            # Currently requires num_experts=256
-            ops.sgl_moe_align_block_size(
-                topk_ids,
-                num_experts,
-                block_size,
-                sorted_ids,
-                expert_ids,
-                num_tokens_post_pad,
-            )
-    else:
-        ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
+
+    ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
                                  expert_ids, num_tokens_post_pad)
     if expert_map is not None:
         expert_ids = expert_map[expert_ids]

@@ -1518,6 +1518,7 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                                           num_tokens_post_pad)
 
 
+# TODO(wentao): Deprecate this function
 def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                              block_size: int, sorted_token_ids: torch.Tensor,
                              experts_ids: torch.Tensor,
