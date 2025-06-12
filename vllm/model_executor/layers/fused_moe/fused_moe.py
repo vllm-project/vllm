@@ -478,7 +478,7 @@ def prepare_scales(
     from vllm.utils import round_up
     max_num_tokens = round_up(a1.shape[0], 64)
     num_tokens, hidden_dim = a1.size()
-    topk = topk_ids.size(1)
+    #topk = topk_ids.size(1)
 
     tokens_per_expert = torch.zeros(num_experts,
                                     dtype=torch.int,
