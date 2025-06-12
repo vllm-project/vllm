@@ -330,6 +330,10 @@ class EagleProposer:
         self.attn_layer_names = list(draft_attn_layer_names)
 
         if supports_multimodal(target_model):
+            # handle multimodality
+            if hasattr(target_model.config, "image_token_index"):
+                self.model.config.image_token_index = (
+                    target_model.config.image_token_index)
             target_language_model = target_model.get_language_model()
         else:
             target_language_model = target_model
