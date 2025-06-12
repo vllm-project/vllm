@@ -678,7 +678,6 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         self.attn_type = attn_type
 
         self.lambda_full = None
-        # self.subln = nn.RMSNorm(2 * self.head_size, eps=1e-5, elementwise_affine=True)
         self.subln = self.differential_flash_attention_config["subln"]
 
     def split_heads(self, x):
@@ -705,9 +704,6 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         if (kv_cache.numel() > 0):
             if (key is not None) and (value is not None):
                 updated_slot_mapping = attn_metadata.slot_mapping
-                # previous_key_cache_sum = key_cache.sum()
-                # previous_value_cache_sum = value_cache.sum()
-
                 torch.ops._C_cache_ops.reshape_and_cache_flash(
                     key,
                     value,
@@ -718,12 +714,6 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                 )
-                # assert key_cache.sum() - previous_key_cache_sum == key.sum(), "key_cache sum mismatch"
-                # assert value_cache.sum() - previous_value_cache_sum == value.sum(), "value_cache sum mismatch"
-                # if key_cache.sum() - previous_key_cache_sum != key.sum():
-                #     print("key_cache sum mismatch")
-                # if value_cache.sum() - previous_value_cache_sum != value.sum():
-                #     print("value_cache sum mismatch")
 
     def forward_generate_kv_cache(
         self,
