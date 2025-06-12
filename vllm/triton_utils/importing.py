@@ -15,7 +15,8 @@ HAS_TRITON = (
 if HAS_TRITON:
     try:
         from triton.backends import backends
-        # It's generally expected that x.driver exists and has 
+
+        # It's generally expected that x.driver exists and has
         # an is_active method.
         # The `x.driver and` check adds a small layer of safety.
         active_drivers = [
@@ -26,25 +27,21 @@ if HAS_TRITON:
             logger.info(
                 "Triton is installed but %d active driver(s) found "
                 "(expected 1). Disabling Triton to prevent runtime errors.",
-                len(active_drivers)
-            )
+                len(active_drivers))
             HAS_TRITON = False
     except ImportError:
-        # This can occur if Triton is partially installed or triton.backends 
+        # This can occur if Triton is partially installed or triton.backends
         # is missing.
         logger.warning(
             "Triton is installed, but `triton.backends` could not be imported. "
-            "Disabling Triton."
-        )
+            "Disabling Triton.")
         HAS_TRITON = False
     except Exception as e:
         # Catch any other unexpected errors during the check.
         logger.warning(
             "An unexpected error occurred while checking Triton active drivers:"
-            " %s. Disabling Triton.", e
-        )
+            " %s. Disabling Triton.", e)
         HAS_TRITON = False
-        
 
 if not HAS_TRITON:
     logger.info("Triton not installed or not compatible; certain GPU-related"
