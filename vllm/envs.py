@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
-    VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
@@ -319,11 +318,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda:
     (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT", "True").lower() in
      ("true", "1")),
-
-    # use quantized q,k,v,softmax(qk^T), attn output during prefill
-    "VLLM_USE_ROCM_FP8_FLASH_ATTN":
-    lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
-             ("true", "1")),
 
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
