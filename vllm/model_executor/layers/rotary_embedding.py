@@ -703,7 +703,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
-    def forward(
+    def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
@@ -711,7 +711,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        # print(f"query: {query.shape}, key: {key.shape}, positions: {positions.shape}, cos_sin_cache: {self.cos_sin_cache.shape}, rotary_dim: {self.rotary_dim}")
         query_rot = query[..., :self.rotary_dim]
         key_rot = key[..., :self.rotary_dim]
         if self.rotary_dim < self.head_size:
@@ -742,7 +741,49 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         else:
             query = query_rot
             key = key_rot
-        # print(f"query is {query.shape}, key is {key.shape}")
+        return query, key
+
+    def forward_hpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from habana_frameworks.torch.hpex.kernels import (
+            RotaryPosEmbeddingMode, apply_rotary_pos_emb)
+        """PyTorch-native implementation equivalent to forward()."""
+        query_rot = query[..., :self.rotary_dim]
+        key_rot = key[..., :self.rotary_dim]
+        if self.rotary_dim < self.head_size:
+            query_pass = query[..., self.rotary_dim:]
+            key_pass = key[..., self.rotary_dim:]
+
+        self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(
+            positions.device)
+        cos_sin = self.cos_sin_cache[torch.add(positions, offsets)
+                                     if offsets is not None else positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        rope_mode: RotaryPosEmbeddingMode
+        if self.is_neox_style:
+            rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
+            # NOTE(woosuk): Here we assume that the positions tensor has the
+            # shape [batch_size, seq_len].
+            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
+            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+        else:
+            rope_mode = RotaryPosEmbeddingMode.PAIRWISE
+            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
+            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        query_rot = apply_rotary_pos_emb(query_rot, cos, sin, None, 0, rope_mode)
+        key_rot = apply_rotary_pos_emb(key_rot, cos, sin, None, 0, rope_mode)
+
+        if self.rotary_dim < self.head_size:
+            query = torch.cat((query_rot, query_pass), dim=-1)
+            key = torch.cat((key_rot, key_pass), dim=-1)
+        else:
+            query = query_rot
+            key = key_rot
         return query, key
 
 
