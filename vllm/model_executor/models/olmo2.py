@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/olmo2/modeling_olmo2.py
@@ -23,8 +24,9 @@
 # limitations under the License.
 """Inference-only OLMo2 model compatible with HuggingFace weights."""
 
+from collections.abc import Iterable
 from functools import partial
-from typing import Iterable, Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -48,8 +50,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
-    is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
-    make_layers, maybe_prefix)
+    AutoWeightsLoader, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -135,12 +137,12 @@ class Olmo2Attention(nn.Module):
         )
 
     def _apply_qk_norm(self, q: torch.Tensor,
-                       k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+                       k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
             k = tensor_model_parallel_all_gather(k.contiguous())
-        q = self.q_norm.forward_native(q)
-        k = self.k_norm.forward_native(k)
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         if self.tp_size > 1:
             splitter = partial(split_tensor_along_last_dim,
                                num_partitions=self.tp_size)
@@ -313,6 +315,44 @@ class Olmo2Model(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            if is_pp_missing_parameter(name, self):
+                continue
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader  # type: ignore
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class Olmo2ForCausalLM(nn.Module, SupportsPP):
     """
@@ -365,48 +405,10 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            # With tie_word_embeddings, we can skip lm_head.weight
-            # The weight might appear unnecessarily in the files if the model is
-            # processed with quantization, LoRA, fine-tuning, etc.
-            if self.config.tie_word_embeddings and "lm_head.weight" in name:
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader  # type: ignore
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head.weight"]
+                           if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)

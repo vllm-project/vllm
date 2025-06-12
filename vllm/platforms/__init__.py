@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
 import traceback
@@ -42,7 +43,6 @@ def tpu_platform_plugin() -> Optional[str]:
         logger.debug("Confirmed TPU platform is available.")
     except Exception as e:
         logger.debug("TPU platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.tpu.TpuPlatform" if is_tpu else None
 
@@ -112,7 +112,6 @@ def rocm_platform_plugin() -> Optional[str]:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
         logger.debug("ROCm platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
@@ -130,7 +129,6 @@ def hpu_platform_plugin() -> Optional[str]:
                          "habana_frameworks is not found.")
     except Exception as e:
         logger.debug("HPU platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.hpu.HpuPlatform" if is_hpu else None
 
@@ -148,7 +146,6 @@ def xpu_platform_plugin() -> Optional[str]:
             logger.debug("Confirmed XPU platform is available.")
     except Exception as e:
         logger.debug("XPU platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
 
@@ -170,23 +167,31 @@ def cpu_platform_plugin() -> Optional[str]:
 
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
-        pass
 
     return "vllm.platforms.cpu.CpuPlatform" if is_cpu else None
 
 
 def neuron_platform_plugin() -> Optional[str]:
-    is_neuron = False
+    tnx_installed = False
+    nxd_installed = False
     logger.debug("Checking if Neuron platform is available.")
     try:
         import transformers_neuronx  # noqa: F401
-        is_neuron = True
+        tnx_installed = True
         logger.debug("Confirmed Neuron platform is available because"
                      " transformers_neuronx is found.")
-    except ImportError as e:
-        logger.debug("Neuron platform is not available because: %s", str(e))
+    except ImportError:
         pass
 
+    try:
+        import neuronx_distributed_inference  # noqa: F401
+        nxd_installed = True
+        logger.debug("Confirmed Neuron platform is available because"
+                     " neuronx_distributed_inference is found.")
+    except ImportError:
+        pass
+
+    is_neuron = tnx_installed or nxd_installed
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
 

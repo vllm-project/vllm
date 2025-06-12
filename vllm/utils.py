@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -15,10 +16,10 @@ import importlib.metadata
 import importlib.util
 import inspect
 import ipaddress
+import json
 import multiprocessing
 import os
 import pickle
-import re
 import signal
 import socket
 import subprocess
@@ -33,11 +34,12 @@ import uuid
 import warnings
 import weakref
 from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError)
+                      ArgumentTypeError, RawDescriptionHelpFormatter,
+                      _ArgumentGroup)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
-from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
-                             Iterable, Iterator, KeysView, Mapping)
+from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
+                             Hashable, Iterable, Iterator, KeysView, Mapping)
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
@@ -53,6 +55,7 @@ import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
+import regex as re
 import torch
 import torch.types
 import yaml
@@ -70,13 +73,21 @@ import vllm.triton_utils  # noqa: F401
 from vllm.logger import enable_trace_function_call, init_logger
 
 if TYPE_CHECKING:
+    from argparse import Namespace
+
     from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
+# This value is chosen to have a balance between ITL and TTFT. Note it is
+# not optimized for throughput.
+DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
+MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
+
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/features/compatibility_matrix.md
+# Reminder: Please update docs/features/compatibility_matrix.md
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
@@ -97,7 +108,7 @@ STR_NOT_IMPL_ENC_DEC_LOGIT_SOFTCAP = (
     "currently not supported for encoder/decoder "
     "models.")
 
-STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is currently not currently "
+STR_NOT_IMPL_ENC_DEC_LORA = ("LoRA is not currently "
                              "supported with encoder/decoder "
                              "models.")
 
@@ -151,6 +162,7 @@ STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
 STR_ROCM_FLASH_ATTN_VAL: str = "ROCM_FLASH"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
+STR_DUAL_CHUNK_FLASH_ATTN_VAL: str = "DUAL_CHUNK_FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
 
 GB_bytes = 1_000_000_000
@@ -309,8 +321,8 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         """
         Gets the cumulative number of hits and queries against this cache.
 
-        If :code:`delta=True`, instead gets these statistics
-        since the last call that also passed :code:`delta=True`.
+        If `delta=True`, instead gets these statistics
+        since the last call that also passed `delta=True`.
         """
         info = CacheInfo(hits=self._hits, total=self._total)
 
@@ -610,6 +622,10 @@ def is_valid_ipv6_address(address: str) -> bool:
 
 
 def get_distributed_init_method(ip: str, port: int) -> str:
+    return get_tcp_uri(ip, port)
+
+
+def get_tcp_uri(ip: str, port: int) -> str:
     # Brackets are not permitted in ipv4 addresses,
     # see https://github.com/python/cpython/issues/103848
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
@@ -704,6 +720,13 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
+def next_power_of_2(n) -> int:
+    """The next power of 2 (inclusive)"""
+    if n < 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
 def round_up(x: int, y: int) -> int:
     return ((x + y - 1) // y) * y
 
@@ -737,16 +760,15 @@ def get_kv_cache_torch_dtype(
         model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
-            if isinstance(model_dtype, str):
+            if isinstance(model_dtype,
+                          str) and model_dtype in STR_DTYPE_TO_TORCH_DTYPE:
                 torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
             elif isinstance(model_dtype, torch.dtype):
                 torch_dtype = model_dtype
             else:
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
-        elif cache_dtype in ["half", "bfloat16", "float"]:
+        elif cache_dtype in STR_DTYPE_TO_TORCH_DTYPE:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype == "fp8":
-            torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     elif isinstance(cache_dtype, torch.dtype):
@@ -877,6 +899,7 @@ class DeviceMemoryProfiler:
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
         from vllm.platforms import current_platform
+        gc.collect()
         return current_platform.get_current_memory_usage(self.device)
 
     def __enter__(self):
@@ -958,6 +981,53 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
+# bool = 0, int = 1, float = 2, complex = 3
+def _get_precision_level(dtype: torch.dtype) -> int:
+    # NOTE: Complex dtypes return `is_floating_point=False`
+    return ((dtype != torch.bool) + dtype.is_floating_point +
+            dtype.is_complex * 2)
+
+
+def is_lossless_cast(src_dtype: torch.dtype, tgt_dtype: torch.dtype):
+    """
+    Test whether it is lossless to cast a tensor from
+    `src_dtype` to `tgt_dtype`.
+    """
+    if src_dtype == tgt_dtype:
+        return True
+
+    src_level = _get_precision_level(src_dtype)
+    tgt_level = _get_precision_level(tgt_dtype)
+
+    if src_level < tgt_level:
+        return True
+    if src_level > tgt_level:
+        return False
+
+    # Compare integral types
+    if not src_dtype.is_floating_point and not src_dtype.is_complex:
+        src_info = torch.iinfo(src_dtype)
+        tgt_info = torch.iinfo(tgt_dtype)
+        return src_info.min >= tgt_info.min and src_info.max <= tgt_info.max
+
+    # Compare floating-point types
+    src_info = torch.finfo(src_dtype)
+    tgt_info = torch.finfo(tgt_dtype)
+    return (src_info.min >= tgt_info.min and src_info.max <= tgt_info.max
+            and src_info.resolution >= tgt_info.resolution)
+
+
+def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
+    """
+    Get the common `dtype` where all of the other `dtypes` can be
+    cast to it without losing any information.
+    """
+    return max(
+        dtypes,
+        key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
+    )
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -983,7 +1053,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
     """
-    Unlike :class:`itertools.groupby`, groups are not broken by
+    Unlike [`itertools.groupby`][], groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)
@@ -1302,7 +1372,8 @@ class StoreBoolean(Action):
                              "Expected 'true' or 'false'.")
 
 
-class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
+class SortedHelpFormatter(ArgumentDefaultsHelpFormatter,
+                          RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
 
     def _split_lines(self, text, width):
@@ -1326,13 +1397,51 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter):
 class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
+    _deprecated: set[Action] = set()
+
     def __init__(self, *args, **kwargs):
         # Set the default 'formatter_class' to SortedHelpFormatter
         if 'formatter_class' not in kwargs:
             kwargs['formatter_class'] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
 
-    def parse_args(self, args=None, namespace=None):
+    if sys.version_info < (3, 13):
+        # Enable the deprecated kwarg for Python 3.12 and below
+
+        def parse_known_args(self, args=None, namespace=None):
+            namespace, args = super().parse_known_args(args, namespace)
+            for action in FlexibleArgumentParser._deprecated:
+                if (hasattr(namespace, dest := action.dest)
+                        and getattr(namespace, dest) != action.default):
+                    logger.warning_once("argument '%s' is deprecated", dest)
+            return namespace, args
+
+        def add_argument(self, *args, **kwargs):
+            deprecated = kwargs.pop("deprecated", False)
+            action = super().add_argument(*args, **kwargs)
+            if deprecated:
+                FlexibleArgumentParser._deprecated.add(action)
+            return action
+
+        class _FlexibleArgumentGroup(_ArgumentGroup):
+
+            def add_argument(self, *args, **kwargs):
+                deprecated = kwargs.pop("deprecated", False)
+                action = super().add_argument(*args, **kwargs)
+                if deprecated:
+                    FlexibleArgumentParser._deprecated.add(action)
+                return action
+
+        def add_argument_group(self, *args, **kwargs):
+            group = self._FlexibleArgumentGroup(self, *args, **kwargs)
+            self._action_groups.append(group)
+            return group
+
+    def parse_args(  # type: ignore[override]
+        self,
+        args: list[str] | None = None,
+        namespace: Namespace | None = None,
+    ):
         if args is None:
             args = sys.argv[1:]
 
@@ -1349,23 +1458,84 @@ class FlexibleArgumentParser(ArgumentParser):
         if '--config' in args:
             args = self._pull_args_from_config(args)
 
+        def repl(match: re.Match) -> str:
+            """Replaces underscores with dashes in the matched string."""
+            return match.group(0).replace("_", "-")
+
+        # Everything between the first -- and the first .
+        pattern = re.compile(r"(?<=--)[^\.]*")
+
         # Convert underscores to dashes and vice versa in argument names
-        processed_args = []
+        processed_args = list[str]()
         for arg in args:
             if arg.startswith('--'):
                 if '=' in arg:
                     key, value = arg.split('=', 1)
-                    key = '--' + key[len('--'):].replace('_', '-')
+                    key = pattern.sub(repl, key, count=1)
                     processed_args.append(f'{key}={value}')
                 else:
-                    processed_args.append('--' +
-                                          arg[len('--'):].replace('_', '-'))
+                    key = pattern.sub(repl, arg, count=1)
+                    processed_args.append(key)
             elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
                 # allow -O flag to be used without space, e.g. -O3
                 processed_args.append('-O')
                 processed_args.append(arg[2:])
             else:
                 processed_args.append(arg)
+
+        def create_nested_dict(keys: list[str], value: str) -> dict[str, Any]:
+            """Creates a nested dictionary from a list of keys and a value.
+
+            For example, `keys = ["a", "b", "c"]` and `value = 1` will create:
+            `{"a": {"b": {"c": 1}}}`
+            """
+            nested_dict: Any = value
+            for key in reversed(keys):
+                nested_dict = {key: nested_dict}
+            return nested_dict
+
+        def recursive_dict_update(
+            original: dict[str, Any],
+            update: dict[str, Any],
+        ):
+            """Recursively updates a dictionary with another dictionary."""
+            for k, v in update.items():
+                if isinstance(v, dict) and isinstance(original.get(k), dict):
+                    recursive_dict_update(original[k], v)
+                else:
+                    original[k] = v
+
+        delete = set[int]()
+        dict_args = defaultdict[str, dict[str, Any]](dict)
+        for i, processed_arg in enumerate(processed_args):
+            if processed_arg.startswith("--") and "." in processed_arg:
+                if "=" in processed_arg:
+                    processed_arg, value_str = processed_arg.split("=", 1)
+                    if "." not in processed_arg:
+                        # False positive, . was only in the value
+                        continue
+                else:
+                    value_str = processed_args[i + 1]
+                    delete.add(i + 1)
+
+                key, *keys = processed_arg.split(".")
+                try:
+                    value = json.loads(value_str)
+                except json.decoder.JSONDecodeError:
+                    value = value_str
+
+                # Merge all values with the same key into a single dict
+                arg_dict = create_nested_dict(keys, value)
+                recursive_dict_update(dict_args[key], arg_dict)
+                delete.add(i)
+        # Filter out the dict args we set to None
+        processed_args = [
+            a for i, a in enumerate(processed_args) if i not in delete
+        ]
+        # Add the dict args back as if they were originally passed as JSON
+        for dict_arg, dict_value in dict_args.items():
+            processed_args.append(dict_arg)
+            processed_args.append(json.dumps(dict_value))
 
         return super().parse_args(processed_args, namespace)
 
@@ -1773,14 +1943,6 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
-def is_in_doc_build() -> bool:
-    try:
-        from sphinx.ext.autodoc.mock import _MockModule
-        return isinstance(torch, _MockModule)
-    except ModuleNotFoundError:
-        return False
-
-
 def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     """
     Import a Python file according to its file path.
@@ -1820,9 +1982,10 @@ class _PlaceholderBase:
     Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
-    :meth:`__getattr__` is not called when they are accessed.
+    [`__getattr__`][vllm.utils._PlaceholderBase.__getattr__]
+    is not called when they are accessed.
 
-    See also:
+    Info:
         [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
     """
 
@@ -2052,9 +2215,6 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if is_in_doc_build():
-        return
-
     if not supports_custom_op():
         from vllm.platforms import current_platform
         assert not current_platform.is_cuda_alike(), (
@@ -2118,6 +2278,8 @@ def kill_process_tree(pid: int):
 class MemorySnapshot:
     """Memory snapshot."""
     torch_peak: int = 0
+    free_memory: int = 0
+    total_memory: int = 0
     cuda_memory: int = 0
     torch_memory: int = 0
     non_torch_memory: int = 0
@@ -2137,8 +2299,8 @@ class MemorySnapshot:
         self.torch_peak = torch.cuda.memory_stats().get(
             "allocated_bytes.all.peak", 0)
 
-        self.cuda_memory = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+        self.free_memory, self.total_memory = torch.cuda.mem_get_info()
+        self.cuda_memory = self.total_memory - self.free_memory
 
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
@@ -2151,6 +2313,8 @@ class MemorySnapshot:
     def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
+            free_memory=self.free_memory - other.free_memory,
+            total_memory=self.total_memory - other.total_memory,
             cuda_memory=self.cuda_memory - other.cuda_memory,
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
@@ -2171,6 +2335,16 @@ class MemoryProfilingResult:
     before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
+
+    def __repr__(self) -> str:
+        return (f"Memory profiling takes {self.profile_time:.2f} seconds. "
+                f"Total non KV cache memory: "
+                f"{(self.non_kv_cache_memory / GiB_bytes):.2f}GiB; "
+                f"torch peak memory increase: "
+                f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB; "
+                f"non-torch forward increase memory: "
+                f"{(self.non_torch_increase / GiB_bytes):.2f}GiB; "
+                f"weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB.")
 
 
 @contextlib.contextmanager
@@ -2300,6 +2474,24 @@ def split_zmq_path(path: str) -> Tuple[str, str, str]:
     return scheme, host, port
 
 
+def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
+    """Make a ZMQ path from its parts.
+
+    Args:
+        scheme: The ZMQ transport scheme (e.g. tcp, ipc, inproc).
+        host: The host - can be an IPv4 address, IPv6 address, or hostname.
+        port: Optional port number, only used for TCP sockets.
+
+    Returns:
+        A properly formatted ZMQ path string.
+    """
+    if port is None:
+        return f"{scheme}://{host}"
+    if is_valid_ipv6_address(host):
+        return f"{scheme}://[{host}]:{port}"
+    return f"{scheme}://{host}:{port}"
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
@@ -2307,6 +2499,7 @@ def make_zmq_socket(
     socket_type: Any,
     bind: Optional[bool] = None,
     identity: Optional[bytes] = None,
+    linger: Optional[int] = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2326,7 +2519,7 @@ def make_zmq_socket(
         buf_size = -1  # Use system default buffer size
 
     if bind is None:
-        bind = socket_type != zmq.PUSH
+        bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
 
     if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.RCVHWM, 0)
@@ -2338,6 +2531,9 @@ def make_zmq_socket(
 
     if identity is not None:
         socket.setsockopt(zmq.IDENTITY, identity)
+
+    if linger is not None:
+        socket.setsockopt(zmq.LINGER, linger)
 
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
@@ -2410,7 +2606,7 @@ def _maybe_force_spawn():
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-            "See https://docs.vllm.ai/en/latest/getting_started/"
+            "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
             "for more information. Reason: %s", reason)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -2675,14 +2871,17 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
 
 # Only relevant for models using ALiBi (e.g, MPT)
 def check_use_alibi(model_config: ModelConfig) -> bool:
-    return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
+    cfg = model_config.hf_text_config
+    return (getattr(cfg, "alibi", False)  # Falcon
             or ("BloomForCausalLM" in getattr(model_config.hf_config,
                                               "architectures", []))  # Bloom
-            or getattr(model_config.hf_text_config, "position_encoding_type",
-                       "") == "alibi"  # codellm_1b_alibi
-            or
-            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
-             and model_config.hf_text_config.attn_config.get("alibi", False)))
+            or getattr(cfg, "position_encoding_type", "") ==
+            "alibi"  # codellm_1b_alibi
+            or (hasattr(cfg, "attn_config")  # MPT
+                and ((isinstance(cfg.attn_config, dict)
+                      and cfg.attn_config.get("alibi", False)) or
+                     (not isinstance(cfg.attn_config, dict)
+                      and getattr(cfg.attn_config, "alibi", False)))))
 
 
 def sha256(input) -> int:

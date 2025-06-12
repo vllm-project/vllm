@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PyTorch MAMBA2 model."""
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -31,11 +33,11 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-KVCache = Tuple[torch.Tensor, torch.Tensor]
+KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
 class Mamba2DecoderLayer(nn.Module):
@@ -142,7 +144,6 @@ class Mamba2Model(nn.Module):
 
         mamba2_metadata = prepare_mamba2_metadata(
             chunk_size=self.config.chunk_size,
-            input_ids=input_ids,
             attn_metadata=attn_metadata,
         )
 
@@ -166,6 +167,27 @@ class Mamba2Model(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
 
         return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            if "A_log" in name:
+                name = name.replace("A_log", "A")
+
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
+                continue
+
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree,
@@ -242,7 +264,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree,
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def _get_mamba_cache_shape(
-            self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+            self) -> tuple[tuple[int, int], tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
 
         conv_state_shape, temporal_state_shape = None, None
@@ -280,23 +302,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree,
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if "A_log" in name:
-                name = name.replace("A_log", "A")
-
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

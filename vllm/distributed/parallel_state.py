@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2023 The vLLM team.
 # Adapted from
@@ -29,7 +30,7 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 from unittest.mock import patch
 
 import torch
@@ -41,8 +42,8 @@ from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.utils import (direct_register_custom_op, resolve_obj_by_qualname,
-                        supports_custom_op)
+from vllm.utils import (direct_register_custom_op, get_distributed_init_method,
+                        resolve_obj_by_qualname, supports_custom_op)
 
 
 @dataclass
@@ -54,15 +55,15 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 
 def _split_tensor_dict(
-    tensor_dict: Dict[str, Union[torch.Tensor, Any]]
-) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
+    tensor_dict: dict[str, Union[torch.Tensor, Any]]
+) -> tuple[list[tuple[str, Any]], list[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
          by its metadata.
     2. A list of tensors.
     """
-    metadata_list: List[Tuple[str, Any]] = []
-    tensor_list: List[torch.Tensor] = []
+    metadata_list: list[tuple[str, Any]] = []
+    tensor_list: list[torch.Tensor] = []
     for key, value in tensor_dict.items():
         if isinstance(value, torch.Tensor):
             # Note: we cannot use `value.device` here,
@@ -78,7 +79,7 @@ def _split_tensor_dict(
     return metadata_list, tensor_list
 
 
-_group_name_counter: Dict[str, int] = {}
+_group_name_counter: dict[str, int] = {}
 
 
 def _get_unique_name(name: str) -> str:
@@ -94,7 +95,7 @@ def _get_unique_name(name: str) -> str:
     return newname
 
 
-_groups: Dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
+_groups: dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
 
 
 def _register_group(group: "GroupCoordinator") -> None:
@@ -119,7 +120,7 @@ def reduce_scatter(tensor: torch.Tensor, dim: int, world_size: int,
     group = _groups[group_name]()
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
-    return group.reduce_scatter(tensor, dim)
+    return group._reduce_scatter_out_place(tensor, dim)
 
 
 def reduce_scatter_fake(tensor: torch.Tensor, dim: int, world_size: int,
@@ -135,7 +136,7 @@ def all_gather(tensor: torch.Tensor, dim: int, world_size: int,
     group = _groups[group_name]()
     if group is None:
         raise ValueError(f"Group {group_name} is destroyed.")
-    return group.all_gather(tensor, dim)
+    return group._all_gather_out_place(tensor, dim)
 
 
 def all_gather_fake(tensor: torch.Tensor, dim: int, world_size: int,
@@ -160,6 +161,7 @@ if supports_custom_op():
         op_func=reduce_scatter,
         mutates_args=[],
         fake_impl=reduce_scatter_fake,
+        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
@@ -167,6 +169,7 @@ if supports_custom_op():
         op_func=all_gather,
         mutates_args=[],
         fake_impl=all_gather_fake,
+        dispatch_key=current_platform.dispatch_key,
     )
 
 
@@ -182,7 +185,7 @@ class GroupCoordinator:
 
     # available attributes:
     rank: int  # global rank
-    ranks: List[int]  # global ranks in the group
+    ranks: list[int]  # global ranks in the group
     world_size: int  # size of the group
     # difference between `local_rank` and `rank_in_group`:
     # if we have a group of size 4 across two nodes:
@@ -201,7 +204,7 @@ class GroupCoordinator:
 
     def __init__(
         self,
-        group_ranks: List[List[int]],
+        group_ranks: list[list[int]],
         local_rank: int,
         torch_distributed_backend: Union[str, Backend],
         use_device_communicator: bool,
@@ -366,6 +369,16 @@ class GroupCoordinator:
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
+        if self.use_custom_op_call:
+            return torch.ops.vllm.all_gather(input_,
+                                             dim,
+                                             world_size,
+                                             group_name=self.unique_name)
+        else:
+            return self._all_gather_out_place(input_, dim)
+
+    def _all_gather_out_place(self, input_: torch.Tensor,
+                              dim: int) -> torch.Tensor:
         return self.device_communicator.all_gather(input_, dim)
 
     def reduce_scatter(self,
@@ -378,6 +391,16 @@ class GroupCoordinator:
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
 
+        if self.use_custom_op_call:
+            return torch.ops.vllm.reduce_scatter(input_,
+                                                 dim,
+                                                 world_size,
+                                                 group_name=self.unique_name)
+        else:
+            return self._reduce_scatter_out_place(input_, dim)
+
+    def _reduce_scatter_out_place(self, input_: torch.Tensor,
+                                  dim: int) -> torch.Tensor:
         return self.device_communicator.reduce_scatter(input_, dim)
 
     def gather(self,
@@ -435,7 +458,7 @@ class GroupCoordinator:
             return recv[0]
 
     def broadcast_object_list(self,
-                              obj_list: List[Any],
+                              obj_list: list[Any],
                               src: int = 0,
                               group: Optional[ProcessGroup] = None):
         """Broadcast the input object list.
@@ -518,11 +541,11 @@ class GroupCoordinator:
 
     def broadcast_tensor_dict(
         self,
-        tensor_dict: Optional[Dict[str, Union[torch.Tensor, Any]]] = None,
+        tensor_dict: Optional[dict[str, Union[torch.Tensor, Any]]] = None,
         src: int = 0,
         group: Optional[ProcessGroup] = None,
         metadata_group: Optional[ProcessGroup] = None
-    ) -> Optional[Dict[str, Union[torch.Tensor, Any]]]:
+    ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
         """Broadcast the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -536,7 +559,7 @@ class GroupCoordinator:
 
         rank_in_group = self.rank_in_group
         if rank_in_group == src:
-            metadata_list: List[Tuple[Any, Any]] = []
+            metadata_list: list[tuple[Any, Any]] = []
             assert isinstance(
                 tensor_dict,
                 dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
@@ -603,10 +626,10 @@ class GroupCoordinator:
 
     def send_tensor_dict(
         self,
-        tensor_dict: Dict[str, Union[torch.Tensor, Any]],
+        tensor_dict: dict[str, Union[torch.Tensor, Any]],
         dst: Optional[int] = None,
         all_gather_group: Optional["GroupCoordinator"] = None,
-    ) -> Optional[Dict[str, Union[torch.Tensor, Any]]]:
+    ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
         """Send the input tensor dictionary.
         NOTE: `dst` is the local rank of the source rank.
         """
@@ -626,7 +649,7 @@ class GroupCoordinator:
             dst = (self.rank_in_group + 1) % self.world_size
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
-        metadata_list: List[Tuple[Any, Any]] = []
+        metadata_list: list[tuple[Any, Any]] = []
         assert isinstance(
             tensor_dict,
             dict), f"Expecting a dictionary, got {type(tensor_dict)}"
@@ -661,7 +684,7 @@ class GroupCoordinator:
         self,
         src: Optional[int] = None,
         all_gather_group: Optional["GroupCoordinator"] = None,
-    ) -> Optional[Dict[str, Union[torch.Tensor, Any]]]:
+    ) -> Optional[dict[str, Union[torch.Tensor, Any]]]:
         """Recv the input tensor dictionary.
         NOTE: `src` is the local rank of the source rank.
         """
@@ -682,7 +705,7 @@ class GroupCoordinator:
         assert src < self.world_size, f"Invalid src rank ({src})"
 
         recv_metadata_list = self.recv_object(src=src)
-        tensor_dict: Dict[str, Any] = {}
+        tensor_dict: dict[str, Any] = {}
         for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
@@ -757,6 +780,26 @@ class GroupCoordinator:
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
+    def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
+        if self.device_communicator is not None:
+            self.device_communicator.prepare_communication_buffer_for_model(
+                model)
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.device_communicator is not None:
+            return self.device_communicator.dispatch(hidden_states,
+                                                     router_logits)
+        else:
+            return hidden_states, router_logits
+
+    def combine(self, hidden_states) -> torch.Tensor:
+        if self.device_communicator is not None:
+            return self.device_communicator.combine(hidden_states)
+        else:
+            return hidden_states
+
 
 _WORLD: Optional[GroupCoordinator] = None
 
@@ -766,7 +809,7 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
-def init_world_group(ranks: List[int], local_rank: int,
+def init_world_group(ranks: list[int], local_rank: int,
                      backend: str) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
@@ -778,7 +821,7 @@ def init_world_group(ranks: List[int], local_rank: int,
 
 
 def init_model_parallel_group(
-    group_ranks: List[List[int]],
+    group_ranks: list[list[int]],
     local_rank: int,
     backend: str,
     use_message_queue_broadcaster: bool = False,
@@ -814,6 +857,14 @@ _DP: Optional[GroupCoordinator] = None
 def get_dp_group() -> GroupCoordinator:
     assert _DP is not None, ("data parallel group is not initialized")
     return _DP
+
+
+_EP: Optional[GroupCoordinator] = None
+
+
+def get_ep_group() -> GroupCoordinator:
+    assert _EP is not None, ("expert parallel group is not initialized")
+    return _EP
 
 
 def get_pp_group() -> GroupCoordinator:
@@ -879,7 +930,7 @@ def init_distributed_environment(
         world_size = parallel_config.world_size_across_dp
         ip = parallel_config.data_parallel_master_ip
         port = parallel_config.get_next_dp_init_port()
-        distributed_init_method = f"tcp://{ip}:{port}"  # noqa
+        distributed_init_method = get_distributed_init_method(ip, port)
         logger.info(
             "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
             world_size, rank, distributed_init_method)
@@ -1001,10 +1052,21 @@ def initialize_model_parallel(
                                     backend,
                                     group_name="dp")
 
+    global _EP
+    assert _EP is None, ("expert parallel group is already initialized")
+    group_ranks = all_ranks.transpose(1, 2).reshape(
+        -1, data_parallel_size * tensor_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _EP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="ep")
+
     logger.info(
         "rank %s in world size %s is assigned as "
-        "DP rank %s, PP rank %s, TP rank %s", rank, world_size,
-        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group)
+        "DP rank %s, PP rank %s, TP rank %s, EP rank %s", rank, world_size,
+        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
+        _EP.rank_in_group)
 
 
 def ensure_model_parallel_initialized(
@@ -1033,6 +1095,23 @@ def ensure_model_parallel_initialized(
         "pipeline parallel group already initialized, but of unexpected size: "
         f"{pp_world_size=} vs. "
         f"{pipeline_model_parallel_size=}")
+
+
+def prepare_communication_buffer_for_model(model: torch.nn.Module):
+    """Prepare the communication buffer for the model.
+    Traditional communication libraries like NCCL are almost
+    model agnostic. However, emerging new communication libraries like
+    MoE all2all (DeepEP) usually allocate the communication buffer
+    based on the model shape for optimal performance.
+    """
+    if _TP is not None:
+        _TP.prepare_communication_buffer_for_model(model)
+    if _PP is not None:
+        _PP.prepare_communication_buffer_for_model(model)
+    if _DP is not None:
+        _DP.prepare_communication_buffer_for_model(model)
+    if _EP is not None:
+        _EP.prepare_communication_buffer_for_model(model)
 
 
 def model_parallel_is_initialized():
@@ -1081,6 +1160,7 @@ def get_tensor_model_parallel_rank():
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP
+
     if _TP:
         _TP.destroy()
     _TP = None
@@ -1094,6 +1174,11 @@ def destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
+
+    global _EP
+    if _EP:
+        _EP.destroy()
+    _EP = None
 
 
 def destroy_distributed_environment():
@@ -1115,17 +1200,19 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         ray.shutdown()
     gc.collect()
     from vllm.platforms import current_platform
-    if not current_platform.is_cpu():
-        torch.cuda.empty_cache()
+    empty_cache = current_platform.empty_cache
+    if empty_cache is not None:
+        empty_cache()
     try:
-        torch._C._host_emptyCache()
+        if not current_platform.is_cpu():
+            torch._C._host_emptyCache()
     except AttributeError:
         logger.warning(
             "torch._C._host_emptyCache() only available in Pytorch >=2.5")
 
 
 def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
-                        source_rank: int = 0) -> List[bool]:
+                        source_rank: int = 0) -> list[bool]:
     """
     This is a collective operation that returns if each rank is in the same node
     as the source rank. It tests if processes are attached to the same

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 from unittest.mock import Mock
 
@@ -44,7 +45,7 @@ def create_scheduler(
                              (None)
 
     Returns:
-      :class:`Scheduler` instance
+      {class}`Scheduler` instance
     '''
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
@@ -96,7 +97,7 @@ def create_scheduler(
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
-        tensors={},
+        kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(block_size, 1, 1, torch.float32,
@@ -138,7 +139,6 @@ def create_requests(num_requests: int,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
             eos_token_id=EOS_TOKEN_ID,
-            arrival_time=0,
         )
         requests.append(request)
     return requests
@@ -744,7 +744,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert running_req.num_tokens_with_spec == 2 + len(spec_tokens[i])
 
     # No draft or accepted tokens counted yet
-    assert engine_core_outputs.scheduler_stats.spec_decoding_stats is None
+    assert not engine_core_outputs or (
+        engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None)
 
     # Schedule the speculated tokens for validation
     output = scheduler.schedule()
@@ -772,7 +773,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     engine_core_outputs = scheduler.update_from_output(output,
                                                        model_runner_output)
 
-    scheduler_stats = engine_core_outputs.scheduler_stats
+    scheduler_stats = engine_core_outputs[0].scheduler_stats \
+        if engine_core_outputs else None
     if expected[0] == 0:
         assert scheduler_stats.spec_decoding_stats is None
     else:
@@ -812,10 +814,11 @@ def _assert_right_kv_cache_manager(
     # Make sure the request stats are right.
     EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
     for req_id in req_ids:
-        blocks = scheduler.kv_cache_manager.req_to_blocks[req_id]
+        blocks = (scheduler.kv_cache_manager.coordinator.
+                  single_type_managers[0].req_to_blocks[req_id])
         hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
-        assert (scheduler.kv_cache_manager.num_cached_block[req_id] ==
-                EXPECTED_TOTAL_BLOCKS)
+        assert (scheduler.kv_cache_manager.coordinator.single_type_managers[0].
+                num_cached_block[req_id] == EXPECTED_TOTAL_BLOCKS)
         assert len(blocks) == EXPECTED_TOTAL_BLOCKS
         assert len(hashes) == EXPECTED_TOTAL_BLOCKS
 
@@ -842,7 +845,7 @@ def _step_until_done(
             # We should be in the decode phase now.
             assert num_scheduled_tokens == 1
         assert len(output.kv_connector_metadata.requests) == 0
-        ecos = scheduler.update_from_output(output, model_runner_output)
+        ecos = scheduler.update_from_output(output, model_runner_output)[0]
         all_done = True
         for eco in ecos.outputs:
             if eco.finish_reason is None:
@@ -869,7 +872,7 @@ def test_kv_connector_basic():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     ######################################################
     # FIRST SET OF REQUESTS - External Hit Only
@@ -980,7 +983,7 @@ def test_kv_connector_unable_to_allocate():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     # Create two requests. The second request will not be able to
     # allocate slots because it will not have enough blocks.
@@ -1059,7 +1062,7 @@ def test_kv_connector_handles_preemption():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
     scheduler.connector.get_num_new_matched_tokens.return_value = (
-        NUM_MATCHED_NEW_TOKENS)
+        NUM_MATCHED_NEW_TOKENS, False)
 
     # Create two requests.
     # Both can be scheduled at first, but the second request
@@ -1195,9 +1198,11 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.encoder_cache_manager.cached) == 0
 
     # KVCache Manager.
-    assert len(scheduler.kv_cache_manager.req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
+               req_to_blocks) == 0
     assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
-    assert len(scheduler.kv_cache_manager.num_cached_block) == 0
+    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
+               num_cached_block) == 0
     num_free_blocks = (
         scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
     assert num_free_blocks == (

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 a simple demonstration of RLHF with vLLM, inspired by
 the OpenRLHF framework https://github.com/OpenRLHF/OpenRLHF .
@@ -12,6 +13,7 @@ inference instance. In practice, there could be multiple training instances
 and multiple inference instances. For the full implementation, please refer
 to the OpenRLHF framework.
 """
+
 import os
 
 import ray
@@ -26,7 +28,6 @@ from vllm.utils import get_ip, get_open_port
 
 
 class MyLLM(LLM):
-
     def __init__(self, *args, **kwargs):
         # a hack to make the script work.
         # stop ray from manipulating CUDA_VISIBLE_DEVICES
@@ -89,8 +90,7 @@ print("-" * 50)
 for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}\n"
-          f"Generated text: {generated_text!r}")
+    print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
     print("-" * 50)
 
 # set up the communication between the training process
@@ -98,11 +98,13 @@ for output in outputs:
 master_address = get_ip()
 master_port = get_open_port()
 
-handle = llm.collective_rpc.remote("init_weight_update_group",
-                                   args=(master_address, master_port, 1, 3))
+handle = llm.collective_rpc.remote(
+    "init_weight_update_group", args=(master_address, master_port, 1, 3)
+)
 
-model_update_group = stateless_init_process_group(master_address, master_port,
-                                                  0, 3, torch.device("cuda:0"))
+model_update_group = stateless_init_process_group(
+    master_address, master_port, 0, 3, torch.device("cuda:0")
+)
 ray.get(handle)
 
 # simulate training, modify the weights of the model.
@@ -111,8 +113,7 @@ for name, p in train_model.named_parameters():
 
 # sync weight from the training process to the inference engine.
 for name, p in train_model.named_parameters():
-    handle = llm.collective_rpc.remote("update_weight",
-                                       args=(name, p.dtype, p.shape))
+    handle = llm.collective_rpc.remote("update_weight", args=(name, p.dtype, p.shape))
     model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
     ray.get(handle)
 
@@ -126,6 +127,5 @@ print("-" * 50)
 for output in outputs_updated:
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}\n"
-          f"Generated text: {generated_text!r}")
+    print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
     print("-" * 50)

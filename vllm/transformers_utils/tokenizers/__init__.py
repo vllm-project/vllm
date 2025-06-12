@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .bitnet import BitnetTokenizer
 from .mistral import (MistralTokenizer, maybe_serialize_tool_calls,

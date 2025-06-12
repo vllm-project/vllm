@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 ###############################################################################
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
@@ -201,7 +202,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         Then, it calculate the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
 
-        .. tip::
+        Tip:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """

@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
+from vllm.logger import init_logger
+
 from .base_device_communicator import DeviceCommunicatorBase
+
+logger = init_logger(__name__)
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
@@ -23,7 +29,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             from vllm.distributed.parallel_state import (
                 _ENABLE_CUSTOM_ALL_REDUCE)
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
-        use_pynccl = True
+
+        # ep does not use pynccl
+        use_pynccl = "ep" not in unique_name
 
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
@@ -48,6 +56,27 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
             )
+
+        if self.use_all2all:
+            all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+            if all2all_backend == "naive":
+                from .all2all import NaiveAll2AllManager
+                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
+                logger.info("Using naive all2all manager.")
+            elif all2all_backend == "pplx":
+                from .all2all import PPLXAll2AllManager
+                self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
+                logger.info("Using PPLX all2all manager.")
+            elif all2all_backend == "deepep_high_throughput":
+                from .all2all import DeepEPHTAll2AllManager
+                self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
+                logger.info("Using DeepEP High-Throughput all2all manager.")
+            elif all2all_backend == "deepep_low_latency":
+                from .all2all import DeepEPLLAll2AllManager
+                self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
+                logger.info("Using DeepEP Low-Latency all2all manager.")
+            else:
+                raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_):
         # always try custom allreduce first,
@@ -129,3 +158,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.all2all_manager is not None:
+            self.all2all_manager.destroy()
+            self.all2all_manager = None
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.all2all_manager is not None
+        hidden_states, router_logits = self.all2all_manager.dispatch(
+            hidden_states, router_logits)
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.all2all_manager is not None
+        hidden_states = self.all2all_manager.combine(hidden_states)
+        return hidden_states
