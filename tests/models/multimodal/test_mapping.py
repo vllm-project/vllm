@@ -47,6 +47,7 @@ def model_architectures_for_test() -> list[str]:
     return arch_to_test
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("model_arch", model_architectures_for_test())
 def test_hf_model_weights_mapper(model_arch: str):
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
