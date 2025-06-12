@@ -665,4 +665,3 @@ for config, values in benchmark_results.items():
         f"{values['BitBLAS_top20_latency']:.3f} ms",
     ]
     print("".join([str(i).ljust(col_widths[j]) for j, i in enumerate(row)]) + "\n")
-    
