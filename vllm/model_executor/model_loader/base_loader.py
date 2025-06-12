@@ -7,8 +7,7 @@ import torch.nn as nn
 
 from vllm.config import LoadConfig, ModelConfig, VllmConfig
 from vllm.model_executor.model_loader.utils import (
-    initialize_model, process_weights_after_loading)
-from vllm.utils import set_default_torch_dtype
+    initialize_model, process_weights_after_loading, set_default_torch_dtype)
 
 
 class BaseModelLoader(ABC):

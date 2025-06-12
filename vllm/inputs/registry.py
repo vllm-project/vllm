@@ -4,14 +4,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
+import torch
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar
 
-from vllm.jsontree import JSONTree
+from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import resolve_mm_processor_kwargs, set_default_torch_dtype
+from vllm.utils import resolve_mm_processor_kwargs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -158,11 +159,26 @@ class InputProcessingContext(InputContext):
             allow_var_kwargs=True,
         )
 
+        def maybe_cast_dtype(x):
+            # This mimics the behavior of transformers.BatchFeature
+            if isinstance(x, torch.Tensor) and x.is_floating_point():
+                return x.to(dtype=self.model_config.dtype)
+            return x
+
         try:
-            with set_default_torch_dtype(self.model_config.dtype):
-                return hf_processor(**data,
-                                    **merged_kwargs,
-                                    return_tensors="pt")
+            output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            # this emulates output.to(dtype=self.model_config.dtype)
+            if isinstance(output, BatchFeature):
+                cast_output = json_map_leaves(maybe_cast_dtype, output.data)
+                return BatchFeature(cast_output)
+
+            cast_output = json_map_leaves(maybe_cast_dtype, output)
+
+            logger.warning_once(
+                f"{type(hf_processor).__name__} did not return `BatchFeature`. "
+                "Make sure to match the behaviour of `ProcessorMixin` when "
+                "implementing custom processors.")
+            return cast_output
 
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "

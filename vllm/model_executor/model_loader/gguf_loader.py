@@ -11,10 +11,9 @@ from transformers import AutoModelForCausalLM
 from vllm.config import LoadConfig, ModelConfig, VllmConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
-    initialize_model, process_weights_after_loading)
+    initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_extra_tensor_names, gguf_quant_weights_iterator)
-from vllm.utils import set_default_torch_dtype
 
 
 class GGUFModelLoader(BaseModelLoader):
