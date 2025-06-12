@@ -560,8 +560,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     quant_config.per_act_token_quant,
                     quant_config.block_shape,
                 ))
-                if (quant_config.block_shape is None and
-                    not quant_config.per_act_token_quant):
+                if (quant_config.block_shape is None
+                        and not quant_config.per_act_token_quant):
                     b_a1_scale[idx] = b_s
                 else:
                     #print(f"XXXXX rhs={rhs.shape} b_s={b_s.shape}")

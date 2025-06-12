@@ -94,8 +94,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             )
 
             logger.debug("All2All %s, %s = %s/%s", moe.quant_dtype,
-                         moe.block_shape, hidden_dim_bytes,
-                         hidden_scale_bytes)
+                         moe.block_shape, hidden_dim_bytes, hidden_scale_bytes)
 
             all_to_all_args = dict(
                 max_num_tokens=moe.max_num_tokens,
@@ -224,8 +223,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
-
-        experts: Optional[FusedMoEPermuteExpertsUnpermute] = None
 
         use_batched_experts = prepare_finalize.max_num_tokens_per_rank(
         ) is not None

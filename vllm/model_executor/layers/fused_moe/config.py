@@ -250,10 +250,10 @@ class FusedMoEConfig:
 
     @property
     def block_shape(self) -> Optional[list[int]]:
-         if self.quant_config is not None:
-             return self.quant_config.block_shape
-         else:
-             return None
+        if self.quant_config is not None:
+            return self.quant_config.block_shape
+        else:
+            return None
 
     @property
     def per_act_token_quant(self) -> bool:
