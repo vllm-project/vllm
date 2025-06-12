@@ -264,7 +264,8 @@ async def test_mid_stream_cancellation(monkeypatch: pytest.MonkeyPatch,
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine = AsyncLLM.from_engine_args(engine_args)
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
@@ -326,10 +327,11 @@ async def test_customize_loggers(monkeypatch):
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine = AsyncLLM.from_engine_args(
-            TEXT_ENGINE_ARGS,
-            stat_loggers=[MockLoggingStatLogger],
-        )
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(
+                TEXT_ENGINE_ARGS,
+                stat_loggers=[MockLoggingStatLogger],
+            )
         after.callback(engine.shutdown)
 
         await engine.do_log_stats()
@@ -344,7 +346,8 @@ async def test_dp_rank_argument(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
         sampling_params = SamplingParams(max_tokens=100,
