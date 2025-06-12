@@ -192,4 +192,4 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         combine(False)
         # print(f"{ubatch_id} AFTER COMBINE RECV SYNC", flush=True)
         yield_and_switch_from_comm_to_compute_impl(schedule="default")
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize()
