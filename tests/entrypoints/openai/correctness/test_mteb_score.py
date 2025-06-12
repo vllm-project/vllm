@@ -24,7 +24,8 @@ MAIN_SCORE = 0.32379
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task", "score", "--enforce-eager", "--disable-uvicorn-access-log"
+        "--task", "score", "--dtype", "float32", "--enforce-eager",
+        "--disable-uvicorn-access-log"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
