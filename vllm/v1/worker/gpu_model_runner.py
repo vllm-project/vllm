@@ -1304,12 +1304,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "Either all or none of the requests in" \
                 " a batch must be pooling request"
 
-                offset = 0
-                extracted_hidden_states = list[torch.Tensor]()
-                for seq_len in num_scheduled_tokens_np:
-                    extracted_hidden_states.append(
-                        hidden_states[offset:offset + seq_len])
-                    offset += seq_len
+                extracted_hidden_states = torch.split(
+                    hidden_states, num_scheduled_tokens_np.tolist())
 
                 pooling_metadata = self.input_batch.pooling_metadata
 
@@ -2005,11 +2001,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         num_reqs = num_scheduled_tokens.shape[0]
 
-        offset = 0
-        hidden_states_list = list[torch.Tensor]()
-        for seq_len in num_scheduled_tokens:
-            hidden_states_list.append(hidden_states[offset:offset + seq_len])
-            offset += seq_len
+        hidden_states_list = torch.split(hidden_states,
+                                         num_scheduled_tokens.tolist())
 
         req_num_tokens = num_tokens // num_reqs
 
