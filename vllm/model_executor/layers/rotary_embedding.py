@@ -34,7 +34,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
 if current_platform.is_cuda():
-    from flash_attn.layers.rotary import apply_rotary_emb
+    from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
