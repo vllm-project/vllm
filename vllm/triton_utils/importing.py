@@ -12,6 +12,11 @@ HAS_TRITON = (
     find_spec("triton") is not None
     or find_spec("pytorch-triton-xpu") is not None  # Not compatible
 )
+if HAS_TRITON:
+    from triton.backends import backends
+    active_triton_drivers = [x.driver for x in backends.values() if x.driver.is_active()]
+    if len(active_triton_drivers) != 1:
+        HAS_TRITON = False
 
 if not HAS_TRITON:
     logger.info("Triton not installed or not compatible; certain GPU-related"
