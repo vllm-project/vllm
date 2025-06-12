@@ -5,6 +5,8 @@ from typing import Any, Optional
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
+                                                        FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
@@ -126,6 +128,9 @@ class BitsAndBytesConfig(QuantizationConfig):
             if is_layer_skipped_bnb(prefix, self.llm_int8_skip_modules):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
+        elif isinstance(layer, FusedMoE):
+            return BitsAndBytesMoEMethod(self)
+
         return None
 
 
@@ -144,6 +149,13 @@ def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: list[str]):
     prefix_check = len(set_llm_int8_skip_modules & set_components) != 0
 
     return substr_check or prefix_check
+
+
+def calculate_quant_ratio(dtype):
+    if dtype.is_floating_point:
+        return torch.finfo(dtype).bits // torch.iinfo(torch.uint8).bits
+    else:
+        return torch.iinfo(dtype).bits // torch.iinfo(torch.uint8).bits
 
 
 class BitsAndBytesLinearMethod(LinearMethodBase):
@@ -172,12 +184,6 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         from bitsandbytes.nn import Int8Params
-
-        def calculate_quant_ratio(dtype):
-            if dtype.is_floating_point:
-                return torch.finfo(dtype).bits // torch.iinfo(torch.uint8).bits
-            else:
-                return torch.iinfo(dtype).bits // torch.iinfo(torch.uint8).bits
 
         def create_qweight_for_8bit():
             qweight = Int8Params(
@@ -394,3 +400,95 @@ try:
 
 except AttributeError as error:
     raise error
+
+
+class BitsAndBytesMoEMethod(FusedMoEMethodBase):
+    """MoE method for BitsAndBytes.
+
+    Args:
+       quant_config: The BitsAndBytes quantization config.
+    """
+
+    def __init__(self, quant_config: BitsAndBytesConfig):
+        try:
+            import bitsandbytes
+            if bitsandbytes.__version__ < "0.45.3":
+                raise ImportError("bitsandbytes version is wrong. Please "
+                                  "install bitsandbytes>=0.45.3.")
+        except ImportError as err:
+            raise ImportError("Please install bitsandbytes>=0.45.3 via "
+                              "`pip install bitsandbytes>=0.45.3` to use "
+                              "bitsandbytes quantizer.") from err
+
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+
+        def _create_weights_4bit():
+            quant_ratio = calculate_quant_ratio(params_dtype)
+            # Fused gate_up_proj (column parallel)
+            w13_total_size = (num_experts * hidden_size * 2 *
+                              intermediate_size_per_partition) // quant_ratio
+            w13_qweight = torch.nn.Parameter(
+                torch.empty(
+                    w13_total_size,
+                    1,
+                    dtype=torch.uint8,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_qweight", w13_qweight)
+            set_weight_attrs(w13_qweight, extra_weight_attrs)
+            # down_proj (row parallel)
+            w2_total_size = (num_experts * hidden_size *
+                             intermediate_size_per_partition) // quant_ratio
+            w2_qweight = torch.nn.Parameter(
+                torch.empty(
+                    w2_total_size,
+                    1,
+                    dtype=torch.uint8,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_qweight", w2_qweight)
+            set_weight_attrs(w2_qweight, extra_weight_attrs)
+
+        def _create_weights_8bit():
+            raise NotImplementedError
+
+        if self.quant_config.load_in_8bit:
+            _create_weights_8bit()
+        else:
+            _create_weights_4bit()
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        if self.quant_config.load_in_8bit:
+            return self._apply_8bit_weight(layer, x, bias)
+        else:
+            return self._apply_4bit_weight(layer, x, bias)
+
+    def _apply_8bit_weight(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _apply_4bit_weight(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        raise NotImplementedError
