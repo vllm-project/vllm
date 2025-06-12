@@ -15,9 +15,11 @@ def check_stop(request: Request,
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
         return True
 
-    if request.pooling_params and pooler_output is not None:
-        request.status = RequestStatus.FINISHED_STOPPED
-        return True
+    if request.pooling_params:
+        if pooler_output is not None:
+            request.status = RequestStatus.FINISHED_STOPPED
+            return True
+        return False
 
     sampling_params = request.sampling_params
     assert sampling_params is not None
