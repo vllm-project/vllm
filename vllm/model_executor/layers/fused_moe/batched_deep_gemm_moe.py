@@ -120,6 +120,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2q = a2q.view(E, max_num_tokens, -1)
         a2q_scale = a2q_scale.view(E, max_num_tokens, -1)
 
+        output = output.view(E, max_num_tokens, -1)
+
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a2q, a2q_scale),
                                                  (w2, w2_scale),
                                                  out=output,
