@@ -9,8 +9,8 @@ import torch
 import triton.language as tl
 
 from tests.kernels.moe.utils import (batched_moe, make_test_weights,
-                                     torch_moe2, triton_moe,
-                                     per_block_cast_to_fp8)
+                                     per_block_cast_to_fp8, torch_moe2,
+                                     triton_moe)
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (

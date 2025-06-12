@@ -10,7 +10,7 @@ from compressed_tensors.quantization import (QuantizationArgs,
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig
-from vllm.distributed import get_dp_group
+from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 

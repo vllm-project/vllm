@@ -23,13 +23,12 @@ from tests.kernels.moe.utils import (make_test_weights, naive_batched_moe,
                                      torch_moe2)
 from tests.pplx_utils import ProcessGroupInfo, parallel_launch
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe import (override_config,
+from vllm.model_executor.layers.fused_moe import (BatchedTritonExperts,
                                                   FusedMoEConfig,
+                                                  FusedMoEModularKernel,
                                                   fused_topk,
                                                   get_default_config,
-                                                  FusedMoEModularKernel,
-                                                  BatchedTritonExperts,
-                                                  FusedMoEModularKernel)
+                                                  override_config)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize, NaiveBatchedExperts)
 from vllm.platforms import current_platform
@@ -560,8 +559,6 @@ def _pplx_moe(
     e, _, n = w2.shape
 
     moe_config = get_default_config(m, e, n, k, topk, a.dtype, False)
-
-    use_fp8_w8a8 = qtype == torch.float8_e4m3fn
 
     device = torch.device("cuda", pgi.rank)
     a = a.to(device)

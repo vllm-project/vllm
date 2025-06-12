@@ -33,10 +33,7 @@ def Xnative_w8a8_block_matmul(A: torch.Tensor,
     `Bs` (float32).
     The output is returned in the specified `output_dtype`.
     """
-    if A.dtype.itemsize <= 2:
-        compute_type = torch.bfloat16
-    else:
-        compute_type = torch.float32
+    compute_type = torch.bfloat16 if A.dtype.itemsize <= 2 else torch.float32
 
     A = A.to(compute_type)
     B = B.to(compute_type).contiguous()
@@ -101,7 +98,7 @@ def torch_moe2(
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
     M, K = a.shape
-    N = w1.shape[1]
+    #N = w1.shape[1]
     topk = topk_ids.shape[1]
 
     a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)

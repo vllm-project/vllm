@@ -24,17 +24,18 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel,
+    FusedMoEPermuteExpertsUnpermute,
+    FusedMoEPrepareAndFinalize)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
 
+
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 has_deepep = importlib.util.find_spec("deep_ep") is not None
-
-from .modular_kernel import (FusedMoEModularKernel,
-                             FusedMoEPermuteExpertsUnpermute,
-                             FusedMoEPrepareAndFinalize)
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
