@@ -1106,6 +1106,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # so we receive it in that format.
         grammar_bitmask = torch.from_numpy(grammar_bitmask)
 
+        # Force use of the torch.compile implementation from xgrammar to work
+        # around issues with the Triton kernel in concurrent structured output
+        # scenarios. See PR #19565 and issues #19493, #18376 for details.
         xgr_torch_compile.apply_token_bitmask_inplace_torch_compile(
             logits,
             grammar_bitmask.to(self.device, non_blocking=True),
