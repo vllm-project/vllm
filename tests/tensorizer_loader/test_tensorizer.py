@@ -93,11 +93,10 @@ def test_can_deserialize_s3(vllm_runner):
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_deserialized_encrypted_vllm_model_has_same_outputs(model_ref,
-        vllm_runner, tmp_path):
+        vllm_runner, tmp_path, model_path):
     args = EngineArgs(model=model_ref)
     with vllm_runner(model_ref) as vllm_model:
-        model_path = tmp_path / (model_ref + ".tensors")
-        key_path = tmp_path / (model_ref + ".key")
+        key_path = tmp_path / model_ref / "model.key"
         write_keyfile(key_path)
 
         outputs = vllm_model.generate(prompts, sampling_params)
@@ -123,9 +122,8 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(model_ref,
 
 
 def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
-                                                tmp_path, model_ref):
+                                                tmp_path, model_ref, model_path):
     with hf_runner(model_ref) as hf_model:
-        model_path = tmp_path / (model_ref + ".tensors")
         max_tokens = 50
         outputs = hf_model.generate_greedy(prompts, max_tokens=max_tokens)
         with open_stream(model_path, "wb+") as stream:
@@ -220,7 +218,7 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
         outputs = base_model.generate(prompts, sampling_params)
 
     # load model with two shards and serialize with encryption
-    model_path = str(tmp_path / (model_ref + "-%02d.tensors"))
+    model_path = str(tmp_path / model_ref / "model-%02d.tensors")
     key_path = tmp_path / (model_ref + ".key")
 
     tensorizer_config = TensorizerConfig(
@@ -254,11 +252,14 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
 
 
 @pytest.mark.flaky(reruns=3)
-def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
+def test_vllm_tensorized_model_has_same_outputs(
+    model_ref,
+    vllm_runner,
+    tmp_path,
+    model_path
+):
     gc.collect()
     torch.cuda.empty_cache()
-    model_ref = "facebook/opt-125m"
-    model_path = tmp_path / (model_ref + ".tensors")
     config = TensorizerConfig(tensorizer_uri=str(model_path))
     args = EngineArgs(model=model_ref, device="cuda")
 
@@ -295,8 +296,10 @@ def test_load_with_just_model_tensors(just_serialize_model_tensors, model_ref):
         "--model-loader-extra-config", json.dumps(extra_config),
     ]
 
-    with RemoteOpenAIServer(model_ref, args) as remote_server:
-        assert remote_server
+    with RemoteOpenAIServer(model_ref, args):
+        # This test only concerns itself with being able to load the model
+        # and successfully initialize the server
+        pass
 
 
 

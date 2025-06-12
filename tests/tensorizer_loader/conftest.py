@@ -8,8 +8,6 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.model_loader import tensorizer as tensorizer_mod
 
 MODEL_REF = "facebook/opt-125m"
-tensorize_model_for_testing_script = os.path.join(
-    os.path.dirname(__file__), "tensorize_vllm_model_for_testing.py")
 
 @pytest.fixture()
 def model_ref():
@@ -40,3 +38,8 @@ def just_serialize_model_tensors(model_ref, monkeypatch, tmp_path):
 def tensorizer_config():
     config = TensorizerConfig(tensorizer_uri="vllm")
     return config
+
+
+@pytest.fixture()
+def model_path(model_ref, tmp_path):
+    yield tmp_path / model_ref / "model.tensors"

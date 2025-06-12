@@ -236,7 +236,7 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
                             tensor_parallel_size=2,
                             max_loras=2)
 
-    tensorizer_config_dict = tensorizer_config.to_dict()
+    tensorizer_config_dict = tensorizer_config.to_serializable()
 
     print("lora adapter created")
     assert do_sample(loaded_vllm_model,

@@ -12,9 +12,10 @@ import tempfile
 import threading
 import time
 from collections.abc import Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields, asdict
 from functools import partial
 from typing import Any, BinaryIO, Optional, Union
+from collections.abc import MutableMapping
 
 import regex as re
 import torch
@@ -65,26 +66,9 @@ __all__ = [
 
 logger = init_logger(__name__)
 
-
-
-def is_valid_path_string(path_str: str) -> bool:
-    try:
-        Path(path_str)
-        return True
-    except (TypeError, ValueError):
-        return False
-
-# Potentially too flimsy...
-def is_valid_path_or_s3_uri(uri: str) -> bool:
-    if uri.startswith("s3://") and uri.endswith("/"):
-        return True
-    if uri.startswith("http://") and uri.endswith("/"):
-        return True
-    if uri.startswith("https://") and uri.endswith("/"):
-        return True
-    if is_valid_path_string(uri):
-        return True
-    return False
+def is_valid_deserialization_uri(uri: str) -> bool:
+    scheme = uri.lower().split("://")[0]
+    return scheme in {"s3", "http", "https"} or os.path.exists(uri)
 
 class MetaTensorMode(TorchDispatchMode):
 
@@ -157,23 +141,23 @@ class _NoInitOrTensorImpl:
 
 
 @dataclass
-class TensorizerConfig:
-    tensorizer_uri: Union[str, None] = None
+class TensorizerConfig(MutableMapping):
+    tensorizer_uri: Optional[str] = None
     tensorizer_dir: Optional[str] = None
-    vllm_tensorized: Optional[bool] = False
-    verify_hash: Optional[bool] = False
+    vllm_tensorized: Optional[bool] = None
+    verify_hash: Optional[bool] = None
     num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
     s3_endpoint: Optional[str] = None
     lora_dir: Optional[str] = None
-    _extra_serialization_attrs: Optional[dict[str, Any]] = None
-    _model_cls: Optional[type[torch.nn.Module]] = None
-    _hf_config: Optional[PretrainedConfig] = None
-    _model_cls_dtype: Optional[Union[str, torch.dtype]] = None
-    _is_sharded: bool = False
-    """    
+    _extra_serialization_attrs: Optional[dict[str, Any]] = field(init=False, default=None)
+    _model_cls: Optional[type[torch.nn.Module]] = field(init=False, default=None)
+    _hf_config: Optional[PretrainedConfig] = field(init=False, default=None)
+    _model_cls_dtype: Optional[Union[str, torch.dtype]] = field(init=False, default=None)
+    _is_sharded: bool = field(init=False, default=None)
+    """
     Args for the TensorizerConfig class. These are used to configure the 
     behavior of model serialization and deserialization using Tensorizer.
     
@@ -223,36 +207,69 @@ class TensorizerConfig:
         # check if the configuration is for a sharded vLLM model
         self._is_sharded = isinstance(self.tensorizer_uri, str) \
             and re.search(r'%0\dd', self.tensorizer_uri) is not None
+
+        if self.tensorizer_dir and self.tensorizer_uri:
+            raise ValueError(
+                "Either tensorizer_dir or tensorizer_uri must be provided, "
+                "not both."
+            )
+        if self.tensorizer_dir and self.lora_dir:
+            raise ValueError(
+                "Only one of tensorizer_dir or lora_dir may be specified. "
+                "Use lora_dir exclusively when serializing LoRA adapters, "
+                "and tensorizer_dir otherwise."
+            )
         if not self.tensorizer_uri:
             if self.lora_dir:
                 self.tensorizer_uri = f"{self.lora_dir}/adapter_model.tensors"
             elif self.tensorizer_dir:
-                if is_valid_path_or_s3_uri(self.tensorizer_dir):
-                    self.tensorizer_uri = f"{self.tensorizer_dir}/model.tensors"
-                else:
-                    raise ValueError(
-                        f"tensorizer_dir must be a valid directory or s3 URI. "
-                    )
+                self.tensorizer_uri = f"{self.tensorizer_dir}/model.tensors"
             else:
                 raise ValueError("Unable to resolve tensorizer_uri. "
                                  "A valid tensorizer_uri or tensorizer_dir "
                                  "must be provided for deserialization, and a "
                                  "valid tensorizer_uri, tensorizer_uri, or "
                                  "lora_dir for serialization.")
+        else:
+            self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
 
-        self.tensorizer_dir = os.path.dirname(self.tensorizer_uri)
+    def to_serializable(self) -> dict[str, Any]:
+        # Due to TensorizerConfig needing to be msgpack-serializable, it needs
+        # support for morphing back and forth between itself and its dict
+        # representation
 
-        assert is_valid_path_or_s3_uri(self.tensorizer_uri), ("tensorizer_uri must be a "
-                                                              "valid S3 URI or local path")
-        self.lora_dir = self.tensorizer_dir
+        # TensorizerConfig's representation as a dictionary is meant to be
+        # linked to TensorizerConfig in such a way that the following is
+        # technically initializable:
+        # TensorizerConfig(**my_tensorizer_cfg.to_serializable())
 
-    @classmethod
-    def as_dict(cls, *args, **kwargs) -> dict[str, Any]:
-        cfg = TensorizerConfig(*args, **kwargs)
-        return dataclasses.asdict(cfg)
 
-    def to_dict(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
+        # This means the dict must not retain non-initializable parameters
+        # and post-init attribute states
+
+        # Also don't want to retain private and unset parameters, so only retain
+        # not None values and public attributes
+
+        raw_tc_dict = asdict(self)
+        blacklisted = []
+
+        if "tensorizer_uri" in raw_tc_dict and "tensorizer_dir" in raw_tc_dict:
+            blacklisted.append("tensorizer_dir")
+
+        if "tensorizer_dir" in raw_tc_dict and "lora_dir" in raw_tc_dict:
+            blacklisted.append("lora_dir")
+
+        tc_dict = {}
+        for k, v in raw_tc_dict.items():
+            if (
+                k not in blacklisted
+                and k not in tc_dict
+                and not k.startswith("_")
+                and v is not None
+            ):
+                tc_dict[k] = v
+
+        return tc_dict
 
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         return TensorizerArgs(self)  # type: ignore
@@ -282,9 +299,20 @@ class TensorizerConfig:
         return open_stream(self.tensorizer_uri,
                            **tensorizer_args.stream_params)
 
+    def __len__(self):
+        return len(fields(self))
+
+    def __iter__(self):
+        return (f.name for f in fields(self))
+
     def __getitem__(self, item: str) -> Any:
         return getattr(self, item)
 
+    def __setitem__(self, key: str, value: Any) -> None:
+        setattr(self, key, value)
+
+    def __delitem__(self, key, /):
+        delattr(self, key)
 
 def load_with_tensorizer(tensorizer_config: TensorizerConfig,
                          **extra_kwargs) -> nn.Module:
@@ -292,31 +320,30 @@ def load_with_tensorizer(tensorizer_config: TensorizerConfig,
     return tensorizer.deserialize()
 
 
-
-class TensorizerArgs(TensorizerConfig):
+class TensorizerArgs:
     def __init__(self, tensorizer_config: TensorizerConfig):
-        super().__init__(**tensorizer_config.to_dict())
-
-        self.file_obj = self.tensorizer_uri
-        self.s3_access_key_id = self.s3_access_key_id or envs.S3_ACCESS_KEY_ID
-        self.s3_secret_access_key = (self.s3_secret_access_key
+        for k, v in tensorizer_config.items():
+            setattr(self, k, v)
+        self.file_obj = tensorizer_config.tensorizer_uri
+        self.s3_access_key_id = tensorizer_config.s3_access_key_id or envs.S3_ACCESS_KEY_ID
+        self.s3_secret_access_key = (tensorizer_config.s3_secret_access_key
                                      or envs.S3_SECRET_ACCESS_KEY)
-        self.s3_endpoint = self.s3_endpoint or envs.S3_ENDPOINT_URL
+        self.s3_endpoint = tensorizer_config.s3_endpoint or envs.S3_ENDPOINT_URL
         self.stream_params = {
-            "s3_access_key_id": self.s3_access_key_id,
-            "s3_secret_access_key": self.s3_secret_access_key,
-            "s3_endpoint": self.s3_endpoint,
+            "s3_access_key_id": tensorizer_config.s3_access_key_id,
+            "s3_secret_access_key": tensorizer_config.s3_secret_access_key,
+            "s3_endpoint": tensorizer_config.s3_endpoint,
         }
 
         self.deserializer_params = {
-            "verify_hash": self.verify_hash,
-            "encryption": self.encryption_keyfile,
-            "num_readers": self.num_readers
+            "verify_hash": tensorizer_config.verify_hash,
+            "encryption": tensorizer_config.encryption_keyfile,
+            "num_readers": tensorizer_config.num_readers
         }
 
         if self.encryption_keyfile:
             with open_stream(
-                    self.encryption_keyfile,
+                    tensorizer_config.encryption_keyfile,
                     **self.stream_params,
             ) as stream:
                 key = stream.read()
@@ -469,6 +496,13 @@ class TensorizerAgent:
         Returns:
             nn.Module: The deserialized model.
         """
+        if not is_valid_deserialization_uri(self.tensorizer_config.tensorizer_uri):
+            raise ValueError(
+                f"{self.tensorizer_config.tensorizer_uri} is not a valid "
+                f"tensorizer URI. Please check that the URI is correct. "
+                f"It must either point to a local existing file, or have a "
+                f"S3, HTTP or HTTPS scheme."
+            )
         before_mem = get_mem_usage()
         start = time.perf_counter()
         with _read_stream(
@@ -544,24 +578,30 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
 
 
 def serialize_extra_artifacts(tensorizer_args: TensorizerArgs,
-                              model_config: ModelConfig) -> None:
-
-    exclusion_suffixes = [".cache", ".gitattributes", ".md"]
-    should_exclude = lambda file: any(suffix in file for suffix in exclusion_suffixes)
+                              served_model_name: str) -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         snapshot_download(
-            model_config.served_model_name,
+            served_model_name,
             local_dir=tmpdir,
-            ignore_patterns=["*.pt", "*.safetensors", "*.bin"]
+            ignore_patterns=[
+                "*.pt",
+                "*.safetensors",
+                "*.bin",
+                "*.cache",
+                "*.gitattributes",
+                "*.md"
+            ]
         )
-        for artifact in [file for file in os.listdir(tmpdir) if not should_exclude(file)]:
-            with open(f"{tmpdir}/{artifact}", "rb") as f:
+        for artifact in os.scandir(tmpdir):
+            if not artifact.is_file():
+                continue
+            with open(artifact.path, "rb") as f:
                 with _write_stream(
-                    f"{tensorizer_args.tensorizer_dir}/{artifact}",
+                    f"{tensorizer_args.tensorizer_dir}/{artifact.name}",
                     **tensorizer_args.stream_params
                 ) as stream:
-                    logger.info("Writing artifact %s", artifact)
+                    logger.info("Writing artifact %s", artifact.name)
                     stream.write(f.read())
 
 
@@ -573,6 +613,7 @@ def serialize_vllm_model(
     model.register_parameter(
         "vllm_tensorized_marker",
         nn.Parameter(torch.tensor((1, ), device="meta"), requires_grad=False))
+
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
 
     encryption_params = None
@@ -591,7 +632,7 @@ def serialize_vllm_model(
         serializer.write_module(model)
         serializer.close()
 
-    serialize_extra_artifacts(tensorizer_args, model_config)
+    serialize_extra_artifacts(tensorizer_args, model_config.served_model_name)
 
 
     logger.info("Successfully serialized model to %s", str(output_file))
@@ -630,13 +671,13 @@ def tensorize_vllm_model(engine_args: EngineArgs,
         engine = LLMEngine.from_engine_args(engine_args)
         engine.model_executor.collective_rpc(
             "save_tensorized_model",
-            kwargs=dict(tensorizer_config=tensorizer_config),
+            kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
         )
     else:
         engine = V1LLMEngine.from_vllm_config(engine_config)
         engine.collective_rpc(
             "save_tensorized_model",
-            kwargs=dict(tensorizer_config=tensorizer_config),
+            kwargs={"tensorizer_config": tensorizer_config.to_serializable()},
         )
 
 
