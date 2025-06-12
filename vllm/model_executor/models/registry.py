@@ -78,6 +78,7 @@ _TEXT_GENERATION_MODELS = {
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
+    "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM":("falcon_h1", "FalconH1ForCausalLM"),
