@@ -219,6 +219,11 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         self.per_out_ch = per_out_ch
         self.use_batched_format = use_batched_format
 
+    @property
+    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (mk.FusedMoEActivationFormat.Standard,
+                mk.FusedMoEActivationFormat.Standard)
+
     def supports_chunking(self) -> bool:
         return not self.use_batched_format
 

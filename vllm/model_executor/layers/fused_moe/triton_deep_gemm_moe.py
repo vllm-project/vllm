@@ -34,6 +34,12 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.deep_gemm_expert = DeepGemmExperts(
         ) if self.allow_deep_gemm else None
 
+
+    @property
+    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        assert self.deep_gemm_expert is None or self.triton_expert.activation_formats == self.deep_gemm_expert.activation_formats
+        return self.triton_expert.activation_formats
+
     def supports_chunking(self) -> bool:
         dge = self.deep_gemm_expert
         te = self.triton_expert
