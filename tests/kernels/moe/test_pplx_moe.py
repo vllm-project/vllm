@@ -23,13 +23,15 @@ from tests.kernels.moe.utils import (make_test_weights, naive_batched_moe,
                                      torch_moe2)
 from tests.pplx_utils import ProcessGroupInfo, parallel_launch
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe import override_config
+from vllm.model_executor.layers.fused_moe import (override_config,
+                                                  FusedMoEConfig,
+                                                  fused_topk,
+                                                  get_default_config,
+                                                  FusedMoEModularKernel,
+                                                  BatchedTritonExperts,
+                                                  FusedMoEModularKernel)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
-from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
-                                                            get_default_config)
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel)
+    BatchedPrepareAndFinalize, NaiveBatchedExperts)
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
