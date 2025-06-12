@@ -32,7 +32,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
 
@@ -121,6 +121,14 @@ class KVConnectorBase_V1(ABC):
 
         Args: kv_caches:
             dictionary of layer names, kv cache
+        """
+        return
+
+    def set_host_xfer_buffer_ops(self, d2h_copy_blocks: Callable,
+                                 h2d_copy_blocks: Callable):
+        """
+        Set the xPU-specific ops for copying KV between host and device.
+        Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
         """
         return
 
