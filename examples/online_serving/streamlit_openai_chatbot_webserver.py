@@ -271,6 +271,7 @@ def server_supports_reasoning():
 supports_reasoning = server_supports_reasoning()
 
 # Add reasoning toggle in sidebar if supported
+reason = False  # Default to False
 if supports_reasoning:
     reason = st.sidebar.checkbox("Enable Reasoning", value=False)
 else:
@@ -278,6 +279,7 @@ else:
         "<span style='color:gray;'>Reasoning unavailable for this model.</span>",
         unsafe_allow_html=True,
     )
+    # reason remains False
 
 # Update the input handling section
 if prompt := st.chat_input("Type your message here..."):
