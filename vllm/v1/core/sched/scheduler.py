@@ -516,7 +516,8 @@ class Scheduler(SchedulerInterface):
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
-                                        req_to_new_block_ids[req.request_id])
+                                        req_to_new_block_ids[req.request_id],
+                                        num_scheduled_tokens[req.request_id])
             for req in scheduled_new_reqs
         ]
         resumed_reqs_data = [

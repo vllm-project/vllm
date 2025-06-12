@@ -125,6 +125,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 block_ids=([0], ),
                 num_computed_tokens=0,
                 lora_request=None,
+                num_scheduled_tokens=3,
             ))
         num_scheduled_tokens[req_id] = 3
         total_num_scheduled_tokens += num_scheduled_tokens[req_id]

@@ -30,12 +30,14 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
+    num_scheduled_tokens: int
 
     @classmethod
     def from_request(
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
+        num_scheduled_tokens: int,
     ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
@@ -47,6 +49,7 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
+            num_scheduled_tokens=num_scheduled_tokens,
         )
 
     def __repr__(self):
@@ -59,7 +62,8 @@ class NewRequestData:
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"num_scheduled_tokens={self.num_scheduled_tokens}"
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
@@ -73,7 +77,8 @@ class NewRequestData:
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"num_scheduled_tokens={self.num_scheduled_tokens}"
                 ")")
 
 

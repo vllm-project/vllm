@@ -74,6 +74,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 block_ids=([0], ),  # block_ids should be tuple[list[int]]
                 num_computed_tokens=0,
                 lora_request=None,
+                num_scheduled_tokens=3,
             ))
         num_scheduled_tokens[req_id] = 3
         total_num_scheduled_tokens += num_scheduled_tokens[req_id]
@@ -103,7 +104,7 @@ def _is_req_added(model_runner, req_id: str) -> bool:
 
 def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
     """Check if the request state block IDs match the block table.
-    
+
     This function handles both legacy BlockTable and new MultiGroupBlockTable
     structures for backward compatibility.
     """
