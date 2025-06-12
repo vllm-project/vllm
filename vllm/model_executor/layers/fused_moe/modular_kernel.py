@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from enum import Enum
 from math import prod
 from typing import Optional
 
@@ -82,6 +83,21 @@ def _moe_problem_size(
     return E, M, N, K, topk
 
 
+class FusedMoEActivationFormat(Enum):
+    """
+    Add comment
+    """
+    Standard = "standard",
+    """
+    Add comment
+    """
+    TopkReplicated = "topk_replicated",
+    """
+    Add comment
+    """
+    BatchedExperts = "standard",
+
+
 class FusedMoEPrepareAndFinalize(ABC):
     """
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
@@ -148,6 +164,14 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    @property
+    @abstractmethod
+    def activation_format(self) -> FusedMoEActivationFormat:
+        """
+        Add comment
+        """
+        raise NotImplementedError
+
     @abstractmethod
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
         """
@@ -175,6 +199,14 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     An abstract base class for the [Permute-Experts-Unpermute] step described
     above.
     """
+
+    @property
+    @abstractmethod
+    def activation_formats(self) -> tuple[FusedMoEActivationFormat, FusedMoEActivationFormat]:
+        """
+        Add comment
+        """
+        raise NotImplementedError
 
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod
@@ -314,6 +346,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        assert prepare_finalize.activation_format == fused_experts.activation_formats[0]
 
     def forward(
         self,

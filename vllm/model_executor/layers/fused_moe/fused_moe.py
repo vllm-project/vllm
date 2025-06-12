@@ -1542,6 +1542,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                       use_int4_w4a16=use_int4_w4a16)
         self.per_channel_quant = per_channel_quant
 
+    @property
+    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (mk.FusedMoEActivationFormat.Standard,
+                mk.FusedMoEActivationFormat.Standard)
+
     def supports_chunking(self) -> bool:
         return True
 

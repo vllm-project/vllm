@@ -67,6 +67,15 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert (self.batched_deep_gemm_experts is not None
                 or self.batched_triton_experts is not None)
 
+    @property
+    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        if self.batched_triton_experts is not None:
+            assert self.batched_deep_gemm_experts is None or self.batched_deep_gemm_experts.activation_formats == self.batched_triton_experts.activation_formats
+            return self.batched_triton_experts.activation_formats
+        else:
+            assert self.batched_deep_gemm_experts is not None
+            return self.batched_deep_gemm_experts.activation_formats
+
     def supports_chunking(self) -> bool:
         bdge = self.batched_deep_gemm_experts
         bte = self.batched_triton_experts

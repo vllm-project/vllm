@@ -14,8 +14,17 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    FusedMoEMethodBase,
+    FusedMoeWeightScaleSupported,
+    FusedMoEActivationFormat,
+    FusedMoEPermuteExpertsUnpermute,
+    FusedMoEPrepareAndFinalize,
+    TritonOrDeepGemmExperts,
+    BatchedTritonOrDeepGemmExperts,
+    MoEConfig
+)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -770,23 +779,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-    def select_gemm_impl(self, prepare_finalize, moe):
-
-        from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
-            BatchedTritonOrDeepGemmExperts)
-        from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-            TritonOrDeepGemmExperts)
-
+    def select_gemm_impl(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: MoEConfig,
+    ) -> FusedMoEPermuteExpertsUnpermute:
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
 
-        experts: Optional[Union[BatchedTritonOrDeepGemmExperts,
-                                TritonOrDeepGemmExperts]] = None
-        max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-        use_batched_experts = max_num_tokens_per_rank is not None
-
-        if use_batched_experts:
-            experts = BatchedTritonOrDeepGemmExperts(
+        if prepare_finalize.activation_format == FusedMoEActivationFormat.BatchedExperts:
+            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens_per_rank is not None
+            return BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 world_size=prepare_finalize.world_size,
                 dp_size=prepare_finalize.dp_size,
@@ -799,14 +803,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         else:
-            experts = TritonOrDeepGemmExperts(
+            return TritonOrDeepGemmExperts(
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
                 allow_deep_gemm=self.allow_deep_gemm,
             )
-
-        assert experts is not None
-        return experts
 
     def apply(
         self,

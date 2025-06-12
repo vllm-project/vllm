@@ -39,6 +39,10 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
 
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
     def max_num_tokens_per_rank(self) -> Optional[int]:
         return None
 
@@ -130,8 +134,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
-        rank_topk_weights: torch.Tensor,
-        rank_topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
@@ -139,11 +143,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
         if apply_router_weight_on_input:
-            topk = rank_topk_ids.size(1)
+            topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1")
-            a1 = a1 * rank_topk_weights.to(a1.dtype)
+            a1 = a1 * topk_weights.to(a1.dtype)
 
         # Check if there is a block_shape / or if we can infer the quantization
         # schemes from the scales.
@@ -165,8 +169,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1q,
                  token_scales=a1q_scale,
-                 rank_topk_ids=rank_topk_ids,
-                 rank_topk_weights=rank_topk_weights,
+                 rank_topk_ids=topk_ids,
+                 rank_topk_weights=topk_weights,
                  num_experts=num_experts)
         else:
             # DeepEP kernels only support dispatching per-token-quant
@@ -175,8 +179,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1,
                  token_scales=None,
-                 rank_topk_ids=rank_topk_ids,
-                 rank_topk_weights=rank_topk_weights,
+                 rank_topk_ids=topk_ids,
+                 rank_topk_weights=topk_weights,
                  num_experts=num_experts)
             # quantize now
             expert_x_scale = None

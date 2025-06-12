@@ -23,6 +23,9 @@ from vllm.distributed import (get_dp_group, get_ep_group,
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+    from .modular_kernel import (FusedMoEModularKernel,
+                                 FusedMoEPermuteExpertsUnpermute,
+                                 FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -38,9 +41,6 @@ has_deepep = importlib.util.find_spec("deep_ep") is not None
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import TritonExperts, fused_experts
-    from .modular_kernel import (FusedMoEModularKernel,
-                                 FusedMoEPermuteExpertsUnpermute,
-                                 FusedMoEPrepareAndFinalize)
     if has_pplx:
         from .pplx_prepare_finalize import PplxPrepareAndFinalize
     if has_deepep:
@@ -304,9 +304,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             act_quant_block_size = quant_config.weight_block_size
             quant_dtype = torch.float8_e4m3fn
 
-        prepare_finalize: Optional[Union[PplxPrepareAndFinalize,
-                                         DeepEPHTPrepareAndFinalize,
-                                         DeepEPLLPrepareAndFinalize]] = None
+        prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
+
         if moe.use_pplx_kernels:
             all_to_all_args = dict(
                 max_num_tokens=moe.max_num_tokens,
@@ -399,8 +398,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             )
 
     def select_gemm_impl(
-            self, prepare_finalize: FusedMoEPrepareAndFinalize,
-            moe: Optional[MoEConfig]) -> FusedMoEPermuteExpertsUnpermute:
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: MoEConfig
+    ) -> FusedMoEPermuteExpertsUnpermute:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
         raise NotImplementedError(
@@ -446,23 +447,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             self.rocm_aiter_fused_experts = None  # type: ignore
 
-    def select_gemm_impl(self, prepare_finalize: FusedMoEPrepareAndFinalize,
-                         moe: Optional[MoEConfig]):
+    def select_gemm_impl(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: MoEConfig
+    ) -> FusedMoEPermuteExpertsUnpermute:
 
         assert self.fused_experts == fused_experts
 
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
-        experts: Optional[FusedMoEPermuteExpertsUnpermute] = None
-
-        use_batched_experts = prepare_finalize.max_num_tokens_per_rank(
-        ) is not None
-        if use_batched_experts:
+        if prepare_finalize.activation_format == FusedMoeActivationFormat.BatchedExperts:
             logger.debug("BatchedTritonExperts %s", self.moe)
             assert self.moe.dp_size == all2all_manager.dp_world_size
-            experts = BatchedTritonExperts(
+            return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
+                # TODO (bnell): Fix this mess
                 world_size=all2all_manager.world_size,
                 # dp_size actually means tp_size, bug in pplx kernels
                 dp_size=all2all_manager.tp_group.world_size,
@@ -475,7 +476,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
         else:
             logger.debug("TritonExperts %s", self.moe)
-            experts = TritonExperts(
+            return TritonExperts(
                 use_fp8_w8a8=False,
                 use_int8_w8a8=False,
                 use_int8_w8a16=False,
@@ -483,7 +484,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 block_shape=None,
                 per_channel_quant=False,
             )
-        return experts
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
