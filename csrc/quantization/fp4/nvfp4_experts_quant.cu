@@ -487,7 +487,7 @@ void quant_impl(void* output, void* output_scale, void* input,
           reinterpret_cast<uint32_t*>(output_scale),
           reinterpret_cast<uint32_t*>(input_offset_by_experts),
           reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
-          n_experts, true);
+          n_experts, /* bool low_latency */ true);
     } else {
       cvt_fp16_to_fp4<T, false, true><<<grid, block, 0, stream>>>(
           m_topk, k, reinterpret_cast<T*>(input),
@@ -496,7 +496,7 @@ void quant_impl(void* output, void* output_scale, void* input,
           reinterpret_cast<uint32_t*>(output_scale),
           reinterpret_cast<uint32_t*>(input_offset_by_experts),
           reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
-          n_experts, true);
+          n_experts, /* bool low_latency */ true);
     }
   }
 }
