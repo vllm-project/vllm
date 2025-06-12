@@ -153,7 +153,10 @@ def torchao_quantize_param_data(param: torch.Tensor,
     assert isinstance(torchao_config, AOBaseConfig), f"{torchao_config}"
     # Avoid real weight allocation for faster load, since we will end up setting it to param.
     with torch.device("meta"):
-        dummy_linear = torch.nn.Linear(param.shape[1], param.shape[0], bias=False)
+        dummy_linear = torch.nn.Linear(param.shape[1],
+                                       param.shape[0],
+                                       bias=False)
+
     dummy_linear.weight = param
     quantize_(dummy_linear, torchao_config)
     return dummy_linear.weight
