@@ -107,15 +107,15 @@ def generate_random_inputs(batch_size,
     return A, dt, X, B, C
 
 
-def generate_continous_batched_examples(example_lens_by_batch,
-                                        num_examples,
-                                        full_length,
-                                        last_taken,
-                                        exhausted,
-                                        n_heads,
-                                        d_head,
-                                        itype,
-                                        device='cuda'):
+def generate_continuous_batched_examples(example_lens_by_batch,
+                                         num_examples,
+                                         full_length,
+                                         last_taken,
+                                         exhausted,
+                                         n_heads,
+                                         d_head,
+                                         itype,
+                                         device='cuda'):
 
     # this function generates a random examples of certain length
     # and then cut according to "example_lens_by_batch" and feed
@@ -269,11 +269,10 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
     exhausted: dict = {}  # map: eg -> boolean indicating example is exhausted
 
     states = None
-    for Y_min, cu_seqlens, seq_idx, (A, dt, X, B,
-                                     C) in generate_continous_batched_examples(
-                                         cases, num_examples, seqlen,
-                                         last_taken, exhausted, n_heads,
-                                         d_head, itype):
+    for Y_min, cu_seqlens, seq_idx, (
+            A, dt, X, B, C) in generate_continuous_batched_examples(
+                cases, num_examples, seqlen, last_taken, exhausted, n_heads,
+                d_head, itype):
 
         chunk_indices, chunk_offsets = \
             _query_start_loc_to_chunk_indices_offsets(
