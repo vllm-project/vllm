@@ -79,7 +79,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                               q,
                                               k,
                                               v,
-                                              return_softmax_lse=False,
                                               softmax_scale=None,
                                               **kwargs):
         assert self.triton_fa_func is not None
@@ -119,7 +118,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 q,
                 k,
                 v,
-                return_softmax_lse=return_softmax_lse,
                 softmax_scale=softmax_scale,
                 **kwargs)
         else:
