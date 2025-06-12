@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import enum
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal, Optional, dict
 
 import torch
 from torch.nn.parameter import Parameter
@@ -49,11 +49,11 @@ class BITNETBitBLASConfig(QuantizationConfig):
                 f"is_sym={self.is_sym})")
 
     @classmethod
-    def get_name(cls) -> Literal["bitnet_bitblas"]:
+    def get_name(cls) -> str:
         return "bitnet_bitblas"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half, torch.int8]
 
     @classmethod
@@ -61,11 +61,11 @@ class BITNETBitBLASConfig(QuantizationConfig):
         return 70
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "BITNETBitBLASConfig":
+    def from_config(cls, config: dict[str, Any]) -> "BITNETBitBLASConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         is_sym = cls.get_from_keys(config, ["sym"])
         return cls(weight_bits, is_sym)
@@ -98,11 +98,11 @@ class BITNETBitBLASConfig(QuantizationConfig):
             return BITNETBitBLASLinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
+    def get_scaled_act_names(self) -> list[str]:
         return []
 
     @classmethod
-    def is_bitblas_compatible(cls, quant_config: Dict[str, Any]):
+    def is_bitblas_compatible(cls, quant_config: dict[str, Any]):
         # Extract data from quant config.
         num_bits = quant_config.get("bits")
         sym = quant_config.get("sym")
@@ -150,7 +150,7 @@ class BITNETBitBLASLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
