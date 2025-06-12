@@ -385,6 +385,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: DualChunkFlashAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with DualChunkFlashAttention.
         Args:
@@ -401,6 +403,14 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         # Check if FP8 attention is enabled
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
         
+
+        assert output is None, "Output tensor not supported for DualChunk"
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashAttentionImpl")
+
         (
             query,
             query_succ,
