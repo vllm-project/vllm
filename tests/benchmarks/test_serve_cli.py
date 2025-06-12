@@ -31,6 +31,8 @@ def test_bench_serve(server):
         server.host,
         "--port",
         str(server.port),
+        "--dataset-name",
+        "random",
         "--random-input-len",
         "32",
         "--random-output-len",

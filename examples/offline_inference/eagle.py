@@ -137,4 +137,8 @@ def main():
 
 
 if __name__ == "__main__":
+    print(
+        "[WARNING] Use examples/offline_inference/spec_decode.py"
+        " instead of this script."
+    )
     main()
