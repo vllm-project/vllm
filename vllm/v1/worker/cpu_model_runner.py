@@ -81,10 +81,5 @@ def _set_global_compilation_settings():
     # Note: The CPPGEMM backend requires freezing parameters.
     freezing_value = torch._inductor.config.freezing
     torch._inductor.config.freezing = True
-    # Note: workaround for "ValueError: fast mode: can't pickle cyclic objects
-    # including object type dict"
-    force_disable_caches = torch._inductor.config.force_disable_caches
-    torch._inductor.config.force_disable_caches = True
     yield
     torch._inductor.config.freezing = freezing_value
-    torch._inductor.config.force_disable_caches = force_disable_caches

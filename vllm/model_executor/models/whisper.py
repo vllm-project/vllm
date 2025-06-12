@@ -11,6 +11,7 @@ from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.attention import Attention, AttentionType
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -399,6 +400,7 @@ class WhisperEncoder(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": 0})
 class WhisperDecoder(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -425,7 +427,7 @@ class WhisperDecoder(nn.Module):
 
     def forward(
         self,
-        input_ids,
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor],
     ):
@@ -465,11 +467,20 @@ class WhisperModel(nn.Module):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         encoder_outputs = self.get_encoder_outputs(input_features)
-        decoder_outputs = self.decoder(
-            input_ids=input_ids,
-            positions=positions,
-            encoder_hidden_states=encoder_outputs,
-        )
+        if encoder_outputs is None:
+            # compile
+            decoder_outputs = self.decoder(
+                input_ids=input_ids,
+                positions=positions,
+                encoder_hidden_states=encoder_outputs,
+            )
+        else:
+            # eager
+            decoder_outputs = self.decoder.forward(
+                input_ids=input_ids,
+                positions=positions,
+                encoder_hidden_states=encoder_outputs,
+            )
         return decoder_outputs
 
     def get_encoder_outputs(
