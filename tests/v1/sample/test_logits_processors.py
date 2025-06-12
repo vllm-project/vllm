@@ -103,8 +103,8 @@ def _create_logit_bias(
     batch_size: int,
     vocab_size: int,
     bias_value: float,
-) -> list[Optional[dict[int, float]]]:
-    res: list[Optional[dict[int, float]]] = []
+) -> list[dict[int, float]]:
+    res: list[dict[int, float]] = []
     for i in range(batch_size):
         logit_bias = {min(i, vocab_size - 1): bias_value}
         res.append(logit_bias)
@@ -157,7 +157,7 @@ def _fake_apply_greedy_logits_processors(
         test_fakes: TestFakes) -> torch.Tensor:
     """Imitate greedy-compatible logit processor application
     in engine"""
-    logits = test_fakes.logits
+    logits = test_fakes.logits.clone()
     for processor in test_fakes.sampling_metadata.logitsprocs.greedy_list:
         logits = processor.apply(logits)
     return logits
@@ -167,7 +167,7 @@ def _fake_apply_nongreedy_logits_processors(
         test_fakes: TestFakes) -> torch.Tensor:
     """Imitate non-greedy-only logit processor application in engine
     core"""
-    logits = test_fakes.logits
+    logits = test_fakes.logits.clone()
     for processor in test_fakes.sampling_metadata.logitsprocs.nongreedy_list:
         logits = processor.apply(logits)
     return logits
@@ -175,7 +175,7 @@ def _fake_apply_nongreedy_logits_processors(
 
 def _fake_apply_all_logits_processors(test_fakes: TestFakes) -> torch.Tensor:
     """Imitate application of logits processors in engine core"""
-    logits = test_fakes.logits
+    logits = test_fakes.logits.clone()
     for processor in test_fakes.sampling_metadata.logitsprocs.all_list:
         logits = processor.apply(logits)
     return logits
@@ -198,12 +198,11 @@ def _generate_min_token_penalties_and_stop_tokens(
     min_tokens: dict[int, tuple[int, set[int]]] = {}
     for index in range(batch_size):
         if index in batch_indices_for_min_token_penalty:
-            min_tokens[index] = (
-                np.random.randint(num_output_tokens + 1,
-                                  2 * num_output_tokens),
-                set(
+            min_tokens[index] = (np.random.randint(
+                num_output_tokens + 1, 2 * num_output_tokens), [
                     np.random.randint(0, vocab_size - 1)
-                    for _ in range(np.random.randint(0, vocab_size))))
+                    for _ in range(np.random.randint(0, vocab_size))
+                ])
         else:
             min_tokens[index] = (np.random.randint(0,
                                                    num_output_tokens), set())
@@ -224,8 +223,57 @@ def _test_setup(batch_size: int, device: str) -> TestFakes:
     )
 
 
+def _logit_bias_params(kwargs: dict) -> None:
+    kwargs["logit_bias"] = _create_logit_bias(
+        batch_size=1,
+        vocab_size=VOCAB_SIZE,
+        bias_value=random.choice([-0.1, 1.2]),
+    )[0]
+
+
 def _min_p_params(kwargs: dict) -> None:
     kwargs["min_p"] = 0.1
+
+
+def _min_tokens_params(kwargs: dict) -> None:
+    (
+        _,
+        kwargs["stop_token_ids"],
+    ) = _generate_min_token_penalties_and_stop_tokens(NUM_OUTPUT_TOKENS, 1,
+                                                      VOCAB_SIZE, [0])[0]
+    kwargs["min_tokens"] = MIN_TOKENS_LEN_THRESHOLD
+
+
+def _logit_bias_validate(
+    test_fakes: TestFakes,
+    logits_new: torch.Tensor,
+    batch_index: int,
+    request_params: RequestParams,
+) -> bool:
+    logit_bias = request_params.params.logit_bias
+    logits_old = test_fakes.logits[batch_index].cpu()
+    logits_new = logits_new[batch_index].cpu()
+    biased_index = 0
+    for token_id in range(VOCAB_SIZE):
+        logit_old_value = logits_old[token_id]
+        logit_new_value = logits_new[token_id]
+        if biased_index == token_id:
+            bias_value = logit_bias[token_id]
+            exp_value = bias_value + logit_old_value
+            if logit_new_value != pytest.approx(exp_value):
+                print(f"Biased token {token_id} logit value {logit_new_value} "
+                      f"does not match expected value {exp_value} "
+                      f"given bias {bias_value}")
+                return False
+
+        else:
+            if logit_new_value != pytest.approx(logit_old_value):
+                print(
+                    f"Unbiased token {token_id} logit value {logit_new_value} "
+                    f"does not match expected value {logit_old_value}")
+                return False
+
+    return True
 
 
 def _min_p_validate(
@@ -234,33 +282,52 @@ def _min_p_validate(
     batch_index: int,
     request_params: RequestParams,
 ) -> bool:
-    logits = test_fakes.logits
     for token_id in range(VOCAB_SIZE):
+        logits_for_token = logits_new[batch_index][token_id]
         if token_id == 0:
             # Dominant token should always be unmasked
-            if logits[batch_index][token_id] == -float("inf"):
+            if logits_for_token == -float("inf"):
                 print("Invalid: dominant token 0 masked (-inf)")
                 return False
         else:
             if request_params.params.min_p > 0.0:
                 # Non-dominant tokens should be masked when min_p > 0
-                if logits[batch_index][token_id] != -float("inf"):
+                if logits_for_token != -float("inf"):
                     print(f"Invalid: non-dominant token {token_id} not masked")
                     return False
             else:
                 # No masking when min_p is 0
-                if logits[batch_index][token_id] == -float("inf"):
+                if logits_for_token == -float("inf"):
                     print(f"Invalid: token {token_id} masked when min_p=0.0")
                     return False
     return True
 
 
-def _logit_bias_params(kwargs: dict) -> None:
-    pass
+def _min_tokens_validate(
+    test_fakes: TestFakes,
+    logits_new: torch.Tensor,
+    batch_index: int,
+    request_params: RequestParams,
+) -> bool:
+    num_out_tokens = len(request_params.out_tokens)
+    min_reached = num_out_tokens >= MIN_TOKENS_LEN_THRESHOLD
+    stop_token_ids = request_params.params.stop_token_ids
+    for token_id in range(VOCAB_SIZE):
+        logits_for_token = logits_new[batch_index][token_id]
+        if token_id in stop_token_ids and not min_reached:
+            if logits_for_token != -float("inf"):
+                print(f"Token {token_id} is a stop token and "
+                      "the sequence has not reached min length, "
+                      "but the token is not masked "
+                      f"(logit={logits_for_token})")
+                return False
+        else:
+            if logits_for_token == -float("inf"):
+                print(f"Token {token_id} should not be masked but "
+                      f"is (output len={len(num_out_tokens)})")
+                return False
 
-
-def _min_tokens_params(kwargs: dict) -> None:
-    pass
+    return True
 
 
 def _none_validate(
@@ -270,7 +337,8 @@ def _none_validate(
     request_params: RequestParams,
 ) -> bool:
     """Validate that no logits processors are applied"""
-    return logits_new == test_fakes.logits
+    return torch.all(
+        logits_new[batch_index] == test_fakes.logits.cpu()[batch_index])
 
 
 class LogitsprocTestHelpers(NamedTuple):
@@ -281,16 +349,16 @@ class LogitsprocTestHelpers(NamedTuple):
 
 logitsprocs_test_mapping = {
     STR_NO_LOGITPROC:
-    LogitsprocTestHelpers(eval_fxn=_min_p_validate),
+    LogitsprocTestHelpers(eval_fxn=_none_validate),
     STR_LOGITS_BIAS_LOGITPROC_ID:
-    LogitsprocTestHelpers(gen_request_fxn=_min_p_params,
-                          eval_fxn=_min_p_validate),
+    LogitsprocTestHelpers(gen_request_fxn=_logit_bias_params,
+                          eval_fxn=_logit_bias_validate),
     STR_MIN_P_LOGITPROC_ID:
     LogitsprocTestHelpers(gen_request_fxn=_min_p_params,
                           eval_fxn=_min_p_validate),
     STR_MIN_TOKENS_LOGITPROC_ID:
-    LogitsprocTestHelpers(gen_request_fxn=_min_p_params,
-                          eval_fxn=_min_p_validate),
+    LogitsprocTestHelpers(gen_request_fxn=_min_tokens_params,
+                          eval_fxn=_min_tokens_validate),
 }
 
 
@@ -357,8 +425,6 @@ def test_mixed_batch_with_reordering(device: str, reqs_per_logitproc: int,
     random.seed(42)
     torch.set_default_device(device)
 
-    logitsprocs_under_test = ["min_p", "none"]
-
     # Define a shuffled batch of requests which individually use a different
     # logitproc, or no logitproc at all
     batch_params = _generate_mixed_logitsprocs_batch_params(
@@ -386,6 +452,7 @@ def test_mixed_batch_with_reordering(device: str, reqs_per_logitproc: int,
 
     # Emulate application of greedy logits processors in engine
     logits_w_lp = _fake_apply_all_logits_processors(test_fakes)
+    logits_w_lp = logits_w_lp.cpu()
 
     # Validate logits for each fake request
     for batch_index in range(batch_size):
