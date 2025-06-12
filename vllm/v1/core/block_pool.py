@@ -6,6 +6,7 @@ from typing import Callable, Optional
 from vllm.distributed.kv_events import (AllBlocksCleared, BlockRemoved,
                                         BlockStored, KVCacheEvent)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock,
                                          generate_block_hash_extra_keys,
@@ -44,7 +45,12 @@ class BlockPool:
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        if current_platform.is_hpu() and not enable_caching:
+            from vllm.v1.core.kv_cache_utils import FreeKVCacheBlockQueueHPU
+            self.free_block_queue = FreeKVCacheBlockQueueHPU(self.blocks)
+        else:
+            self.free_block_queue = FreeKVCacheBlockQueue(
+                self.blocks)  # type: ignore
 
         # {block_hash: {block ID: block}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.

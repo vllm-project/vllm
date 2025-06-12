@@ -222,6 +222,12 @@ stages:
           cd .jenkins/vision &&
           PT_HPU_LAZY_MODE=1 
           bash run-tests.sh -c configs/models-small.txt -t 2
+      - name: multimodal_qwen_tp1
+        flavor: g3.s
+        command: >-
+          cd .jenkins/vision &&
+          PT_HPU_LAZY_MODE=1
+          bash run-tests.sh -c configs/models-qwen.txt -t 1
       - name: multimodal_small_g3_tp1_mss
         flavor: g3
         command: >-
