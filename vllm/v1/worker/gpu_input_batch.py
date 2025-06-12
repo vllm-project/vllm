@@ -14,7 +14,8 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.sample.logits_processor import BatchUpdate, MinPLogitsProcessor
+from vllm.v1.sample.logits_processor import (BatchUpdate, MinPLogitsProcessor,
+                                             MoveDirectionalityEnum)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
@@ -441,7 +442,8 @@ class InputBatch:
     def swap_states(self, i1: int, i2: int) -> None:
         if not is_tpu:
             # TODO(andy): TPU implementation does not support this path
-            self.batch_update.swapped.append((i1, i2))
+            self.batch_update.moved.append(
+                (i1, i2, MoveDirectionalityEnum.SWAP))
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] =\
@@ -499,7 +501,8 @@ class InputBatch:
         self.block_table.swap_row(i1, i2)
 
     def _register_move_request(self, from_idx: int, to_idx: int) -> None:
-        self.batch_update.moved.append((from_idx, to_idx))
+        self.batch_update.moved.append(
+            (from_idx, to_idx, MoveDirectionalityEnum.UNIDIRECTIONAL))
 
     def condense(self, empty_req_indices: Optional[list[int]] = None) -> None:
         """Slide non-empty requests down into empty indices.
@@ -544,7 +547,9 @@ class InputBatch:
             # index.
             if not is_tpu:
                 self.batch_update.pop_removed_if_can()
-                self.batch_update.moved.append((last_req_index, empty_index))
+                self.batch_update.moved.append(
+                    (last_req_index, empty_index,
+                     MoveDirectionalityEnum.UNIDIRECTIONAL))
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
             assert req_id is not None

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from enum import Enum
 from typing import Optional
 
 import torch
@@ -11,6 +12,12 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
+class MoveDirectionalityEnum(Enum):
+    UNIDIRECTIONAL = 0
+    SWAP = 1
+
+
 # (index, params, output_tok_ids) for new
 # requests added to the batch.
 AddedRequestType = tuple[int, SamplingParams, list[int]]
@@ -19,7 +26,7 @@ AddedRequestType = tuple[int, SamplingParams, list[int]]
 SwappedRequestType = tuple[int, int]
 # (from, to) batch indices of any requests
 # moved within the batch.
-MovedRequestType = tuple[int, int]
+MovedRequestType = tuple[int, int, MoveDirectionalityEnum]
 # Batch indices of any removed requests.
 RemovedRequestType = int
 
@@ -30,18 +37,15 @@ class BatchUpdate:
     _removed: list[RemovedRequestType]
     _is_removed_sorted: bool
     moved: list[MovedRequestType]
-    swapped: list[SwappedRequestType]
     added: list[AddedRequestType]
 
     def __init__(self,
                  removed: Optional[list[RemovedRequestType]] = None,
                  moved: Optional[list[MovedRequestType]] = None,
-                 swapped: Optional[list[SwappedRequestType]] = None,
                  added: Optional[list[AddedRequestType]] = None,
                  batch_size: Optional[int] = None) -> None:
         self._removed = removed or []
         self.moved = moved or []
-        self.swapped = swapped or []
         self.added = added or []
         self.batch_size = 0 if batch_size is None else batch_size
         self._is_removed_sorted = False
@@ -86,7 +90,6 @@ class BatchUpdate:
         self._removed = []
         self._is_removed_sorted = False
         self.moved = []
-        self.swapped = []
         self.added = []
 
 
@@ -158,33 +161,29 @@ class MinPLogitsProcessor(LogitsProcessor):
         # Process added requests.
         for index, sampling_params, _ in batch_update.added:
             min_p = sampling_params.min_p
-            self.min_p_cpu[index] = min_p
+            if self.min_p_cpu[index] != min_p:
+                needs_update = True
+                self.min_p_cpu[index] = min_p
             if min_p:
                 self.min_p_count += 1
-                needs_update = True
 
         if self.min_p_count:
             # Process removed requests.
+            needs_update |= bool(batch_update.removed)
             for index in batch_update.removed:
                 if self.min_p_cpu[index]:
                     self.min_p_count -= 1
-                    needs_update = True
 
-            # Process moved (i1 -> i2) requests
-            for from_index, to_index in batch_update.moved:
-                min_p = self.min_p_cpu[from_index]
-                self.min_p_cpu[to_index] = min_p
-                if min_p:
-                    needs_update = True
-
-            # Process swapped (i1 <-> i2) requests
-            for adx, bdx in batch_update.swapped:
-                min_p_a = self.min_p_cpu[adx]
-                min_p_b = self.min_p_cpu[bdx]
-                if min_p_a or min_p_b:
-                    needs_update = True
-                self.min_p_cpu[adx] = min_p_b
-                self.min_p_cpu[bdx] = min_p_a
+            # Process moved requests, unidirectional (a->b) and swap (a<->b)
+            for adx, bdx, direct in batch_update.moved:
+                change = (min_p_a :=
+                          self.min_p_cpu[adx]) != (min_p_b :=
+                                                   self.min_p_cpu[bdx])
+                needs_update |= change
+                if change:
+                    self.min_p_cpu[bdx] = min_p_a
+                    if direct == MoveDirectionalityEnum.SWAP:
+                        self.min_p_cpu[adx] = min_p_b
 
         # Update tensors if needed.
         size = batch_update.batch_size
@@ -245,21 +244,16 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
                 if self.biases.pop(index, None):
                     needs_update = True
 
-            # Process moved requests.
-            for from_index, to_index in batch_update.moved:
-                if entry := self.biases.pop(from_index, None):
-                    self.biases[to_index] = entry
-                    needs_update = True
-
-            # Process swapped requests.
-            for a_index, b_index in batch_update.swapped:
+            # Process moved requests, unidirectional (a->b) and swap (a<->b)
+            for a_index, b_index, direct in batch_update.moved:
                 a_entry = self.biases.pop(a_index, None)
-                b_entry = self.biases.pop(b_index, None)
-                needs_update |= bool(a_entry or b_entry)
-                if a_entry:
-                    self.biases[b_index] = a_entry
-                if b_entry:
+                if direct == MoveDirectionalityEnum.SWAP and (
+                        b_entry := self.biases.pop(b_index, None)) is not None:
+                    needs_update = True
                     self.biases[a_index] = b_entry
+                if a_entry is not None:
+                    needs_update = True
+                    self.biases[b_index] = a_entry
 
         # Update tensors if needed.
         if self.biases and needs_update:
@@ -323,21 +317,18 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                 if self.min_toks.pop(index, None):
                     needs_update = True
 
-            # Process moved requests.
-            for from_index, to_index in batch_update.moved:
-                if entry := self.min_toks.pop(from_index, None):
-                    self.min_toks[to_index] = entry
-                    needs_update = True
-
-            # Process swapped requests.
-            for a_index, b_index in batch_update.swapped:
+            # Process moved requests, unidirectional (a->b) and
+            # swapped (a<->b)
+            for a_index, b_index, direct in batch_update.moved:
                 a_entry = self.min_toks.pop(a_index, None)
-                b_entry = self.min_toks.pop(b_index, None)
-                needs_update |= bool(a_entry or b_entry)
-                if a_entry:
-                    self.min_toks[b_index] = a_entry
-                if b_entry:
+                if direct == MoveDirectionalityEnum.SWAP and (
+                        b_entry := self.min_toks.pop(b_index,
+                                                     None)) is not None:
+                    needs_update = True
                     self.min_toks[a_index] = b_entry
+                if a_entry:
+                    needs_update = True
+                    self.min_toks[b_index] = a_entry
 
         if self.min_toks:
             # Check for any requests that have attained their min tokens.
