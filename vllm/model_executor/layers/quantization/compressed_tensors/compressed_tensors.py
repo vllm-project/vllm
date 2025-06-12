@@ -381,7 +381,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                         "Current platform does not support cutlass NVFP4."
                         " Running CompressedTensorsW4A16Fp4.")
                     return CompressedTensorsW4A16Fp4(
-                        has_input_globa_scale=True)
+                        has_input_global_scale=True)
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
