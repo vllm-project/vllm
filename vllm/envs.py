@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
-    VLLM_USE_TRITON_FLASH_ATTN: bool = False
+    VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
@@ -112,6 +112,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
@@ -772,6 +773,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port of the master node in the data parallel setting
     "VLLM_DP_MASTER_PORT":
     lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
+
+    # In the context of executing MoE models with Data-Parallel, Expert-Parallel
+    # and Batched All-to-All dispatch/combine kernels, VLLM_MOE_DP_CHUNK_SIZE
+    # dictates the quantum of tokens that can be dispatched from a DP
+    # rank. All DP ranks process the activations in VLLM_MOE_DP_CHUNK_SIZE
+    # units.
+    "VLLM_MOE_DP_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
 
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS":
