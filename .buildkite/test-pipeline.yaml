@@ -759,6 +759,7 @@ steps:
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
+  - pytest -v -s cuda/test_cuda_context.py
 
 - label: LM Eval Large Models # optional
   gpu: a100
