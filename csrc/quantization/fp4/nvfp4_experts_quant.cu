@@ -281,6 +281,8 @@ cvt_fp16_to_fp4(
         }
       }
     } else {
+      // Load input offsets into registers first, then do the computation.
+      // Local array size set to 17 because of register limit.
       uint32_t local_offsets[17];
       for (int chunk_start = 0; chunk_start < n_experts; chunk_start += 16) {
         *reinterpret_cast<int4*>(local_offsets) =
@@ -350,6 +352,9 @@ cvt_fp16_to_fp4(
                 "Vec size is not matched.");
   extern __shared__ uint32_t shared_input_offsets[];
 
+  // Load input offsets into shared memory.
+  // If n_experts is larger than 4, use vectorized int4 to save instructions.
+  // If n_experts is smaller than 4, read directly.
   if constexpr (SMALL_NUM_EXPERTS) {
     for (int i = threadIdx.x; i < n_experts + 1; i += blockDim.x) {
       shared_input_offsets[i] = input_offset_by_experts[i];
