@@ -38,7 +38,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
-from vllm.utils import is_navi3
 
 from .chatglm import ChatGLMBaseModel, ChatGLMModel
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -118,30 +117,6 @@ class EVA2CLIPAttention(nn.Module):
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if is_navi3():
-            try:
-                # git clone -b howiejay/navi_support https://github.com/ROCm/flash-attention.git
-                from flash_attn import flash_attn_func
-                B, L, _ = x.shape
-                qkv, _ = self.query_key_value(x)  # B, L, 3 * H * D
-                q, k, v = qkv.chunk(3, dim=-1)
-
-                q = q.reshape(B, L, self.num_heads_per_rank,
-                              self.head_dim)  # B, L, H, D
-                k = k.reshape(B, L, self.num_heads_per_rank,
-                              self.head_dim)  # B, L, H, D
-                v = v.reshape(B, L, self.num_heads_per_rank,
-                              self.head_dim)  # B, L, H, D
-
-                out = flash_attn_func(q, k, v)
-
-                output, _ = self.dense(out.view(B, L, -1))
-                output = self.output_dropout(output)
-
-                return output
-            except ModuleNotFoundError:
-                pass
-
         qkv, _ = self.query_key_value(x)  # B, L, 3 * H * D
         q, k, v = qkv.chunk(3, dim=-1)
 

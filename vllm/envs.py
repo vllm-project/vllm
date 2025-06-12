@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
-    VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
@@ -46,6 +45,7 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_CPU_NUM_OF_RESERVED_CPU: int = 0
     VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
+    VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
@@ -318,11 +319,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT", "True").lower() in
      ("true", "1")),
 
-    # use quantized q,k,v,softmax(qk^T), attn output during prefill
-    "VLLM_USE_ROCM_FP8_FLASH_ATTN":
-    lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
-             ("true", "1")),
-
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
     # enabled by default.
@@ -434,7 +430,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
-    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
+    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "auto"),
+
+    # (CPU backend only) CPU cores not used by OMP threads .
+    # Those CPU cores will not be used by OMP threads of a rank.
+    "VLLM_CPU_NUM_OF_RESERVED_CPU":
+    lambda: int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0")),
 
     # (CPU backend only) whether to use prepack for MoE layer. This will be
     # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
@@ -569,6 +570,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # server for simple data operations
     "VLLM_RPC_TIMEOUT":
     lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
+
+    # Timeout in seconds for keeping HTTP connections alive in API server
+    "VLLM_HTTP_TIMEOUT_KEEP_ALIVE":
+    lambda: int(os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")),
 
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded

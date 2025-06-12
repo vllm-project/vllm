@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-import importlib
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -719,10 +718,8 @@ def cutlass_scaled_mm(a: torch.Tensor,
 
     cutlass_compatible_b = (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     if current_platform.is_rocm() or not cutlass_compatible_b:
-        triton_scaled_mm_module = importlib.import_module(
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "triton_scaled_mm")
-        triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
+        from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa
+            triton_scaled_mm)
         return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
@@ -1563,10 +1560,10 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 token_expert_indicies: torch.Tensor,
+                 token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor) -> None:
-    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
-                                  token_expert_indicies, gating_output)
+    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids, token_expert_indices,
+                                  gating_output)
 
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],

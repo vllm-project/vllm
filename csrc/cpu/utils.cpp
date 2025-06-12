@@ -54,8 +54,7 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
     *(src_mask->maskp) = *(src_mask->maskp) ^ *(mask->maskp);
     int page_num = numa_migrate_pages(pid, src_mask, mask);
     if (page_num == -1) {
-      TORCH_CHECK(false,
-                  "numa_migrate_pages failed. errno: " + std::to_string(errno));
+      TORCH_WARN("numa_migrate_pages failed. errno: " + std::to_string(errno));
     }
 
     // restrict memory allocation node.
