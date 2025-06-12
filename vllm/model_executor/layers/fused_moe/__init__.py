@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from typing import Any, Optional
 
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported, FusedMoEFlashinferCutlass)
 from vllm.triton_utils import HAS_TRITON
 
 _config: Optional[dict[str, Any]] = None
@@ -28,6 +28,7 @@ __all__ = [
     "FusedMoE",
     "FusedMoEMethodBase",
     "FusedMoeWeightScaleSupported",
+    "FusedMoEFlashinferCutlass",
     "override_config",
     "get_config",
 ]

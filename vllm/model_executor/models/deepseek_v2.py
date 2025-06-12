@@ -35,7 +35,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEFlashinferCutlass)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -119,8 +119,8 @@ class DeepseekV2MoE(nn.Module):
                 torch.empty(config.n_routed_experts))
         else:
             self.gate.e_score_correction_bias = None
-
-        self.experts = FusedMoE(
+        # TODO(shuw): add a env var
+        self.experts = FusedMoEFlashinferCutlass(
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,

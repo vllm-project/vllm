@@ -1071,12 +1071,15 @@ class FusedMoE(torch.nn.Module):
                                              shard_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
-        if shard_id == "w1":
-            expert_data = expert_data.narrow(shard_dim, 0, shard_size)
         # w3, up_proj: Load into second logical weight of w13.
+        # trtllm cutlass kernel assumes differently
+        assert shard_id in ("w1", "w3")
+        switch_w13 = getattr(self.quant_method, 'load_up_proj_weight_first', False)
+        if (switch_w13 and shard_id == "w1") or (not switch_w13 and shard_id == "w3"):
+            start = shard_size
         else:
-            assert shard_id == "w3"
-            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+            start = 0
+        expert_data = expert_data.narrow(shard_dim, start, shard_size)
         expert_data.copy_(loaded_weight)
 
     def _load_w2(self,
@@ -1204,7 +1207,7 @@ class FusedMoE(torch.nn.Module):
                              tp_rank=self.tp_rank)
             return
 
-        if "ModelOpt" in quant_method_name:
+        if "ModelOpt" in quant_method_name or "FlashInferCutlass" in quant_method_name:
             if ('weight_scale_2' in weight_name
                     or 'input_scale' in weight_name):
                 self._load_per_tensor_weight_scale(shard_id=shard_id,
@@ -1533,3 +1536,42 @@ direct_register_custom_op(
     fake_impl=moe_forward_fake,
     dispatch_key=current_platform.dispatch_key,
 )
+
+class FusedMoEFlashinferCutlass(FusedMoE):
+    def forward(self, hidden_states: torch.Tensor,
+						  	router_logits: torch.Tensor):
+        assert self.dp_size == 1
+        return self.forward_impl(hidden_states, router_logits)
+
+
+    def forward_impl(self,
+					x: torch.Tensor,#, Fp4QuantizedTensor],
+					router_logits: torch.Tensor,
+		) -> torch.Tensor:
+        final_hidden_states = self.quant_method.apply(
+            layer=self,
+            x=x,
+            router_logits=router_logits,
+            top_k=self.top_k,
+            renormalize=self.renormalize,
+            use_grouped_topk=self.use_grouped_topk,
+            global_num_experts=self.global_num_experts,
+            expert_map=self.expert_map,
+            topk_group=self.topk_group,
+            num_expert_group=self.num_expert_group,
+            custom_routing_function=self.custom_routing_function,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.e_score_correction_bias,
+            activation=self.activation,
+            apply_router_weight_on_input=self.apply_router_weight_on_input,
+            ep_size=self.ep_size,
+            ep_rank=self.ep_rank,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
+        )
+        if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+            # Default set to False. (May have to add shared expert outputs.
+            final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
+                final_hidden_states)
+
+        return final_hidden_states

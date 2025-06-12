@@ -30,6 +30,14 @@ from vllm.model_executor.parameter import (ModelWeightParameter,
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
+from typing import TYPE_CHECKING
+try:
+    from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
+    from flashinfer import fp4_quantize as fp4_quantize
+except ImportError:
+    if not TYPE_CHECKING:
+        flashinfer_cutlass_fused_moe = None
+
 logger = init_logger(__name__)
 
 QUANT_ALGOS = ["FP8", "NVFP4"]
@@ -735,3 +743,108 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                a1_gscale=layer.w13_input_scale_quant,
                                a2_gscale=layer.w2_input_scale_quant,
                                device=x.device).to(x.dtype)
+
+def flashinfer_cutlass_fp4_supported() -> bool:
+    return cutlass_fp4_supported() and flashinfer_cutlass_fused_moe is not None
+
+
+class FlashInferCutlassNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
+    """
+    MoE TRTLLM-CUTLASS Method for FP4 Quantization.
+    Args: 
+        quant_config: NVFP4 CUTLASS Quant Config
+    """
+
+    def __init__(self, quant_config: ModelOptNvFp4Config):
+        self.quant_config = quant_config
+        self.flashinfer_cutlass_fp4_supported = flashinfer_cutlass_fp4_supported()
+        self.use_marlin = False
+
+        if not self.flashinfer_cutlass_fp4_supported:
+            raise ValueError("Current platform does not support NVFP4"
+                                " quantization for flashinfer-cutlass implementation."
+                                " Please use Blackwell and"
+                                " above.")
+
+    @property
+    def load_up_proj_weight_first(self) -> bool:
+        return True
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        ep_rank: Optional[int] = None,
+        ep_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
+        tp_size: Optional[int] = None,        
+    ):
+
+        assert activation == "silu", "Only SiLU activation is supported."
+        assert not apply_router_weight_on_input, (
+            "Router weight on input is not "
+            "supported for FlashInferCutlassFusedMoE.")
+        # assert expert_map is None, ("Expert Parallelism / expert_map "
+        #                             "is currently not supported for "
+        #                             "FlashInferCutlassFusedMoE.")
+
+        topk_weights, topk_ids = FusedMoEFlashinferCutlass.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
+        
+        a1_gs = torch.min(layer.w13_input_scale_quant)
+        a2_gs = torch.min(layer.w2_input_scale_quant)
+        w1_blockscale=layer.w13_blockscale_swizzled                                                                    
+        w2_blockscale=layer.w2_blockscale_swizzled                                                                                          
+        g1_alphas=layer.g1_alphas                                                                                      
+        g2_alphas=layer.g2_alphas
+        
+        quant_scales=[
+            a1_gs,
+            w1_blockscale.view(torch.int32),
+            g1_alphas,
+            a2_gs,
+            w2_blockscale.view(torch.int32),
+            g2_alphas,
+        ]
+        # TRTLLM Cutlass moe takes in activations in BF16/Half/nvfp4 precision
+        # and fp4 quantized weights loaded from the checkpoint
+        # TODO(shuw): do quantization here
+        out_dtype = x.dtype
+        x, x_sf = fp4_quantize(x, a1_gs)
+        out = flashinfer_cutlass_fused_moe(
+            x,  
+            topk_ids.to(torch.int),                                                               
+            topk_weights,                                                                                              
+            layer.w13_weight.view(torch.long),                                                                         
+            layer.w2_weight.view(torch.long),                                                                          
+            out_dtype,                                                                  
+            quant_scales=quant_scales,                                                                                              
+            input_sf=x_sf,                                          
+            ep_size=ep_size,                                                                                           
+            ep_rank=ep_rank,                                          
+            tp_size=tp_size,                                                                                           
+            tp_rank=tp_rank,            
+        )
+        return out[0]
