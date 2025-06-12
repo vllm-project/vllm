@@ -547,6 +547,7 @@ class FlashInferImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 
@@ -560,6 +561,11 @@ class FlashInferImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashInferImpl")
 
         if attn_metadata is None:
             # Profiling run.
