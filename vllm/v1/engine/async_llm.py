@@ -455,8 +455,7 @@ class AsyncLLM(EngineClient):
         Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
             * 2) Processing the Input.
-            * 3) Adding the Request to the Detokenizer.
-            * 4) Adding the Request to the EngineCore (separate process).
+            * 3) Adding the Request to the EngineCore (separate process).
 
         A separate output_handler loop runs in a background AsyncIO task,
         pulling outputs from EngineCore and putting them into the
