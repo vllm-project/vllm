@@ -4477,13 +4477,11 @@ class VllmConfig:
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        disable_cascade_reasons: list[str] = []
-
         if self.compilation_config.full_cuda_graph and \
             not self.model_config.disable_cascade_attn:
-            disable_cascade_reasons.append(
-                "full_cuda_graph is not supported with "
-                "cascade attention. Disabling cascade attention.")
+            logger.info("full_cuda_graph is not supported with "
+                        "cascade attention. Disabling cascade attention.")
+            self.model_config.disable_cascade_attn = True
             self.cache_config.enable_prefix_caching = False
 
         disable_chunked_prefill_reasons: list[str] = []
@@ -4495,13 +4493,9 @@ class VllmConfig:
                     "Only \"last\" pooling supports chunked "
                     "prefill and prefix caching; disabling both.")
 
-            disable_cascade_reasons.append(
-                "Loaded model for pooling; disabling cascade attention.")
-
         if disable_chunked_prefill_reasons:
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
-            self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.chunked_prefill_enabled = False
             self.scheduler_config.long_prefill_token_threshold = 0
             self.scheduler_config.max_num_batched_tokens = max(
@@ -4510,11 +4504,6 @@ class VllmConfig:
 
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
-
-        if disable_cascade_reasons:
-            for reason in disable_cascade_reasons:
-                logger.info(reason)
-            self.model_config.disable_cascade_attn = True
 
         if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events
