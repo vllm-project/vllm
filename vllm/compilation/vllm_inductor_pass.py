@@ -4,6 +4,7 @@
 import time
 
 import torch
+from torch._dynamo.utils import lazy_format_graph_code
 
 from vllm.config import PassConfig, VllmConfig
 # yapf: disable
@@ -34,6 +35,8 @@ class VllmInductorPass(InductorPass):
         self.pass_name = self.__class__.__name__
 
     def dump_graph(self, graph: torch.fx.Graph, stage: str, always=False):
+        lazy_format_graph_code(stage, graph.owning_module)
+
         if stage in self.pass_config.dump_graph_stages or always:
             # Make sure filename includes rank in the distributed setting
             parallel = p_is_init() and get_tp_world_size() > 1
