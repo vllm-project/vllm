@@ -67,7 +67,7 @@ class Hermes2ProToolParser(ToolParser):
             for token_id in self.tool_call_end_token_ids
         ]
 
-        self.Buffered_delta_text = ""
+        self.buffered_delta_text = ""
 
     # Very simple idea: when encountering tokens like <, tool, _call, >,
     # <, /, tool, _call, >, store them in a buffer.
@@ -84,16 +84,16 @@ class Hermes2ProToolParser(ToolParser):
             # the buffered text + delta_text.
             if (delta_text == self.tool_call_start_token_array[-1]
                     or delta_text == self.tool_call_end_token_array[-1]):
-                buffered_text = self.Buffered_delta_text
-                self.Buffered_delta_text = ""
+                buffered_text = self.buffered_delta_text
+                self.buffered_delta_text = ""
                 return buffered_text + delta_text
             else:
-                self.Buffered_delta_text = self.Buffered_delta_text + delta_text
+                self.buffered_delta_text = self.buffered_delta_text + delta_text
                 return ""
         else:
-            if self.Buffered_delta_text:
-                buffered_text = self.Buffered_delta_text
-                self.Buffered_delta_text = ""
+            if self.buffered_delta_text:
+                buffered_text = self.buffered_delta_text
+                self.buffered_delta_text = ""
                 return buffered_text + delta_text
             else:
                 return delta_text
@@ -167,11 +167,11 @@ class Hermes2ProToolParser(ToolParser):
 
         delta_text = self.tool_call_delta_buffer(delta_text)
         # If the last characters of previous_text
-        # match self.Buffered_delta_text, remove only the matching part.
-        if (len(previous_text) >= len(self.Buffered_delta_text)
-                and previous_text[-len(self.Buffered_delta_text):]
-                == self.Buffered_delta_text):
-            previous_text = previous_text[:-len(self.Buffered_delta_text)]
+        # match self.buffered_delta_text, remove only the matching part.
+        if (len(previous_text) >= len(self.buffered_delta_text)
+                and previous_text[-len(self.buffered_delta_text):]
+                == self.buffered_delta_text):
+            previous_text = previous_text[:-len(self.buffered_delta_text)]
             current_text = previous_text + delta_text
 
         logger.debug("delta_text: %s", delta_text)
