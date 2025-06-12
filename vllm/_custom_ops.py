@@ -1550,10 +1550,10 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 token_expert_indicies: torch.Tensor,
+                 token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor) -> None:
-    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
-                                  token_expert_indicies, gating_output)
+    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids, token_expert_indices,
+                                  gating_output)
 
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],

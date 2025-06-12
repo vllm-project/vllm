@@ -594,8 +594,8 @@ def test_decode_schedule_preempted():
     # should be preempted. 1 will also be preempted.
     budget = create_token_budget()
     output = scheduler._schedule_running(budget, curr_loras)
-    remainig_running = scheduler.running
-    assert len(remainig_running) == 0
+    remaining_running = scheduler.running
+    assert len(remaining_running) == 0
     assert len(output.decode_seq_groups) == 1
     assert len(output.prefill_seq_groups) == 0
     assert output.decode_seq_groups[0].seq_group.request_id == "0"
