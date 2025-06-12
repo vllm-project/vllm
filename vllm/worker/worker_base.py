@@ -542,15 +542,10 @@ class WorkerWrapperBase:
             del os.environ[key]
         update_environment_variables(envs)
 
-    def init_config(self, all_kwargs: List[Dict[str, Any]]) -> None:
+    def _init_config(self) -> None:
         """
         Resolve configuration that depends on hardware capabilities.
         """
-        kwargs = all_kwargs[self.rpc_rank]
-        self.vllm_config: VllmConfig = kwargs.get("vllm_config")
-        assert self.vllm_config is not None, (
-            "vllm_config is required to initialize the worker")
-
         model_config = self.vllm_config.model_config
         if model_config.dtype == "auto":
             from vllm.config import (V1_SUPPORTED_DTYPES, _find_dtype,
@@ -592,8 +587,11 @@ class WorkerWrapperBase:
         Arguments are passed to the worker class constructor.
         """
         kwargs = all_kwargs[self.rpc_rank]
+        self.vllm_config: VllmConfig = kwargs.get("vllm_config")
         assert self.vllm_config is not None, (
             "vllm_config is required to initialize the worker")
+
+        self._init_config()
         enable_trace_function_call_for_thread(self.vllm_config)
 
         from vllm.plugins import load_general_plugins

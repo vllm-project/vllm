@@ -122,8 +122,6 @@ class MultiprocessingDistributedExecutor(DistributedExecutorBase):
             )
             all_kwargs.append(kwargs)
 
-        # init_config first to resolve hardware dependent config/"auto" dtype
-        self._run_workers("init_config", all_kwargs)
         self._run_workers("init_worker", all_kwargs)
         self._run_workers("init_device")
         self._run_workers("load_model",
