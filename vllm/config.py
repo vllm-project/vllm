@@ -227,6 +227,10 @@ def get_field(cls: ConfigType, name: str) -> Field:
         f"{cls.__name__}.{name} must have a default value or default factory.")
 
 
+def is_init_field(cls: ConfigType, name: str) -> bool:
+    return next(f for f in fields(cls) if f.name == name).init
+
+
 TokenizerMode = Literal["auto", "slow", "mistral", "bitnet", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
