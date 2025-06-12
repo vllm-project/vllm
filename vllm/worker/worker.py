@@ -189,7 +189,6 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
-
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
