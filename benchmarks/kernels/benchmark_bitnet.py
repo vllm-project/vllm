@@ -7,7 +7,8 @@ from bitblas import Matmul, MatmulConfig, auto_detect_nvidia_target
 from vllm.utils import FlexibleArgumentParser
 
 parser = FlexibleArgumentParser(
-    description="Benchmark BitBLAS int4 on a specific target.")
+    description="Benchmark BitBLAS int4 on a specific target."
+)
 
 # Add arguments to the parser
 parser.add_argument(
@@ -16,10 +17,9 @@ parser.add_argument(
     default=auto_detect_nvidia_target(),
     help="Specify the target device for benchmarking.",
 )
-parser.add_argument("--group_size",
-                    type=int,
-                    default=None,
-                    help="Group size for grouped quantization.")
+parser.add_argument(
+    "--group_size", type=int, default=None, help="Group size for grouped quantization."
+)
 parser.add_argument(
     "--A_dtype",
     type=str,
@@ -66,17 +66,17 @@ parser.add_argument(
     choices=["nt", "nn"],
     help="Matrix layout, 'nt' for non-transpose A and transpose W.",
 )
-parser.add_argument("--with_bias",
-                    action="store_true",
-                    help="Include bias in the benchmark.")
+parser.add_argument(
+    "--with_bias", action="store_true", help="Include bias in the benchmark."
+)
 parser.add_argument(
     "--with_scaling",
     action="store_true",
     help="Include scaling factor in the quantization.",
 )
-parser.add_argument("--with_zeros",
-                    action="store_true",
-                    help="Include zeros in the quantization.")
+parser.add_argument(
+    "--with_zeros", action="store_true", help="Include zeros in the quantization."
+)
 parser.add_argument(
     "--zeros_mode",
     type=str,
@@ -640,13 +640,10 @@ for config, values in benchmark_results.items():
     args = config.split("-")
     func_name = args[0]
     input_args = "-".join(args[1:])
-    col_widths[0] = max((max(len(str(headers[0])), len(func_name)) + 2),
-                        col_widths[0])
-    col_widths[1] = max(
-        (max(len(str(headers[1])), len(input_args)) + 2, col_widths[1]))
+    col_widths[0] = max((max(len(str(headers[0])), len(func_name)) + 2), col_widths[0])
+    col_widths[1] = max((max(len(str(headers[1])), len(input_args)) + 2, col_widths[1]))
     col_widths[2] = max(
-        max(len(str(headers[2])),
-            len(f"{values['BitBLAS_top20_latency']:.3f} ms")) + 2,
+        max(len(str(headers[2])), len(f"{values['BitBLAS_top20_latency']:.3f} ms")) + 2,
         col_widths[2],
     )
     break
@@ -667,5 +664,4 @@ for config, values in benchmark_results.items():
         input_args,
         f"{values['BitBLAS_top20_latency']:.3f} ms",
     ]
-    print("".join([str(i).ljust(col_widths[j])
-                   for j, i in enumerate(row)]) + "\n")
+    print("".join([str(i).ljust(col_widths[j]) for j, i in enumerate(row)]) + "\n")
