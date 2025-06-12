@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-import importlib
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -706,10 +705,8 @@ def cutlass_scaled_mm(a: torch.Tensor,
 
     cutlass_compatible_b = (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     if current_platform.is_rocm() or not cutlass_compatible_b:
-        triton_scaled_mm_module = importlib.import_module(
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "triton_scaled_mm")
-        triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
+        from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa
+            triton_scaled_mm)
         return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
@@ -899,11 +896,36 @@ def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
     return output_tensor
 
 
+def get_cutlass_pplx_moe_mm_data(expert_offsets: torch.Tensor,
+                                 problem_sizes1: torch.Tensor,
+                                 problem_sizes2: torch.Tensor,
+                                 expert_num_tokens: torch.Tensor,
+                                 num_local_experts: int, padded_m: int, n: int,
+                                 k: int):
+    """
+    Prepare data necessary to perform CUTLASS grouped matrix multiplications
+    used in CUTLASS-based fused MoE.
+
+    The function takes in expert_num_tokens (token count per expert) and
+    non_zero_expert_idxs (consecutive indices of experts with non-zero token 
+    counts) and uses them to compute:
+    - expert_offsets: Indices that mark at which token index each expert begins
+                      its computation.
+    - problem_sizes1, problem_sizes2: MxNxK sizes of each expert's
+                                      multiplication in two grouped MMs used in
+                                      the fused MoE operation.
+    """
+    return torch.ops._C.get_cutlass_pplx_moe_mm_data(
+        expert_offsets, problem_sizes1, problem_sizes2, expert_num_tokens,
+        num_local_experts, padded_m, n, k)
+
+
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                    b_tensors: torch.Tensor, a_scales: torch.Tensor,
                    b_scales: torch.Tensor, expert_offsets: torch.Tensor,
                    problem_sizes: torch.Tensor, a_strides: torch.Tensor,
-                   b_strides: torch.Tensor, c_strides: torch.Tensor):
+                   b_strides: torch.Tensor, c_strides: torch.Tensor,
+                   per_act_token: bool, per_out_ch: bool):
     """
     A single grouped matrix multiplication used in CUTLASS-based fused MoE.
     The function executes fp8-quantized OUT = AB matrix multiplication.
@@ -918,7 +940,7 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
     return torch.ops._C.cutlass_moe_mm(out_tensors, a_tensors, b_tensors,
                                        a_scales, b_scales, expert_offsets,
                                        problem_sizes, a_strides, b_strides,
-                                       c_strides)
+                                       c_strides, per_act_token, per_out_ch)
 
 
 def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
@@ -1525,10 +1547,10 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 token_expert_indicies: torch.Tensor,
+                 token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor) -> None:
-    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
-                                  token_expert_indicies, gating_output)
+    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids, token_expert_indices,
+                                  gating_output)
 
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
