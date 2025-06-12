@@ -21,11 +21,27 @@ from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
+from z_hacky_layer_test.utils import identity_rotary_cos_sin
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+from py_bok import (
+    create_op,
+    forward_inplace,
+    calculate_workspace_size,
+    AttentionLayerDimensions,
+    DeviceDataType,
+    RotaryEmbedding,
+    RotaryScalingType,
+    RotaryPositionalEmbeddingType,
+    PrefixCacheConfiguration,
+    AttentionOp
+)
+
+USING_BOK = True
 
 BOK_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
@@ -186,6 +202,13 @@ class BokMetadata:
     decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
     cascade_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
 
+    op: Optional[AttentionOp] = None
+    test_case: Optional[ForwardInplaceTestCase] = None
+
+    prefix_cache_configuration: Optional[PrefixCacheConfiguration] = None
+    rotary_embedding: Optional[RotaryEmbedding] = None
+    stream: Optional[torch.cuda.Stream] = None
+
     @property
     def query_start_loc(self):
         # The GPUModelRunner expects to be able to access this property.
@@ -218,7 +241,77 @@ class BokMetadataBuilder:
         self.vllm_config = runner.vllm_config
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
+        if USING_BOK:
+            print("here 1", flush=True)
+            from z_hacky_layer_test.test_py_bok import ForwardInplaceTestCase, ContextRequest, GenerationRequest, _sequence_length, _input_sequence_length
+            from z_hacky_layer_test.utils import identity_rotary_cos_sin, generate_constant_attention_input, pack_attention_input
+            self.stream = torch.cuda.current_stream()
+            
+            attention_layer_dimensions = AttentionLayerDimensions()
+            attention_layer_dimensions.numQHeads = 32
+            attention_layer_dimensions.numKVHeads = 4
+            attention_layer_dimensions.headSize = 64    
+            self.test_case = ForwardInplaceTestCase(
+                    num_layers=1,
+                    max_batch_size=64,
+                    max_num_tokens=(1 << 14),
+                    attention_layer_dimensions=attention_layer_dimensions,
+                    rotary_embedding_dim=128,
+                    rotary_embedding_base=10000,
+                    rotary_embedding_max_positions=2048,
+                    max_attention_window_size=(1 << 15),
+                    num_tokens_per_block=32,
+                    max_num_blocks_per_sequence=512,
+                    requests=(ContextRequest(sequence_length=1024),),
+                    output_scaling_factor=1.0,
+                )
+            print("here 2", flush=True)
+            self.rotary_embedding = RotaryEmbedding()
+            self.rotary_embedding.type = RotaryPositionalEmbeddingType.GPT_NEOX
+            self.rotary_embedding.rotaryEmbeddingDim = 128 #TODO: make this configurable
+            self.rotary_embedding.rotaryEmbeddingBase = 10000 #TODO: make this configurable
+            self.rotary_embedding.rotaryEmbeddingScale = 0 #TODO: make this configurable
+            self.rotary_embedding.rotaryEmbeddingMaxPositions = 2048 #TODO: make this configurable   
+            self.rotary_embedding.rotaryScalingType = RotaryScalingType.NONE #TODO: make this configurable
 
+            self.prefix_cache_configuration = PrefixCacheConfiguration()
+            self.prefix_cache_configuration.numTokensPerBlock = 32 #TODO: make this configurable
+            self.prefix_cache_configuration.maxNumBlocksPerSequence = (
+                512 #TODO: make this configurable
+            )
+            self.prefix_cache_configuration.dataType = DeviceDataType.FP8_E4M3
+
+            fp8_output_scaling = torch.tensor(
+                [1.0], device=torch.device("cuda"), dtype=torch.float32
+            )
+            kv_scale_orig_quant = torch.tensor(
+                [1.0], device=torch.device("cuda"), dtype=torch.float32
+            )
+            kv_scale_quant_orig = torch.tensor(
+                [1.0], device=torch.device("cuda"), dtype=torch.float32
+            )
+            multi_block_semaphores = torch.zeros(
+                self.test_case.max_batch_size * self.test_case.attention_layer_dimensions.numQHeads,
+                device=torch.device("cuda"),
+                dtype=torch.int32,
+            )
+            print("here 3", flush=True)
+            # Create a representation of the fixed parameters of the attention operation.
+            self.op = create_op(
+                inputDataType=DeviceDataType.BF16,
+                outputDataType=DeviceDataType.FP8_E4M3,
+                attentionLayerDimensions=self.test_case.attention_layer_dimensions,
+                rotaryEmbedding=self.rotary_embedding,
+                prefixCacheConfiguration=self.prefix_cache_configuration,
+                qScaling=1.0,
+                maxAttentionWindowSize=self.test_case.max_attention_window_size,
+                cyclicAttentionWindowSize=self.test_case.max_attention_window_size,
+                fp8OutputScaling=fp8_output_scaling,
+                kvScaleOrigQuant=kv_scale_orig_quant,
+                kvScaleQuantOrig=kv_scale_quant_orig,
+                multiBlockSemaphores=multi_block_semaphores,
+            )
+            print("here 4", flush=True)
     def reorder_batch(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
         # We now want to reorder the batch so that the "decode" requests are and
@@ -479,6 +572,11 @@ class BokMetadataBuilder:
             shared_kv_page_indptr=shared_kv_page_indptr,
             shared_kv_page_indices=shared_kv_page_indices,
             shared_kv_last_page_len=shared_kv_last_page_len,
+            op=self.op,
+            test_case=self.test_case,
+            prefix_cache_configuration=self.prefix_cache_configuration,
+            rotary_embedding=self.rotary_embedding,
+            stream=self.stream,
         )
 
         self._plan(attn_metadata)
@@ -559,6 +657,8 @@ class BokImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+
+        
         assert output is not None, "Output tensor must be provided."
 
         if attn_metadata is None:
@@ -648,4 +748,151 @@ class BokImpl(AttentionImpl):
                 out=output[:num_decode_tokens],
             )
 
+        if USING_BOK:
+            from z_hacky_layer_test.test_py_bok import ForwardInplaceTestCase, ContextRequest, GenerationRequest, _sequence_length, _input_sequence_length
+            from z_hacky_layer_test.utils import pack_attention_input, generate_constant_attention_input
+
+            # Calculate how much workspace memory is needed for the operation.
+            workspace_size = calculate_workspace_size(
+                attn_metadata.op, attn_metadata.test_case.max_num_tokens, attn_metadata.test_case.max_batch_size
+            )
+            workspace = torch.zeros(
+                workspace_size, device=torch.device("cuda"), dtype=torch.int8
+            )
+            print("here 5", flush=True)
+            q_dimension = (
+                attn_metadata.test_case.attention_layer_dimensions.numQHeads
+                * attn_metadata.test_case.attention_layer_dimensions.headSize
+            )
+
+            sequence_lengths_host = torch.tensor(
+                [_sequence_length(request) for request in attn_metadata.test_case.requests],
+                dtype=torch.int32,
+            )
+
+            # Create a representation of the rotary positional embedding cosine and sine cache.
+            rotary_cos_sin = identity_rotary_cos_sin(attn_metadata.rotary_embedding)
+
+            output_scaling_factor = torch.tensor(
+                [attn_metadata.test_case.output_scaling_factor],
+                device=torch.device("cuda"),
+                dtype=torch.float32,
+            )
+
+            num_blocks_in_kv_cache = (
+                attn_metadata.test_case.max_batch_size * attn_metadata.prefix_cache_configuration.maxNumBlocksPerSequence
+            )
+            actual_kv_cache_pools = [
+                torch.zeros(
+                    num_blocks_in_kv_cache,
+                    2,
+                    attn_metadata.test_case.attention_layer_dimensions.numKVHeads,
+                    attn_metadata.prefix_cache_configuration.numTokensPerBlock,
+                    attn_metadata.test_case.attention_layer_dimensions.headSize,
+                    device=torch.device("cuda"),
+                    dtype=torch.float8_e4m3fn,
+                )
+                for _ in range(attn_metadata.test_case.num_layers)
+            ]
+
+            input_sequence_lengths_host = torch.tensor(
+                [_input_sequence_length(request) for request in attn_metadata.test_case.requests],
+                dtype=torch.int32,
+            )
+            num_tokens = input_sequence_lengths_host.sum().item()
+            sequence_lengths_device = sequence_lengths_host.cuda()
+
+            num_context_requests = sum(
+                isinstance(request, ContextRequest) for request in attn_metadata.test_case.requests
+            )
+            print("here 6", flush=True)
+            # Rough simulation of a realistic workload where the operation would be called for each layer.
+            
+
+            (q, k, v) = generate_constant_attention_input(
+                num_tokens,
+                attn_metadata.test_case.attention_layer_dimensions,
+                DeviceDataType.BF16,
+                1.0,
+            )
+
+            qkv = pack_attention_input(q, k, v)
+
+            # TODO: it will be a bit more complicated here to set the state of the KV-cache correctly.
+            # kv_cache_block_offsets = write_kv_cache_at_contiguous_offsets(
+            #     k.to(torch.float8_e4m3fn),
+            #     v.to(torch.float8_e4m3fn),
+            #     sequence_lengths_device,
+            #     actual_kv_cache_pools[layer_index],
+            #     test_case.max_num_blocks_per_sequence,
+            # )
+            num_sequences = input_sequence_lengths_host.shape[0]
+            num_blocks_required = 2 * num_sequences * attn_metadata.test_case.max_num_blocks_per_sequence
+            kv_cache_block_offsets = torch.arange(
+                num_blocks_required,
+                device=torch.device("cuda"),
+                dtype=torch.int32,
+            ).reshape(num_sequences, 2, attn_metadata.test_case.max_num_blocks_per_sequence)
+
+            # Run the attention operation.
+            output = torch.zeros(
+                num_tokens,
+                q_dimension,
+                device=torch.device("cuda"),
+                dtype=torch.int8,
+            )
+            attn_metadata.stream.synchronize()
+            forward_inplace(
+                attn_metadata.op,
+                qkv,
+                num_context_requests,
+                input_sequence_lengths_host.to(torch.uint32),
+                sequence_lengths_device.to(torch.uint32),
+                sequence_lengths_host.to(torch.uint32),
+                kv_cache_block_offsets.to(torch.uint32),
+                actual_kv_cache_pools[0].data_ptr(),
+                output_scaling_factor,
+                rotary_cos_sin,
+                output,
+                workspace,
+                attn_metadata.stream.cuda_stream,
+            )
+            attn_metadata.stream.synchronize()
+
         return output_padded
+
+
+@dataclass(frozen=True)
+class ContextRequest:
+    sequence_length: int
+
+
+@dataclass(frozen=True)
+class GenerationRequest:
+    sequence_length: int
+
+
+type Request = ContextRequest | GenerationRequest
+
+
+@dataclass(frozen=True)
+class ForwardInplaceTestCase:
+    num_layers: int
+    max_batch_size: int
+    max_num_tokens: int
+
+    attention_layer_dimensions: AttentionLayerDimensions
+
+    rotary_embedding_dim: int
+    rotary_embedding_base: int
+    rotary_embedding_max_positions: int
+
+    max_attention_window_size: int
+
+    num_tokens_per_block: int
+    max_num_blocks_per_sequence: int
+
+    requests: tuple[Request, ...]
+
+    output_scaling_factor: float
+    

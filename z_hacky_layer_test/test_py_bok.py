@@ -16,7 +16,7 @@ from py_bok import (
     PrefixCacheConfiguration,
 )
 
-from utils import (
+from .utils import (
     generate_constant_attention_input,
     identity_rotary_cos_sin,
     pack_attention_input,
