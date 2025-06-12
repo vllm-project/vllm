@@ -178,6 +178,19 @@ def get_vllm_port() -> Optional[int]:
             f"VLLM_PORT '{port}' must be a valid integer") from err
 
 
+# Helper function to consistently handle boolean environment variables
+def parse_bool_env(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment variable consistently.
+
+    Accepts "1" or "true" (case-insensitive) as True,
+    and anything else (including blank/unset) as the supplied default value.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true")
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -205,14 +218,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
-    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
-        os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+    lambda: parse_bool_env("VLLM_USE_PRECOMPILED") or parse_bool_env(
+        "VLLM_PRECOMPILED_WHEEL_LOCATION"),
 
     # Whether to force using nightly wheel in python build.
     # This is used for testing the nightly wheel in python build.
     "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL":
-    lambda: bool(int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))
-                 ),
+    lambda: parse_bool_env("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL"),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
@@ -222,7 +234,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, vllm will print verbose logs during installation
     "VERBOSE":
-    lambda: bool(int(os.getenv('VERBOSE', '0'))),
+    lambda: parse_bool_env("VERBOSE"),
 
     # Root directory for vLLM configuration files
     # Defaults to `~/.config/vllm` unless `XDG_CONFIG_HOME` is set
@@ -269,7 +281,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE":
-    lambda: os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true",
+    lambda: parse_bool_env("VLLM_USE_MODELSCOPE"),
 
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL":
@@ -292,15 +304,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # flag to control if vllm should use triton flash attention
     "VLLM_USE_TRITON_FLASH_ATTN":
-    lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
-             ("true", "1")),
+    lambda: parse_bool_env("VLLM_USE_TRITON_FLASH_ATTN", True),
 
     # Use separate prefill and decode kernels for V1 attention instead of
     # the unified triton kernel.
     "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
-    lambda:
-    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
-     ("true", "1")),
+    lambda: parse_bool_env("VLLM_V1_USE_PREFILL_DECODE_ATTENTION"),
 
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
     # when using the flash-attention backend.
@@ -309,14 +318,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
-    lambda: bool(
-        os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
+    lambda: parse_bool_env("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", True),
 
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
     # enabled by default.
     "VLLM_USE_STANDALONE_COMPILE":
-    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
+    lambda: parse_bool_env("VLLM_USE_STANDALONE_COMPILE", True),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -337,8 +345,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to log responses from API Server for debugging
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE":
-    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False"
-                           ).lower() == "true",
+    lambda: parse_bool_env("VLLM_DEBUG_LOG_API_SERVER_RESPONSE"),
 
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
@@ -352,10 +359,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USAGE_STATS_SERVER":
     lambda: os.environ.get("VLLM_USAGE_STATS_SERVER", "https://stats.vllm.ai"),
     "VLLM_NO_USAGE_STATS":
-    lambda: os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1",
+    lambda: parse_bool_env("VLLM_NO_USAGE_STATS"),
     "VLLM_DO_NOT_TRACK":
-    lambda: (os.environ.get("VLLM_DO_NOT_TRACK", None) or os.environ.get(
-        "DO_NOT_TRACK", None) or "0") == "1",
+    lambda: parse_bool_env("VLLM_DO_NOT_TRACK") or parse_bool_env(
+        "DO_NOT_TRACK"),
     "VLLM_USAGE_SOURCE":
     lambda: os.environ.get("VLLM_USAGE_SOURCE", "production"),
 
@@ -409,7 +416,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, vllm will force flashinfer to use tensor cores;
     # otherwise will use heuristic based on model architecture.
     "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
-    lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
+    lambda: parse_bool_env("VLLM_FLASHINFER_FORCE_TENSOR_CORES"),
 
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
@@ -434,14 +441,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
     # need to set this to "0" (False).
     "VLLM_CPU_MOE_PREPACK":
-    lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
+    lambda: parse_bool_env("VLLM_CPU_MOE_PREPACK", True),
 
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
     # Run vLLM with VLLM_USE_RAY_SPMD_WORKER=1 to enable it.
     "VLLM_USE_RAY_SPMD_WORKER":
-    lambda: bool(int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))),
+    lambda: parse_bool_env("VLLM_USE_RAY_SPMD_WORKER"),
 
     # If the env var is set, it uses the Ray's Compiled Graph
     # (previously known as ADAG) API which optimizes the
@@ -450,7 +457,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Note that this variable is set to 1 in V1 by default
     # when ray distributed executor is used.
     "VLLM_USE_RAY_COMPILED_DAG":
-    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
+    lambda: parse_bool_env("VLLM_USE_RAY_COMPILED_DAG"),
 
     # If the env var is set, Ray Compiled Graph uses the specified
     # channel type to communicate between workers belonging to
@@ -467,8 +474,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
-    lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
-                 ),
+    lambda: parse_bool_env("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM"),
 
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
@@ -524,38 +530,34 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, assert on XLA recompilation after each execution step.
     "VLLM_XLA_CHECK_RECOMPILATION":
-    lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION", "0"))),
+    lambda: parse_bool_env("VLLM_XLA_CHECK_RECOMPILATION"),
 
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD":
-    lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
+    lambda: parse_bool_env("VLLM_XLA_USE_SPMD"),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
-    lambda: bool(int(os.getenv("VLLM_NO_DEPRECATION_WARNING", "0"))),
+    lambda: parse_bool_env("VLLM_NO_DEPRECATION_WARNING"),
 
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH":
-    lambda: bool(os.getenv("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", 0)),
+    lambda: parse_bool_env("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH"),
 
     # If the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN is set, it allows
     # the user to specify a max sequence length greater than
     # the max length derived from the model's config.json.
     # To enable this, set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1.
     "VLLM_ALLOW_LONG_MAX_MODEL_LEN":
-    lambda:
-    (os.environ.get("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "0").strip().lower() in
-     ("1", "true")),
+    lambda: parse_bool_env("VLLM_ALLOW_LONG_MAX_MODEL_LEN"),
 
     # If set, forces FP8 Marlin to be used for FP8 quantization regardless
     # of the hardware support for FP8 compute.
     "VLLM_TEST_FORCE_FP8_MARLIN":
-    lambda:
-    (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
-     ("1", "true")),
+    lambda: parse_bool_env("VLLM_TEST_FORCE_FP8_MARLIN"),
     "VLLM_TEST_FORCE_LOAD_FORMAT":
     lambda: os.getenv("VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"),
 
@@ -589,20 +591,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":
-    lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+    lambda: parse_bool_env("VLLM_USE_TRITON_AWQ"),
 
     # If set, allow loading or unloading lora adapters in runtime,
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING":
-    lambda:
-    (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
-     ("1", "true")),
+    lambda: parse_bool_env("VLLM_ALLOW_RUNTIME_LORA_UPDATING"),
 
     # By default, vLLM will check the peer-to-peer capability itself,
     # in case of broken drivers. See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
     # If this env var is set to 1, vLLM will skip the peer-to-peer check,
     # and trust the driver's peer-to-peer capability report.
     "VLLM_SKIP_P2P_CHECK":
-    lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
+    lambda: parse_bool_env("VLLM_SKIP_P2P_CHECK"),
 
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
@@ -614,60 +614,52 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":
-    lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
+    lambda: parse_bool_env("VLLM_USE_V1", True),
 
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-             ("true", "1")),
+    lambda: parse_bool_env("VLLM_ROCM_USE_AITER"),
 
     # Whether to use aiter paged attention.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_PAGED_ATTN":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in
-             ("true", "1")),
+    lambda: parse_bool_env("VLLM_ROCM_USE_AITER_PAGED_ATTN"),
 
     # use aiter linear op if aiter ops are enabled
     # The following list of related ops
     # - scaled_mm (per-tensor / rowwise)
     "VLLM_ROCM_USE_AITER_LINEAR":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in
-             ("true", "1")),
+    lambda: parse_bool_env("VLLM_ROCM_USE_AITER_LINEAR", True),
 
     # Whether to use aiter moe ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
-             ("true", "1")),
+    lambda: parse_bool_env("VLLM_ROCM_USE_AITER_MOE", True),
 
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
-             ("true", "1")),
+    lambda: parse_bool_env("VLLM_ROCM_USE_AITER_RMSNORM", True),
 
     # Whether to use aiter mla ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in
-             ("true", "1")),
+    lambda: parse_bool_env("VLLM_ROCM_USE_AITER_MLA", True),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
-    lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
-             ("true", "1")),
+    lambda: parse_bool_env("VLLM_ROCM_USE_SKINNY_GEMM", True),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
-    lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
+    lambda: parse_bool_env("VLLM_ROCM_FP8_PADDING", True),
 
     # Pad the weights for the moe kernel
     "VLLM_ROCM_MOE_PADDING":
-    lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
+    lambda: parse_bool_env("VLLM_ROCM_MOE_PADDING", True),
 
     # custom paged attention kernel for MI3* cards
     "VLLM_ROCM_CUSTOM_PAGED_ATTN":
-    lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
-             ("true", "1")),
+    lambda: parse_bool_env("VLLM_ROCM_CUSTOM_PAGED_ATTN", True),
 
     # If set, when running in Quark emulation mode, do not dequantize the
     # weights at load time. Instead, dequantize weights on-the-fly during
@@ -675,7 +667,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This allows running larger models at the cost of slower inference.
     # This flag has no effect when not running in Quark emulation mode.
     "VLLM_QUARK_EMU_MEM_OPT":
-    lambda: bool(int(os.getenv("VLLM_QUARK_EMU_MEM_OPT", "0"))),
+    lambda: parse_bool_env("VLLM_QUARK_EMU_MEM_OPT"),
 
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
@@ -689,17 +681,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))),
+    lambda: parse_bool_env("VLLM_ENABLE_V1_MULTIPROCESSING", True),
     "VLLM_LOG_BATCHSIZE_INTERVAL":
     lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
     "VLLM_DISABLE_COMPILE_CACHE":
-    lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
+    lambda: parse_bool_env("VLLM_DISABLE_COMPILE_CACHE"),
 
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
     "VLLM_SERVER_DEV_MODE":
-    lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
+    lambda: parse_bool_env("VLLM_SERVER_DEV_MODE"),
 
     # Controls the maximum number of requests to handle in a
     # single asyncio task when processing per-token outputs in the
@@ -713,13 +705,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE":
-    lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+    lambda: parse_bool_env("VLLM_MLA_DISABLE"),
 
     # If set, vLLM will use the Triton implementation of moe_align_block_size,
     # i.e. moe_align_block_size_triton in fused_moe.py.
     "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
-                 ),
+    lambda: parse_bool_env("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON"),
 
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
@@ -742,14 +733,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
     # contiguous cache fetch will be used.
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
-    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
-    ("1", "true"),
+    lambda: parse_bool_env("VLLM_CONTIGUOUS_PA", True),
 
     # Use delayed sampling for HPU to reduce host cpu overhead
     # between each step.
     "VLLM_HPU_USE_DELAYED_SAMPLING":
-    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in
-    ("1", "true"),
+    lambda: parse_bool_env("VLLM_DELAYED_SAMPLING"),
 
     # Rank of the process in the data parallel setting
     "VLLM_DP_RANK":
@@ -775,11 +764,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS":
-    lambda: os.environ.get("VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0") == "1",
+    lambda: parse_bool_env("VLLM_RANDOMIZE_DP_DUMMY_INPUTS"),
 
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
-    lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
+    lambda: parse_bool_env("VLLM_CI_USE_S3"),
 
     # Use model_redirect to redirect the model name to a local folder.
     # `model_redirect` can be a json file mapping the model between
@@ -792,13 +781,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
     "VLLM_MARLIN_USE_ATOMIC_ADD":
-    lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
+    lambda: parse_bool_env("VLLM_MARLIN_USE_ATOMIC_ADD"),
 
     # Whether to turn on the outlines cache for V0
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.
     "VLLM_V0_USE_OUTLINES_CACHE":
-    lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
+    lambda: parse_bool_env("VLLM_V0_USE_OUTLINES_CACHE"),
 
     # Gap between padding buckets for the forward pass. So we have
     # 8, we will run forward pass with [16, 24, 32, ...].
@@ -808,7 +797,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
-    lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+    lambda: parse_bool_env("VLLM_USE_DEEP_GEMM"),
 
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
@@ -830,7 +819,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is useful for environments where it is deemed safe to use the
     # insecure method and it is needed for some reason.
     "VLLM_ALLOW_INSECURE_SERIALIZATION":
-    lambda: bool(int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))),
+    lambda: parse_bool_env("VLLM_ALLOW_INSECURE_SERIALIZATION"),
 
     # IP address used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_HOST":
@@ -863,7 +852,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Reduce CPU usage when vLLM is idle. Enabling this will incur small
     # latency penalty when a request eventually comes.
     "VLLM_SLEEP_WHEN_IDLE":
-    lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
+    lambda: parse_bool_env("VLLM_SLEEP_WHEN_IDLE"),
 
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
