@@ -13,7 +13,7 @@ logger = init_logger(__name__)
 # that interact with vllm workers.
 # they are executed whenever `import vllm` is called.
 
-if 'NCCL_CUMEM_ENABLE' in os.environ:
+if os.environ.get('NCCL_CUMEM_ENABLE', '0') != '0':
     logger.warning(
         "NCCL_CUMEM_ENABLE is set to %s, skipping override. "
         "This may increase memory overhead with cudagraph+allreduce: "

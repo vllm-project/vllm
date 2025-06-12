@@ -417,6 +417,8 @@ class ModelConfig:
     available.\n
     - "vllm" will use the vLLM model implementation.\n
     - "transformers" will use the Transformers model implementation."""
+    override_attention_dtype: Optional[str] = None
+    """Override dtype for attention"""
 
     def compute_hash(self) -> str:
         """
@@ -516,6 +518,12 @@ class ModelConfig:
                 "for instructions on how to install it.")
 
         from vllm.platforms import current_platform
+
+        if (self.override_attention_dtype is not None
+                and not current_platform.is_rocm()):
+            warnings.warn(
+                "override-attention-dtype is set but not using ROCm platform",
+                stacklevel=2)
 
         if (self.enable_sleep_mode
                 and not current_platform.is_sleep_mode_available()):
@@ -3819,15 +3827,18 @@ class PassConfig:
     its own stages (before, after, maybe in-between)."""
     dump_graph_dir: Path = Path(".")
     """Directory to dump the graphs."""
-    # TODO(luka) better pass enabling system.
     enable_fusion: bool = True
-    """Whether to enable the custom fusion pass."""
+    """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
+    enable_attn_fusion: bool = False
+    """Whether to enable the custom attention+quant fusion pass."""
     enable_noop: bool = True
     """Whether to enable the custom no-op elimination pass."""
     enable_sequence_parallelism: bool = False
     """Whether to enable sequence parallelism."""
     enable_async_tp: bool = False
     """Whether to enable async TP."""
+
+    # TODO(luka) better pass enabling system.
 
     def uuid(self):
         """
@@ -3836,18 +3847,20 @@ class PassConfig:
         Do not include dump_graph_* in the hash - they don't affect
         compilation.
         """
-        include = {
-            "enable_fusion", "enable_noop", "enable_sequence_parallelism",
-            "enable_async_tp"
-        }
-        dict_ = {k: v for k, v in asdict(self).items() if k in include}
+        exclude = {"dump_graph_stages", "dump_graph_dir"}
+        dict_ = {k: v for k, v in asdict(self).items() if k not in exclude}
         return InductorPass.hash_dict(dict_)
 
     def __post_init__(self) -> None:
-        if not self.enable_noop and self.enable_fusion:
-            logger.warning_once(
-                "Fusion enabled but reshape elimination disabled. "
-                "RMSNorm + quant (fp8) fusion might not work")
+        if not self.enable_noop:
+            if self.enable_fusion:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "RMSNorm/SiluMul + quant (fp8) fusion might not work")
+            if self.enable_attn_fusion:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "Attention + quant (fp8) fusion might not work")
 
 
 @config
@@ -3954,7 +3967,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    use_cudagraph: bool = envs.VLLM_USE_V1
+    use_cudagraph: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
     """Whether to use cudagraph inside compilation.
     - False: cudagraph inside compilation is not used.
     - True: cudagraph inside compilation is used. It requires
@@ -4520,13 +4533,13 @@ class VllmConfig:
             # warning message here and will log it later.
             if not (current_platform.is_cuda() or current_platform.is_rocm()):
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
-                self.disable_hybrid_kv_cache_manager = True
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_transfer_config is not None:
                 # Hybrid KV cache manager is not compatible with KV transfer.
-                self.disable_hybrid_kv_cache_manager = True
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
-                self.disable_hybrid_kv_cache_manager = True
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:

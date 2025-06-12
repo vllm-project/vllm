@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
-    VLLM_USE_TRITON_FLASH_ATTN: bool = False
+    VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_CPU_NUM_OF_RESERVED_CPU: int = 0
     VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
@@ -111,6 +112,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
@@ -422,7 +424,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
-    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
+    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "auto"),
+
+    # (CPU backend only) CPU cores not used by OMP threads .
+    # Those CPU cores will not be used by OMP threads of a rank.
+    "VLLM_CPU_NUM_OF_RESERVED_CPU":
+    lambda: int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0")),
 
     # (CPU backend only) whether to use prepack for MoE layer. This will be
     # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
@@ -766,6 +773,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port of the master node in the data parallel setting
     "VLLM_DP_MASTER_PORT":
     lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
+
+    # In the context of executing MoE models with Data-Parallel, Expert-Parallel
+    # and Batched All-to-All dispatch/combine kernels, VLLM_MOE_DP_CHUNK_SIZE
+    # dictates the quantum of tokens that can be dispatched from a DP
+    # rank. All DP ranks process the activations in VLLM_MOE_DP_CHUNK_SIZE
+    # units.
+    "VLLM_MOE_DP_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
 
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS":

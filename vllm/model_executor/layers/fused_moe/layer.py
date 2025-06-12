@@ -63,10 +63,6 @@ else:
     fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
 
-# Note: this limit is somewhat arbitrary and might be changed later.
-# The size of the activations will be E x MOE_DP_CHUNK_SIZE x hidden_dim.
-MOE_DP_CHUNK_SIZE = 256
-
 
 @dataclass
 class FusedMoEParallelConfig:
@@ -220,7 +216,12 @@ class MoEConfig:
     # TODO: add more quantization params, blocked, per-token, etc.
     block_size: int = 128
 
-    max_num_tokens: int = MOE_DP_CHUNK_SIZE
+    max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
+
+    def __post_init__(self):
+        if self.dp_size > 1:
+            logger.debug("Using MOEConfig::max_num_tokens=%d",
+                         self.max_num_tokens)
 
     @property
     def tp_size(self):
@@ -934,7 +935,7 @@ class FusedMoE(torch.nn.Module):
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=params_dtype,
             quant_dtype=quant_dtype,
-            max_num_tokens=MOE_DP_CHUNK_SIZE,
+            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
         )
         self.moe_config = moe
         self.quant_config = quant_config
@@ -987,13 +988,13 @@ class FusedMoE(torch.nn.Module):
                 or self.moe_parallel_config.use_deepep_ll_kernels):
             act_dtype = vllm_config.model_config.dtype
             self.batched_hidden_states = torch.zeros(
-                (MOE_DP_CHUNK_SIZE, self.hidden_size),
+                (envs.VLLM_MOE_DP_CHUNK_SIZE, self.hidden_size),
                 dtype=act_dtype,
                 device=torch.cuda.current_device())
 
             # Note here we use `num_experts` which is logical expert count
             self.batched_router_logits = torch.zeros(
-                (MOE_DP_CHUNK_SIZE, num_experts),
+                (envs.VLLM_MOE_DP_CHUNK_SIZE, num_experts),
                 dtype=act_dtype,
                 device=torch.cuda.current_device())
 
