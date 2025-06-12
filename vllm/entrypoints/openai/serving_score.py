@@ -174,8 +174,8 @@ class ServingScores(OpenAIServing):
               for t1, t2 in input_pairs))
 
         for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
-
-            request_prompt = f"{t1}{tokenizer.sep_token}{t2}"
+            sep_token = tokenizer.sep_token if tokenizer.sep_token else ''
+            request_prompt = f"{t1}{sep_token}{t2}"
 
             input_ids = prompt_inputs["input_ids"]
             text_token_prompt = \
