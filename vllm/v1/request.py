@@ -65,7 +65,7 @@ class Request:
                     sampling_params.extra_args.get("kv_transfer_params")
         else:
             raise ValueError(
-                "sampling_params and pooling_params can't both be set")
+                "sampling_params and pooling_params can't both be unset")
 
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
