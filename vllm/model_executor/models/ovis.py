@@ -283,7 +283,7 @@ class OvisProcessingInfo(BaseProcessingInfo):
     def get_image_size_with_most_features(self) -> ImageSize:
         height, width = self.get_hf_processor().get_image_size()
         hs = self.get_hf_config().visual_tokenizer_config.hidden_stride
-        # NOTE(Isotr0py): 9 is `max_partion` hardcoded in original code
+        # NOTE(Isotr0py): 9 is `max_partition` hardcoded in original code
         # https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/modeling_ovis.py#L96
         return ImageSize(width=width * hs * 9, height=height * hs * 9)
 

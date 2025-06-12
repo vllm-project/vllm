@@ -33,8 +33,8 @@ BLOCK_SIZE = 16
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER", "XFORMERS"])
-def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
-                                 batch_size, seed, backend, monkeypatch):
+def test_sliding_window_retrieval(baseline_llm_generator, test_llm_generator,
+                                  batch_size, seed, backend, monkeypatch):
     """
     The test does a bunch of assignments "x1 = 10\nx2 = 33\n..." and then
     asks for value of one of them (which is outside the sliding window).
@@ -100,7 +100,7 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
 def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed,
                                         backend, monkeypatch):
     """
-    This is similar to test_sliding_window_retrival, however, it doesn't
+    This is similar to test_sliding_window_retrieval, however, it doesn't
     compare against the v1 block manager since v1 doesn't support
     chunked prefill with sliding window.
 

@@ -46,7 +46,7 @@ CUDA_DEVICE = "cuda:0"
 MAX_DEC_SEQ_LENS = [128]
 MAX_ENC_SEQ_LENS = [128]
 
-# Narrow teest-cases for unsupported-scenario
+# Narrow test-cases for unsupported-scenario
 # tests
 HEAD_SIZES_FOR_UNSUPP = [HEAD_SIZES[0]]
 

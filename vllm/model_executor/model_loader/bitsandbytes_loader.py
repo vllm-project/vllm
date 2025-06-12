@@ -401,7 +401,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         self.target_modules.append(
                             name.replace(rep_name, sub_name))
                 # Add original module name even if the module has stacked map,
-                # in case model has a mixture of disk-merged and disk-splitted
+                # in case model has a mixture of disk-merged and disk-split
                 # weights with same last name.
                 self.target_modules.append(name)
 

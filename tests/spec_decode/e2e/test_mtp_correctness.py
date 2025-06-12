@@ -18,7 +18,7 @@ However, we still need to verify below scenario could be passed:
     * Test greedy equality under various number of speculative tokens.
 
 With those tests, we can say at least, mtp would not break the
-correctess for the target model outputs.
+correctness for the target model outputs.
 """
 
 import pytest

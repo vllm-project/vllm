@@ -40,7 +40,7 @@ class Internlm2ToolParser(ToolParser):
             request.skip_special_tokens = False
         return request
 
-    def get_argments(self, obj):
+    def get_arguments(self, obj):
         if "parameters" in obj:
             return obj.get("parameters")
         elif "arguments" in obj:
@@ -119,9 +119,9 @@ class Internlm2ToolParser(ToolParser):
             # now we know we're on the same tool call and we're streaming
             # arguments
             else:
-                prev_arguments = self.get_argments(
+                prev_arguments = self.get_arguments(
                     self.prev_tool_call_arr[self.current_tool_id])
-                cur_arguments = self.get_argments(tool_call_arr)
+                cur_arguments = self.get_arguments(tool_call_arr)
 
                 # not arguments generated
                 if not cur_arguments and not prev_arguments:
@@ -170,7 +170,7 @@ class Internlm2ToolParser(ToolParser):
             # check to see if the name is defined and has been sent. if so,
             # stream the name - otherwise keep waiting
             # finish by setting old and returning None as base case
-            tool_call_arr["arguments"] = self.get_argments(tool_call_arr)
+            tool_call_arr["arguments"] = self.get_arguments(tool_call_arr)
             self.prev_tool_call_arr = [tool_call_arr]
             return delta
         except Exception:

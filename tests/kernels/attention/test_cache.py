@@ -72,8 +72,8 @@ def test_copy_blocks(
     # destination blocks.
     assert 2 * num_mappings <= num_blocks
     src_blocks = random.sample(range(num_blocks), num_mappings)
-    remainig_blocks = list(set(range(num_blocks)) - set(src_blocks))
-    dst_blocks = random.sample(remainig_blocks, 2 * num_mappings)
+    remaining_blocks = list(set(range(num_blocks)) - set(src_blocks))
+    dst_blocks = random.sample(remaining_blocks, 2 * num_mappings)
     block_mapping: list[tuple[int, int]] = []
     for i in range(num_mappings):
         src = src_blocks[i]
@@ -189,12 +189,12 @@ def test_reshape_and_cache(
 
     # Run the reference implementation.
     reshaped_key = key.reshape(num_tokens, *key_cache[0, :, :, 0, :].shape)
-    block_indicies = torch.div(slot_mapping, block_size, rounding_mode="floor")
-    block_indicies_lst = block_indicies.cpu().tolist()
+    block_indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    block_indices_lst = block_indices.cpu().tolist()
     block_offsets = slot_mapping % block_size
     block_offsets_lst = block_offsets.cpu().tolist()
     for i in range(num_tokens):
-        block_idx = block_indicies_lst[i]
+        block_idx = block_indices_lst[i]
         block_offset = block_offsets_lst[i]
         cloned_key_cache[block_idx, :, :, block_offset, :] = reshaped_key[i]
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
@@ -322,12 +322,12 @@ def test_reshape_and_cache_flash(
                         kv_dtype=kv_cache_dtype)
 
     # Run the reference implementation.
-    block_indicies = torch.div(slot_mapping, block_size, rounding_mode="floor")
-    block_indicies_lst = block_indicies.cpu().tolist()
+    block_indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    block_indices_lst = block_indices.cpu().tolist()
     block_offsets = slot_mapping % block_size
     block_offsets_lst = block_offsets.cpu().tolist()
     for i in range(num_tokens):
-        block_idx = block_indicies_lst[i]
+        block_idx = block_indices_lst[i]
         block_offset = block_offsets_lst[i]
         if kv_cache_layout == "NHD":
             cloned_key_cache[block_idx, block_offset, :, :] = key[i]

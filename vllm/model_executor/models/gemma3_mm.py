@@ -634,13 +634,13 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         kwargs["has_images"] = True
         # NOTE(woosuk): Here, we distinguish the sequences by the position id 0.
         # This is a HACK. Fix this.
-        start_idices = (positions == 0).cpu().nonzero()
-        num_seqs = len(start_idices)
+        start_indices = (positions == 0).cpu().nonzero()
+        num_seqs = len(start_indices)
         seq_lens = []
         for i in range(num_seqs):
-            start_idx = start_idices[i].item()
+            start_idx = start_indices[i].item()
             if i < num_seqs - 1:
-                end_idx = start_idices[i + 1].item()
+                end_idx = start_indices[i + 1].item()
             else:
                 end_idx = len(input_ids)
             seq_lens.append(end_idx - start_idx)

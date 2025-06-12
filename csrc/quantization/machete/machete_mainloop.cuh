@@ -1003,7 +1003,7 @@ struct MacheteCollectiveMma {
     static constexpr int A_CPY_VEC =
         decltype(max_common_vector(tCsA, tCrA_load)){};
 
-    static constexpr int COVERSION_WIDTH =
+    static constexpr int CONVERSION_WIDTH =
         std::min(A_CPY_VEC, int(size<0>(tCrA_mma)));
 
     auto load_A_to_registers = [&](int read_stage) {
@@ -1026,8 +1026,8 @@ struct MacheteCollectiveMma {
     // PIPELINED MAIN LOOP
     //
 
-    auto convert_A = [&, a_vec = Int<COVERSION_WIDTH>{}](int k_block,
-                                                         int read_stage) {
+    auto convert_A = [&, a_vec = Int<CONVERSION_WIDTH>{}](int k_block,
+                                                          int read_stage) {
       load_extra_info_to_registers(partitioned_extra_info,
                                    copy_partitions_extra_info, k_block,
                                    read_stage);
