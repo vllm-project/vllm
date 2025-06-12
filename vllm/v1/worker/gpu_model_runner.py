@@ -65,11 +65,15 @@ from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
 
 if TYPE_CHECKING:
     import xgrammar as xgr
+    import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
 
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
+    xgr_torch_compile = LazyLoader(
+        "xgr_torch_compile", globals(),
+        "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
 logger = init_logger(__name__)
 
@@ -1102,7 +1106,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # so we receive it in that format.
         grammar_bitmask = torch.from_numpy(grammar_bitmask)
 
-        xgr.apply_token_bitmask_inplace(
+        xgr_torch_compile.apply_token_bitmask_inplace_torch_compile(
             logits,
             grammar_bitmask.to(self.device, non_blocking=True),
             indices=out_indices,
