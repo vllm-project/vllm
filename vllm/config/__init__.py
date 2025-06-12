@@ -1985,6 +1985,7 @@ class SpeculativeConfig:
     """Shift tokens during draft prefill or not"""
 
     # Config for kv sharing, map from base model layer to draft layer
+    # Key is draft layer, value is base layer
     kv_sharing_mapping: SkipValidation[dict[str, str]] = None
     """KV copy mapping for prefill stage from base to draft"""
 

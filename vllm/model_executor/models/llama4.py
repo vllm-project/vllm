@@ -185,11 +185,6 @@ class Llama4Attention(nn.Module):
         is_gguf = quant_config and quant_config.get_name() == "gguf"
         if is_gguf and config.model_type == "llama":
             is_neox_style = False
-        elif config.model_type == "eagle":
-            # EAGLE draft model does not use neox style RoPE
-            is_neox_style = False
-        else:
-            is_neox_style = True
 
         self.rotary_emb = get_rope(
             self.head_dim,

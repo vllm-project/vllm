@@ -290,3 +290,73 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+def copy_kv_cache_for_layers(
+    kv_caches: dict[str, torch.Tensor],
+    kv_sharing_layers_mapping: dict[str, str],
+    copy_positions_mask: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """
+    Copies values from one set of layers to another
+    based on a mapping and a mask.
+
+    This function is primarily used when KV sharing
+    is enabled especially for spec decoding to copy 
+    target model's cache for the specified positions into
+    corresponding draft model layer's KV cache.
+
+    Args:
+        kv_caches:
+            Dictionary mapping layer names to their cache tensors.
+        kv_sharing_layers_mapping:
+            Mapping the target layers to the source layers.
+        copy_positions_mask:
+            Boolean mask where True indicates positions to copy.
+        slot_mapping:
+            Mapping tensor that maps positions to cache slots.
+    """
+    # Get the positions to copy
+    positions = torch.nonzero(copy_positions_mask, as_tuple=True)[0]
+
+    if positions.numel() == 0:
+        # No positions to copy
+        return
+
+    # Get the corresponding slot mappings for the positions
+    slots = slot_mapping[positions]
+
+    # Prepare source and destination key/value caches
+    src_key_caches = []
+    src_value_caches = []
+    dst_key_caches = []
+    dst_value_caches = []
+
+    # Collect all valid source-target layer pairs
+    for target_layer, source_layer in kv_sharing_layers_mapping.items():
+        if target_layer not in kv_caches or source_layer not in kv_caches:
+            continue
+
+        src_key_caches.append(kv_caches[source_layer][0])
+        src_value_caches.append(kv_caches[source_layer][1])
+        dst_key_caches.append(kv_caches[target_layer][0])
+        dst_value_caches.append(kv_caches[target_layer][1])
+
+    if not src_key_caches:  # No valid pairs to copy
+        return
+
+    # Prepare block mapping tensor
+    block_size = src_key_caches[0].shape[1]
+    block_indices = torch.unique_consecutive(slots // block_size)
+
+    # Create block mapping tensor with shape (num_positions, 2)
+    # Each row contains [source_block_idx, destination_block_idx]
+    block_mapping = torch.stack([block_indices, block_indices], dim=1)
+
+    # Use the optimized CUDA kernel to copy blocks between caches
+    copy_blocks_between_layers(src_key_caches, src_value_caches,
+                               dst_key_caches, dst_value_caches, block_mapping)
+
+    current_stream = torch.cuda.current_stream()
+    current_stream.synchronize()

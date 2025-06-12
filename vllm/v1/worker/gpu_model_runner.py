@@ -142,6 +142,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
+        self.kv_sharing_prefill = (
+            self.vllm_config.cache_config.kv_sharing_fast_prefill)
 
         # Model-related.
         self.num_query_heads = model_config.get_num_attention_heads(
@@ -1775,10 +1777,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             assert spec_decode_common_attn_metadata is not None
             spec_token_ids = self.propose_draft_token_ids(
-                scheduler_output, valid_sampled_token_ids, sampling_metadata,
-                hidden_states, sample_hidden_states, aux_hidden_states,
-                spec_decode_metadata, spec_decode_common_attn_metadata,
-                mm_embeds, decode_mask)
+                scheduler_output,
+                valid_sampled_token_ids,
+                sampling_metadata,
+                hidden_states,
+                sample_hidden_states,
+                aux_hidden_states,
+                spec_decode_metadata,
+                spec_decode_common_attn_metadata,
+                mm_embeds,
+                decode_mask,
+            )
 
         self.eplb_step()
 
@@ -1861,29 +1870,46 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     common_attn_metadata, num_rejected_tokens_cpu)
 
                 target_token_ids = self.input_ids[token_indices]
-                # TODO(woosuk): Support M-RoPE.
                 target_positions = self.positions[token_indices]
+                decode_mask = decode_mask[token_indices]
                 if self.use_aux_hidden_state_outputs:
                     target_hidden_states = torch.cat(
                         [h[token_indices] for h in aux_hidden_states], dim=-1)
                 else:
                     target_hidden_states = hidden_states[token_indices]
             draft_mm_embeds = mm_embeds if mm_embeds else None
+<<<<<<< HEAD
             if (self.is_multimodal_model
                     and self.speculative_config.eagle_shift_prefill_token()):
+=======
+            if self.kv_sharing_prefill:
+                draft_mm_embeds = None
+            elif (self.is_multimodal_model
+                  and self.speculative_config.eagle_shift_prefill_token()):
+>>>>>>> 34926dbff (add kv copy logic and offline tests)
                 draft_mm_embeds = self._gather_mm_embeddings(
                     scheduler_output, shift_computed_tokens=1)
 
             # TODO(woosuk): Refactor the loop.
             next_token_ids: list[int] = []
+            # Get the first token's hidden state from cached for each request.
+            # This is used in non-shifted prefill for eagle draft.
             prefill_first_hiddens = []
             full_prefill_mask = []
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
             for i, token_ids in enumerate(sampled_token_ids):
                 req_id = self.input_batch.req_ids[i]
                 req_state = self.requests[req_id]
+                # Initialize the prefill hidden state if not set.,
+                # from experimental results, the last token hidden state
+                # works very well for init the first prefill hidden state.
                 if req_state.prefill_hidden_states is None:
                     req_state.prefill_hidden_states = target_hidden_states[
+<<<<<<< HEAD
                         cu_num_tokens[i]]
+=======
+                        query_start_loc_cpu[i + 1] - 1]
+>>>>>>> 34926dbff (add kv copy logic and offline tests)
                 prefill_first_hiddens.append(req_state.prefill_hidden_states)
                 num_prompt_tokens = req_state.num_prompt_tokens
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
@@ -1901,7 +1927,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     seq_len = (req_state.num_computed_tokens +
                                scheduler_output.num_scheduled_tokens[req_id])
                     next_token_id = req_state.get_token_id(seq_len)
-                    last_hidden_index = cu_num_tokens[i + 1] - 1
+                    last_hidden_index = query_start_loc_cpu[i + 1] - 1
+                    # For non-shifting prefill + partial prefill case,
+                    # the current round last hidden state will be used
+                    # as the first prefill hidden for the next round
                     req_state.prefill_hidden_states = target_hidden_states[
                         last_hidden_index]
                 next_token_ids.append(next_token_id)

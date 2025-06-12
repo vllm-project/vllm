@@ -19,6 +19,7 @@ from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_aiter_fa import (
     AiterFlashAttentionMetadata)
@@ -28,6 +29,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.utils import copy_kv_cache_for_layers
 
 logger = init_logger(__name__)
 
@@ -46,6 +48,8 @@ class EagleProposer:
         self.speculative_config = vllm_config.speculative_config
         self.draft_model_config = self.speculative_config.draft_model_config
         self.kv_sharing_mapping = self.speculative_config.kv_sharing_mapping
+        self.kv_sharing_prefill = (
+            self.vllm_config.cache_config.kv_sharing_fast_prefill)
         self.method = self.speculative_config.method
 
         self.runner = runner
@@ -57,6 +61,10 @@ class EagleProposer:
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens)
         self.token_arange_np = np.arange(self.max_num_tokens)
+        # For non-shifting case, consider full prefills each would add
+        # one more token
+        if not self.speculative_config.prefill_token_shift:
+            self.max_num_tokens = self.max_num_tokens * 2
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -71,7 +79,9 @@ class EagleProposer:
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
-        self.draft_prefill_kv_sharing_from_base = self.kv_sharing_mapping is not None
+        self.draft_prefill_kv_sharing_from_base = (self.kv_sharing_mapping
+                                                   is not None
+                                                   and self.kv_sharing_prefill)
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(self.max_num_tokens,
@@ -139,7 +149,8 @@ class EagleProposer:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int,
                torch.Tensor]:
         """
-        Prepare adjusted tensors for different request types (partial prefill, full prefill, full decode).
+        Prepare adjusted tensors for different request types
+        (partial prefill, full prefill, full decode).
         
         Args:
             target_token_ids: Input token IDs tensor
@@ -159,10 +170,12 @@ class EagleProposer:
                     cu_num_tokens, current_pos, partial_prefill_mask)
 
         """
-        # Count total number of full prefill requests to determine the size needed for adjusted tensors
+        # Count total number of full prefill requests to determine the
+        # size needed for adjusted tensors
         num_full_prefill = full_prefill_mask.sum().item()
 
-        # Create tensors with extra space for the additional positions from full prefill requests
+        # Create tensors with extra space for the additional
+        # positions from full prefill requests
         adjusted_token_ids = torch.zeros(
             num_tokens + num_full_prefill,
             dtype=target_token_ids.dtype,
@@ -184,6 +197,27 @@ class EagleProposer:
             dtype=target_hidden_states.dtype,
             device=target_hidden_states.device,
         )
+        if self.draft_prefill_kv_sharing_from_base:
+            # Get the KV caches from the forward context
+            attentions = get_layers_from_vllm_config(self.vllm_config,
+                                                     Attention)
+            kv_caches = {
+                layer: att.kv_cache[0]
+                for layer, att in attentions.items()
+                if layer in self.kv_sharing_mapping
+                or layer in self.kv_sharing_mapping.values()
+            }
+            copy_positions_mask = ~decode_mask
+            full_prefill_last_pos = cu_num_tokens[1:][full_prefill_mask] - 1
+            copy_positions_mask[full_prefill_last_pos] = True
+
+            # Call the function to copy KV cache values
+            copy_kv_cache_for_layers(
+                kv_caches=kv_caches,
+                kv_sharing_layers_mapping=self.kv_sharing_mapping,
+                copy_positions_mask=copy_positions_mask,
+                slot_mapping=target_slot_mapping,
+            )
 
         # Create updated cumulative token counts
         updated_cu_num_tokens = torch.zeros_like(cu_num_tokens)
@@ -227,87 +261,100 @@ class EagleProposer:
 
             if is_partial_prefill:
                 # Category 1: Partial prefill - just copy all tokens
+                # if we enable copy kv then all of the tokens are skipped
                 if not self.draft_prefill_kv_sharing_from_base:
-                    # Use torch operations for copying blocks of data
                     adjusted_token_ids[current_pos:current_pos +
                                        req_len].copy_(
                                            target_token_ids[start_idx:end_idx])
+
                     adjusted_positions[current_pos:current_pos +
                                        req_len].copy_(
                                            target_positions[start_idx:end_idx])
+
                     adjusted_slot_mapping[current_pos:current_pos +
                                           req_len].copy_(target_slot_mapping[
                                               start_idx:end_idx])
+
+                    # Put the first prefill hidden state in the first position
+                    # and shift all the other ones, this matches the sequence
+                    # as non-shifting will include the first prefill token
                     adjusted_hidden_states[current_pos + 1:current_pos +
                                            req_len].copy_(
                                                target_hidden_states[start_idx +
                                                                     1:end_idx])
+
                     adjusted_hidden_states[
                         current_pos] = prefill_first_hiddens[i]
                     current_pos += req_len
                     cu_num_tokens_index += 1
 
             elif is_full_prefill:
-                # Category 2: Full prefill with decode - copy tokens and add one position
+                # Category 2: Full prefill with decode:
+                # copy tokens and add one position
                 pos = target_positions[end_idx - 1] + 1
                 block_number = pos // self.block_size
                 block_number = block_table[i][block_number].item()
                 block_offset = pos % self.block_size
+                adjusted_slot = (block_number * self.block_size + block_offset)
 
                 if not self.draft_prefill_kv_sharing_from_base:
-                    # Copy token IDs, positions, slot mappings, and hidden states
+                    # copy the original and adjust the one additional token
+                    # for position, slot mapping and hidden state
                     adjusted_token_ids[current_pos:current_pos +
                                        req_len].copy_(
                                            target_token_ids[start_idx:end_idx])
+
                     adjusted_positions[current_pos:current_pos +
                                        req_len].copy_(
                                            target_positions[start_idx:end_idx])
-                    adjusted_positions[current_pos +
-                                       req_len] = adjusted_positions[
-                                           current_pos + req_len - 1] + 1
+                    adjusted_positions[current_pos + req_len] = pos
 
                     adjusted_slot_mapping[current_pos:current_pos +
                                           req_len].copy_(target_slot_mapping[
                                               start_idx:end_idx])
-                    adjusted_slot_mapping[
-                        current_pos +
-                        req_len] = block_number * self.block_size + block_offset
+                    adjusted_slot_mapping[current_pos +
+                                          req_len] = (adjusted_slot)
 
                     adjusted_hidden_states[
                         current_pos + 1:current_pos + req_len + 1].copy_(
                             target_hidden_states[start_idx:end_idx])
+
                     adjusted_hidden_states[
                         current_pos] = prefill_first_hiddens[i]
                     current_pos += req_len + 1
                 else:
-                    adjusted_positions[current_pos] = 0
-                    adjusted_slot_mapping[
-                        current_pos] = block_number * self.block_size + block_offset
-                    adjusted_hidden_states[current_pos] = target_hidden_states[
-                        end_idx - 1]
+                    # if we enable copy kv then all of the prefill tokens
+                    # are skipped. Only keep the prefill output token
+                    adjusted_positions[current_pos] = pos
+                    adjusted_slot_mapping[current_pos] = adjusted_slot
+                    adjusted_hidden_states[current_pos] = (
+                        target_hidden_states[end_idx - 1])
                     current_pos += 1
 
                 cu_num_tokens_index += 1
 
             else:
                 # Category 3: Full decode - shift tokens
-                # Shift operations using optimized copy operations
+                # Due to additional token in full prefill already,
+                # all the corresponding decode rounds will shift one tokens
                 adjusted_token_ids[current_pos:current_pos + req_len -
                                    1].copy_(target_token_ids[start_idx +
                                                              1:end_idx])
+
                 adjusted_positions[current_pos:current_pos + req_len].copy_(
                     target_positions[start_idx:end_idx] + 1)
 
                 adjusted_slot_mapping[current_pos:current_pos + req_len -
                                       1].copy_(target_slot_mapping[start_idx +
                                                                    1:end_idx])
+
                 pos = adjusted_positions[current_pos + req_len - 1]
                 block_number = pos // self.block_size
                 block_number = block_table[i][block_number].item()
                 block_offset = pos % self.block_size
-                adjusted_slot_mapping[
-                    current_pos + req_len -
-                    1] = block_number * self.block_size + block_offset
+                adjusted_slot_mapping[current_pos + req_len -
+                                      1] = (block_number * self.block_size +
+                                            block_offset)
 
                 adjusted_hidden_states[current_pos:current_pos +
                                        req_len].copy_(target_hidden_states[
@@ -319,6 +366,7 @@ class EagleProposer:
             # Update the cumulative token count for this request
             updated_cu_num_tokens[cu_num_tokens_index] = current_pos
 
+        # using current_pos to cap the actual number of tokens
         # Copy the adjusted tensors to the input buffers
         self.input_ids[:current_pos] = adjusted_token_ids[:current_pos]
 
@@ -395,11 +443,26 @@ class EagleProposer:
                 batch_size,
                 num_tokens,
             )
+            if (partial_prefill_mask.all()
+                    and self.draft_prefill_kv_sharing_from_base):
+                # All requests are partial prefill and
+                # KV cache sharing is enabled
+                # Skip the rest of the function
+                # and return dummy draft tokens
+                return torch.zeros(
+                    (batch_size, self.num_speculative_tokens),
+                    dtype=target_token_ids.dtype,
+                    device=target_token_ids.device,
+                )
+            batch_size = cu_num_tokens.shape[0] - 1
         else:
             # Original behavior: shift all tokens by one
-            partial_prefill_mask = None
             self.input_ids[:num_tokens - 1] = target_token_ids[1:]
+            partial_prefill_mask = torch.zeros_like(full_prefill_mask)
             if not prefill_shift_tokens:
+                # For pure decode in non-shifting prefill case
+                # Due to one additional token in prefill, all the decode
+                # rounds will shift one token
                 target_positions += 1
                 max_num_blocks_per_req = block_table.shape[1]
                 segment_indices = torch.arange(len(target_positions),
@@ -413,15 +476,24 @@ class EagleProposer:
                     segment_indices * max_num_blocks_per_req)
                 block_numbers = block_table.flatten()[block_table_indices]
                 block_offsets = target_positions % self.block_size
-                target_slot_mapping = block_numbers * self.block_size + block_offsets
+                target_slot_mapping = (block_numbers * self.block_size +
+                                       block_offsets)
 
             # Use the original last token indices
         last_token_indices = cu_num_tokens[1:] - 1
 
-        # Replace the last token with the next token, but only for non-partial prefill requests
         if not prefill_shift_tokens and has_prefill:
+            # Replace the last token with the next token under non-shifting,
+            # but only for non-partial prefill requests
             mask = ~partial_prefill_mask
-            self.input_ids[last_token_indices[mask]] = next_token_ids[mask]
+            # if we enable copy kv then all of the partial prefills
+            # are completely skipped so they won't be in last_token_indices
+            input_indices = (
+                last_token_indices[mask]
+                if not self.draft_prefill_kv_sharing_from_base else
+                last_token_indices[:batch_size -
+                                   partial_prefill_mask.sum().item()])
+            self.input_ids[input_indices] = next_token_ids[mask]
         else:
             # Original behavior: apply to all requests
             self.input_ids[last_token_indices] = next_token_ids
@@ -489,10 +561,24 @@ class EagleProposer:
             return torch.cat(draft_token_ids_list, dim=1)
 
         draft_token_ids = logits.argmax(dim=-1)
-        # print("draft_tokens topK:", logits.topk(3, dim=-1))
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
+            if (self.draft_prefill_kv_sharing_from_base
+                    and partial_prefill_mask.any().item()):
+                # if we do kv sharing and has partial prefill
+                # the original position for partial prefill will not
+                # have token output thus we need to pad the draft tokens
+                # with the correct positions
+                padded_draft_token_ids = torch.zeros(
+                    partial_prefill_mask.shape[0],
+                    dtype=draft_token_ids.dtype,
+                    device=draft_token_ids.device)
+                draft_token_ids = draft_token_ids[:batch_size -
+                                                  partial_prefill_mask.sum(
+                                                  ).item()]
+                padded_draft_token_ids[~partial_prefill_mask] = draft_token_ids
+                draft_token_ids = padded_draft_token_ids
             # [batch_size, 1]
             return draft_token_ids.view(-1, 1)
 
@@ -597,7 +683,21 @@ class EagleProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        # print("draft_token_ids:", draft_token_ids)
+        if (self.draft_prefill_kv_sharing_from_base
+                and partial_prefill_mask.any().item()):
+            # if we do kv sharing and has partial prefill
+            # the original position for partial prefill will not
+            # have token output thus we need to pad the draft tokens
+            # with the correct positions
+            padded_draft_token_ids = torch.zeros(
+                (partial_prefill_mask.shape[0], self.num_speculative_tokens),
+                dtype=draft_token_ids.dtype,
+                device=draft_token_ids.device)
+            draft_token_ids = draft_token_ids[:batch_size -
+                                              partial_prefill_mask.sum().item(
+                                              )]
+            padded_draft_token_ids[~partial_prefill_mask] = draft_token_ids
+            draft_token_ids = padded_draft_token_ids
         return draft_token_ids
 
     def propose_tree(
@@ -865,7 +965,8 @@ class EagleProposer:
         return spec_common_attn_metadata, token_indices
 
     def load_model(self, target_model: nn.Module) -> None:
-        draft_model_config = self.vllm_config.speculative_config.draft_model_config
+        draft_model_config = (
+            self.vllm_config.speculative_config.draft_model_config)
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
@@ -879,6 +980,30 @@ class EagleProposer:
             target_attn_layer_names)
 
         self.attn_layer_names = list(draft_attn_layer_names)
+
+        if self.kv_sharing_prefill:
+            logger.info("Using half prefill for decoding only attention,"
+                        " Setting up KV sharing from base to draft.")
+            assert self.kv_sharing_mapping is not None
+            target_attn_layer_indices_dict = dict(
+                (str(extract_layer_index(target_layer)), target_layer)
+                for target_layer in target_attn_layer_names)
+            draft_attn_layer_indices_dict = dict(
+                (str(extract_layer_index(draft_layer)), draft_layer)
+                for draft_layer in draft_attn_layer_names)
+            updated_kv_sharing_mapping = {
+                draft_attn_layer_indices_dict[draft_index]:
+                target_attn_layer_indices_dict[target_index]
+                for draft_index, target_index in
+                self.kv_sharing_mapping.items()
+            }
+            logger.info("Updated KV sharing mapping: %s",
+                        updated_kv_sharing_mapping)
+            assert len(updated_kv_sharing_mapping) == len(
+                self.kv_sharing_mapping), (
+                    "KV sharing mapping should be a subset of draft and"
+                    " target attn layer indices")
+            self.kv_sharing_mapping = updated_kv_sharing_mapping
 
         if supports_multimodal(target_model):
             # handle multimodality
