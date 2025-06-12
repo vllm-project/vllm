@@ -115,11 +115,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             and self.use_triton_flash_attn \
             and not return_softmax_lse:
             return self._flash_attn_varlen_diff_headdims_rocm(
-                q,
-                k,
-                v,
-                softmax_scale=softmax_scale,
-                **kwargs)
+                q, k, v, softmax_scale=softmax_scale, **kwargs)
         else:
             return super()._flash_attn_varlen_diff_headdims(
                 q,
