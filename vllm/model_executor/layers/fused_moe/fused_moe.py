@@ -9,6 +9,8 @@ from typing import Any, Callable, Optional
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig)
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -1048,20 +1050,6 @@ def get_config_dtype_str(
     return None
 
 
-# TODO (bnell): use scalar_type instead of bools?
-def get_config_quant_dtype(
-    use_fp8_w8a8: bool,
-    use_int8_w8a8: bool,
-    use_int8_w8a16: bool,
-    use_int4_w4a16: bool,
-) -> Optional[torch.dtype]:
-    if use_fp8_w8a8:
-        return torch.float8_e4m3fn
-    elif use_int8_w8a8:
-        return torch.int8
-    return None
-
-
 def inplace_fused_experts(hidden_states: torch.Tensor,
                           w1: torch.Tensor,
                           w2: torch.Tensor,
@@ -1618,17 +1606,15 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         per_act_token_quant: bool = False,
         block_shape: Optional[list[int]] = None,
     ):
-        quant_dtype = get_config_quant_dtype(
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=use_int4_w4a16
-        )
-
         super().__init__(
-            quant_dtype=quant_dtype,
-            per_act_token_quant=per_act_token_quant,
-            block_shape=block_shape,
+            FusedMoEQuantConfig.make(
+                use_fp8_w8a8=use_fp8_w8a8,
+                use_int8_w8a8=use_int8_w8a8,
+                use_int8_w8a16=use_int8_w8a16,
+                use_int4_w4a16=use_int4_w4a16,
+                per_act_token_quant=per_act_token_quant,
+                block_shape=block_shape,
+            )
         )
 
         self.use_fp8_w8a8 = use_fp8_w8a8

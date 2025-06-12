@@ -5,6 +5,8 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
@@ -126,14 +128,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
-        rank_topk_weights: torch.Tensor,
-        rank_topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-        quant_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        block_shape: Optional[list[int]],
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
@@ -153,16 +153,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             "low_latency kernels doesn't support dispatching per-token scales")
 
         if apply_router_weight_on_input:
-            topk = rank_topk_ids.size(1)
+            topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1")
-            a1 = a1 * rank_topk_weights.to(a1.dtype)
+            a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
         expert_x, expert_num_tokens, self.handle, event, hook = \
                 self.buffer.low_latency_dispatch(a1,
-                                                rank_topk_ids,
+                                                topk_ids,
                                                 self.max_tokens_per_rank,
                                                 num_experts,
                                                 use_fp8=self.use_fp8_dispatch,
@@ -171,9 +171,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         expert_x, expert_x_scale = self._do_quant(expert_x, a1_scale, a2_scale,
                                                   a1.dtype,
-                                                  quant_dtype,
-                                                  per_act_token_quant,
-                                                  block_shape)
+                                                  quant_config.quant_dtype,
+                                                  quant_config.per_act_token_quant,
+                                                  quant_config.block_shape)
 
         return (expert_x, expert_x_scale, expert_num_tokens, None, None)
 

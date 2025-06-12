@@ -6,6 +6,8 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
@@ -119,34 +121,32 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
-        rank_topk_weights: torch.Tensor,
-        rank_topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-        quant_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        block_shape: Optional[list[int]],
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
         if apply_router_weight_on_input:
-            topk = rank_topk_ids.size(1)
+            topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1")
-            a1 = a1 * rank_topk_weights.to(a1.dtype)
+            a1 = a1 * topk_weights.to(a1.dtype)
 
         # Check if there is a block_shape / or if we can infer the quantization
         # schemes from the scales.
         per_token_quant = None
-        if all([x is None for x in [block_shape, a1_scale, a2_scale]
-                ]) and quant_dtype is not None:
+        if all([x is None for x in [quant_config.block_shape, a1_scale, a2_scale]
+                ]) and quant_config.quant_dtype is not None:
             # Quantization required despite none of the inputs suggesting
             # quantization. Fallback to per_token_dynamic quant.
             per_token_quant = True
         else:
-            per_token_quant = ((block_shape is not None) or
+            per_token_quant = ((quant_config.block_shape is not None) or
                                (a1_scale is not None and a1_scale.numel() != 1)
                                or (a2_scale is not None
                                    and a2_scale.numel() != 1))
@@ -155,16 +155,16 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 a1_scale,
-                quant_dtype=quant_dtype,
+                quant_dtype=quant_config.quant_dtype,
                 per_act_token_quant=False,
-                block_shape=block_shape,
+                block_shape=quant_config.block_shape,
             )
             (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1q,
                  token_scales=a1q_scale,
-                 rank_topk_ids=rank_topk_ids,
-                 rank_topk_weights=rank_topk_weights,
+                 rank_topk_ids=topk_ids,
+                 rank_topk_weights=topk_weights,
                  num_experts=num_experts)
         else:
             # DeepEP kernels only support dispatching per-token-quant
@@ -173,8 +173,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1,
                  token_scales=None,
-                 rank_topk_ids=rank_topk_ids,
-                 rank_topk_weights=rank_topk_weights,
+                 rank_topk_ids=topk_ids,
+                 rank_topk_weights=topk_weights,
                  num_experts=num_experts)
             # quantize now
             expert_x_scale = None
@@ -182,9 +182,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
                     expert_x,
                     a1_scale,
-                    quant_dtype=quant_dtype,
+                    quant_dtype=quant_config.quant_dtype,
                     per_act_token=False,
-                    block_shape=block_shape
+                    block_shape=quant_config.block_shape
                 )
 
         return (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,

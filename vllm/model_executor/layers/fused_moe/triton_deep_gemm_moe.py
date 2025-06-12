@@ -8,7 +8,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    TritonExperts, get_config_quant_dtype)
+    TritonExperts)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig)
 
 
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -23,16 +25,15 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         block_shape: Optional[list[int]] = None,
         allow_deep_gemm: bool = False,
     ):
-        quant_dtype = get_config_quant_dtype(
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=use_int4_w4a16,
-        )
         super().__init__(
-            quant_dtype=quant_dtype,
-            per_act_token_quant=per_act_token_quant,
-            block_shape=block_shape,
+            FusedMoEQuantConfig(
+                use_fp8_w8a8=use_fp8_w8a8,
+                use_int8_w8a8=use_int8_w8a8,
+                use_int8_w8a16=use_int8_w8a16,
+                use_int4_w4a16=use_int4_w4a16,
+                per_act_token_quant=per_act_token_quant,
+                block_shape=block_shape,
+            )
         )
         self.triton_expert = TritonExperts(
             use_fp8_w8a8=use_fp8_w8a8,

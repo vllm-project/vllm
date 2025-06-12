@@ -100,7 +100,8 @@ def native_w8a8_block_matmul(
         As: torch.Tensor,
         Bs: torch.Tensor,
         block_size: list[int],
-        output_dtype: torch.dtype
+        output_dtype: torch.dtype,
+        compute_type: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise
     quantization using native torch.
@@ -111,11 +112,6 @@ def native_w8a8_block_matmul(
     `Bs` (float32).
     The output is returned in the specified `output_dtype`.
     """
-    if A.dtype.itemsize <= 2:
-        compute_type = torch.bfloat16
-    else:
-        compute_type = torch.float32
-
     A = A.to(compute_type)
     B = B.to(compute_type)
     assert A.shape[-1] == B.shape[-1]

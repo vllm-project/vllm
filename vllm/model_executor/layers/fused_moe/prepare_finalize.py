@@ -5,6 +5,8 @@ from typing import Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_unpermute_and_reduce)
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -29,9 +31,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-        quant_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        block_shape: Optional[list[int]],
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
@@ -43,9 +43,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             a1.mul_(topk_weights.to(a1.dtype))
 
         a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
-                                                   quant_dtype,
-                                                   per_act_token_quant,
-                                                   block_shape)
+                                                   quant_config.quant_dtype,
+                                                   quant_config.per_act_token_quant,
+                                                   quant_config.block_shape)
 
         return a1q, a1q_scale, None, None, None
 

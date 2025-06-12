@@ -7,6 +7,8 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import _fp8_perm, _resize_cache
@@ -215,9 +217,11 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         use_batched_format: bool = False,
     ):
         super().__init__(
-            quant_dtype=torch.float8_e4m3fn,
-            per_act_token_quant=per_act_token_quant,
-            block_shape=block_shape,
+            FusedMoEQuantConfig(
+                quant_dtype=torch.float8_e4m3fn,
+                per_act_token_quant=per_act_token_quant,
+                block_shape=block_shape,
+            )
         )
         assert max_experts_per_worker > 0
         self.max_experts_per_worker = max_experts_per_worker

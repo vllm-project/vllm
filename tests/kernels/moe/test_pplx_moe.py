@@ -39,6 +39,7 @@ from .deepep_utils import ProcessGroupInfo, parallel_launch
 from tests.kernels.moe.utils import (
     torch_moe2,
     naive_batched_moe,
+    make_test_weights,
 )
 
 
@@ -264,7 +265,7 @@ def pplx_prepare_finalize(
         chunk_topk_ids,
         num_experts,
         None,
-        False,
+        FusedMoEConfig(),
     )
 
     b_a = b_a * 1.5
@@ -583,7 +584,7 @@ def _pplx_moe(
     with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s, w2_s,
-                                  use_fp8_w8a8, per_act_token_quant,
+                                  qtype, per_act_token_quant,
                                   block_shape)
         pplx_output = pplx_moe(group_name, pgi.rank, pgi.world_size, dp_size, a,
                                w1, w2, topk_weight, topk_ids, w1_s, w2_s, qtype,
@@ -624,69 +625,16 @@ def test_pplx_moe(
     current_platform.seed_everything(7)
     m, n, k = mnk
     world_size, dp_size = world_dp_size
-    a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=torch.bfloat16) / 10
-    w2 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16) / 10
-    score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
-
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
     if not use_fp8_w8a8 and per_act_token_quant and block_shape is not None:
         pytest.skip("Skip quantization test for non-quantized type")
 
-    # TODO (bnell): scale setup for different quant strategies?
-    if use_fp8_w8a8:
-        quant_type = torch.float8_e4m3fn
+    a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+    score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
 
-        #finfo = torch.finfo(dtype)
-        #fp8_min = finfo.min
-        #fp8_max = finfo.max
-        #w1 = w1.clamp(min=fp8_min, max=fp8_max).to(dtype)
-        #w2 = w2.clamp(min=fp8_min, max=fp8_max).to(dtype)
-        # block_n, block_k = block_shape[0], block_shape[1]
-        # n_tiles_w1 = (2 * n + block_n - 1) // block_n
-        # n_tiles_w2 = (k + block_n - 1) // block_n
-        # k_tiles_w1 = (k + block_k - 1) // block_k
-        # k_tiles_w2 = (n + block_k - 1) // block_k
-        # factor_for_scale = 1e-2
-        # w1_s = torch.rand(
-        #     (e, n_tiles_w1, k_tiles_w1), dtype=torch.float32,
-        #     device="cuda") * factor_for_scale
-        # w2_s = torch.rand(
-        #     (e, n_tiles_w2, k_tiles_w2), dtype=torch.float32,
-        #     device="cuda") * factor_for_scale
-        w1_l = [None] * e
-        w2_l = [None] * e
-        w1_s = [None] * e
-        w2_s = [None] * e
-        for idx in range(e):
-            w1_l[idx], w1_s[idx] = moe_kernel_quantize_input(
-                w1[idx],
-                None,
-                quant_type,
-                per_act_token_quant,
-                block_shape
-            )
-            w2_l[idx], w2_s[idx] = moe_kernel_quantize_input(
-                w2[idx],
-                None,
-                quant_type,
-                per_act_token_quant,
-                block_shape
-            )
-        w1 = torch.stack(w1_l)
-        w2 = torch.stack(w2_l)
-        w1_s = torch.stack(w1_s)
-        w2_s = torch.stack(w2_s)
-        if w1_s.ndim == 2:
-            assert w1_s.shape[-1] == 1
-            w1_s = w1_s.view(-1, 1, 1)
-            w2_s = w2_s.view(-1, 1, 1)
-    else:
-        quant_type = None
-        w1_s = None
-        w2_s = None
+    w1, w2, w1_s, w2_s, w1_16, w2_16 = make_test_weights(e, n, k, block_shape, dtype)
 
     parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk,
-                    w1_s, w2_s, quant_type, per_act_token_quant, block_shape,
+                    w1_s, w2_s, dtype, per_act_token_quant, block_shape,
                     use_internode)

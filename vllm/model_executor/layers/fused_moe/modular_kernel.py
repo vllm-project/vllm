@@ -7,6 +7,11 @@ from typing import Optional
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    FusedMoEConfig,
+)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.utils import cdiv
 
@@ -100,9 +105,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
-        quant_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        block_shape: Optional[list[int]],
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
@@ -182,14 +185,28 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     def __init__(
         self,
-        quant_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        block_shape: Optional[list[int]],
+        quant_config: Optional[FusedMoEQuantConfig],
     ):
-        assert not per_act_token_quant or block_shape is None
-        self.quant_dtype = quant_dtype
-        self.per_act_token_quant = per_act_token_quant
-        self.block_shape = block_shape
+        if quant_config is not None:
+            self.quant_config = quant_config
+        else:
+            self.quant_config = FusedMoEQuantConfig()
+
+    @property
+    def quant_dtype(self):
+        return self.quant_config.quant_dtype
+
+    @property
+    def block_shape(self):
+        return self.quant_config.block_shape
+
+    @property
+    def per_act_token_quant(self):
+        return self.quant_config.per_act_token_quant
+
+    @property
+    def per_out_ch_quant(self):
+        return self.quant_config.per_out_ch_quant
 
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod
@@ -396,9 +413,7 @@ class FusedMoEModularKernel(torch.nn.Module):
          _expert_topk_weights) = self.prepare_finalize.prepare(
              a1, a1_scale, a2_scale, topk_weights, topk_ids,
              global_num_experts, expert_map, apply_router_weight_on_input,
-             self.fused_experts.quant_dtype,
-             self.fused_experts.per_act_token_quant,
-             self.fused_experts.block_shape,
+             self.fused_experts.quant_config,
          )
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
