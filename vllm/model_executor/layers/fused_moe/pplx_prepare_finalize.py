@@ -34,6 +34,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.quant_dtype = quant_dtype
         self.per_act_token = per_act_token
 
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
     def max_num_tokens_per_rank(self) -> Optional[int]:
         return self.max_num_tokens
 

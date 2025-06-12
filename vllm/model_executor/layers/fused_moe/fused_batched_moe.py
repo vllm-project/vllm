@@ -395,6 +395,10 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.rank = rank
         self.max_num_tokens = max_num_tokens
 
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
     def max_num_tokens_per_rank(self) -> Optional[int]:
         return self.max_num_tokens
 
@@ -510,6 +514,11 @@ class BatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.world_size = world_size
         self.dp_size = dp_size
 
+    @property
+    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (mk.FusedMoEActivationFormat.BatchedExperts,
+                mk.FusedMoEActivationFormat.BatchedExperts)
+
     def supports_chunking(self) -> bool:
         return False
 
@@ -614,6 +623,11 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not use_int8_w8a8, "NYI"
         assert not use_int4_w4a16, "NYI"
         assert self.block_shape is None, "NYI"
+
+    @property
+    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (mk.FusedMoEActivationFormat.BatchedExperts,
+                mk.FusedMoEActivationFormat.BatchedExperts)
 
     def supports_chunking(self) -> bool:
         return False

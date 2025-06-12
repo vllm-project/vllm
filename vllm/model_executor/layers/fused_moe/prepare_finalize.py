@@ -24,6 +24,10 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         self.block_shape = block_shape
         self.quant_dtype = quant_dtype
 
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
     def max_num_tokens_per_rank(self) -> Optional[int]:
         return None
 
