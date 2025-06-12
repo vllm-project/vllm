@@ -18,36 +18,25 @@ try:
 except ImportError:
     has_pplx = False
 
+#from tests.kernels.quant_utils import native_w8a8_block_matmul
+from tests.kernels.moe.utils import (make_test_weights, naive_batched_moe,
+                                     torch_moe2)
+from tests.pplx_utils import ProcessGroupInfo, parallel_launch
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import override_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    NaiveBatchedExperts, BatchedPrepareAndFinalize, BatchedTritonExperts)
+    BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
 from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
                                                             get_default_config)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8)
 from vllm.platforms import current_platform
 from vllm.utils import round_up
-
-from .deepep_utils import ProcessGroupInfo, parallel_launch
-
-from tests.kernels.moe.utils import (
-    torch_moe2,
-    naive_batched_moe,
-    make_test_weights,
-)
-
 
 requires_pplx = pytest.mark.skipif(
     not has_pplx,
     reason="Requires PPLX kernels",
 )
-
 
 PPLX_PREPARE_COMBOS = [(4, 128, 128), (32, 1024, 512), (64, 1024, 512),
                        (222, 2048, 1024)]
@@ -430,13 +419,11 @@ def pplx_moe(
         dp_size,
     )
 
-    experts = BatchedTritonExperts(
-        max_num_tokens=max_num_tokens,
-        world_size=world_size,
-        dp_size=dp_size,
-        use_fp8_w8a8=qtype==torch.float8_e4m3fn,
-        block_shape=block_shape
-    )
+    experts = BatchedTritonExperts(max_num_tokens=max_num_tokens,
+                                   world_size=world_size,
+                                   dp_size=dp_size,
+                                   use_fp8_w8a8=qtype == torch.float8_e4m3fn,
+                                   block_shape=block_shape)
 
     fused_experts = FusedMoEModularKernel(
         prepare_finalize,
@@ -584,8 +571,7 @@ def _pplx_moe(
     with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s, w2_s,
-                                  qtype, per_act_token_quant,
-                                  block_shape)
+                                  qtype, per_act_token_quant, block_shape)
         pplx_output = pplx_moe(group_name, pgi.rank, pgi.world_size, dp_size, a,
                                w1, w2, topk_weight, topk_ids, w1_s, w2_s, qtype,
                                per_act_token_quant, block_shape)
@@ -633,7 +619,8 @@ def test_pplx_moe(
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
 
-    w1, w2, w1_s, w2_s, w1_16, w2_16 = make_test_weights(e, n, k, block_shape, dtype)
+    w1, w2, w1_s, w2_s, w1_16, w2_16 = make_test_weights(
+        e, n, k, block_shape, dtype)
 
     parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk,
                     w1_s, w2_s, dtype, per_act_token_quant, block_shape,

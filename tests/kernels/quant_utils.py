@@ -95,13 +95,13 @@ def ref_dynamic_per_tensor_fp8_quant(x: torch.tensor) \
 
 
 def native_w8a8_block_matmul(
-        A: torch.Tensor,
-        B: torch.Tensor,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
-        block_size: list[int],
-        output_dtype: torch.dtype,
-        compute_type: torch.dtype = torch.float32,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+    compute_type: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise
     quantization using native torch.

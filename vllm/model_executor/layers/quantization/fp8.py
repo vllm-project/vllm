@@ -3,7 +3,7 @@
 
 import functools
 import importlib.util
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -12,10 +12,9 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE,
-                                                  FusedMoEMethodBase,
+from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
@@ -792,15 +791,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if use_batched_experts:
             logger.debug(
                 "BatchedTritonOrDeepGemmExperts(%s): max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
-                self.__class__.__name__,
-                max_num_tokens_per_rank,
-                self.quant_config.weight_block_size,
-                False
-            )
+                self.__class__.__name__, max_num_tokens_per_rank,
+                self.quant_config.weight_block_size, False)
             return BatchedTritonOrDeepGemmExperts(
-                max_num_tokens=max_num_tokens_per_rank, # get from prepare_finalize?
-                world_size=prepare_finalize.world_size, # sketchy
-                dp_size=prepare_finalize.dp_size,       # sketchy
+                max_num_tokens=
+                max_num_tokens_per_rank,  # get from prepare_finalize?
+                world_size=prepare_finalize.world_size,  # sketchy
+                dp_size=prepare_finalize.dp_size,  # sketchy
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
                 per_act_token_quant=False,  #?
@@ -809,14 +806,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         else:
             logger.debug(
                 "TritonOrDeepGemmExperts(%s): block_size=%s, per_act_token=%s",
-                self.__class__.__name__,
-                self.quant_config.weight_block_size,
-                False
-            )
+                self.__class__.__name__, self.quant_config.weight_block_size,
+                False)
             return TritonOrDeepGemmExperts(
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
-                per_act_token=False, #?
+                per_act_token=False,  #?
                 allow_deep_gemm=self.allow_deep_gemm,
             )
 

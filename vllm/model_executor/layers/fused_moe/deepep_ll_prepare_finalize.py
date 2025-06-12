@@ -5,8 +5,7 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
@@ -39,14 +38,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     # specific hidden sizes.
     SUPPORTED_HIDDEN_SIZES = [2560, 4096, 5120, 7168]
 
-    def __init__(
-        self,
-        buffer: deep_ep.Buffer,
-        max_tokens_per_rank: int,
-        world_size: int,
-        dp_size: int,
-        use_fp8_w8a8: bool
-    ):
+    def __init__(self, buffer: deep_ep.Buffer, max_tokens_per_rank: int,
+                 world_size: int, dp_size: int, use_fp8_w8a8: bool):
         super().__init__()
 
         self.buffer = buffer
@@ -103,10 +96,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         #                        or (a2_scale is not None
         #                            and a2_scale.numel() != 1))
 
-        assert per_act_token_quant == ((block_shape is not None) or
-                                       (a1_scale is not None and a1_scale.numel() != 1)
-                                       or (a2_scale is not None
-                                           and a2_scale.numel() != 1))
+        assert per_act_token_quant == (
+            (block_shape is not None)
+            or (a1_scale is not None and a1_scale.numel() != 1)
+            or (a2_scale is not None and a2_scale.numel() != 1))
 
         num_experts, max_tokens, hidden_dim = x.size()
 
@@ -169,11 +162,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 async_finish=False,
                                                 return_recv_hook=False)
 
-        expert_x, expert_x_scale = self._do_quant(expert_x, a1_scale, a2_scale,
-                                                  a1.dtype,
-                                                  quant_config.quant_dtype,
-                                                  quant_config.per_act_token_quant,
-                                                  quant_config.block_shape)
+        expert_x, expert_x_scale = self._do_quant(
+            expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
+            quant_config.per_act_token_quant, quant_config.block_shape)
 
         return (expert_x, expert_x_scale, expert_num_tokens, None, None)
 

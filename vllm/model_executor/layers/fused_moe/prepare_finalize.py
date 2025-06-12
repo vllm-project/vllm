@@ -5,8 +5,7 @@ from typing import Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_unpermute_and_reduce)
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -42,10 +41,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        a1q, a1q_scale = moe_kernel_quantize_input(a1, a1_scale,
-                                                   quant_config.quant_dtype,
-                                                   quant_config.per_act_token_quant,
-                                                   quant_config.block_shape)
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1, a1_scale, quant_config.quant_dtype,
+            quant_config.per_act_token_quant, quant_config.block_shape)
 
         return a1q, a1q_scale, None, None, None
 

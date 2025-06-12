@@ -9,11 +9,10 @@ from typing import Any, Callable, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig)
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
@@ -464,7 +463,6 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-
 def prepare_scales(
     a1: torch.Tensor,
     a1_scale: Optional[torch.Tensor],
@@ -487,8 +485,7 @@ def prepare_scales(
 
     b_a1 = torch.zeros(
         (num_local_experts, max_num_tokens, hidden_dim),
-        dtype=quant_dtype
-        if quant_dtype is not None else a1.dtype,
+        dtype=quant_dtype if quant_dtype is not None else a1.dtype,
         device=a1.device)
 
     if quant_dtype is not None:
@@ -500,10 +497,9 @@ def prepare_scales(
             num = 1
             scale_shape = (num_local_experts, num, 1)
 
-        b_a1_scale = torch.zeros(
-            scale_shape,
-            dtype=torch.float32,
-            device=a1.device)
+        b_a1_scale = torch.zeros(scale_shape,
+                                 dtype=torch.float32,
+                                 device=a1.device)
     else:
         assert a1_scale is None
         b_a1_scale = None
@@ -522,7 +518,8 @@ def prepare_scales(
             if block_shape is None:
                 b_a1_scale[idx] = rhs_a1_scale
             else:
-                assert rows == rhs_a1_scale.shape[0] and b_a1_scale.shape[-1] == rhs_a1_scale.shape[-1]
+                assert rows == rhs_a1_scale.shape[0] and b_a1_scale.shape[
+                    -1] == rhs_a1_scale.shape[-1]
                 b_a1_scale[idx, :rows] = rhs_a1_scale
 
         tokens_per_expert[idx] = rows
@@ -558,8 +555,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
 
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
-#        assert (block_shape is None or triton.cdiv(B.shape[-2], block_shape[0])
-#                == B_scale.shape[-2]), f"{block_shape[0]} {B.shape[-2]} {B_scale.shape[-2]}"
+        #        assert (block_shape is None or triton.cdiv(B.shape[-2], block_shape[0])
+        #                == B_scale.shape[-2]), f"{block_shape[0]} {B.shape[-2]} {B_scale.shape[-2]}"
         assert (block_shape is None or triton.cdiv(B.shape[-1], block_shape[1])
                 == B_scale.shape[-1])
 
@@ -1614,8 +1611,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int4_w4a16=use_int4_w4a16,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
-            )
-        )
+            ))
 
         self.use_fp8_w8a8 = use_fp8_w8a8
         self.use_int4_w4a16 = use_int4_w4a16

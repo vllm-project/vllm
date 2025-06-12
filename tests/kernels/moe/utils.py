@@ -1,31 +1,29 @@
-import torch
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel)
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize,
-    BatchedTritonExperts,
-    NaiveBatchedExperts)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    w8a8_block_fp8_matmul,
-    per_token_group_quant_fp8)
-
-from vllm.utils import round_up
+import torch
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+    BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel)
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
+from vllm.utils import round_up
 
 
 def Xnative_w8a8_block_matmul(A: torch.Tensor,
-                             B: torch.Tensor,
-                             As: torch.Tensor,
-                             Bs: torch.Tensor,
-                             block_size: Optional[list[int]],
-                             output_dtype=torch.bfloat16):
+                              B: torch.Tensor,
+                              As: torch.Tensor,
+                              Bs: torch.Tensor,
+                              block_size: Optional[list[int]],
+                              output_dtype=torch.bfloat16):
     """This function performs matrix multiplication with block-wise
     quantization using native torch.
     It is agnostic to the input data type and can be used for both int8 and
@@ -108,13 +106,8 @@ def torch_moe2(
 
     a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
 
-    a, a_scale = moe_kernel_quantize_input(
-        a,
-        None,
-        quant_type,
-        per_act_token_quant,
-        block_shape
-    )
+    a, a_scale = moe_kernel_quantize_input(a, None, quant_type,
+                                           per_act_token_quant, block_shape)
 
     print(f"XXX {quant_type} {block_shape} {a.shape} {a_scale}")
 
@@ -135,14 +128,9 @@ def torch_moe2(
                 tmp2 = SiluAndMul()(tmp1)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
             elif block_shape is not None:
-                tmp1 = native_w8a8_block_matmul(
-                    a[mask],
-                    w1[i],
-                    a_scale[mask],
-                    w1_scale[i],
-                    block_shape,
-                    out.dtype
-                )
+                tmp1 = native_w8a8_block_matmul(a[mask], w1[i], a_scale[mask],
+                                                w1_scale[i], block_shape,
+                                                out.dtype)
 
                 #print(f"TORCH INTER[{i}] {tmp1.shape}\n{tmp1}")
                 #inters[i, :tmp1.shape[0]] = tmp1
@@ -152,24 +140,20 @@ def torch_moe2(
                 #print(f"TORCH ACT[{i}] {tmp2.shape}\n{tmp2}")
                 #acts[i, :tmp2.shape[0]] = tmp2
 
-                tmp2, b_scale = moe_kernel_quantize_input(tmp2, None, quant_type,
-                                                          per_act_token_quant,
-                                                          block_shape)
+                tmp2, b_scale = moe_kernel_quantize_input(
+                    tmp2, None, quant_type, per_act_token_quant, block_shape)
 
-                out[mask] = native_w8a8_block_matmul(
-                    tmp2,
-                    w2[i],
-                    b_scale,
-                    w2_scale[i],
-                    block_shape,
-                    out.dtype
-                )
+                out[mask] = native_w8a8_block_matmul(tmp2, w2[i], b_scale,
+                                                     w2_scale[i], block_shape,
+                                                     out.dtype)
             else:
                 # XXXX need scales here
                 compute_type = torch.bfloat16
-                tmp1 = a[mask].to(compute_type) @ w1[i].transpose(0, 1).to(compute_type)
+                tmp1 = a[mask].to(compute_type) @ w1[i].transpose(
+                    0, 1).to(compute_type)
                 tmp2 = SiluAndMul()(tmp1)
-                out[mask] = (tmp2 @ w2[i].transpose(0, 1).to(compute_type)).to(out.dtype)
+                out[mask] = (tmp2 @ w2[i].transpose(0, 1).to(compute_type)).to(
+                    out.dtype)
 
     #print(f"TORCH INTER {inters.shape}\n{inters}")
     #print(f"TORCH ACT {acts.shape}\n{acts}")
@@ -190,18 +174,17 @@ def triton_moe(
     per_act_token_quant=False,
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
-    return fused_experts(
-        a,
-        w1,
-        w2,
-        topk_weight,
-        topk_ids,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        per_channel_quant=per_act_token_quant,
-        use_fp8_w8a8=quant_type == torch.float8_e4m3fn,
-        block_shape=block_shape
-    )
+    return fused_experts(a,
+                         w1,
+                         w2,
+                         topk_weight,
+                         topk_ids,
+                         w1_scale=w1_scale,
+                         w2_scale=w2_scale,
+                         per_channel_quant=per_act_token_quant,
+                         use_fp8_w8a8=quant_type == torch.float8_e4m3fn,
+                         block_shape=block_shape)
+
 
 def batched_moe(
     a: torch.Tensor,
@@ -225,10 +208,9 @@ def batched_moe(
         BatchedTritonExperts(max_num_tokens=max_num_tokens,
                              world_size=1,
                              dp_size=1,
-                             use_fp8_w8a8=qtype==torch.float8_e4m3fn,
+                             use_fp8_w8a8=qtype == torch.float8_e4m3fn,
                              per_act_token_quant=per_act_token,
-                             block_shape=block_shape)
-    )
+                             block_shape=block_shape))
 
     return fused_experts(a,
                          w1,
@@ -250,21 +232,21 @@ def naive_batched_moe(
 
     fused_experts = FusedMoEModularKernel(
         BatchedPrepareAndFinalize(a.shape[0], world_size=1, dp_size=1, rank=0),
-        NaiveBatchedExperts(max_num_tokens=a.shape[0], dp_size=1, world_size=1))
+        NaiveBatchedExperts(max_num_tokens=a.shape[0], dp_size=1,
+                            world_size=1))
 
     return fused_experts(a, w1, w2, topk_weight, topk_ids, num_experts)
 
 
 # Move to utils
 def per_block_cast_to_fp8(
-    x: torch.Tensor,
-    block_size_n: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
+        x: torch.Tensor,
+        block_size_n: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.utils import cdiv
     assert x.dim() == 2
     m, n = x.shape
     x_padded = torch.zeros(
-        (cdiv(m, 128) * 128,
-         cdiv(n, block_size_n) * block_size_n),
+        (cdiv(m, 128) * 128, cdiv(n, block_size_n) * block_size_n),
         dtype=x.dtype,
         device=x.device)
     x_padded[:m, :n] = x
@@ -300,15 +282,11 @@ def make_test_weights(e, n, k, block_shape, dtype):
                 )
             else:
                 tmp, w1_s[idx] = per_token_group_quant_fp8(
-                    w1_16[idx].view(1, -1),
-                    w1_16[idx].numel()
-                )
+                    w1_16[idx].view(1, -1), w1_16[idx].numel())
                 w1_l[idx] = tmp.view(*w1_16[idx].shape)
 
                 tmp, w2_s[idx] = per_token_group_quant_fp8(
-                    w2_16[idx].view(1, -1),
-                    w2_16[idx].numel()
-                )
+                    w2_16[idx].view(1, -1), w2_16[idx].numel())
                 w2_l[idx] = tmp.view(*w2_16[idx].shape)
 
         w1 = torch.stack(w1_l)

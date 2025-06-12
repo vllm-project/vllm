@@ -19,9 +19,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEParallelConfig,
-    FusedMoEConfig,
-)
+    FusedMoEConfig, FusedMoEParallelConfig)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -35,7 +33,6 @@ has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 has_deepep = importlib.util.find_spec("deep_ep") is not None
 
 from .modular_kernel import (FusedMoEModularKernel,
-                             FusedMoEPrepareAndFinalize,
                              FusedMoEPermuteExpertsUnpermute,
                              FusedMoEPrepareAndFinalize)
 
@@ -78,11 +75,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                        params_dtype: torch.dtype, **extra_weight_attrs):
         raise NotImplementedError
 
-    def init_prepare_finalize(
-        self,
-        moe: FusedMoEConfig,
-        quant_config: Optional[QuantizationConfig]
-    ):
+    def init_prepare_finalize(self, moe: FusedMoEConfig,
+                              quant_config: Optional[QuantizationConfig]):
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
@@ -100,7 +94,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 block_shape=moe.block_shape,
             )
 
-            logger.debug(f"All2All {moe.quant_dtype}, {moe.block_shape} = {hidden_dim_bytes}/{hidden_scale_bytes}")
+            logger.debug(
+                f"All2All {moe.quant_dtype}, {moe.block_shape} = {hidden_dim_bytes}/{hidden_scale_bytes}"
+            )
 
             all_to_all_args = dict(
                 max_num_tokens=moe.max_num_tokens,
@@ -176,10 +172,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             )
 
     def select_gemm_impl(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: Optional[FusedMoEConfig]
-    ) -> FusedMoEPermuteExpertsUnpermute:
+            self, prepare_finalize: FusedMoEPrepareAndFinalize,
+            moe: Optional[FusedMoEConfig]) -> FusedMoEPermuteExpertsUnpermute:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
         raise NotImplementedError(
@@ -225,11 +219,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             self.rocm_aiter_fused_experts = None  # type: ignore
 
-    def select_gemm_impl(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: Optional[FusedMoEConfig]
-    ):
+    def select_gemm_impl(self, prepare_finalize: FusedMoEPrepareAndFinalize,
+                         moe: Optional[FusedMoEConfig]):
         assert self.fused_experts == fused_experts
 
         all2all_manager = get_ep_group().device_communicator.all2all_manager

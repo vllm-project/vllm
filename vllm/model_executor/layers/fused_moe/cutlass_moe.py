@@ -7,8 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import _fp8_perm, _resize_cache
@@ -221,8 +220,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
                 quant_dtype=torch.float8_e4m3fn,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
-            )
-        )
+            ))
         assert max_experts_per_worker > 0
         self.max_experts_per_worker = max_experts_per_worker
         self.out_dtype = out_dtype
@@ -255,7 +253,8 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
             workspace1 = (M * topk, max(2 * N, K))
             workspace2 = (M * topk, N)
             output = (M * topk, K)
-        return (workspace1, workspace2, output, self.out_dtype if self.out_dtype is not None else a.dtype)
+        return (workspace1, workspace2, output,
+                self.out_dtype if self.out_dtype is not None else a.dtype)
 
     def apply(
         self,
@@ -280,14 +279,15 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
         activation_callable = lambda i, o: self.activation(activation, i, o)
-        run_cutlass_moe_fp8(output, hidden_states, w1, w2, topk_ids,
-                            activation_callable, global_num_experts,
-                            expert_map, w1_scale, w2_scale, a1q_scale,
-                            a2_scale, workspace13, workspace2,
-                            expert_num_tokens,
-                            self.out_dtype if self.out_dtype is not None else hidden_states.dtype,
-                            self.per_act_token_quant, self.per_out_ch_quant,
-                            self.use_batched_format)
+        run_cutlass_moe_fp8(
+            output, hidden_states, w1, w2, topk_ids,
+            activation_callable, global_num_experts,
+            expert_map, w1_scale, w2_scale, a1q_scale,
+            a2_scale, workspace13, workspace2,
+            expert_num_tokens,
+            self.out_dtype if self.out_dtype is not None else hidden_states.dtype,
+            self.per_act_token_quant, self.per_out_ch_quant,
+            self.use_batched_format)
 
 
 def cutlass_moe_fp8(
@@ -350,7 +350,8 @@ def cutlass_moe_fp8(
     if out_dtype is None:
         out_dtype = a.dtype
 
-    num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
+    num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(
+        0)
 
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),

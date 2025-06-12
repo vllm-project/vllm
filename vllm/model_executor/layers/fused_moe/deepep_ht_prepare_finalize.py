@@ -6,8 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
@@ -17,12 +16,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     Prepare/Finalize using DeepEP High-Throughput kernels.
     """
 
-    def __init__(self,
-                 buffer: deep_ep.Buffer,
-                 world_size: int,
-                 rank: int,
-                 dp_size: int,
-                 rank_expert_offset: int):
+    def __init__(self, buffer: deep_ep.Buffer, world_size: int, rank: int,
+                 dp_size: int, rank_expert_offset: int):
         super().__init__()
         self.buffer = buffer
         self.world_size = world_size
@@ -140,8 +135,10 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # Check if there is a block_shape / or if we can infer the quantization
         # schemes from the scales.
         per_token_quant = None
-        if all([x is None for x in [quant_config.block_shape, a1_scale, a2_scale]
-                ]) and quant_config.quant_dtype is not None:
+        if all([
+                x is None
+                for x in [quant_config.block_shape, a1_scale, a2_scale]
+        ]) and quant_config.quant_dtype is not None:
             # Quantization required despite none of the inputs suggesting
             # quantization. Fallback to per_token_dynamic quant.
             per_token_quant = True
@@ -184,8 +181,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     a1_scale,
                     quant_dtype=quant_config.quant_dtype,
                     per_act_token=False,
-                    block_shape=quant_config.block_shape
-                )
+                    block_shape=quant_config.block_shape)
 
         return (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
                 expert_topk_weights)

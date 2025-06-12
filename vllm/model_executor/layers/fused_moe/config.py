@@ -1,7 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 from typing import Optional, Union
-import torch
 
+import torch
 from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy,
                                              QuantizationType)
@@ -30,13 +32,14 @@ def _get_quant_config_quantization_args(
 
 
 def get_quant_config_input_quant(
-    quant_config: Optional[QuantizationConfig]
+        quant_config: Optional[QuantizationConfig]
 ) -> Optional[QuantizationArgs]:
-    return _get_quant_config_quantization_args(quant_config, "input_activations")
+    return _get_quant_config_quantization_args(quant_config,
+                                               "input_activations")
 
 
 def get_quant_config_weight_quant(
-    quant_config: Optional[QuantizationConfig]
+        quant_config: Optional[QuantizationConfig]
 ) -> Optional[QuantizationArgs]:
     return _get_quant_config_quantization_args(quant_config, "weights")
 
@@ -73,12 +76,10 @@ class FusedMoEQuantConfig:
         per_out_ch_quant: bool = False,
         block_shape: Optional[list[int]] = None,
     ) -> "FusedMoEQuantConfig":
-        quant_dtype = get_config_quant_dtype(
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=use_int4_w4a16
-        )
+        quant_dtype = get_config_quant_dtype(use_fp8_w8a8=use_fp8_w8a8,
+                                             use_int8_w8a8=use_int8_w8a8,
+                                             use_int8_w8a16=use_int8_w8a16,
+                                             use_int4_w4a16=use_int4_w4a16)
         return FusedMoEQuantConfig(
             quant_dtype,
             per_act_token_quant,
@@ -305,12 +306,14 @@ class FusedMoEConfig:
         moe_parallel_config: FusedMoEParallelConfig,
         in_dtype: torch.dtype,
         max_num_tokens: int = MOE_DP_CHUNK_SIZE,
-        quant_config: Optional[Union[FusedMoEQuantConfig, QuantizationConfig]] = None
+        quant_config: Optional[Union[FusedMoEQuantConfig,
+                                     QuantizationConfig]] = None
     ) -> "FusedMoEConfig":
 
         _quant_config: Optional[FusedMoEQuantConfig] = None
 
-        if quant_config is not None and isinstance(quant_config, QuantizationConfig):
+        if quant_config is not None and isinstance(quant_config,
+                                                   QuantizationConfig):
             block_shape = quant_config.weight_block_size
             per_act_token_quant = False
             per_out_ch_quant = False
@@ -320,9 +323,9 @@ class FusedMoEConfig:
             weight_quant = get_quant_config_input_quant(quant_config)
 
             if input_quant is not None:
-                per_act_token_quant = (
-                    input_quant.strategy == QuantizationStrategy.TOKEN
-                    if input_quant is not None else False)
+                per_act_token_quant = (input_quant.strategy
+                                       == QuantizationStrategy.TOKEN
+                                       if input_quant is not None else False)
 
                 if input_quant.num_bits == 8:
                     if input_quant.type == QuantizationType.FLOAT:

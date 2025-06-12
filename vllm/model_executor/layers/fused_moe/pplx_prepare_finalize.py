@@ -6,8 +6,7 @@ import pplx_kernels as pplx
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 from vllm.utils import cdiv, round_up
@@ -107,8 +106,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, (None if quant_config.per_act_token_quant else a1_scale), quant_config.quant_dtype,
-            quant_config.per_act_token_quant, quant_config.block_shape)
+            a1, (None if quant_config.per_act_token_quant else a1_scale),
+            quant_config.quant_dtype, quant_config.per_act_token_quant,
+            quant_config.block_shape)
 
         if a1q_scale is not None:
             scalar_scales = a1q_scale.numel() == 1
@@ -123,7 +123,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # pad out scales if needed. TODO (bnell): do for non-scalar scales?
             if scalar_scales:
                 #print(f"a1q_scale {a1q.shape}, {a1q_scale.shape}")
-                a1q_scale = a1q_scale.repeat(a1q.shape[1], 4*torch.float32.itemsize)
+                a1q_scale = a1q_scale.repeat(a1q.shape[1],
+                                             4 * torch.float32.itemsize)
 
             #assert a1_scale is None or a1_scale.shape[0] == a1q.shape[1], f"{a1_scale.shape}, {a1q_scale.shape}"
 
@@ -153,12 +154,14 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_x_scale: Optional[torch.Tensor] = None
         if a1q.dtype.itemsize == 1:
             float32_size = torch.float32.itemsize
-            block_size = (quant_config.block_shape[1] if quant_config.block_shape is not None else 1) * float32_size
+            block_size = (quant_config.block_shape[1] if quant_config.
+                          block_shape is not None else 1) * float32_size
 
             expert_x_scale_shape = (
                 num_local_experts,
                 expert_x.size(1),
-                (expert_x.size(2) + block_size - 1) // block_size if not scalar_scales else 1,
+                (expert_x.size(2) + block_size - 1) //
+                block_size if not scalar_scales else 1,
             )
 
             #print(f"EXPERT_X_SCALE {expert_x_scale_shape}")

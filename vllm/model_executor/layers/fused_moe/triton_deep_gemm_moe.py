@@ -5,12 +5,10 @@ from typing import Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    TritonExperts)
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig)
+from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 
 
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -33,8 +31,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_int4_w4a16=use_int4_w4a16,
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
-            )
-        )
+            ))
         self.triton_expert = TritonExperts(
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
@@ -43,10 +40,10 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             per_act_token_quant=per_act_token_quant,
             block_shape=block_shape,
         )
-        self.allow_deep_gemm = (allow_deep_gemm and
-                                not per_act_token_quant and
-                                use_fp8_w8a8)
-        self.deep_gemm_expert = DeepGemmExperts() if self.allow_deep_gemm else None
+        self.allow_deep_gemm = (allow_deep_gemm and not per_act_token_quant
+                                and use_fp8_w8a8)
+        self.deep_gemm_expert = DeepGemmExperts(
+        ) if self.allow_deep_gemm else None
 
     def supports_chunking(self) -> bool:
         dge = self.deep_gemm_expert
@@ -69,7 +66,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
         if (self.allow_deep_gemm and N > 512
-            and _valid_deep_gemm_shape(M, N, K)):
+                and _valid_deep_gemm_shape(M, N, K)):
             return self.deep_gemm_expert.workspace_shapes(
                 a, aq, M, N, K, topk, global_num_experts, local_num_experts)
         else:

@@ -8,27 +8,16 @@ import pytest
 import torch
 import triton.language as tl
 
-import vllm._custom_ops as ops
+from tests.kernels.moe.utils import (batched_moe, make_test_weights,
+                                     torch_moe2, triton_moe)
+from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize, BatchedTritonExperts,
     invoke_moe_batched_triton_kernel)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    w8a8_block_fp8_matmul,
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
-from tests.kernels.quant_utils import native_w8a8_block_matmul
-from tests.kernels.moe.utils import (
-    torch_moe2,
-    triton_moe,
-    batched_moe,
-    make_test_weights,
-)
 
 NUM_EXPERTS = [8, 64]
 TOP_KS = [1, 2, 6]
@@ -104,18 +93,13 @@ def ref_impl(
     for e in range(num_experts):
         num_tokens = num_expert_tokens_cpu[e]
         if A.dtype.itemsize == 1 and block_shape is not None:
-            tmp = native_w8a8_block_matmul(A[e],
-                                           B[e],
-                                           A_scale[e],
-                                           B_scale[e],
-                                           block_shape,
-                                           C.dtype)
+            tmp = native_w8a8_block_matmul(A[e], B[e], A_scale[e], B_scale[e],
+                                           block_shape, C.dtype)
             C[e, :num_tokens, :] = tmp[:num_tokens, :]
         elif A.dtype.itemsize == 1 and block_shape is None:
             C[e, :num_tokens, :] = (
-                (A[e, :num_tokens, :].to(f32) * A_scale[e]).to(bf16) @
-                (B[e].transpose(0, 1).to(f32) * B_scale[e]).to(bf16)
-            )
+                (A[e, :num_tokens, :].to(f32) * A_scale[e]).to(bf16)
+                @ (B[e].transpose(0, 1).to(f32) * B_scale[e]).to(bf16))
         else:
             assert A_scale is None
             assert B_scale is None
@@ -124,7 +108,8 @@ def ref_impl(
     return C
 
 
-def make_quantized_test_activations(E, m, k, dtype, block_shape, per_act_token):
+def make_quantized_test_activations(E, m, k, dtype, block_shape,
+                                    per_act_token):
     assert not per_act_token, "NYI"
 
     a_type = torch.bfloat16 if dtype == torch.float8_e4m3fn else dtype
@@ -138,9 +123,11 @@ def make_quantized_test_activations(E, m, k, dtype, block_shape, per_act_token):
         a_scale = [None] * E
         for e in range(E):
             if block_shape is not None:
-                a_q[e], a_scale[e] = per_token_group_quant_fp8(a[e], block_shape[1])
+                a_q[e], a_scale[e] = per_token_group_quant_fp8(
+                    a[e], block_shape[1])
             else:
-                a_tmp, a_scale[e] = per_token_group_quant_fp8(a[e].view(1, -1), a[e].numel())
+                a_tmp, a_scale[e] = per_token_group_quant_fp8(
+                    a[e].view(1, -1), a[e].numel())
                 a_q[e] = a_tmp.view(*a[e].shape)
         a_scale = torch.stack(a_scale)
 
@@ -173,14 +160,10 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
                                       device="cuda",
                                       dtype=torch.int32)
 
-    A, A_q, A_scale = make_quantized_test_activations(
-        num_experts,
-        max_tokens_per_expert,
-        K,
-        dtype,
-        block_shape,
-        per_act_token_quant
-    )
+    A, A_q, A_scale = make_quantized_test_activations(num_experts,
+                                                      max_tokens_per_expert, K,
+                                                      dtype, block_shape,
+                                                      per_act_token_quant)
 
     B_q, _, B_scale, _, B, _ = make_test_weights(
         num_experts,
@@ -206,7 +189,8 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
 
     #print(f"A {use_fp8_w8a8} {A_q.dtype} {B_q.dtype} {A_scale.shape} {B_scale.shape}")
     if False:
-        from vllm.model_executor.layers.fused_moe.batched_moe2 import fused_moe_kernel2
+        from vllm.model_executor.layers.fused_moe.batched_moe2 import (
+            fused_moe_kernel2)
         fused_moe_kernel2(
             A_q,
             B_q,
@@ -238,7 +222,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
             config_block_shape[1],
             config_block_shape[2],
             1,
-            1, # topk hack
+            1,  # topk hack
             compute_tl_dtype,
             use_fp8_w8a8,
             False,
@@ -279,15 +263,8 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         None,
     )
 
-    q_ref_output = ref_impl(
-        A_q,
-        B_q,
-        q_ref_output,
-        num_expert_tokens,
-        A_scale,
-        B_scale,
-        block_shape
-    )
+    q_ref_output = ref_impl(A_q, B_q, q_ref_output, num_expert_tokens, A_scale,
+                            B_scale, block_shape)
 
     rtol, atol = {
         torch.float16: (6e-2, 6e-2),
@@ -393,11 +370,14 @@ def test_fused_moe_batched_experts(
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                     w2_s, quant_type, per_act_token_quant, block_shape)
+                                     w2_s, quant_type, per_act_token_quant,
+                                     block_shape)
         baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                     w2_s, quant_type, per_act_token_quant, block_shape)
+                                     w2_s, quant_type, per_act_token_quant,
+                                     block_shape)
         triton_output = triton_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                   w2_s, quant_type, per_act_token_quant, block_shape)
+                                   w2_s, quant_type, per_act_token_quant,
+                                   block_shape)
 
     torch.testing.assert_close(triton_output,
                                baseline_output,
@@ -411,4 +391,4 @@ def test_fused_moe_batched_experts(
     torch.testing.assert_close(triton_output,
                                batched_output,
                                atol=2e-2,
-                               rtol=2e-2) # 0
+                               rtol=2e-2)  # 0

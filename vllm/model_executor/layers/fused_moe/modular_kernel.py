@@ -86,7 +86,9 @@ def _moe_problem_size(
 
     return E, M, N, K, topk
 
+
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
+
 
 class FusedMoEPrepareAndFinalize(ABC):
     """
@@ -411,8 +413,14 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         (a1q, a1q_scale, expert_num_tokens, _expert_topk_ids,
          _expert_topk_weights) = self.prepare_finalize.prepare(
-             a1, a1_scale, a2_scale, topk_weights, topk_ids,
-             global_num_experts, expert_map, apply_router_weight_on_input,
+             a1,
+             a1_scale,
+             a2_scale,
+             topk_weights,
+             topk_ids,
+             global_num_experts,
+             expert_map,
+             apply_router_weight_on_input,
              self.fused_experts.quant_config,
          )
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.

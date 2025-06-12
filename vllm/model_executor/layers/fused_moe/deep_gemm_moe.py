@@ -8,14 +8,13 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, per_token_group_quant_fp8)
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig)
 from vllm.utils import round_up
 
 logger = init_logger(__name__)
@@ -70,12 +69,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self):
         super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=False,
-                block_shape=deep_gemm_block_shape()
-            )
-        )
+            FusedMoEQuantConfig(quant_dtype=torch.float8_e4m3fn,
+                                per_act_token_quant=False,
+                                block_shape=deep_gemm_block_shape()))
 
     def supports_chunking(self) -> bool:
         return True

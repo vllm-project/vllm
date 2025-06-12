@@ -4,9 +4,6 @@
 import enum
 import importlib
 from enum import Enum
-
-import functools
-
 from typing import Callable, Optional
 
 import torch
@@ -18,8 +15,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE,
-                                                  FusedMoEMethodBase,
+from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
@@ -342,8 +338,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             use_fp8_w8a8=True,
             block_shape=self.quant_config.weight_block_size,
             per_act_token_quant=(
-                self.input_quant.strategy == QuantizationStrategy.TOKEN
-            ),
+                self.input_quant.strategy == QuantizationStrategy.TOKEN),
         )
 
     def apply(
@@ -601,9 +596,11 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
 
         experts = CutlassExpertsFp8(
             max_experts_per_worker,
-            None,  # moe.in_dtype?
-            per_act_token_quant=self.input_quant.strategy == QuantizationStrategy.TOKEN,
-            per_out_ch_quant=self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
+            None,
+            per_act_token_quant=self.input_quant.strategy ==
+            QuantizationStrategy.TOKEN,
+            per_out_ch_quant=self.weight_quant.strategy ==
+            QuantizationStrategy.CHANNEL,
             use_batched_format=True
         )
 
