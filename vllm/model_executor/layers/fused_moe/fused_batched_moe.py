@@ -10,9 +10,11 @@ import triton.language as tl
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    get_config_dtype_str, get_config_quant_dtype, try_get_optimal_moe_config)
+    get_config_dtype_str, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig)
 
 
 @triton.jit
@@ -520,13 +522,13 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             dtype=b_type,
             device=a1.device)
 
-        if quant_dtype is not None:
-            if block_shape is not None:
-                _, block_k = block_shape
+        if quant_config.quant_dtype is not None:
+            if quant_config.block_shape is not None:
+                _, block_k = quant_config.block_shape
                 k_tiles = (hidden_dim + block_k - 1) // block_k
                 scale_shape = (num_local_experts, self.max_num_tokens, k_tiles)
             else:
-                num = self.max_num_tokens if per_act_token_quant else 1
+                num = self.max_num_tokens if quant_config.per_act_token_quant else 1
                 scale_shape = (num_local_experts, num, 1)
 
             #print(f"SCALE_SHAPE {block_shape} {b_a1.shape} {scale_shape}")
@@ -549,7 +551,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 continue
             rhs = a1[:topks.numel()][topks]
             idx = expert_id - first_expert
-            if quant_dtype is not None:
+            if quant_config.quant_dtype is not None:
                 if a1_scale is not None:
                     assert False, "NYI"
                     rhs_a1_scale = a1_scale[:topks.numel()][topks]
@@ -559,11 +561,11 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     moe_kernel_quantize_input(
                         rhs,
                         rhs_a1_scale,
-                        quant_dtype,
-                        per_act_token_quant,
-                        block_shape,
+                        quant_config.quant_dtype,
+                        quant_config.per_act_token_quant,
+                        quant_config.block_shape,
                     ))
-                if block_shape is None and not per_act_token_quant:
+                if quant_config.block_shape is None and not quant_config.per_act_token_quant:
                     b_a1_scale[idx] = b_s
                 else:
                     #print(f"XXXXX rhs={rhs.shape} b_s={b_s.shape}")
@@ -640,16 +642,15 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
-        quant_dtype = get_config_quant_dtype(
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=use_int4_w4a16,
-        )
         super().__init__(
-            quant_dtype=quant_dtype,
-            per_act_token_quant=per_act_token_quant,
-            block_shape=block_shape,
+            FusedMoEQuantConfig.make(
+                use_fp8_w8a8=use_fp8_w8a8,
+                use_int8_w8a8=use_int8_w8a8,
+                use_int8_w8a16=use_int8_w8a16,
+                use_int4_w4a16=use_int4_w4a16,
+                per_act_token_quant=per_act_token_quant,
+                block_shape=block_shape,
+            )
         )
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size

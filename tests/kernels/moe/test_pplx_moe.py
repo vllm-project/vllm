@@ -40,6 +40,7 @@ from .parallel_utils import ProcessGroupInfo, parallel_launch
 from tests.kernels.moe.utils import (
     torch_moe2,
     naive_batched_moe,
+    make_test_weights,
 )
 
 

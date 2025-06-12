@@ -203,14 +203,28 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     def __init__(
         self,
-        quant_dtype: Optional[torch.dtype],
-        per_act_token_quant: bool,
-        block_shape: Optional[list[int]],
+        quant_config: Optional[FusedMoEQuantConfig],
     ):
-        assert not per_act_token_quant or block_shape is None
-        self.quant_dtype = quant_dtype
-        self.per_act_token_quant = per_act_token_quant
-        self.block_shape = block_shape
+        if quant_config is not None:
+            self.quant_config = quant_config
+        else:
+            self.quant_config = FusedMoEQuantConfig()
+
+    @property
+    def quant_dtype(self):
+        return self.quant_config.quant_dtype
+
+    @property
+    def block_shape(self):
+        return self.quant_config.block_shape
+
+    @property
+    def per_act_token_quant(self):
+        return self.quant_config.per_act_token_quant
+
+    @property
+    def per_out_ch_quant(self):
+        return self.quant_config.per_out_ch_quant
 
     def __init__(
         self,

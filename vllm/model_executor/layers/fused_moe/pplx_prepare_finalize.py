@@ -129,11 +129,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 assert scalar_scales
                 a1q_scale = a1q_scale.view(1, 1)
 
+            orig_a_scale_block_shape = a1q_scale.shape[-1]
+
             # pad out scales if needed. TODO (bnell): do for non-scalar scales?
             if scalar_scales:
-                a1q_scale = a1q_scale.repeat(a1q.shape[1], torch.float32.itemsize)
-
-            orig_a_scale_block_shape = a1q_scale.shape[-1]
+                #print(f"a1q_scale {a1q.shape}, {a1q_scale.shape}")
+                a1q_scale = a1q_scale.repeat(a1q.shape[1], 4*torch.float32.itemsize)
 
             #assert a1_scale is None or a1_scale.shape[0] == a1q.shape[1], f"{a1_scale.shape}, {a1q_scale.shape}"
 
@@ -153,6 +154,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
         num_dp = self.world_size // self.dp_size
+        #print(f"EXPERT_X {(num_local_experts, self.max_num_tokens * num_dp, hidden_dim)}, {a1q.dtype}, {device}")
         expert_x = torch.zeros(
             (num_local_experts, self.max_num_tokens * num_dp, hidden_dim),
             dtype=a1q.dtype,
@@ -172,6 +174,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 (expert_x.size(2) + block_size - 1) // block_size if not scalar_scales else 1,
             )
 
+            #print(f"EXPERT_X_SCALE {expert_x_scale_shape}")
+
             expert_x_scale = torch.zeros(
                 expert_x_scale_shape,
                 dtype=torch.float32,
@@ -182,6 +186,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: Optional[torch.Tensor] = None
 
+        #print(f"DISPATCH X={expert_x.shape}, X_SCALE={expert_x_scale.shape}, A={a1q.shape}, A_SCALE={a1q_scale.shape}, TOPK={topk_ids}")
+
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,
@@ -191,6 +197,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=topk_ids,
             bound_m=bound_m,
         )
+        #print(f"DISPATCH DONE {device}")
+
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
 
@@ -223,10 +231,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        #print("CCCCCCCCCCCCCCCCCCCC")
-
+        #print(f"COMBINE {output.device}")
         self.a2a.combine(out_tokens=output,
                          indices=topk_ids,
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
+        #print(f"COMBINE DONE {output.device}")

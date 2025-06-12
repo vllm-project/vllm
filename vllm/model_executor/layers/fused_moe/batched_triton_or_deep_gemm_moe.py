@@ -9,6 +9,8 @@ from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig)
 
 
 class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
