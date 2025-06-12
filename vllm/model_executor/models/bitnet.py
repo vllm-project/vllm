@@ -24,7 +24,8 @@
 
 # ruff: noqa: E501
 
-from typing import Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -49,8 +50,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
-from .utils import PPMissingLayer
 
 logger = init_logger(__name__)
 
@@ -220,9 +219,8 @@ class BitnetConfig(PretrainedConfig):
             raise ValueError(
                 f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
             )
-        if (rope_scaling_factor is None
-                or not isinstance(rope_scaling_factor, float)
-                or rope_scaling_factor <= 1.0):
+        if rope_scaling_factor is None or not isinstance(
+                rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
             raise ValueError(
                 f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}"
             )
@@ -275,7 +273,7 @@ class BitnetAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, float]] = None,
+        rope_scaling: Optional[dict[str, float]] = None,
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
@@ -449,7 +447,7 @@ class BitnetDecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -506,7 +504,7 @@ class BitnetModel(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
@@ -556,44 +554,31 @@ class BitnetForCausalLM(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        cache_config = vllm_config.cache_config
-
-        self.config = config
-        self.lora_config = lora_config
-
-        self.quant_config = quant_config
-        self.cache_config = cache_config
-
-        self.model = BitnetModel(config, cache_config, quant_config)
-
-        if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-
-            self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-            )
-            if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
-
-            logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
-            self.sampler = Sampler()
-        else:
-            self.lm_head = PPMissingLayer()
+        self.config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.quant_config = vllm_config.quant_config
+        self.prefix = prefix
+        self.model = BitnetModel(self.config, self.cache_config,
+                                 self.quant_config)
+        self.lm_head = ParallelLMHead(
+            self.config.vocab_size,
+            self.config.hidden_size,
+            org_num_embeddings=self.config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+            quant_config=self.quant_config,
+        )
+        self.logits_processor = LogitsProcessor(self.config.vocab_size,
+                                                self.config.vocab_size)
+        self.sampler = Sampler()
+        self.packed_modules_mapping = self.model.packed_modules_mapping
+        self.embedding_modules = self.model.embedding_modules
+        self.embedding_padding_modules = self.model.embedding_padding_modules
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
@@ -629,7 +614,7 @@ class BitnetForCausalLM(nn.Module):
                         device=device),
         })
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
