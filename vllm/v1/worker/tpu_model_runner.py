@@ -422,6 +422,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         block_ids.extend(new_block_ids)
                 else:
                     # The argument 'strict' is not support until 3.10
+                    if len(req_state.block_ids) != len(req_data.new_block_ids):
+                        raise ValueError(
+                            "The number of block IDs does not match the "
+                            "number of new block IDs.")
                     for block_ids, new_block_ids in zip(  # type: ignore[call-overload]
                             req_state.block_ids, req_data.new_block_ids):
                         block_ids.extend(new_block_ids)
