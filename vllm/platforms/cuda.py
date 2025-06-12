@@ -4,6 +4,7 @@
 pynvml. However, it should not initialize cuda context.
 """
 
+import ctypes
 import os
 from datetime import timedelta
 from functools import cache, wraps
@@ -48,6 +49,65 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
             pynvml.nvmlShutdown()
 
     return wrapper
+
+
+def set_cuda_context(device: Union[torch.device, int]) -> bool:
+    """
+    Set CUDA context directly using CUDA driver API for immediate effect.
+    
+    Args:
+        device: Either a torch.device or device ID (int)
+        
+    Returns:
+        bool: True if context creation succeeded, False otherwise
+    """
+
+    # Extract device ID
+    if isinstance(device, torch.device):
+        if device.type != 'cuda':
+            raise ValueError(f"Expected CUDA device, got {device.type}")
+        device_id = device.index if device.index is not None else 0
+    else:
+        device_id = int(device)
+
+    try:
+        # Load CUDA driver library
+        cuda = ctypes.CDLL('libcuda.so')
+
+        # Initialize CUDA driver
+        result = cuda.cuInit(0)
+        if result != 0:
+            logger.warning("CUDA driver init failed with error %s", result)
+            return False
+
+        # Get device handle for the specified device
+        cu_device = ctypes.c_int()
+        result = cuda.cuDeviceGet(ctypes.byref(cu_device), device_id)
+        if result != 0:
+            logger.warning("Failed to get CUDA device %s with error %s",
+                           device_id, result)
+            return False
+
+        # Create CUDA context on the specified device
+        ctx = ctypes.c_void_p()
+        result = cuda.cuCtxCreate_v2(ctypes.byref(ctx), 0, cu_device)
+
+        if result == 0:
+            logger.info("CUDA context creation: SUCCESS on device %s",
+                        device_id)
+            return True
+        else:
+            logger.warning(
+                "CUDA context creation: FAILED on device %s - error %s",
+                device_id, result)
+            return False
+
+    except OSError as e:
+        logger.warning("Failed to load CUDA driver library: %s", e)
+        return False
+    except Exception as e:
+        logger.warning("Unexpected error in CUDA context creation: %s", e)
+        return False
 
 
 class CudaPlatformBase(Platform):
