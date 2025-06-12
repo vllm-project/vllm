@@ -13,6 +13,7 @@ nav:
       - Developer Guide: contributing/README.md
       - API Reference: api/README.md
       - CLI Reference: cli/README.md
+      - Community: community/meetups.html
     - Timeline:
       - Roadmap: https://roadmap.vllm.ai
       - Releases: https://github.com/vllm-project/vllm/releases
