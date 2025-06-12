@@ -700,22 +700,26 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
+            correct_usage_message = 'Correct usage: `{"type": "function",' \
+                ' "function": {"name": "my_function"}}`'
             if isinstance(data["tool_choice"], dict):
                 valid_tool = False
-                specified_function = data["tool_choice"].get("function")
-                if not specified_function:
+                function = data["tool_choice"].get("function")
+                if not isinstance(function, dict):
                     raise ValueError(
-                        "Expected field `function` in `tool_choice`."
-                        " Correct usage: `{\"type\": \"function\","
-                        " \"function\": {\"name\": \"my_function\"}}`")
-                specified_function_name = specified_function.get("name")
-                if not specified_function_name:
+                        f"Invalid value for `function`: `{function}` in "
+                        f"`tool_choice`! {correct_usage_message}")
+                if "name" not in function:
+                    raise ValueError(f"Expected field `name` in `function` in "
+                                     f"`tool_choice`! {correct_usage_message}")
+                function_name = function["name"]
+                if not isinstance(function_name,
+                                  str) or len(function_name) == 0:
                     raise ValueError(
-                        "Expected field `name` in `function` in `tool_choice`."
-                        "Correct usage: `{\"type\": \"function\", "
-                        "\"function\": {\"name\": \"my_function\"}}`")
+                        f"Invalid `name` in `function`: `{function_name}`"
+                        f" in `tool_choice`! {correct_usage_message}")
                 for tool in data["tools"]:
-                    if tool["function"]["name"] == specified_function_name:
+                    if tool["function"]["name"] == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
