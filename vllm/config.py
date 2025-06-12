@@ -557,13 +557,16 @@ class ModelConfig:
 
         self.pooler_config = self._init_pooler_config()
 
-        self.dtype = _get_and_verify_dtype(
-            self.model,
-            self.hf_config,
-            self.dtype,
-            is_pooling_model=self.runner_type == "pooling",
-            revision=self.revision,
-        )
+        # Defer "auto" dtype resolution to the worker, since ModelConfig may be
+        # initialized in a process without access to the current platform.
+        if self.dtype != "auto":
+            self.dtype = _get_and_verify_dtype(
+                self.model,
+                self.hf_config,
+                self.dtype,
+                is_pooling_model=self.runner_type == "pooling",
+                revision=self.revision,
+            )
 
         # Workaround for Gemma 2 which uses interleaved sliding window
         # attention, but it's not specified in its config. TODO: remove this
@@ -3237,20 +3240,14 @@ def _get_and_verify_dtype(
     *,
     is_pooling_model: bool,
     revision: Optional[str] = None,
-    defer_auto_to_worker: bool = True,
-) -> Union[torch.dtype, ModelDType]:
+) -> torch.dtype:
     config_dtype = _find_dtype(model_id, config, revision=revision)
     model_type = config.model_type
 
     if isinstance(dtype, str):
         dtype = dtype.lower()
         if dtype == "auto":
-            if defer_auto_to_worker:
-                # Don't resolve here - let the worker handle it
-                # This avoids using current_platform which might be incorrect
-                # in distributed setups
-                return "auto"
-
+            # Set default dtype from model config
             torch_dtype = _resolve_auto_dtype(
                 model_type,
                 config_dtype,
