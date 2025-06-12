@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
@@ -1836,10 +1837,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
 
-        #self.seq_lens.fill_(0)
-        #seq_lens = self.seq_lens[:num_reqs]
-        #seq_lens.copy_(torch.from_numpy(num_scheduled_tokens))
-
         if skip_attn:
             attn_metadata: Optional[dict[str, Any]] = None
         else:
@@ -2139,7 +2136,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
             skip_attn = not self.vllm_config.compilation_config.full_cuda_graph
-            for num_tokens in reversed(self.cudagraph_batch_sizes):
+            for num_tokens in tqdm(reversed(self.cudagraph_batch_sizes),
+                                   desc="Capturing CUDA graphs",
+                                   total=len(self.cudagraph_batch_sizes)):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
                     self._dummy_run(num_tokens, skip_attn=skip_attn)

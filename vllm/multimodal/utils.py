@@ -324,7 +324,7 @@ def merge_and_sort_multimodal_metadata(
     Returns:
         list[str]: List of item modalities in order of their positions in the
         input sequence.
-        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from
+        list[PlaceholderRange]: Sorted list of all PlaceholderRanges from
         mm_positions.
         Optional[list[str]]: Sorted list of all hashes from mm_hashes if given,
         None otherwise.
