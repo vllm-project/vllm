@@ -6,7 +6,7 @@ import time
 import numpy as np
 from collections.abc import AsyncGenerator
 from math import ceil
-from typing import Final, Optional, Union, cast, List
+from typing import Final, Optional, Union, cast
 
 from fastapi import Request
 
@@ -180,7 +180,7 @@ class OpenAIServingTranscription(OpenAIServing):
         self,
         request: TranscriptionRequest,
         audio_data: bytes,
-    ) -> tuple[PromptType, float]:
+    ) -> tuple[list[PromptType], float]:
         # Validate request
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
@@ -277,7 +277,7 @@ class OpenAIServingTranscription(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        list_result_generator: Optional[List[AsyncGenerator[RequestOutput, None]]] = None
+        list_result_generator: Optional[list[AsyncGenerator[RequestOutput, None]]] = None
         try:
             # Unlike most decoder-only models, whisper generation length is not
             # constrained by the size of the input audio, which is mapped to a
@@ -324,7 +324,7 @@ class OpenAIServingTranscription(OpenAIServing):
 
     async def transcription_stream_generator(
             self, request: TranscriptionRequest,
-            list_result_generator: List[AsyncGenerator[RequestOutput, None]],
+            list_result_generator: list[AsyncGenerator[RequestOutput, None]],
             request_id: str, request_metadata: RequestResponseMetadata,
             audio_duration_s: float) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
@@ -427,7 +427,7 @@ class OpenAIServingTranscription(OpenAIServing):
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 
-    def _split_audio(self, audio_data: np.ndarray, sample_rate: int) -> List[np.ndarray]:
+    def _split_audio(self, audio_data: np.ndarray, sample_rate: int) -> list[np.ndarray]:
         chunk_size = sample_rate * self.max_audio_clip_s
         overlap_size = sample_rate * OVERLAP_CHUNK_SECOND
         chunks = []
