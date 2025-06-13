@@ -34,7 +34,8 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 
-from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsLoRA,
                          SupportsTranscription, SupportsV0Only)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     make_layers)
@@ -636,9 +637,18 @@ class WhisperMultiModalProcessor(
 @MULTIMODAL_REGISTRY.register_processor(WhisperMultiModalProcessor,
                                         info=WhisperProcessingInfo,
                                         dummy_inputs=WhisperDummyInputsBuilder)
-class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
+class WhisperForConditionalGeneration(nn.Module, SupportsTranscription, SupportsLoRA,
                                       SupportsMultiModal, SupportsV0Only):
     packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
         "self_attn.qkv_proj": [
             "self_attn.q_proj",
             "self_attn.k_proj",
@@ -683,6 +693,17 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             positions=positions,
         )
         return decoder_outputs
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(language_model="model.")
+#        return MultiModelKeys.from_string_field(language_model="model.decoder",
+#                                                tower_model = (
+#                                                     ["model.encoder"] +
+#                                                     [f"model.decoder.layers.{i}.encoder" for i in range(31 + 1)]
+#                                               ))
 
     def get_language_model(self) -> torch.nn.Module:
         return self.model.decoder
