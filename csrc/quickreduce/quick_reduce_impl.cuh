@@ -219,9 +219,9 @@ struct CodecQ6 : public CodecBase {
   // Each threads processes a fragment of fp16x8_t (16B),
   // into a int6x8_t (4B + 2B) and a fp16 scale shared among 32 values.
   static constexpr int kRankAtoms = kAtoms / kWorldSize;
-  static int constexpr kRankTileStride = 1664;
-  static int constexpr kRankTileQ2Offset = 1024;
-  static int constexpr kRankTileScaleOffset = 1536;
+  static constexpr int kRankTileStride = 1664;
+  static constexpr int kRankTileQ2Offset = 1024;
+  static constexpr int kRankTileScaleOffset = 1536;
   static constexpr int kRankTransmittedTileSize = kRankTileStride * kRankAtoms;
   static_assert(kRankTransmittedTileSize % 16 == 0,
                 "kRankTransmittedTileSize must be 16B aligned.");
@@ -252,7 +252,7 @@ struct CodecQ6 : public CodecBase {
       std::is_same<T, half>::value ? 0x4FC04FC0 : 0x41F841F8;
 
   // {+32, +32}, int16x2_t
-  static int constexpr kRangeBias = 0x00200020;
+  static constexpr int kRangeBias = 0x00200020;
 
   __quickreduce_device_inline__ CodecQ6(int thread, int rank)
       : CodecBase(thread, rank) {}
@@ -397,39 +397,39 @@ struct CodecQ8 : public CodecBase {
   // Codec tile size process by this workgroup.
   // Each threads processes a fragment of f16x8_t (16B),
   // into a int8x8_t (8B) and a f16 scale shared among 32 values.
-  static int constexpr kRankAtoms = kAtoms / kWorldSize;
-  static int constexpr kRankTileStride = 2176;
-  static int constexpr kRankTileScaleOffset = 2048;
-  static int constexpr kRankTransmittedTileSize = kRankTileStride * kRankAtoms;
+  static constexpr int kRankAtoms = kAtoms / kWorldSize;
+  static constexpr int kRankTileStride = 2176;
+  static constexpr int kRankTileScaleOffset = 2048;
+  static constexpr int kRankTransmittedTileSize = kRankTileStride * kRankAtoms;
   static_assert(kRankTransmittedTileSize % 16 == 0,
                 "kRankTileSize must be 16B aligned.");
 
-  static int constexpr kRankBufferTileStride =
+  static constexpr int kRankBufferTileStride =
       kRankTileStride / sizeof(int32x4_t);
 
   // Total tile size for the collective communication.
-  static int constexpr kTransmittedTileSize =
+  static constexpr int kTransmittedTileSize =
       kRankTransmittedTileSize * kWorldSize;
 
   // Constants configuration
 
   // {-1/128.0h, -1/128.0h}, f16x2_t
-  static int constexpr kScaleFactor =
+  static constexpr int kScaleFactor =
       std::is_same<T, half>::value ? 0xA000A000 : 0xBC00BC00;
 
   // {1e-7, 1e-7}, f16x2_t
-  static int constexpr kScaleEpsilon =
+  static constexpr int kScaleEpsilon =
       std::is_same<T, half>::value ? 0x00010001 : 0x33D733D7;
 
   // {-128, -128}, f16x2_t
-  static int constexpr kRangeMin =
+  static constexpr int kRangeMin =
       std::is_same<T, half>::value ? 0xD800D800 : 0xC300C300;
   // {+127, +127}, f16x2_t
-  static int constexpr kRangeMax =
+  static constexpr int kRangeMax =
       std::is_same<T, half>::value ? 0x57F057F0 : 0x42FE42FE;
 
   // {+128, +128}, int16x2_t
-  static int constexpr kRangeBias = 0x00800080;
+  static constexpr int kRangeBias = 0x00800080;
 
   __quickreduce_device_inline__ CodecQ8(int thread, int rank)
       : CodecBase(thread, rank) {
