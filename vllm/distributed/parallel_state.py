@@ -770,14 +770,18 @@ class GroupCoordinator:
 
     def destroy(self):
         if self.device_group is not None:
+            logger.info("Destroying device group")
             torch.distributed.destroy_process_group(self.device_group)
             self.device_group = None
         if self.cpu_group is not None:
+            logger.info("Destroying cpu group")
             torch.distributed.destroy_process_group(self.cpu_group)
             self.cpu_group = None
         if self.device_communicator is not None:
+            logger.info("Destroying device communicator")
             self.device_communicator.destroy()
         if self.mq_broadcaster is not None:
+            logger.info("Destroying mq broadcaster")
             self.mq_broadcaster = None
 
     def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
@@ -916,7 +920,7 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
 ):
-    logger.debug(
+    logger.info(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
         distributed_init_method, backend)
@@ -929,8 +933,11 @@ def init_distributed_environment(
         rank = parallel_config.data_parallel_rank * world_size + rank
         # adjust the world size to take into account data parallelism
         world_size = parallel_config.world_size_across_dp
+        logger.info(
+            f"data_parallel_size: {parallel_config.data_parallel_size}, world_size_across_dp: {world_size}"
+        )
         ip = parallel_config.data_parallel_master_ip
-        port = parallel_config.get_next_dp_init_port()
+        port = parallel_config.data_parallel_master_port + 5  # for worker we add 5
         distributed_init_method = get_distributed_init_method(ip, port)
         logger.info(
             "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
@@ -946,12 +953,18 @@ def init_distributed_environment(
             assert torch.distributed.is_gloo_available(), (
                 "Fallback Gloo backend is not available.")
             backend = "gloo"
+        logger.info(
+            f"init_process_group: backend={backend}, "
+            f"init_method={distributed_init_method}, world_size={world_size}, rank={rank}"
+        )
         # this backend is used for WORLD
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank)
+    else:
+        assert False, "torch.distributed is already initialized"
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
@@ -965,6 +978,9 @@ def init_distributed_environment(
     global _WORLD, _NODE_COUNT
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
+        logger.info(
+            f"init_world_group: ranks={ranks}, local_rank={local_rank}, backend={backend}"
+        )
         _WORLD = init_world_group(ranks, local_rank, backend)
         _NODE_COUNT = _node_count(_WORLD.cpu_group)
         logger.debug("Detected %d nodes in the distributed environment",
@@ -1180,21 +1196,30 @@ def destroy_model_parallel():
     global _TP
 
     if _TP:
+        logger.info("Destroying tp group")
         _TP.destroy()
     _TP = None
 
     global _PP
     if _PP:
+        logger.info("Destroying pp group")
         _PP.destroy()
     _PP = None
 
     global _DP
     if _DP:
+        logger.info("Destroying dp group")
+        logger.info(f"DP group: rank={_DP.rank_in_group}, "
+                    f"world_size={_DP.world_size}, "
+                    f"local_rank={_DP.local_rank}, "
+                    f"rank_in_group={_DP.rank_in_group}, "
+                    f"ranks={_DP.ranks}")
         _DP.destroy()
     _DP = None
 
     global _EP
     if _EP:
+        logger.info("Destroying ep group")
         _EP.destroy()
     _EP = None
 
@@ -1202,6 +1227,7 @@ def destroy_model_parallel():
 def destroy_distributed_environment():
     global _WORLD, _NODE_COUNT
     if _WORLD:
+        logger.info("Destroying world group")
         _WORLD.destroy()
     _WORLD = None
     _NODE_COUNT = None

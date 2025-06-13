@@ -444,6 +444,15 @@ async def ping(raw_request: Request) -> Response:
     return await health(raw_request)
 
 
+@router.post("/reinit")
+async def reinit(raw_request: Request):
+    # get POST params
+    dp_size = raw_request.query_params.get("dp_size", "4")
+    print(f"dp_size: {dp_size}")
+    await engine_client(raw_request).reinit(int(dp_size))
+    return Response(status_code=200)
+
+
 @router.post("/tokenize",
              dependencies=[Depends(validate_json_request)],
              responses={
