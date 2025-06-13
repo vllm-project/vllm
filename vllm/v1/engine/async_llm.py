@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import time
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
 from typing import Any, Optional, Union
@@ -79,6 +80,7 @@ class AsyncLLM(EngineClient):
         Returns:
             None
         """
+        self._startup_ts = time.time()
         if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
@@ -128,9 +130,10 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_index=client_index,
         )
+        elapsed = time.time() - self._startup_ts
         if self.stat_loggers:
             for stat_logger in self.stat_loggers[0]:
-                stat_logger.log_engine_initialized()
+                stat_logger.log_engine_initialized(elapsed)
         self.output_handler: Optional[asyncio.Task] = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
