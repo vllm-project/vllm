@@ -26,7 +26,7 @@ import warnings
 from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 from tqdm.asyncio import tqdm
@@ -80,7 +80,7 @@ class BenchmarkMetrics:
 
 
 def _get_current_request_rate(
-    ramp_up_strategy: Optional[str],
+    ramp_up_strategy: Optional[Literal["linear", "exponential"]],
     ramp_up_start_rps: Optional[float],
     ramp_up_end_rps: Optional[float],
     request_index: int,
@@ -105,7 +105,7 @@ async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-    ramp_up_strategy: Optional[str] = None,
+    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
     ramp_up_start_rps: Optional[float] = None,
     ramp_up_end_rps: Optional[float] = None,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
@@ -145,7 +145,6 @@ async def get_request(
     request_index = 0
 
     for request in input_requests:
-        # Determine current request rate based on ramp-up strategy
         current_request_rate = _get_current_request_rate(ramp_up_strategy,
                                                       ramp_up_start_rps,
                                                       ramp_up_end_rps,
@@ -154,10 +153,11 @@ async def get_request(
                                                       request_rate)
 
         yield request, current_request_rate
+        
+        request_index += 1
 
         if current_request_rate == float("inf"):
             # If the request rate is infinity, then we don't need to wait.
-            request_index += 1
             continue
 
         theta = 1.0 / (current_request_rate * burstiness)
@@ -167,7 +167,6 @@ async def get_request(
         interval = np.random.gamma(shape=burstiness, scale=theta)
         # The next request will be sent after the interval.
         await asyncio.sleep(interval)
-        request_index += 1
 
 
 def calculate_metrics(
@@ -310,7 +309,7 @@ async def benchmark(
     max_concurrency: Optional[int],
     lora_modules: Optional[Iterable[str]],
     extra_body: Optional[dict],
-    ramp_up_strategy: Optional[str] = None,
+    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
     ramp_up_start_rps: Optional[float] = None,
     ramp_up_end_rps: Optional[float] = None,
 ):
@@ -406,7 +405,7 @@ async def benchmark(
     rps_change_events = []
     last_int_rps = -1
     if ramp_up_strategy is not None and ramp_up_start_rps is not None:
-        last_int_rps = int(ramp_up_start_rps)
+        last_int_rps = ramp_up_start_rps
         rps_change_events.append({
             "rps": last_int_rps,
             "timestamp": datetime.now().isoformat(),
