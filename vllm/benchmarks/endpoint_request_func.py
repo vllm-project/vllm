@@ -105,8 +105,9 @@ async def async_request_openai_completions(
                         if not chunk_bytes:
                             continue
                         chunk_bytes = chunk_bytes.decode("utf-8")
-                        # NOTE: SSE comments (often used as pings) start with a colon.
-                        # These are not JSON data payload and should be skipped.
+                        # NOTE: SSE comments (often used as pings) start with
+                        # a colon. These are not JSON data payload and should
+                        # be skipped.
                         if chunk_bytes.startswith(":"):
                             continue
 
@@ -219,8 +220,9 @@ async def async_request_openai_chat_completions(
                         if not chunk_bytes:
                             continue
                         chunk_bytes = chunk_bytes.decode("utf-8")
-                        # NOTE: SSE comments (often used as pings) start with a colon.
-                        # These are not JSON data payload and should be skipped.
+                        # NOTE: SSE comments (often used as pings) start with
+                        # a colon. These are not JSON data payload and should
+                        # be skipped.
                         if chunk_bytes.startswith(":"):
                             continue
 
