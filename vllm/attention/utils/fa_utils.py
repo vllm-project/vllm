@@ -11,15 +11,13 @@ logger = init_logger(__name__)
 if current_platform.is_cuda():
     from vllm import _custom_ops as ops
     reshape_and_cache_flash = ops.reshape_and_cache_flash
-    from vllm.vllm_flash_attn import (
-        flash_attn_varlen_func as flash_attn_varlen_func)
-    from vllm.vllm_flash_attn import (
-        get_scheduler_metadata as get_scheduler_metadata)
+    from vllm.vllm_flash_attn import (flash_attn_varlen_func,
+                                      get_scheduler_metadata)
 elif current_platform.is_xpu():
     from vllm._ipex_ops import ipex_ops as ops
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = ops.flash_attn_varlen_func
-    get_scheduler_metadata = None
+    get_scheduler_metadata = ops.get_scheduler_metadata
 
 
 def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
