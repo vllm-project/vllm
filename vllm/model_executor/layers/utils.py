@@ -88,8 +88,23 @@ def rocm_unquantized_gemm(x: torch.Tensor,
         return out.view(*x.shape[:-1], weight.shape[0])
     return torch.nn.functional.linear(x, weight, bias)
 
+def npu_matmul_add(x: torch.Tensor,
+                weight: torch.Tensor,
+                bias: Optional[torch.Tensor] = None):
+    import torch_npu
+    if torch_npu.get_npu_format(weight) != 29:
+        return torch.nn.functional.linear(x, weight, bias)
+    else:
+        n = x.shape[0]
+        m = weight.shape[0]
+        # print("x.device",x.device)
+        out = torch.empty((n, m), dtype=x.dtype, device=x.device)
+        torch_npu._npu_matmul_add_fp32(x, weight, out)
+        # print("out.device",out.device)
+        return out
 
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         return rocm_unquantized_gemm
-    return torch.nn.functional.linear
+    # return torch.nn.functional.linear
+    return npu_matmul_add
