@@ -171,13 +171,23 @@ def _logit_bias_params(kwargs: dict) -> None:
     }
 
 
+def _raise_error_invalid(
+    msg_suffix: str,
+    batch_index: int,
+    request_params: LogitsProcsRequestParams,
+) -> None:
+    raise ValueError(f"Validation failed for batch_index={batch_index}, "
+                     f"workload_index={request_params.workload_index}, "
+                     f"req_params={request_params}. Reason: {msg_suffix}")
+
+
 def _logit_bias_validate(
     test_fakes: LogitsprocsTestFakes,
     persistent_batch: list[LogitsProcsRequestParams],
     logits_new: torch.Tensor,
     batch_index: int,
     request_params: LogitsProcsRequestParams,
-) -> bool:
+) -> None:
     """Validate logit bias logitproc applied correctly"""
     logit_bias = request_params.params.logit_bias
     logits_old = (
@@ -190,19 +200,20 @@ def _logit_bias_validate(
             bias_value = logit_bias[token_id]
             exp_value = bias_value + logit_old_value
             if logit_new_value != pytest.approx(exp_value):
-                print(f"Biased token {token_id} logit value {logit_new_value} "
-                      f"does not match expected value {exp_value} "
-                      f"given bias {bias_value}")
-                return False
+                _raise_error_invalid(msg_suffix=(
+                    f"Biased token {token_id} logit value {logit_new_value} "
+                    f"does not match expected value {exp_value} "
+                    f"given bias {bias_value}"),
+                                     batch_index=batch_index,
+                                     request_params=request_params)
 
         else:
             if logit_new_value != pytest.approx(logit_old_value):
-                print(
+                _raise_error_invalid(msg_suffix=(
                     f"Unbiased token {token_id} logit value {logit_new_value} "
-                    f"does not match expected value {logit_old_value}")
-                return False
-
-    return True
+                    f"does not match expected value {logit_old_value}"),
+                                     batch_index=batch_index,
+                                     request_params=request_params)
 
 
 def _min_p_params(kwargs: dict) -> None:
@@ -223,20 +234,27 @@ def _min_p_validate(
         if token_id == 0:
             # Dominant token should always be unmasked
             if logits_for_token == -float("inf"):
-                print("Invalid: dominant token 0 masked (-inf)")
-                return False
+                _raise_error_invalid(
+                    msg_suffix="Invalid: dominant token 0 masked (-inf)",
+                    batch_index=batch_index,
+                    request_params=request_params)
         else:
             if request_params.params.min_p > 0.0:
                 # Non-dominant tokens should be masked when min_p > 0
                 if logits_for_token != -float("inf"):
-                    print(f"Invalid: non-dominant token {token_id} not masked")
-                    return False
+                    _raise_error_invalid(
+                        msg_suffix=
+                        f"Invalid: non-dominant token {token_id} not masked",
+                        batch_index=batch_index,
+                        request_params=request_params)
             else:
                 # No masking when min_p is 0
                 if logits_for_token == -float("inf"):
-                    print(f"Invalid: token {token_id} masked when min_p=0.0")
-                    return False
-    return True
+                    _raise_error_invalid(
+                        msg_suffix=
+                        f"Invalid: token {token_id} masked when min_p=0.0",
+                        batch_index=batch_index,
+                        request_params=request_params)
 
 
 def _min_tokens_params(kwargs: dict) -> None:
@@ -263,18 +281,20 @@ def _min_tokens_validate(
         logits_for_token = logits_new[batch_index][token_id]
         if token_id in stop_token_ids and not min_reached:
             if logits_for_token != -float("inf"):
-                print(f"Token {token_id} is a stop token and "
-                      "the sequence has not reached min length, "
-                      "but the token is not masked "
-                      f"(logit={logits_for_token})")
-                return False
+                _raise_error_invalid(
+                    msg_suffix=(f"Token {token_id} is a stop token and "
+                                "the sequence has not reached min length, "
+                                "but the token is not masked "
+                                f"(logit={logits_for_token})"),
+                    batch_index=batch_index,
+                    request_params=request_params)
         else:
             if logits_for_token == -float("inf"):
-                print(f"Token {token_id} should not be masked but "
-                      f"is (output len={len(num_out_tokens)})")
-                return False
-
-    return True
+                _raise_error_invalid(
+                    msg_suffix=(f"Token {token_id} should not be masked but "
+                                f"is (output len={num_out_tokens})"),
+                    batch_index=batch_index,
+                    request_params=request_params)
 
 
 def _none_validate(
@@ -285,8 +305,12 @@ def _none_validate(
     request_params: LogitsProcsRequestParams,
 ) -> bool:
     """Validate that no logits processors are applied"""
-    return torch.all(logits_new[batch_index] == (
-        test_fakes.logits[persistent_batch[batch_index].workload_index].cpu()))
+    if not torch.all(logits_new[batch_index] == (test_fakes.logits[
+            persistent_batch[batch_index].workload_index].cpu())):
+        _raise_error_invalid(msg_suffix=(
+            "Unexpected modification of logits with no logitsprocs"),
+                             batch_index=batch_index,
+                             request_params=request_params)
 
 
 class LogitsprocTestHelpers(NamedTuple):
@@ -405,7 +429,7 @@ def _generate_fake_step_update(
     # moved downward are grouped consecutively in the upper indices of
     # the persistent batch. Truncate them to get condensed persistent batch
     condensed_batch_size = batch_size + num_step_add - num_step_remove
-    persistent_batch = persistent_batch[0:condensed_batch_size]
+    persistent_batch[:] = persistent_batch[0:condensed_batch_size]
 
     if condensed_batch_size > 1:
         # Simulate arbitrary reorder_batch() in the kernel backend
@@ -423,7 +447,7 @@ def _generate_fake_step_update(
                 bdx], persistent_batch[adx]
     batch_update.batch_size = condensed_batch_size
 
-    return batch_update, workload_size - wdx
+    return batch_update, wdx, workload_size - wdx
 
 
 def _assert_valid(
@@ -447,13 +471,13 @@ def _assert_valid(
         # Invoke the appropriate validation function for
         # the logitproc employed by this request
         fxn = logitsprocs_test_mapping[request_params.logitproc_id].eval_fxn
-        assert fxn(test_fakes=test_fakes,
-                   persistent_batch=persistent_batch,
-                   logits_new=logits_w_lp,
-                   batch_index=batch_index,
-                   request_params=request_params), (
-                       f"Validation failed for batch_index={batch_index}, "
-                       f"req_params={request_params}")
+        fxn(test_fakes=test_fakes,
+            persistent_batch=persistent_batch,
+            logits_new=logits_w_lp,
+            batch_index=batch_index,
+            request_params=request_params), (
+                f"Validation failed for batch_index={batch_index}, "
+                f"req_params={request_params}")
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -488,6 +512,7 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
 
         (
             batch_update,
+            wdx,
             workload_reqs_remaining,
         ) = _generate_fake_step_update(
             persistent_batch=persistent_batch,
