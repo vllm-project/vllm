@@ -155,6 +155,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 page_size = dst_kv_cache_layer_shape[1]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
                     num_pages * page_size, -1)
+                self.check_tensors_except_dim(
+                    dst_kv_cache_layer, src_kv_cache, 0)
                 num_token = src_kv_cache.shape[0]
                 if len(slot_mapping) == num_token:
                     dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
@@ -172,6 +174,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 page_size = dst_kv_cache_layer_shape[2]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
                     2, num_pages * page_size, -1)
+                self.check_tensors_except_dim(
+                    dst_kv_cache_layer, src_kv_cache, 1)
                 num_token = src_kv_cache.shape[1]
                 if len(slot_mapping) == num_token:
                     dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
@@ -515,3 +519,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
             return ip, port
         raise ValueError(
             f"Request id {request_id} does not contain hostname and port")
+
+    @staticmethod
+    def check_tensors_except_dim(tensor1, tensor2, dim):
+        shape1 = tensor1.size()
+        shape2 = tensor2.size()
+
+        if len(shape1) != len(shape2) or not all(s1 == s2 for i, (s1, s2) in enumerate(zip(shape1, shape2)) if i != dim):
+            raise NotImplementedError(
+                "Currently, only symmetric TP is supported. Asymmetric TP, PP,"
+                "and others will be supported in future PRs.")
