@@ -135,7 +135,7 @@ class PreparedKernel:
             if self.grid_is_callable:
                 grid = kwargs["grid"](kwargs)
             else:
-                grid = copy.deepcopy(kwargs["grid"])
+                grid = kwargs["grid"]
             grid_size = len(grid)
             grid_0 = grid[0]
             grid_1 = grid[1] if grid_size > 1 else 1
@@ -317,7 +317,6 @@ class JitCache(KernelInterface):
         # assert no config pre-hook
         assert "pre_hook" not in kwargs or kwargs["pre_hook"] is None
 
-        # print(f"my lock: {self.cache_lock.is_locked}")
         if not self.cache_lock.is_locked:
             # we only support int, bool, float as cache index
             for key in self.check_keys:
