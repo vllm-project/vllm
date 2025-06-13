@@ -13,7 +13,8 @@ from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, VllmConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
+                              init_distributed_environment,
+                              is_tp_state_patched)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -390,7 +391,9 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         )
 
         # A small all_reduce for warmup.
-        torch.distributed.all_reduce(torch.zeros(1).cpu())
+        # Skip warmup when using SmallerTpProposerWorker to avoid blocking.
+        if not is_tp_state_patched():
+            torch.distributed.all_reduce(torch.zeros(1).cpu())
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
