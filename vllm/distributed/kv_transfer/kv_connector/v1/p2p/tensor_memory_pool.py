@@ -4,9 +4,11 @@ import atexit
 import ctypes
 import math
 from dataclasses import dataclass
+from vllm.logger import init_logger
 
 import torch
 
+logger = init_logger(__name__)
 
 @dataclass
 class MemoryBlock:
@@ -52,8 +54,8 @@ class TensorMemoryPool:
                                     addr=self.base_address)
         self.free_lists[self.max_block_size][
             initial_block.addr] = initial_block
-        print("TensorMemoryPool, base_address:", self.base_address,
-              self.base_address % self.max_block_size)
+        logger.debug("TensorMemoryPool, base_address:", self.base_address,
+                     self.base_address % self.max_block_size)
 
     def allocate(self, size: int) -> int:
         if size <= 0:

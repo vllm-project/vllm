@@ -16,7 +16,7 @@ import zmq
 from vllm.config import KVTransferConfig
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum)
-from vllm.tensor_memory_pool import TensorMemoryPool
+from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import TensorMemoryPool
 from vllm.utils import current_stream, get_ip
 
 if TYPE_CHECKING:
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MEM_POOL_SIZE_GB = 32
 
 @contextmanager
 def set_p2p_nccl_context(num_chennels: str):
@@ -109,7 +110,7 @@ class P2pNcclEngine:
         self.recv_stream = torch.cuda.Stream()
 
         mem_pool_size_gb = self.config.get_from_extra_config(
-            "mem_pool_size_gb", 32)
+            "mem_pool_size_gb", DEFAULT_MEM_POOL_SIZE_GB)
         self.pool = TensorMemoryPool(max_block_size=int(mem_pool_size_gb) *
                                      1024**3)  # GB
 
