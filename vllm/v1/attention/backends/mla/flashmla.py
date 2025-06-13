@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 import torch
 
@@ -44,7 +44,7 @@ class FlashMLABackend(MLACommonBackend):
 
 @dataclass
 class FlashMLADecodeMetadata(MLACommonDecodeMetadata):
-    tile_scheduler_metadata: tuple[torch.Tensor, torch.Tensor]
+    tile_scheduler_metadata: torch.Tensor
     num_splits: torch.Tensor
 
 
@@ -54,13 +54,17 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
+    full_cudagraph_supported: ClassVar[bool] = True  # Decode-only
 
     def __init__(self, runner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
-        super().__init__(runner, kv_cache_spec, block_table)
+        super().__init__(runner, kv_cache_spec, block_table, FlashMLAMetadata)
 
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
+
+        self.cg_buf_tile_scheduler_metadata = None
+        self.cg_buf_num_splits = None
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
@@ -70,6 +74,30 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             self.num_q_heads,
             1, # MQA for the decode path
         )
+
+        if self.runner.full_cuda_graph:
+            # First time around (CUDAGraph capture), allocate the static buffer
+            if self.cg_buf_tile_scheduler_metadata is None:
+                self.cg_buf_tile_scheduler_metadata = tile_scheduler_metadata
+                self.cg_buf_num_splits = num_splits
+            else:
+                assert self.cg_buf_num_splits is not None
+
+                # Metadata per-SM, fixed size (#SMs, TileMetadataSize)
+                assert (self.cg_buf_tile_scheduler_metadata.size() ==
+                        tile_scheduler_metadata.size())
+                self.cg_buf_tile_scheduler_metadata.\
+                    copy_(tile_scheduler_metadata)
+                tile_scheduler_metadata = self.cg_buf_tile_scheduler_metadata
+
+                # Num splits is per-batch, varying size (batch_size,)
+                n = num_splits.size(0)
+                # make sure static buffer is large enough
+                assert n <= self.cg_buf_num_splits.size(0)
+                num_splits_view = self.cg_buf_num_splits[:n]
+                num_splits_view.copy_(num_splits)
+                self.cg_buf_num_splits[n:].fill_(0)  # fill the rest with 0s
+                num_splits = num_splits_view
 
         return FlashMLADecodeMetadata(
             block_table=block_table_tensor,
