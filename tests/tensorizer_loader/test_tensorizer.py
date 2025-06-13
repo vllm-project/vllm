@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import asyncio
 import gc
 import json
@@ -7,7 +9,6 @@ import pathlib
 import subprocess
 import sys
 from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -19,7 +20,6 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          TensorSerializer,
                                                          is_vllm_tensorized,
-                                                         load_with_tensorizer,
                                                          open_stream,
                                                          tensorize_vllm_model)
 from vllm.model_executor.model_loader.tensorizer_loader import (
@@ -101,21 +101,6 @@ def write_keyfile(keyfile_path: str):
     pathlib.Path(keyfile_path).parent.mkdir(parents=True, exist_ok=True)
     with open(keyfile_path, 'wb') as f:
         f.write(encryption_params.key)
-
-
-@patch('vllm.model_executor.model_loader.tensorizer.TensorizerAgent')
-def test_load_with_tensorizer(mock_agent, tensorizer_config):
-    mock_linear_method = MagicMock()
-    mock_agent_instance = mock_agent.return_value
-    mock_agent_instance.deserialize.return_value = MagicMock()
-
-    result = load_with_tensorizer(tensorizer_config,
-                                  quant_method=mock_linear_method)
-
-    mock_agent.assert_called_once_with(tensorizer_config,
-                                       quant_method=mock_linear_method)
-    mock_agent_instance.deserialize.assert_called_once()
-    assert result == mock_agent_instance.deserialize.return_value
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")

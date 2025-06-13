@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
 import dataclasses
@@ -6,16 +7,18 @@ import os
 import pprint
 import time
 from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 import torch
 import torch.fx as fx
+from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
 from .compiler_interface import (CompilerInterface, EagerAdaptor,
                                  InductorAdaptor, InductorStandaloneAdaptor)
@@ -28,14 +31,15 @@ logger = init_logger(__name__)
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     if compilation_config.use_inductor:
-        if envs.VLLM_TEST_STANDALONE_COMPILE:
-            logger.info("Using InductorStandaloneAdaptor")
+        if envs.VLLM_USE_STANDALONE_COMPILE and is_torch_equal_or_newer(
+                "2.8.0a"):
+            logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor()
         else:
-            logger.info("Using InductorAdaptor")
+            logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
     else:
-        logger.info("Using EagerAdaptor")
+        logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
 
 
@@ -63,7 +67,25 @@ class CompilerManager:
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
 
-    def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
+    def initialize_cache(self,
+                         cache_dir: str,
+                         disable_cache: bool = False,
+                         prefix: str = ""):
+        """
+        Initialize the cache directory for the compiler.
+
+        The organization of the cache directory is as follows:
+        cache_dir=/path/to/hash_str/rank_i_j/prefix/
+        inside cache_dir, there will be:
+        - vllm_compile_cache.py
+        - computation_graph.py
+        - transformed_code.py
+
+        for multiple prefixes, they can share the same
+        base cache dir of /path/to/hash_str/rank_i_j/ ,
+        to store some common compilation artifacts.
+        """
+
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
@@ -77,7 +99,8 @@ class CompilerManager:
                 self.cache = ast.literal_eval(f.read())
 
         self.compiler.initialize_cache(cache_dir=cache_dir,
-                                       disable_cache=disable_cache)
+                                       disable_cache=disable_cache,
+                                       prefix=prefix)
 
     def save_to_file(self):
         if self.disable_cache or not self.is_cache_updated:
@@ -269,7 +292,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
             for t in args
         ]
-        with self.fake_mode:
+        with self.fake_mode, enable_python_dispatcher():
             return super().run(*fake_args)
 
     def call_module(self, target: torch.fx.node.Target,
@@ -307,6 +330,25 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         return output
 
 
+# the tag for the part of model being compiled,
+# e.g. backbone/eagle_head
+model_tag: str = "backbone"
+
+
+@contextmanager
+def set_model_tag(tag: str):
+    """Context manager to set the model tag."""
+    global model_tag
+    assert tag != model_tag, \
+        f"Model tag {tag} is the same as the current tag {model_tag}."
+    old_tag = model_tag
+    model_tag = tag
+    try:
+        yield
+    finally:
+        model_tag = old_tag
+
+
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
     It is used for compilation level of `CompilationLevel.PIECEWISE`,
@@ -338,7 +380,17 @@ class VllmBackend:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ):
+
+        # if the model is initialized with a non-empty prefix,
+        # then usually it's enough to use that prefix,
+        # e.g. launguage_model, vision_model, etc.
+        # when multiple parts are initialized as independent
+        # models, we need to use the model_tag to distinguish
+        # them, e.g. backbone (default), eagle_head, etc.
+        self.prefix = prefix or model_tag
+
         global global_graph_pool
         if global_graph_pool is None:
             global_graph_pool = current_platform.graph_pool_handle()
@@ -438,16 +490,13 @@ class VllmBackend:
             )
             self.compilation_config.cache_dir = cache_dir
 
-        if compilation_counter.num_graphs_seen > 0:
-            cache_dir = self.compilation_config.cache_dir + \
-                f'-{compilation_counter.num_graphs_seen}'
-        else:
-            cache_dir = self.compilation_config.cache_dir
+        cache_dir = self.compilation_config.cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_rank
-        local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
+        local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}",
+                                       self.prefix)
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
@@ -459,7 +508,8 @@ class VllmBackend:
             logger.info("Using cache directory: %s for vLLM's torch.compile",
                         local_cache_dir)
 
-        self.compiler_manager.initialize_cache(local_cache_dir, disable_cache)
+        self.compiler_manager.initialize_cache(local_cache_dir, disable_cache,
+                                               self.prefix)
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done

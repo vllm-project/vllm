@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
 import warnings
@@ -45,8 +46,7 @@ from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
-                        is_list_of)
+from vllm.utils import Counter, Device, deprecate_kwargs, is_list_of
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -143,12 +143,6 @@ class LLM:
     DEPRECATE_LEGACY: ClassVar[bool] = True
     """A flag to toggle whether to deprecate the legacy generate/encode API."""
 
-    DEPRECATE_INIT_POSARGS: ClassVar[bool] = True
-    """
-    A flag to toggle whether to deprecate positional arguments in
-    [LLM.__init__][].
-    """
-
     @classmethod
     @contextmanager
     def deprecate_legacy_api(cls):
@@ -158,16 +152,11 @@ class LLM:
 
         cls.DEPRECATE_LEGACY = False
 
-    @deprecate_args(
-        start_index=2,  # Ignore self and model
-        is_deprecated=lambda: LLM.DEPRECATE_INIT_POSARGS,
-        additional_message=(
-            "All positional arguments other than `model` will be "
-            "replaced with keyword arguments in an upcoming version."),
-    )
     def __init__(
         self,
         model: str,
+        *,
+        task: TaskOption = "auto",
         tokenizer: Optional[str] = None,
         tokenizer_mode: TokenizerMode = "auto",
         skip_tokenizer_init: bool = False,
@@ -189,8 +178,6 @@ class LLM:
         hf_token: Optional[Union[bool, str]] = None,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        # After positional args are removed, move this right below `model`
-        task: TaskOption = "auto",
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any]]] = None,
         **kwargs,
@@ -207,6 +194,9 @@ class LLM:
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
+        if hf_overrides is None:
+            hf_overrides = {}
+
         if compilation_config is not None:
             if isinstance(compilation_config, int):
                 compilation_config_instance = CompilationConfig(
@@ -218,7 +208,7 @@ class LLM:
             else:
                 compilation_config_instance = compilation_config
         else:
-            compilation_config_instance = None
+            compilation_config_instance = CompilationConfig()
 
         engine_args = EngineArgs(
             model=model,
@@ -291,7 +281,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         *,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -307,7 +297,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         list[SamplingParams]]] = None,
         prompt_token_ids: Optional[list[int]] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -323,7 +313,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         list[SamplingParams]]] = None,
         prompt_token_ids: Optional[list[list[int]]] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -340,7 +330,7 @@ class LLM:
                                         list[SamplingParams]]] = None,
         *,
         prompt_token_ids: list[int],
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -357,7 +347,7 @@ class LLM:
                                         list[SamplingParams]]] = None,
         *,
         prompt_token_ids: list[list[int]],
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -372,7 +362,7 @@ class LLM:
         prompts: None,
         sampling_params: None,
         prompt_token_ids: Union[list[int], list[list[int]]],
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -392,7 +382,7 @@ class LLM:
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
@@ -414,7 +404,10 @@ class LLM:
                 When it is a single value, it is applied to every prompt.
                 When it is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
@@ -519,10 +512,27 @@ class LLM:
         executor = self.llm_engine.model_executor
         return executor.apply_model(func)
 
+    def _get_beam_search_lora_requests(
+        self,
+        lora_request: Optional[Union[list[LoRARequest], LoRARequest]],
+        prompts: list[Union[TokensPrompt, TextPrompt]],
+    ) -> list[Optional[LoRARequest]]:
+        """Get the optional lora request corresponding to each prompt."""
+        if isinstance(lora_request,
+                      Sequence) and len(lora_request) != len(prompts):
+            raise ValueError(
+                "Lora request list should be the same length as the prompts")
+
+        if lora_request is None or isinstance(lora_request, LoRARequest):
+            return [lora_request] * len(prompts)
+
+        raise TypeError(f"Invalid lora_request type {type(lora_request)}")
+
     def beam_search(
         self,
         prompts: list[Union[TokensPrompt, TextPrompt]],
         params: BeamSearchParams,
+        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -531,6 +541,7 @@ class LLM:
             prompts: A list of prompts. Each prompt can be a string or a list
                 of token IDs.
             params: The beam search parameters.
+            lora_request: LoRA request to use for generation, if any.
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
@@ -539,6 +550,9 @@ class LLM:
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+
+        lora_requests = self._get_beam_search_lora_requests(
+            lora_request, prompts)
 
         def sort_beams_key(x: BeamSearchSequence) -> float:
             return get_beam_search_score(x.tokens, x.cum_logprob,
@@ -567,7 +581,7 @@ class LLM:
                                             temperature=temperature)
         instances: list[BeamSearchInstance] = []
 
-        for prompt in prompts:
+        for lora_req, prompt in zip(lora_requests, prompts):
             # Add multimodal processor kwargs & data
             mm_kwargs = {}
             if "multi_modal_data" in prompt:
@@ -583,7 +597,12 @@ class LLM:
                 prompt_tokens = tokenizer.encode(prompt["prompt"])
 
             instances.append(
-                BeamSearchInstance(prompt_tokens, logprobs=None, **mm_kwargs))
+                BeamSearchInstance(
+                    prompt_tokens,
+                    lora_request=lora_req,
+                    logprobs=None,
+                    **mm_kwargs,
+                ), )
 
         for _ in range(max_tokens):
             all_beams: list[BeamSearchSequence] = list(
@@ -597,15 +616,17 @@ class LLM:
             if len(all_beams) == 0:
                 break
 
-            prompts_batch = [
-                create_tokens_prompt_from_beam(beam) for beam in all_beams
-            ]
+            # create the corresponding batch entries for prompt & optional lora
+            prompts_batch, lora_req_batch = zip(
+                *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
+                  for beam in all_beams])
 
             # only runs for one step
             # we don't need to use tqdm here
             output = self.generate(prompts_batch,
                                    sampling_params=beam_search_params,
-                                   use_tqdm=False)
+                                   use_tqdm=False,
+                                   lora_request=lora_req_batch)
 
             for (start, end), instance in zip(instance_start_and_end,
                                               instances):
@@ -623,6 +644,7 @@ class LLM:
                             new_beam = BeamSearchSequence(
                                 tokens=current_beam.tokens + [token_id],
                                 logprobs=current_beam.logprobs + [logprobs],
+                                lora_request=current_beam.lora_request,
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob,
                                 multi_modal_data=current_beam.multi_modal_data,
@@ -659,7 +681,7 @@ class LLM:
                         list[list[ChatCompletionMessageParam]]],
         sampling_params: Optional[Union[SamplingParams,
                                         list[SamplingParams]]] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
@@ -690,7 +712,10 @@ class LLM:
                 is a single value, it is applied to every prompt. When it
                 is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
                 If not provided, the model's default chat template will be used.
@@ -804,7 +829,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         *,
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[PoolingRequestOutput]:
@@ -819,7 +844,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[list[int]] = None,
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[PoolingRequestOutput]:
@@ -834,7 +859,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[list[list[int]]] = None,
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[PoolingRequestOutput]:
@@ -850,7 +875,7 @@ class LLM:
         *,
         prompt_token_ids: list[int],
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[PoolingRequestOutput]:
@@ -866,7 +891,7 @@ class LLM:
         *,
         prompt_token_ids: list[list[int]],
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[PoolingRequestOutput]:
@@ -880,7 +905,7 @@ class LLM:
         pooling_params: None,
         prompt_token_ids: Union[list[int], list[list[int]]],
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[PoolingRequestOutput]:
@@ -899,7 +924,7 @@ class LLM:
                                        Sequence[PoolingParams]]] = None,
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[PoolingRequestOutput]:
@@ -916,7 +941,10 @@ class LLM:
                 for more details about the format of each prompts.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
@@ -986,7 +1014,7 @@ class LLM:
         /,
         *,
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
@@ -1005,7 +1033,10 @@ class LLM:
                 for more details about the format of each prompts.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
@@ -1032,7 +1063,7 @@ class LLM:
         prompts: Union[PromptType, Sequence[PromptType]],
         /,
         *,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ClassificationRequestOutput]:
@@ -1047,7 +1078,10 @@ class LLM:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each prompts.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
@@ -1073,7 +1107,7 @@ class LLM:
         text_1: list[Union[str, TextPrompt, TokensPrompt]],
         text_2: list[Union[str, TextPrompt, TokensPrompt]],
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
@@ -1107,7 +1141,7 @@ class LLM:
         text_1: list[str],
         text_2: list[str],
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
@@ -1159,7 +1193,7 @@ class LLM:
         /,
         *,
         truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: bool = True,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
@@ -1179,7 +1213,10 @@ class LLM:
             text_2: The texts to pair with the query to form the input
                 to the LLM. See [PromptType][vllm.inputs.PromptType] for
                 more details about the format of each prompts.
-            use_tqdm: Whether to use tqdm to display the progress bar.
+            use_tqdm: If `True`, shows a tqdm progress bar.
+                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
+                it is used to create the progress bar.
+                If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
@@ -1360,7 +1397,7 @@ class LLM:
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
         *,
-        use_tqdm: bool,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -1398,7 +1435,8 @@ class LLM:
         # Add requests to the engine.
         it = prompts
         if use_tqdm:
-            it = tqdm(it, desc="Adding requests")
+            tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
+            it = tqdm_func(it, desc="Adding requests")
 
         for i, prompt in enumerate(it):
             self._add_request(
@@ -1455,12 +1493,15 @@ class LLM:
         return params
 
     def _run_engine(
-            self, *, use_tqdm: bool
+        self,
+        *,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True
     ) -> list[Union[RequestOutput, PoolingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(
+            tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
+            pbar = tqdm_func(
                 total=num_requests,
                 desc="Processed prompts",
                 dynamic_ncols=True,

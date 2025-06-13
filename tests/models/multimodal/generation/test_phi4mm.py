@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from collections.abc import Sequence
@@ -120,6 +121,10 @@ def run_test(
                                                 lora_request=lora_request)
             for prompts, images, audios in inputs
         ]
+
+    # This error occurs inside `get_peft_model`
+    # FIXME: https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/75
+    pytest.skip("HF impl is not compatible with current transformers")
 
     hf_model_kwargs = {"_attn_implementation": "sdpa"}
     with hf_runner(model, dtype=dtype,
