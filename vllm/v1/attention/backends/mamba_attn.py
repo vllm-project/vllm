@@ -38,8 +38,9 @@ class Mamba2AttentionMetadataBuilder:
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
-        # NOTE (Chen): Copied from FlashInferMetadataBuilder. Should be
-        # refactored later to avoid code duplication.
+        # NOTE (Chen): Copied from MLACommonMetadataBuilder and
+        # FlashInferMetadataBuilder. Should be refactored later to avoid code
+        # duplication of these 3 functions.
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
         # swaps possible. (NOTE for now we loosely use "decode" to mean requests
@@ -100,7 +101,6 @@ class Mamba2AttentionMetadataBuilder:
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
-        # print("query_start_loc", common_attn_metadata.query_start_loc)
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
 
@@ -127,9 +127,7 @@ class Mamba2AttentionMetadataBuilder:
 
             query_start_loc_p = common_attn_metadata.query_start_loc[
                 -self._num_prefills - 1:] - self._num_decode_tokens
-            # TODO: remove this debug check
-            assert query_start_loc_p[0] == 0
-            assert query_start_loc_p[-1] == self._num_prefill_tokens
+
             seq_idx = torch.repeat_interleave(
                 torch.arange(self._num_prefills,
                              dtype=torch.int32,
@@ -162,7 +160,6 @@ class Mamba2AttentionMetadataBuilder:
             chunk_offsets=chunk_offsets,
             state_indices_tensor=state_indices_tensor,
         )
-        # print("attn_metadata", attn_metadata)
         return attn_metadata
 
 
