@@ -29,7 +29,7 @@ DEFAULT_MEM_POOL_SIZE_GB = 32
 
 
 @contextmanager
-def set_p2p_nccl_context(num_chennels: str):
+def set_p2p_nccl_context(num_channels: str):
     original_values: dict[str, Any] = {}
     env_vars = [
         'NCCL_MAX_NCHANNELS',
@@ -46,8 +46,8 @@ def set_p2p_nccl_context(num_chennels: str):
     logger.info("set_p2p_nccl_context, original_values: %s", original_values)
 
     try:
-        os.environ['NCCL_MAX_NCHANNELS'] = num_chennels
-        os.environ['NCCL_MIN_NCHANNELS'] = num_chennels
+        os.environ['NCCL_MAX_NCHANNELS'] = num_channels
+        os.environ['NCCL_MIN_NCHANNELS'] = num_channels
         os.environ['NCCL_CUMEM_ENABLE'] = '1'
         yield
     finally:
@@ -141,8 +141,8 @@ class P2pNcclEngine:
         self.buffer_size = 0
         self.buffer_size_threshold = float(self.config.kv_buffer_size)
 
-        self.nccl_num_chennels = self.config.get_from_extra_config(
-            "nccl_num_chennels", "8")
+        self.nccl_num_channels = self.config.get_from_extra_config(
+            "nccl_num_channels", "8")
 
         self._listener_thread = threading.Thread(
             target=self._listen_for_requests, daemon=True)
@@ -157,9 +157,9 @@ class P2pNcclEngine:
         logger.info(
             "💯P2pNcclEngine init, rank:%d, local_rank:%d, http_address:%s, "
             "zmq_address:%s, proxy_address:%s, send_type:%s, buffer_size_"
-            "threshold:%.2f, nccl_num_chennels:%s", self.rank, self.local_rank,
+            "threshold:%.2f, nccl_num_channels:%s", self.rank, self.local_rank,
             self.http_address, self.zmq_address, self.proxy_address,
-            self.send_type, self.buffer_size_threshold, self.nccl_num_chennels)
+            self.send_type, self.buffer_size_threshold, self.nccl_num_channels)
 
     def _create_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
@@ -179,7 +179,7 @@ class P2pNcclEngine:
 
             with torch.cuda.device(self.device):
                 rank = 0
-                with set_p2p_nccl_context(self.nccl_num_chennels):
+                with set_p2p_nccl_context(self.nccl_num_channels):
                     comm: ncclComm_t = self.nccl.ncclCommInitRank(
                         2, unique_id, rank)
                 self.comms[remote_address] = (comm, rank)
@@ -317,7 +317,7 @@ class P2pNcclEngine:
                         bytes(data["unique_id"]))
                     with torch.cuda.device(self.device):
                         rank = 1
-                        with set_p2p_nccl_context(self.nccl_num_chennels):
+                        with set_p2p_nccl_context(self.nccl_num_channels):
                             comm: ncclComm_t = self.nccl.ncclCommInitRank(
                                 2, unique_id, rank)
                         self.comms[remote_address.decode()] = (comm, rank)
@@ -458,7 +458,7 @@ class P2pNcclEngine:
 
         response = sock.recv()
         if response != b"0":
-            logger.warning(
+            logger.error(
                 "🔴Send Tensor, Peer Out Of Memory/Threshold, %s 👉 %s, "
                 "MyRank:%s, data:%s, tensor:%s, size:%fGB, response:%s",
                 self.zmq_address, remote_address, rank, data, tensor.shape,
