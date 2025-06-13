@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -143,7 +145,7 @@ class Phi3SmallSelfAttention(nn.Module):
         self.num_q_per_kv = self.num_heads // self.num_key_value_heads
         if self.tp_size > 1:
             assert self.num_key_value_heads % self.tp_size == 0
-        self.num_kv_heads_per_partion = max(
+        self.num_kv_heads_per_partition = max(
             1, self.num_key_value_heads // self.tp_size)
         self.num_heads_per_partition = self.num_heads // self.tp_size
 
@@ -210,7 +212,7 @@ class Phi3SmallSelfAttention(nn.Module):
             bs_params = {
                 'max_seqlen': self.max_position_embeddings,
                 'num_heads': self.num_heads_per_partition,
-                "num_kv_heads": self.num_kv_heads_per_partion,
+                "num_kv_heads": self.num_kv_heads_per_partition,
                 "block_size": self.sparse_block_size,
                 "local_blocks": self.local_blocks,
                 "vert_stride": self.vert_stride,
@@ -220,7 +222,7 @@ class Phi3SmallSelfAttention(nn.Module):
         self.attn = Attention(self.num_heads_per_partition,
                               self.head_dim,
                               self.scale,
-                              num_kv_heads=self.num_kv_heads_per_partion,
+                              num_kv_heads=self.num_kv_heads_per_partition,
                               cache_config=cache_config,
                               quant_config=quant_config,
                               blocksparse_params=bs_params,
@@ -230,8 +232,8 @@ class Phi3SmallSelfAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[Tuple[torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[tuple[torch.Tensor]]]:
         qkv, _ = self.query_key_value(hidden_states)
 
         qkv = qkv.view(qkv.shape[:-1] +
@@ -241,8 +243,8 @@ class Phi3SmallSelfAttention(nn.Module):
         # NOTE: this is required by RotaryEmbed, which indeed does not have to
         # TODO: allow 3D QK for rotary forward
         q = q.reshape(-1, self.head_dim * self.num_heads_per_partition)
-        k = k.reshape(-1, self.head_dim * self.num_kv_heads_per_partion)
-        v = v.reshape(-1, self.head_dim * self.num_kv_heads_per_partion)
+        k = k.reshape(-1, self.head_dim * self.num_kv_heads_per_partition)
+        v = v.reshape(-1, self.head_dim * self.num_kv_heads_per_partition)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -352,10 +354,10 @@ class Phi3SmallModel(nn.Module):
         hidden_states = self.final_layernorm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if name.endswith(".bias") and name not in params_dict:
                 continue
@@ -454,8 +456,8 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         output_hidden_states = output_hidden_states
         return output_hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head.weight"]

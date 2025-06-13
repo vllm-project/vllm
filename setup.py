@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
 import importlib.util
@@ -54,7 +55,7 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
     # fallback to cpu
     VLLM_TARGET_DEVICE = "cpu"
 
-MAIN_CUDA_VERSION = "12.4"
+MAIN_CUDA_VERSION = "12.8"
 
 
 def is_sccache_available() -> bool:
@@ -251,11 +252,8 @@ class cmake_build_ext(build_ext):
 
             # CMake appends the extension prefix to the install path,
             # and outdir already contains that prefix, so we need to remove it.
-            # We assume only the final component of extension prefix is added by
-            # CMake, this is currently true for current extensions but may not
-            # always be the case.
             prefix = outdir
-            if '.' in ext.name:
+            for _ in range(ext.name.count('.')):
                 prefix = prefix.parent
 
             # prefix here should actually be the same for all components
@@ -389,7 +387,6 @@ class repackage_wheel(build_ext):
             # vllm_flash_attn python code:
             # Regex from
             #  `glob.translate('vllm/vllm_flash_attn/**/*.py', recursive=True)`
-            import re
             compiled_regex = re.compile(
                 r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
             file_members += list(
@@ -691,6 +688,7 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
+        "bench": ["pandas", "datasets"],
         "tensorizer": ["tensorizer>=2.9.0"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],

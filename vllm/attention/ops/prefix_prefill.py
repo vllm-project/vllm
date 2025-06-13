@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 # Static kernels parameters
 BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
@@ -745,8 +745,8 @@ def context_attention_fwd(q,
     # Conversion of FP8 Tensor from uint8 storage to
     # appropriate torch.dtype for interpretation by Triton
     if "fp8" in kv_cache_dtype:
-        assert (k_cache.dtype == torch.uint8)
-        assert (v_cache.dtype == torch.uint8)
+        assert k_cache.dtype in [torch.uint8, current_platform.fp8_dtype()]
+        assert v_cache.dtype in [torch.uint8, current_platform.fp8_dtype()]
 
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             target_dtype = current_platform.fp8_dtype()

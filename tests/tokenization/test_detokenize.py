@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Generator
 from typing import Any, Optional
@@ -60,8 +61,17 @@ def _run_incremental_decode(tokenizer,
         skip_special_tokens=skip_special_tokens,
         spaces_between_special_tokens=spaces_between_special_tokens,
     )
-    request = EngineCoreRequest("", prompt_token_ids, None, None, None, params,
-                                None, 0.0, None)
+    request = EngineCoreRequest("",
+                                prompt_token_ids,
+                                None,
+                                None,
+                                None,
+                                params,
+                                None,
+                                0.0,
+                                None,
+                                cache_salt=None,
+                                data_parallel_rank=None)
 
     if fast is None:
         detokenizer = IncrementalDetokenizer.from_new_request(

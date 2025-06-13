@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 The vLLM team.
 #
@@ -14,10 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Wrapper around `transformers` models"""
-import re
-from itertools import chain
-from typing import Iterable, Literal, Optional, Union
+from collections.abc import Iterable
+from contextlib import nullcontext
+from typing import Literal, Optional, Union
 
+import regex as re
 import torch
 from torch import nn
 from transformers import AutoModel, PretrainedConfig, PreTrainedModel
@@ -110,6 +112,33 @@ def replace_linear_class(
     )
 
 
+class ConfigOverride:
+    """Context manager to temporarily override config attributes."""
+
+    def __init__(self, config: PretrainedConfig, **kwargs):
+        self.config = config
+        self.kwargs = kwargs
+        self.kwargs_original = {}
+        self.kwargs_delete = set()
+
+    def __enter__(self):
+        """Override config attributes."""
+        for key, value in self.kwargs.items():
+            if not hasattr(self.config, key):
+                self.kwargs_delete.add(key)
+            self.kwargs_original[key] = getattr(self.config, key, None)
+            setattr(self.config, key, value)
+        return self.config
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """Restore original config attributes."""
+        for key, value in self.kwargs_original.items():
+            if key in self.kwargs_delete:
+                delattr(self.config, key)
+            else:
+                setattr(self.config, key, value)
+
+
 class TransformersModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -135,8 +164,17 @@ class TransformersModel(nn.Module):
         self.pp_rank = self.pp_group.rank_in_group
         self.tp_size = get_tensor_model_parallel_world_size()
 
+        # vLLM handles interleaved sliding window attention by creating a new
+        # interleaved_sliding_window attribute and deleting the sliding_window
+        # attribute. This breaks the constructors in Transformers so we
+        # temporarily add the attribute back to construct the model.
+        config_override = nullcontext()
+        if hasattr(config, "interleaved_sliding_window"):
+            config_override = ConfigOverride(
+                config, sliding_window=config.interleaved_sliding_window)
+
         # Use meta device to delay allocating GPU tensors
-        with torch.device("meta"):
+        with torch.device("meta"), config_override:
             # FIXME(Isotr0py): We need to refactor this part in the future to
             # avoid registering an extra model layer, otherwise we will need a
             # weights mapper to rename weights.
@@ -166,8 +204,8 @@ class TransformersModel(nn.Module):
         # Initialize buffers (e.g. rotary embedding inverse frequency)
         self.init_buffers(self.model)
 
-        # Move remaining meta tensors to device (should happen last)
-        self.meta_to_empty(self.model)
+        # Initialize any parameters that have not had their modules replaced
+        self.init_parameters(self.model)
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(["hidden_states"],
@@ -262,9 +300,17 @@ class TransformersModel(nn.Module):
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         start, end = get_pp_indices(self.config.num_hidden_layers,
                                     self.pp_rank, self.pp_size)
-        return {
-            i:
-            Attention(
+
+        attention_instances = {}
+        for i in range(start, end):
+            # Handle interleaved sliding window attention
+            sliding_window = None
+            if (hasattr(self.config, "interleaved_sliding_window")
+                    and hasattr(self.config, "sliding_window_pattern")
+                    and ((i + 1) % self.config.sliding_window_pattern > 0)):
+                sliding_window = self.config.interleaved_sliding_window
+
+            attention_instances[i] = Attention(
                 num_heads=num_heads,
                 head_size=head_size,
                 # NOTE: We use Llama scale as default, if it's set by
@@ -273,9 +319,9 @@ class TransformersModel(nn.Module):
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
+                per_layer_sliding_window=sliding_window,
                 prefix=f"{i}.attn")
-            for i in range(start, end)
-        }
+        return attention_instances
 
     def init_buffers(self, module: nn.Module):
         """
@@ -293,18 +339,37 @@ class TransformersModel(nn.Module):
         """
         for name, buffer in module.named_buffers(recurse=False):
             if buffer.device == torch.device("meta"):
+                if module == self.model:
+                    logger.warning(
+                        "To initialize buffers correctly, we instantiate the "
+                        "parent module and and extract the value of the "
+                        "buffer from it. In this case, the parent module is "
+                        "the base model. Instantiating the entire model here "
+                        "risks GPU OOM. Could this buffer be moved to a child "
+                        "module?")
                 new_buffer = getattr(type(module)(self.config), name)
                 setattr(module, name, new_buffer)
         for child in module.children():
             self.init_buffers(child)
 
-    def meta_to_empty(self, module: nn.Module):
-        tensors = list(chain(module.buffers(), module.parameters()))
-        if tensors and all(t.device == torch.device("meta") for t in tensors):
-            module.to_empty(device=self.device_config.device)
-            return  # We can stop recursing because to_empty is recursive
+    def init_parameters(self, module: nn.Module):
+        """
+        If a `parameter` is on the `meta` device, then its parent
+        `module` is the original module created by:
+
+        ```python
+        with torch.device("meta"):
+            self.model: PreTrainedModel = AutoModel.from_config(...)
+        ```
+        """
+        for name, param in module.named_parameters(recurse=False):
+            if param.device == torch.device("meta"):
+                new_param = nn.Parameter(
+                    torch.empty_like(param.data,
+                                     device=self.device_config.device))
+                setattr(module, name, new_param)
         for child in module.children():
-            self.meta_to_empty(child)
+            self.init_parameters(child)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.model.get_input_embeddings()
@@ -342,6 +407,7 @@ class TransformersModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
+
         loaded_params = set[str]()
         for name, loaded_weight in weights:
             # Use "model" instead of base_model_prefix because

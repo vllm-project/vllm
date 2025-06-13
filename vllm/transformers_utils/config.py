@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
 import json
 import os
 import time
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Literal, Optional, Type, Union
+from typing import Any, Callable, Literal, Optional, TypeVar, Union
 
 import huggingface_hub
-from huggingface_hub import hf_hub_download
+from huggingface_hub import get_safetensors_metadata, hf_hub_download
 from huggingface_hub import list_repo_files as hf_list_repo_files
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
@@ -22,9 +23,10 @@ from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
+from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
-from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm import envs
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -34,30 +36,31 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
-                                             MllamaConfig, MLPSpeculatorConfig,
-                                             MPTConfig, NemotronConfig,
-                                             NVLM_D_Config, RWConfig,
+                                             MiniMaxText01Config,
+                                             MiniMaxVL01Config, MllamaConfig,
+                                             MLPSpeculatorConfig, MPTConfig,
+                                             NemotronConfig, NVLM_D_Config,
+                                             OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
 
-if VLLM_USE_MODELSCOPE:
+if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
 else:
     from transformers import AutoConfig
 
 MISTRAL_CONFIG_NAME = "params.json"
-HF_TOKEN = os.getenv('HF_TOKEN', None)
 
 logger = init_logger(__name__)
 
-_CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, Type[PretrainedConfig]] = {
+_CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
     "mllama": MllamaConfig
 }
 
-_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
+_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "cohere2": Cohere2Config,
     "dbrx": DbrxConfig,
@@ -73,8 +76,11 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "exaone": ExaoneConfig,
     "h2ovl_chat": H2OVLChatConfig,
     "internvl_chat": InternVLChatConfig,
+    "minimax_text_01": MiniMaxText01Config,
+    "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
+    "ovis": OvisConfig,
     "solar": SolarConfig,
     "skywork_chat": SkyworkR1VChatConfig,
     "telechat": Telechat2Config,
@@ -89,10 +95,15 @@ class ConfigFormat(str, enum.Enum):
     MISTRAL = "mistral"
 
 
-def with_retry(func: Callable[[], Any],
-               log_msg: str,
-               max_retries: int = 2,
-               retry_delay: int = 2):
+_R = TypeVar("_R")
+
+
+def with_retry(
+    func: Callable[[], _R],
+    log_msg: str,
+    max_retries: int = 2,
+    retry_delay: int = 2,
+) -> _R:
     for attempt in range(max_retries):
         try:
             return func()
@@ -104,6 +115,8 @@ def with_retry(func: Callable[[], Any],
                          max_retries)
             time.sleep(retry_delay)
             retry_delay *= 2
+
+    raise AssertionError("Should not be reached")
 
 
 # @cache doesn't cache exceptions
@@ -125,12 +138,14 @@ def list_repo_files(
             ]
         # if model is remote, use hf_hub api to list files
         try:
-            if VLLM_USE_MODELSCOPE:
+            if envs.VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import (
                     modelscope_list_repo_files)
                 return modelscope_list_repo_files(repo_id,
                                                   revision=revision,
-                                                  token=token)
+                                                  token=os.getenv(
+                                                      "MODELSCOPE_API_TOKEN",
+                                                      None))
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
@@ -180,7 +195,7 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
     return file_exists(str(model),
                        config_name,
                        revision=revision,
-                       token=HF_TOKEN)
+                       token=os.getenv('HF_TOKEN', None))
 
 
 def patch_rope_scaling(config: PretrainedConfig) -> None:
@@ -194,7 +209,7 @@ def patch_rope_scaling(config: PretrainedConfig) -> None:
         patch_rope_scaling_dict(rope_scaling)
 
 
-def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
+def patch_rope_scaling_dict(rope_scaling: dict[str, Any]) -> None:
     if "rope_type" in rope_scaling and "type" in rope_scaling:
         rope_type = rope_scaling["rope_type"]
         rope_type_legacy = rope_scaling["type"]
@@ -295,7 +310,10 @@ def get_config(
                 "   - For Hugging Face models: ensure the presence of a "
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
-                "'params.json'.\n").format(model=model)
+                "'params.json'.\n"
+                "3. For GGUF: pass the local path of the GGUF checkpoint.\n"
+                "   Loading GGUF from a remote repo directly is not yet "
+                "supported.\n").format(model=model)
 
             raise ValueError(error_message) from e
 
@@ -304,7 +322,7 @@ def get_config(
             model,
             revision=revision,
             code_revision=code_revision,
-            token=HF_TOKEN,
+            token=os.getenv('HF_TOKEN', None),
             **kwargs,
         )
 
@@ -316,7 +334,7 @@ def get_config(
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=HF_TOKEN,
+                token=os.getenv('HF_TOKEN', None),
                 **kwargs,
             )
         else:
@@ -326,7 +344,7 @@ def get_config(
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=HF_TOKEN,
+                    token=os.getenv('HF_TOKEN', None),
                     **kwargs,
                 )
             except ValueError as e:
@@ -344,7 +362,7 @@ def get_config(
                     raise e
 
     elif config_format == ConfigFormat.MISTRAL:
-        config = load_params_config(model, revision, token=HF_TOKEN, **kwargs)
+        config = load_params_config(model, revision, **kwargs)
     else:
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
@@ -553,7 +571,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
                                          revision=revision,
-                                         token=HF_TOKEN)
+                                         token=os.getenv('HF_TOKEN', None))
         except Exception:
             repo_files = []
 
@@ -681,9 +699,24 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_dict["hidden_act"] = config_dict.get("activation", "silu")
     config_dict["tie_word_embeddings"] = config_dict.get(
         "tie_embeddings", False)
-    config_dict["max_seq_len"] = config_dict.get("max_seq_len", 128_000)
-    config_dict["max_position_embeddings"] = config_dict.get(
-        "max_position_embeddings", 128_000)
+
+    if config_dict.get("max_position_embeddings") is None:
+        max_position_embeddings = 128_000
+        try:
+            trust_remote_code_val = kwargs.get("trust_remote_code", False)
+            hf_config = get_config(model=model,
+                                   trust_remote_code=trust_remote_code_val,
+                                   revision=revision,
+                                   config_format=ConfigFormat.HF)
+            if hf_value := hf_config.get_text_config().max_position_embeddings:
+                max_position_embeddings = hf_value
+        except Exception as e:
+            logger.warning(
+                "The params.json file is missing 'max_position_embeddings'"
+                " and could not get a value from the HF config."
+                " Defaulting to 128000",
+                exc_info=e)
+        config_dict["max_position_embeddings"] = max_position_embeddings
 
     if config_dict.get("quantization") is not None:
         quantization = config_dict.get("quantization", {})
@@ -743,9 +776,9 @@ def get_hf_image_processor_config(
     hf_token: Optional[Union[bool, str]] = None,
     revision: Optional[str] = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     # ModelScope does not provide an interface for image_processor
-    if VLLM_USE_MODELSCOPE:
+    if envs.VLLM_USE_MODELSCOPE:
         return dict()
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
@@ -801,13 +834,54 @@ def try_get_generation_config(
 
 
 def get_cross_encoder_activation_function(config: PretrainedConfig):
-    if (hasattr(config, "sbert_ce_default_activation_function")
-            and config.sbert_ce_default_activation_function is not None):
 
+    function_name: Optional[str] = None
+    if hasattr(config, "sentence_transformers") and "activation_fn" in \
+        config.sentence_transformers:
+        function_name = config.sentence_transformers["activation_fn"]
+
+    elif (hasattr(config, "sbert_ce_default_activation_function")
+          and config.sbert_ce_default_activation_function is not None):
         function_name = config.sbert_ce_default_activation_function
+
+    if function_name is not None:
         assert function_name.startswith("torch.nn.modules."), \
             "Loading of activation functions is restricted to " \
             "torch.nn.modules for security reasons"
         return resolve_obj_by_qualname(function_name)()
     else:
         return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
+
+
+def try_get_safetensors_metadata(
+    model: str,
+    *,
+    revision: Optional[str] = None,
+):
+    get_safetensors_metadata_partial = partial(
+        get_safetensors_metadata,
+        model,
+        revision=revision,
+        token=os.getenv('HF_TOKEN', None),
+    )
+
+    try:
+        return with_retry(get_safetensors_metadata_partial,
+                          "Error retrieving safetensors")
+    except Exception:
+        return None
+
+
+def try_get_tokenizer_config(
+    pretrained_model_name_or_path: Union[str, os.PathLike],
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    try:
+        return get_tokenizer_config(
+            pretrained_model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+        )
+    except Exception:
+        return None

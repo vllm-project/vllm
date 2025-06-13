@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # This file is a pure Python wrapper for the NCCL library.
 # The main purpose is to use NCCL combined with CUDA graph.
@@ -24,7 +25,7 @@
 import ctypes
 import platform
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 from torch.distributed import ReduceOp
@@ -121,7 +122,7 @@ class ncclRedOpTypeEnum:
 class Function:
     name: str
     restype: Any
-    argtypes: List[Any]
+    argtypes: list[Any]
 
 
 class NCCLLibrary:
@@ -210,11 +211,11 @@ class NCCLLibrary:
 
     # class attribute to store the mapping from the path to the library
     # to avoid loading the same library multiple times
-    path_to_library_cache: Dict[str, Any] = {}
+    path_to_library_cache: dict[str, Any] = {}
 
     # class attribute to store the mapping from library path
     #  to the corresponding dictionary
-    path_to_dict_mapping: Dict[str, Dict[str, Any]] = {}
+    path_to_dict_mapping: dict[str, dict[str, Any]] = {}
 
     def __init__(self, so_file: Optional[str] = None):
 
@@ -238,7 +239,7 @@ class NCCLLibrary:
             raise e
 
         if so_file not in NCCLLibrary.path_to_dict_mapping:
-            _funcs: Dict[str, Any] = {}
+            _funcs: dict[str, Any] = {}
             for func in NCCLLibrary.exported_functions:
                 f = getattr(self.lib, func.name)
                 f.restype = func.restype

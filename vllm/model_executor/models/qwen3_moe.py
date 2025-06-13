@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
@@ -21,7 +22,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -30,9 +32,7 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -137,7 +137,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                            router_logits=router_logits)
         final_hidden_states = final_hidden_states
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
                 final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
@@ -151,7 +151,7 @@ class Qwen3MoeAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         head_dim: Optional[int] = None,
         rms_norm_eps: float = 1e-06,
@@ -225,12 +225,12 @@ class Qwen3MoeAttention(nn.Module):
         # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
                            self.head_dim)
-        q_by_head = self.q_norm.forward_native(q_by_head)
+        q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
 
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
                            self.head_dim)
-        k_by_head = self.k_norm.forward_native(k_by_head)
+        k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -375,8 +375,8 @@ class Qwen3MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -395,7 +395,7 @@ class Qwen3MoeModel(nn.Module):
             num_experts=self.config.num_experts)
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -459,11 +459,10 @@ class Qwen3MoeModel(nn.Module):
                             ".kv_scale", ".attn.kv_scale")
                         if remapped_kv_scale_name not in params_dict:
                             logger.warning_once(
-                                "Found kv scale in the checkpoint "
-                                f"(e.g. {name}), but not found the expected "
-                                f"name in the model "
-                                f"(e.g. {remapped_kv_scale_name}). "
-                                "kv-scale is not loaded.")
+                                "Found kv scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv-scale is not loaded.",  # noqa: E501
+                                name,
+                                remapped_kv_scale_name,
+                            )
                             continue
                         else:
                             name = remapped_kv_scale_name
@@ -476,6 +475,17 @@ class Qwen3MoeModel(nn.Module):
 
 
 class Qwen3MoeForCausalLM(nn.Module, SupportsPP):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
 
     fall_back_to_pt_during_load = False
 
@@ -519,10 +529,7 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["rotary_emb.inv_freq"]),
-        )
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

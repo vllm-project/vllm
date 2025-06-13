@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import openai  # use the official client for correctness check
 import pytest
@@ -13,9 +14,9 @@ MODEL_NAME = "Qwen/QwQ-32B"
 @pytest.fixture(scope="module")
 def server():  # noqa: F811
     args = [
-        "--max-model-len", "8192", "--enforce-eager", "--enable-reasoning",
-        "--reasoning-parser", "deepseek_r1", "--enable-auto-tool-choice",
-        "--tool-call-parser", "hermes"
+        "--max-model-len", "8192", "--enforce-eager", "--reasoning-parser",
+        "deepseek_r1", "--enable-auto-tool-choice", "--tool-call-parser",
+        "hermes"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

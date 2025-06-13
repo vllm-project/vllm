@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
 
@@ -11,7 +12,8 @@ import requests
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from ...models.embedding.utils import correctness_test
+from ...models.language.pooling.embed_utils import (
+    run_embedding_correctness_test)
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -76,7 +78,7 @@ async def test_single_embedding(hf_model, client: openai.AsyncOpenAI,
     assert embeddings.usage.total_tokens == 11
 
     vllm_outputs = [d.embedding for d in embeddings.data]
-    correctness_test(hf_model, input_texts, vllm_outputs)
+    run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
     # test using token IDs
     input_tokens = [1, 1, 1, 1, 1]
@@ -121,7 +123,7 @@ async def test_batch_embedding(hf_model, client: openai.AsyncOpenAI,
     assert embeddings.usage.total_tokens == 33
 
     vllm_outputs = [d.embedding for d in embeddings.data]
-    correctness_test(hf_model, input_texts, vllm_outputs)
+    run_embedding_correctness_test(hf_model, input_texts, vllm_outputs)
 
     # test list[list[int]]
     input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
@@ -208,7 +210,7 @@ async def test_batch_base64_embedding(hf_model, client: openai.AsyncOpenAI,
                                                      model=model_name,
                                                      encoding_format="float")
     float_data = [d.embedding for d in responses_float.data]
-    correctness_test(hf_model, input_texts, float_data)
+    run_embedding_correctness_test(hf_model, input_texts, float_data)
 
     responses_base64 = await client.embeddings.create(input=input_texts,
                                                       model=model_name,
@@ -219,13 +221,13 @@ async def test_batch_base64_embedding(hf_model, client: openai.AsyncOpenAI,
             np.frombuffer(base64.b64decode(data.embedding),
                           dtype="float32").tolist())
 
-    correctness_test(hf_model, input_texts, base64_data)
+    run_embedding_correctness_test(hf_model, input_texts, base64_data)
 
     # Default response is float32 decoded from base64 by OpenAI Client
     responses_default = await client.embeddings.create(input=input_texts,
                                                        model=model_name)
     default_data = [d.embedding for d in responses_default.data]
-    correctness_test(hf_model, input_texts, default_data)
+    run_embedding_correctness_test(hf_model, input_texts, default_data)
 
 
 @pytest.mark.asyncio

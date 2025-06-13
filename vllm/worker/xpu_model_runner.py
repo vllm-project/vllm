@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import time
@@ -188,19 +189,10 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             input_positions.extend(list(positions_range))
 
             if seq_group_metadata.multi_modal_data:
-                # NOTE: mm_data only includes the subset of multi-modal items
+                # NOTE: mm_kwargs only includes the subset of multi-modal items
                 # that intersect with the current prefill positions.
-                mm_data, placeholder_maps = MultiModalPlaceholderMap \
+                mm_kwargs, placeholder_maps = MultiModalPlaceholderMap \
                     .from_seq_group(seq_group_metadata, positions_range)
-
-                if self.runner.mm_registry.has_processor(
-                        self.runner.model_config):
-                    mm_kwargs = mm_data
-                else:
-                    mm_kwargs = self.runner.multi_modal_input_mapper(
-                        mm_data,
-                        seq_group_metadata.mm_processor_kwargs,
-                    )
 
                 multi_modal_kwargs_list.append(mm_kwargs)
 
@@ -404,9 +396,6 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         # Multi-modal data support
         self.input_registry = input_registry
         self.mm_registry = mm_registry
-        self.multi_modal_input_mapper = mm_registry \
-            .create_input_mapper(model_config)
-        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
@@ -574,9 +563,11 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs
-                                             or {},
-                                             device=self.device))
+                **MultiModalKwargs.as_kwargs(
+                    model_input.multi_modal_kwargs or {},
+                    device=self.device,
+                ),
+            )
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
             return hidden_or_intermediate_states

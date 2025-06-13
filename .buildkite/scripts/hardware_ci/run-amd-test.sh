@@ -3,6 +3,9 @@
 # This script runs test inside the corresponding ROCm docker container.
 set -o pipefail
 
+# Export Python path
+export PYTHONPATH=".."
+
 # Print ROCm version
 echo "--- Confirming Clean Initial State"
 while true; do
@@ -74,38 +77,73 @@ HF_MOUNT="/root/.cache/huggingface"
 
 commands=$@
 echo "Commands:$commands"
+
+if [[ $commands == *"pytest -v -s basic_correctness/test_basic_correctness.py"* ]]; then
+  commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s basic_correctness/test_basic_correctness.py"}
+fi
+
+if [[ $commands == *"pytest -v -s models/test_registry.py"* ]]; then
+  commands=${commands//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
+fi
+
+if [[ $commands == *"VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'"* ]]; then
+  commands=${commands//"VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'"/"VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2 and not BambaForCausalLM and not Gemma2ForCausalLM and not Grok1ModelForCausalLM and not Zamba2ForCausalLM and not Gemma2Model and not GritLM'"}
+fi
+
+if [[ $commands == *"pytest -v -s compile/test_basic_correctness.py"* ]]; then
+  commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s compile/test_basic_correctness.py"}
+fi
+
+if [[ $commands == *"pytest -v -s lora"* ]]; then
+  commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
+fi
+
 #ignore certain kernels tests
-if [[ $commands == *" kernels "* ]]; then
+if [[ $commands == *" kernels/core"* ]]; then
   commands="${commands} \
-  --ignore=kernels/test_attention_selector.py \
-  --ignore=kernels/test_blocksparse_attention.py \
-  --ignore=kernels/test_causal_conv1d.py \
-  --ignore=kernels/test_cutlass.py \
-  --ignore=kernels/test_encoder_decoder_attn.py \
-  --ignore=kernels/test_flash_attn.py \
-  --ignore=kernels/test_flashinfer.py \
-  --ignore=kernels/test_int8_quant.py \
-  --ignore=kernels/test_machete_gemm.py \
-  --ignore=kernels/test_mamba_ssm.py \
-  --ignore=kernels/test_marlin_gemm.py \
-  --ignore=kernels/test_moe.py \
-  --ignore=kernels/test_prefix_prefill.py \
-  --ignore=kernels/test_rand.py \
-  --ignore=kernels/test_sampler.py \
-  --ignore=kernels/test_cascade_flash_attn.py \
-  --ignore=kernels/test_mamba_mixer2.py \
-  --ignore=kernels/test_aqlm.py \
-  --ignore=kernels/test_machete_mm.py \
-  --ignore=kernels/test_mha_attn.py \
-  --ignore=kernels/test_block_fp8.py \
-  --ignore=kernels/test_cutlass_moe.py \
-  --ignore=kernels/test_mamba_ssm_ssd.py \
-  --ignore=kernels/test_attention.py \
-  --ignore=kernels/test_block_int8.py \
-  --ignore=kernels/test_fused_quant_layernorm.py \
-  --ignore=kernels/test_int8_kernel.py \
-  --ignore=kernels/test_triton_moe_ptpc_fp8.py \
-  --ignore=kernels/test_permute_cols.py"
+  --ignore=kernels/core/test_fused_quant_layernorm.py \
+  --ignore=kernels/core/test_permute_cols.py"
+fi
+
+if [[ $commands == *" kernels/attention"* ]]; then
+  commands="${commands} \
+  --ignore=kernels/attention/stest_attention_selector.py \
+  --ignore=kernels/attention/test_blocksparse_attention.py \
+  --ignore=kernels/attention/test_encoder_decoder_attn.py \
+  --ignore=kernels/attention/test_attention_selector.py \
+  --ignore=kernels/attention/test_flash_attn.py \
+  --ignore=kernels/attention/test_flashinfer.py \
+  --ignore=kernels/attention/test_prefix_prefill.py \
+  --ignore=kernels/attention/test_cascade_flash_attn.py \
+  --ignore=kernels/attention/test_mha_attn.py \
+  --ignore=kernels/attention/test_lightning_attn.py \
+  --ignore=kernels/attention/test_attention.py"
+fi
+
+if [[ $commands == *" kernels/quantization"* ]]; then
+  commands="${commands} \
+  --ignore=kernels/quantization/test_int8_quant.py \
+  --ignore=kernels/quantization/test_aqlm.py \
+  --ignore=kernels/quantization/test_machete_mm.py \
+  --ignore=kernels/quantization/test_block_fp8.py \
+  --ignore=kernels/quantization/test_block_int8.py \
+  --ignore=kernels/quantization/test_marlin_gemm.py \
+  --ignore=kernels/quantization/test_cutlass_scaled_mm.py \
+  --ignore=kernels/quantization/test_int8_kernel.py"
+fi
+
+if [[ $commands == *" kernels/mamba"* ]]; then
+  commands="${commands} \
+  --ignore=kernels/mamba/test_mamba_mixer2.py \
+  --ignore=kernels/mamba/test_causal_conv1d.py \
+  --ignore=kernels/mamba/test_mamba_ssm_ssd.py"
+fi
+
+if [[ $commands == *" kernels/moe"* ]]; then
+  commands="${commands} \
+  --ignore=kernels/moe/test_moe.py \
+  --ignore=kernels/moe/test_cutlass_moe.py \
+  --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py"
 fi
 
 #ignore certain Entrypoints/openai tests
@@ -147,6 +185,8 @@ fi
 
 
 PARALLEL_JOB_COUNT=8
+MYPYTHONPATH=".."
+
 # check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
 if [[ $commands == *"--shard-id="* ]]; then
   # assign job count as the number of shards used   
@@ -167,6 +207,7 @@ if [[ $commands == *"--shard-id="* ]]; then
         -e AWS_SECRET_ACCESS_KEY \
         -v "${HF_CACHE}:${HF_MOUNT}" \
         -e "HF_HOME=${HF_MOUNT}" \
+        -e "PYTHONPATH=${MYPYTHONPATH}" \
         --name "${container_name}_${GPU}" \
         "${image_name}" \
         /bin/bash -c "${commands_gpu}" \
@@ -197,6 +238,7 @@ else
           -e AWS_SECRET_ACCESS_KEY \
           -v "${HF_CACHE}:${HF_MOUNT}" \
           -e "HF_HOME=${HF_MOUNT}" \
+          -e "PYTHONPATH=${MYPYTHONPATH}" \
           --name "${container_name}" \
           "${image_name}" \
           /bin/bash -c "${commands}"

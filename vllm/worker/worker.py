@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 import gc
 import os
@@ -71,7 +72,11 @@ class Worker(LocalOrDistributedWorkerBase):
             or (speculative_config.draft_model_config.hf_config.model_type ==
                 model_config.hf_config.model_type) \
             or (speculative_config.draft_model_config.hf_config.model_type
-                not in ("medusa", "mlp_speculator", "eagle", "deepseek_mtp")) \
+                not in ("medusa",
+                        "mlp_speculator",
+                        "eagle",
+                        "deepseek_mtp",
+                         "mimo_mtp")) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
@@ -124,6 +129,8 @@ class Worker(LocalOrDistributedWorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
+        print(
+            self.profiler.key_averages().table(sort_by="self_cuda_time_total"))
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
@@ -230,7 +237,7 @@ class Worker(LocalOrDistributedWorkerBase):
         Then, it calculate the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
 
-        .. tip::
+        Tip:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """

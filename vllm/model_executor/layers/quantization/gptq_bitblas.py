@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Any, Dict, List, Optional, Set
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -7,6 +8,7 @@ from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
@@ -24,6 +26,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -123,23 +126,23 @@ class GPTQBitBLASConfig(QuantizationConfig):
                 f"quant_method={self.quant_method})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "gptq_bitblas"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 70
+        return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "GPTQBitBLASConfig":
+    def from_config(cls, config: dict[str, Any]) -> "GPTQBitBLASConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
@@ -151,8 +154,8 @@ class GPTQBitBLASConfig(QuantizationConfig):
                    lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         can_convert = cls.is_gptq_bitblas_compatible(hf_quant_cfg)
 
         is_valid_user_quant = (user_quant is None or user_quant == "bitblas"
@@ -183,12 +186,16 @@ class GPTQBitBLASConfig(QuantizationConfig):
         return self.TORCH_BITBLAS_STORAGE_DTYPE
 
     @classmethod
-    def is_gptq_bitblas_compatible(cls, quant_config: Dict[str, Any]):
+    def is_gptq_bitblas_compatible(cls, quant_config: dict[str, Any]):
         # Extract data from quant config.
         num_bits = quant_config.get("bits")
         group_size = quant_config.get("group_size")
         sym = quant_config.get("sym")
         desc_act = quant_config.get("desc_act")
+
+        # temporarily disable on ROCm platform
+        if not current_platform.is_cuda():
+            return False
 
         # If we cannot find the info needed in the config, cannot convert.
         if (num_bits is None or group_size is None or sym is None
@@ -218,7 +225,7 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
     """
 
     kernel_type = BitBLASLinearKernel
-    _kernel_backends_being_used: Set[str] = set()
+    _kernel_backends_being_used: set[str] = set()
 
     def __init__(self, quant_config: GPTQBitBLASConfig) -> None:
         self.quant_config = quant_config
@@ -230,7 +237,7 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

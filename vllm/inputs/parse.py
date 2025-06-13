@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from typing import Literal, Optional, TypedDict, Union, cast, overload
 
@@ -6,8 +7,9 @@ from typing_extensions import TypeIs
 
 from vllm.utils import is_list_of
 
-from .data import (ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,
-                   SingletonInputs, SingletonPrompt, TextPrompt, TokensPrompt)
+from .data import (EmbedsPrompt, ExplicitEncoderDecoderPrompt, ProcessorInputs,
+                   PromptType, SingletonInputs, SingletonPrompt, TextPrompt,
+                   TokensPrompt)
 
 
 class ParsedText(TypedDict):
@@ -22,13 +24,13 @@ class ParsedTokens(TypedDict):
 
 @overload
 def parse_and_batch_prompt(
-        prompt: Union[str, list[str]]) -> Sequence[ParsedText]:
+    prompt: Union[str, list[str]], ) -> Sequence[ParsedText]:
     ...
 
 
 @overload
 def parse_and_batch_prompt(
-        prompt: Union[list[int], list[list[int]]]) -> Sequence[ParsedTokens]:
+    prompt: Union[list[int], list[list[int]]], ) -> Sequence[ParsedTokens]:
     ...
 
 
@@ -84,27 +86,55 @@ class ParsedTokensPrompt(TypedDict):
     content: TokensPrompt
 
 
-def parse_singleton_prompt(
-    prompt: SingletonPrompt,
-) -> Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt]:
+class ParsedEmbedsPrompt(TypedDict):
+    type: Literal["embeds"]
+    content: EmbedsPrompt
+
+
+ParsedSingletonPrompt = Union[ParsedStrPrompt, ParsedTextPrompt,
+                              ParsedTokensPrompt, ParsedEmbedsPrompt]
+
+
+@overload
+def parse_singleton_prompt(prompt: str) -> ParsedStrPrompt:
+    ...
+
+
+@overload
+def parse_singleton_prompt(prompt: TextPrompt) -> ParsedTextPrompt:
+    ...
+
+
+@overload
+def parse_singleton_prompt(prompt: TokensPrompt) -> ParsedTokensPrompt:
+    ...
+
+
+@overload
+def parse_singleton_prompt(prompt: EmbedsPrompt) -> ParsedEmbedsPrompt:
+    ...
+
+
+def parse_singleton_prompt(prompt: SingletonPrompt) -> ParsedSingletonPrompt:
     if isinstance(prompt, str):
         return ParsedStrPrompt(type="str", content=prompt)
     elif isinstance(prompt, dict):
-        if "prompt_token_ids" in prompt:
-            return ParsedTokensPrompt(type="tokens",
-                                      content=prompt)  # type: ignore
+        # Type ignores are because mypy does not correctly infer the TypedDicts
+        # Pyright does succeed.
+        if "prompt_embeds" in prompt:
+            return ParsedEmbedsPrompt(
+                type="embeds", content=prompt)  # type: ignore[typeddict-item]
+        elif "prompt_token_ids" in prompt:
+            return ParsedTokensPrompt(
+                type="tokens", content=prompt)  # type: ignore[typeddict-item]
         elif "prompt" in prompt:
             return ParsedTextPrompt(type="text", content=prompt)
-
-    raise TypeError("inputs must be a string, TextPrompt, or TokensPrompt")
-
-
-def is_token_prompt(prompt: PromptType) -> TypeIs[TokensPrompt]:
-    return isinstance(prompt, dict) and "prompt_token_ids" in prompt
+    raise TypeError(
+        "inputs must be a string, TextPrompt, TokensPrompt, or EmbedsPrompt")
 
 
 def is_explicit_encoder_decoder_prompt(
-        prompt: PromptType) -> TypeIs[ExplicitEncoderDecoderPrompt]:
+    prompt: PromptType, ) -> TypeIs[ExplicitEncoderDecoderPrompt]:
     return isinstance(prompt, dict) and "encoder_prompt" in prompt
 
 

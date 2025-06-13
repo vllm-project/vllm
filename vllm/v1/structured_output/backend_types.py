@@ -1,9 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from __future__ import annotations
 
 import enum
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import torch
+if TYPE_CHECKING:
+    import torch
+
+    from vllm.config import VllmConfig
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 class StructuredOutputOptions(enum.Enum):
@@ -36,6 +45,30 @@ class StructuredOutputGrammar(ABC):
         """
 
     @abstractmethod
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        """
+        Validates the provided tokens against the grammar.
+        Will not advance the FSM.
+
+        Args:
+            tokens (list[int]): A list of token IDs to validate.
+
+        Returns:
+            list[int]: A list of accepted token IDs. Will be a prefix
+                of the input tokens, and empty if none are accepted.
+        """
+
+    @abstractmethod
+    def rollback(self, num_tokens: int) -> None:
+        """
+        Rolls back the state of the grammar by a specified number of tokens.
+        Will also revert counters for the number of processed tokens.
+
+        Args:
+            num_tokens (int): The number of tokens to roll back.
+        """
+
+    @abstractmethod
     def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
         """
         Fills the bitmask for a specific batch index.
@@ -61,8 +94,13 @@ class StructuredOutputGrammar(ABC):
         """
 
 
+@dataclass
 class StructuredOutputBackend(ABC):
     """Engine-level backend for structured output requests."""
+
+    vllm_config: VllmConfig
+    tokenizer: AnyTokenizer
+    vocab_size: int
 
     @abstractmethod
     def compile_grammar(self, request_type: StructuredOutputOptions,
@@ -80,7 +118,7 @@ class StructuredOutputBackend(ABC):
         """
 
     @abstractmethod
-    def allocate_token_bitmask(self, max_num_seqs: int):
+    def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
         """
         Allocates a token bitmask for the specified maximum number of sequences.
 

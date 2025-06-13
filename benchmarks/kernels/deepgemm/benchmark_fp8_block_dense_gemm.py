@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # fmt: off
 # ruff: noqa: E501
 import time
@@ -6,13 +7,15 @@ import time
 # Import DeepGEMM functions
 import deep_gemm
 import torch
-import triton
 from deep_gemm import calc_diff, ceil_div, get_col_major_tma_aligned_tensor
 
 # Import vLLM functions
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8, w8a8_block_fp8_matmul)
+    per_token_group_quant_fp8,
+    w8a8_block_fp8_matmul,
+)
+from vllm.triton_utils import triton
 
 
 # Copied from

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Any, Dict, List, Optional
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any, Optional
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.utils.bitblas_utils import (
@@ -100,11 +102,11 @@ class BitBLASConfig(QuantizationConfig):
                 f"quant_method={self.quant_method})")
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "bitblas"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
     @classmethod
@@ -113,12 +115,12 @@ class BitBLASConfig(QuantizationConfig):
         return 70
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @staticmethod
-    def get_from_keys(config: Dict[str, Any],
-                      keys: List[str],
+    def get_from_keys(config: dict[str, Any],
+                      keys: list[str],
                       default: Any = None) -> Any:
         """Get a value from the model's quantization config."""
         for key in keys:
@@ -127,7 +129,7 @@ class BitBLASConfig(QuantizationConfig):
         return default
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "BitBLASConfig":
+    def from_config(cls, config: dict[str, Any]) -> "BitBLASConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"], -1)
         desc_act = cls.get_from_keys(config, ["desc_act"], False)
@@ -139,8 +141,8 @@ class BitBLASConfig(QuantizationConfig):
                    lm_head_quantized)
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         # compat: autogptq >=0.8.0 use checkpoint_format: str
         # compat: autogptq <=0.7.1 is_bitblas_format: bool
         is_bitblas_format = (hf_quant_cfg.get("checkpoint_format") == "bitblas"
@@ -192,7 +194,7 @@ class BitBLASLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -328,7 +330,7 @@ class BitBLASLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

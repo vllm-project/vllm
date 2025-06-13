@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -16,6 +17,8 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.block_table import BlockTable
 
 logger = init_logger(__name__)
 
@@ -52,14 +55,14 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
-    def __init__(self, runner):
-        super().__init__(runner)
+    def __init__(self, runner, kv_cache_spec: AttentionSpec,
+                 block_table: BlockTable):
+        super().__init__(runner, kv_cache_spec, block_table)
 
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
-    def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor,
+    def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
             get_mla_metadata(
@@ -69,8 +72,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         )
 
         return FlashMLADecodeMetadata(
-            input_positions=input_positions,
-            block_table=block_table,
+            block_table=block_table_tensor,
             seq_lens=seq_lens,
             tile_scheduler_metadata=tile_scheduler_metadata,
             num_splits=num_splits,
@@ -91,12 +93,13 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
+            kv_sharing_target_layer_name: Optional[str],
             # MLA Specific Arguments
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+                         kv_sharing_target_layer_name, **mla_args)
 
         assert is_flashmla_supported(), \
             "FlashMLA is not supported on this device"
@@ -146,4 +149,4 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             causal=True,
         )
 
-        return self._v_up_proj_and_o_proj(o)
+        return self._v_up_proj(o)

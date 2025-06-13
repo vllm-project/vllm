@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from unittest.mock import patch
 
@@ -84,7 +85,10 @@ def test_env(
                        CpuPlatform()):
                 backend = get_attn_backend(16, torch.float16, torch.float16,
                                            block_size, False)
-            assert backend.get_name() == "TORCH_SDPA"
+            if use_v1:
+                assert backend.get_name() == "TORCH_SDPA_VLLM_V1"
+            else:
+                assert backend.get_name() == "TORCH_SDPA"
 
         elif device == "hip":
             with patch("vllm.attention.selector.current_platform",
@@ -102,7 +106,10 @@ def test_env(
                                                    block_size,
                                                    False,
                                                    use_mla=use_mla)
-                        assert backend.get_name() == name
+                        if use_v1 and name != "TRITON_MLA":
+                            assert backend.get_name() == f"{name}_VLLM_V1"
+                        else:
+                            assert backend.get_name() == name
                     else:
                         with pytest.raises(ValueError) as exc_info:
                             get_attn_backend(16,
@@ -185,8 +192,9 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
         m.setenv(STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL)
 
         # Unsupported CUDA arch
-        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda:
-                            (7, 5))
+        monkeypatch.setattr(torch.cuda,
+                            "get_device_capability",
+                            lambda _=None: (7, 5))
         backend = get_attn_backend(16, torch.float16, None, 16, False)
         assert backend.get_name() != STR_FLASH_ATTN_VAL
 

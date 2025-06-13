@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import dataclasses
@@ -103,7 +104,8 @@ def test_compile_correctness(
     method = test_setting.method
     fullgraph = test_setting.fullgraph
     if cuda_device_count_stateless() != pp_size * tp_size:
-        pytest.skip("Not correct CUDA devices for the test.")
+        pytest.skip(f"Need exactly {pp_size}*{tp_size} CUDA gpus but got "
+                    f"{cuda_device_count_stateless()}")
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)

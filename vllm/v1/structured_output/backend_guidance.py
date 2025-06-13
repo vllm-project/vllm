@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from __future__ import annotations
 
 import copy
 import json
@@ -8,10 +11,8 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.sampling_params import SamplingParams
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar,
@@ -54,40 +55,23 @@ def process_for_additional_properties(
     return guide_json_obj
 
 
+@dataclass
 class GuidanceBackend(StructuredOutputBackend):
 
-    def __init__(self, vllm_config: VllmConfig):
-        self.vllm_config = vllm_config
-        tokenizer_group = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        self.vllm_config = vllm_config
-        self.vocab_size = vllm_config.model_config.get_vocab_size()
+    def __post_init__(self):
+        self.disable_any_whitespace = \
+            self.vllm_config.decoding_config.disable_any_whitespace
+        self.disable_additional_properties = \
+            self.vllm_config.decoding_config.disable_additional_properties
 
-        self.disable_any_whitespace = False
-        self.no_additional_properties = False
-        backend_options = GuidedDecodingParams(
-            backend=vllm_config.decoding_config.guided_decoding_backend
-        ).backend_options()
-        for option in backend_options:
-            if option == "disable-any-whitespace":
-                self.disable_any_whitespace = True
-            elif option == "no-additional-properties":
-                self.no_additional_properties = True
-            else:
-                raise ValueError(
-                    f"Unsupported option for the guidance backend: {option}")
-
-        tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.ll_tokenizer = llguidance_hf.from_tokenizer(
-            tokenizer, self.vocab_size)
+            self.tokenizer, self.vocab_size)
 
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
         self.serialized_grammar = serialize_guidance_grammar(
             request_type, grammar_spec, self.disable_any_whitespace,
-            self.no_additional_properties)
+            self.disable_additional_properties)
 
         ll_matcher = llguidance.LLMatcher(
             self.ll_tokenizer,
@@ -153,6 +137,27 @@ class GuidanceGrammar(StructuredOutputGrammar):
 
         return r
 
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        """Checks if the list of tokens are accepted by the parser in sequence.
+        Will not advance the parser.
+
+        Returns the prefix list of tokens that are accepted by the parser.
+        """
+        if len(tokens) == 0:
+            return []
+        if self.ll_matcher.is_stopped():
+            return []
+
+        num_tokens = self.ll_matcher.validate_tokens(tokens)
+
+        self.check_error()
+
+        return tokens[:num_tokens]
+
+    def rollback(self, num_tokens: int) -> None:
+        self.ll_matcher.rollback(num_tokens)
+        self.check_error()
+
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         # this will automatically return [EOS] mask if the matcher is stopped
         # or otherwise in an error state
@@ -171,16 +176,20 @@ def serialize_guidance_grammar(
     request_type: StructuredOutputOptions,
     grammar_spec: Union[str, dict[str, Any]],
     disable_any_whitespace: bool = False,
-    no_additional_properties: bool = False,
+    disable_additional_properties: bool = False,
 ) -> str:
-    if request_type == StructuredOutputOptions.JSON:
-        if no_additional_properties:
+
+    def _process_schema(grammar_spec: Union[str, dict[str, Any]], ) -> str:
+        if disable_additional_properties:
             grammar_spec = process_for_additional_properties(grammar_spec)
         return llguidance.LLMatcher.grammar_from_json_schema(
             grammar_spec,
             defaults={
                 "whitespace_flexible": not disable_any_whitespace,
             })
+
+    if request_type == StructuredOutputOptions.JSON:
+        return _process_schema(grammar_spec)
     elif request_type == StructuredOutputOptions.JSON_OBJECT:
         return llguidance.LLMatcher.grammar_from_json_schema(
             '{"type": "object"}',
@@ -195,8 +204,29 @@ def serialize_guidance_grammar(
         elif request_type == StructuredOutputOptions.CHOICE:
             tp = "choice"
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
-            raise ValueError("Structural tag is not supported "
-                             "for guidance backend yet")
+            if isinstance(grammar_spec, str):
+                s_tag = json.loads(grammar_spec)
+            else:
+                s_tag = grammar_spec
+            triggers: list[str] = s_tag["triggers"]
+            tags: list[llguidance.StructTag] = []
+            for s in s_tag["structures"]:
+                begin: str = s["begin"]
+                trig = next((t for t in triggers if begin.startswith(t)), None)
+                if trig is None:
+                    raise ValueError(
+                        f"Trigger {begin} not found in triggers {triggers}")
+                tags.append(
+                    llguidance.StructTag(
+                        trigger=trig,
+                        begin=s["begin"],
+                        grammar=_process_schema(s["schema"]),
+                        end=s["end"],
+                    ))
+            if not tags:
+                raise ValueError(
+                    "No structural tags found in the grammar spec.")
+            return llguidance.StructTag.to_grammar(tags)
         else:
             logger.error("Validation should have already occurred. "
                          "Please file an issue.")

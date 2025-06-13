@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
 from dataclasses import dataclass, field
@@ -19,7 +20,7 @@ class PrefixCacheStats:
     # The number of requests in this update.
     requests: int = 0
     # The number of queries in these requests. Note that "queries" here
-    # means the number of blocks that were queried from the cache.
+    # means the number of tokens that were queried from the cache.
     queries: int = 0
     # The number of hits in these requests.
     hits: int = 0

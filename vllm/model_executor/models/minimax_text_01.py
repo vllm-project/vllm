@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MiniMaxText01 model."""
 import copy
 import math
-import re
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
+import regex as re
 import torch
 import torch.distributed
 import torch.nn.functional as F
@@ -110,14 +112,24 @@ class MiniMaxText01RMSNormTP(CustomOp):
             variance = tensor_model_parallel_all_reduce(
                 variance) / self.tp_world
         x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = x.to(orig_dtype) * self.weight
+
+        weight = self.weight
+        if x.size(-1) != self.weight.size(0):
+            if self.weight.size(0) < x.size(-1):
+                repeat_count = (x.size(-1) + self.weight.size(0)) // x.size(-1)
+                full_weight = self.weight.repeat(repeat_count)
+                weight = full_weight[:x.size(-1)]
+            else:
+                weight = self.weight[:x.size(-1)]
+
+        x = x.to(orig_dtype) * weight
         return x
 
     def forward(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert residual is None, "RMSNorm does not support residual connection."
         return self._forward(x)
 
@@ -130,7 +142,7 @@ class MiniMaxText01RotaryEmbedding(CustomOp):
         head_size: int,
         rotary_dim: int,
         max_position: int,
-        base: int,
+        base: float,
         is_neox_style: bool,
         cache_dtype: torch.dtype,
     ) -> None:
@@ -144,10 +156,7 @@ class MiniMaxText01RotaryEmbedding(CustomOp):
         cache = self._compute_cos_sin_cache().to(cache_dtype)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
-    def _compute_inv_freq(
-        self,
-        base: Union[int, float],
-    ) -> torch.Tensor:
+    def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
         inv_freq = 1.0 / (base**(torch.arange(
             0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
@@ -168,7 +177,7 @@ class MiniMaxText01RotaryEmbedding(CustomOp):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm import _custom_ops as ops
         self.cos_sin_cache = self.cos_sin_cache.to(positions.device)
         query_cast = query.to(self.cache_dtype)
@@ -421,6 +430,10 @@ class MiniMaxText01LinearAttention(nn.Module):
                                attn_metadata):
         hidden = []
         for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
+            if _prefill_idx >= len(attn_metadata.query_start_loc):
+                break
+            if _prefill_idx >= len(state_indices_tensor):
+                break
             _start = attn_metadata.query_start_loc[_prefill_idx]
             _end = attn_metadata.query_start_loc[_prefill_idx + 1]
             slot_id = state_indices_tensor[_prefill_idx]
@@ -443,6 +456,10 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden.append(
                 self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
                                    attn_metadata))
+
+        if not hidden:
+            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
+
         hidden = torch.concat(hidden, dim=0).contiguous()
         return hidden
 
@@ -585,8 +602,9 @@ class MiniMaxText01DecoderLayer(nn.Module):
 
         rope_theta = getattr(config, "rope_theta", 10000)
 
-        head_dim = getattr(config, "head_dim",
-                           config.hidden_size // config.num_attention_heads)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // config.num_attention_heads
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
@@ -663,6 +681,9 @@ class MiniMaxText01DecoderLayer(nn.Module):
         self.shared_moe = False
 
         shared_intermediate = getattr(config, 'shared_intermediate_size', 0)
+        if isinstance(shared_intermediate, list):
+            shared_intermediate = shared_intermediate[
+                layer_id] if layer_id < len(shared_intermediate) else 0
         if shared_intermediate > 0:
             self.shared_moe = True
             self.shared_mlp = MiniMaxText01MLP(
@@ -687,11 +708,11 @@ class MiniMaxText01DecoderLayer(nn.Module):
     def forward(self,
                 hidden_states: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: Union[List[Dict], Optional[torch.Tensor]],
+                kv_caches: Union[list[dict], Optional[torch.Tensor]],
                 attn_metadata: AttentionMetadata,
                 residual: Optional[torch.Tensor],
                 is_warmup: bool = False,
-                **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+                **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
 
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
@@ -839,8 +860,9 @@ class MiniMaxText01Model(nn.Module):
                                                  cache_shape=self.cache_shape)
 
         rope_theta = getattr(config, "rope_theta", 10000)
-        head_dim = getattr(config, "head_dim",
-                           config.hidden_size // config.num_attention_heads)
+        head_dim = getattr(config, "head_dim", None)
+        if head_dim is None:
+            head_dim = config.hidden_size // config.num_attention_heads
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
@@ -875,6 +897,8 @@ class MiniMaxText01Model(nn.Module):
 
         slots_to_clear = []
         for _prefill_id in range(getattr(attn_metadata, "num_prefills", 0)):
+            if _prefill_id >= len(seq_id_map):
+                break
             seq_id = seq_id_map[_prefill_id]
             if attn_metadata.context_lens_tensor[
                     _prefill_id] == 0 and seq_id in seq_to_slot_maps:
@@ -886,13 +910,18 @@ class MiniMaxText01Model(nn.Module):
                                         dtype=torch.long)
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(self,
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                intermediate_tensors=None,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs) -> torch.Tensor:
+                **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
@@ -901,6 +930,7 @@ class MiniMaxText01Model(nn.Module):
             kwargs["request_ids_to_seq_ids"] = {}
         if "finished_requests_ids" not in kwargs:
             kwargs["finished_requests_ids"] = []
+
         (
             minimax_cache_tensors,
             state_indices_tensor,
@@ -922,15 +952,11 @@ class MiniMaxText01Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        kv_cache_index = 0
         minimax_cache_index = 0
         attn_metadata.rotary_emb = self.rotary_emb
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             _caches = None
-            if isinstance(layer.self_attn, MiniMaxText01Attention):
-                _caches = kv_caches[kv_cache_index]
-                kv_cache_index += 1
             if isinstance(layer.self_attn, MiniMaxText01LinearAttention):
                 current_state_layer = minimax_cache_index
                 _caches = minimax_cache_params.at_layer_idx(
@@ -1009,15 +1035,20 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(
             batch_size)
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, self.kv_cache,
-                                   intermediate_tensors, inputs_embeds,
-                                   **kwargs)
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds, **kwargs)
 
         return hidden_states
 
@@ -1042,9 +1073,10 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                         device=device),
         })
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> None:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
 
         def which_layer(name: str) -> int:
             if "layers" in name:
@@ -1108,6 +1140,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                               weight_name,
                               expert_id=expert_id,
                               shard_id=shard_id)
+                loaded_params.add(name)
                 break
             else:
                 if is_pp_missing_parameter(name, self):
@@ -1117,6 +1150,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                         default_weight_loader)
                 weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight)
+                loaded_params.add(name)
             return
 
         def is_shared_mlp_weight(name: str) -> bool:
@@ -1154,6 +1188,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 else:
                     raise AssertionError(
                         "MLP weight not in [gate_up_proj, down_proj]")
+            loaded_params.add(name)
             return
 
         def is_mha_weight(name: str) -> bool:
@@ -1170,6 +1205,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 MiniMaxText01LinearAttention.weight_direct_load)
             weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
             return
 
         def load_flash_attn_weight(name: str, loaded_weight: torch.Tensor,
@@ -1194,6 +1230,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                         default_weight_loader)
                 weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 break
             else:
                 if is_pp_missing_parameter(name, self):
@@ -1204,6 +1241,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                         default_weight_loader)
                 weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(param, loaded_weight)
+                loaded_params.add(name)
             return
 
         def is_layer_norm_weight(name: str) -> bool:
@@ -1219,6 +1257,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                     default_weight_loader)
             weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
             return
 
         def load_basic_weight(name: str, loaded_weight: torch.Tensor,
@@ -1230,6 +1269,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                                     default_weight_loader)
             weight_loader = weight_loader_with_alias(name)(weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
             return
 
         for name, loaded_weight in weights:
@@ -1258,4 +1298,4 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
                 continue
 
             load_basic_weight(name, loaded_weight, self)
-        return
+        return loaded_params

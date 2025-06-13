@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
 import time
@@ -44,10 +45,6 @@ class EngineCoreRequest(
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 
-    # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
-    # but this object is currently not playing well with msgspec
-    # due to circular imports and typing we have in data.py
-
     request_id: str
     prompt_token_ids: list[int]
     mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]
@@ -57,6 +54,12 @@ class EngineCoreRequest(
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
+    cache_salt: Optional[str]
+    data_parallel_rank: Optional[int]
+
+    # Index of the client, used to ensure outputs are sent back to the same
+    # client for this request when scaling out the front-end.
+    client_index: int = 0
 
     # Used in DP case to indicate which wave of requests this is expected to
     # belong to, to cover a race condition where the request is sent before
@@ -104,6 +107,10 @@ class EngineCoreOutput(
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
     events: Optional[list[EngineCoreEvent]] = None
+    kv_transfer_params: Optional[dict[str, Any]] = None
+
+    # The number of tokens with prefix cache hits.
+    num_cached_tokens: int = 0
 
     @property
     def finished(self) -> bool:

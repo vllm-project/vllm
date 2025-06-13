@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 import time
@@ -57,6 +58,8 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                           mm_placeholders=None,
                           eos_token_id=None,
                           lora_request=None,
+                          cache_salt=None,
+                          data_parallel_rank=None,
                           sampling_params=SamplingParams(
                               skip_special_tokens=False,
                               spaces_between_special_tokens=False,
@@ -403,6 +406,8 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                           mm_placeholders=None,
                           eos_token_id=None,
                           lora_request=None,
+                          cache_salt=None,
+                          data_parallel_rank=None,
                           sampling_params=SamplingParams(
                               skip_special_tokens=False,
                               spaces_between_special_tokens=False,
@@ -503,7 +508,7 @@ def test_stop_token(include_stop_str_in_output: bool,
       reason should be "stop" (i.e. first control token causes stop
       and is represented in output text)
 
-    * else, the detokenized string should be 
+    * else, the detokenized string should be
       <token><token>...<token> and the finish reason should be "stop"
       (i.e. first control token causes stop but is not represented
       in output text.)
@@ -565,6 +570,8 @@ def test_stop_token(include_stop_str_in_output: bool,
         mm_placeholders=None,
         eos_token_id=eos_token_id,
         lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
         sampling_params=SamplingParams(
             skip_special_tokens=False,
             spaces_between_special_tokens=False,
@@ -661,6 +668,8 @@ def test_stop_string(include_stop_str_in_output: bool,
             mm_placeholders=None,
             eos_token_id=None,
             lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
             sampling_params=SamplingParams(
                 skip_special_tokens=False,
                 spaces_between_special_tokens=False,
@@ -774,6 +783,8 @@ def test_iteration_stats(dummy_test_vectors):
             mm_placeholders=None,
             eos_token_id=None,
             lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
             sampling_params=SamplingParams(),
         ) for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
     ]

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This docstring details important information on the testing methodology.
 
 Most of the tests rely on "greedy equality", where we expect the output of
@@ -21,8 +22,8 @@ However, we still need to verify below scenario could be passed:
     * Test greedy equality under preemption
     * Test greedy equality under various ngram sizes / speculative sizes
 
-With those tests, we can say at least, ngram spec would not break the correctess
-for the target model outputs.
+With those tests, we can say at least, ngram spec would not break the
+correctness for the target model outputs.
 """
 
 import pytest
@@ -152,7 +153,7 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "block_size": 8,
+        "block_size": 16,
         # 2 for small prompt, 256//8 for generated.
         "num_gpu_blocks_override": 2 + 256 // 8,
         "max_model_len": (2 + 256 // 8) * 8,

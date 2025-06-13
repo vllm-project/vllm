@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.parameter import ModelWeightParameter
@@ -27,10 +29,10 @@ class Int8TpuConfig(QuantizationConfig):
                 f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
 
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "tpu_int8"
 
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.float16, torch.bfloat16]
 
     @classmethod
@@ -39,11 +41,11 @@ class Int8TpuConfig(QuantizationConfig):
             "This function should not be called with TPU Backend")
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "Int8TpuConfig":
+    def from_config(cls, config: dict[str, Any]) -> "Int8TpuConfig":
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         return cls(activation_scheme=activation_scheme)
 
@@ -61,7 +63,7 @@ class TPUInt8LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
 
     def create_weights(self, layer: Module, input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
 
@@ -76,7 +78,7 @@ class TPUInt8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
 
     def _quantize_weight(
-            self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            self, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         weight_dtype = weight.dtype
         weight = weight.cpu().to(torch.float32)
         n_bit = 8

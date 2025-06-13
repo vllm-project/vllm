@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
@@ -22,7 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Optional, Set, Tuple, TypedDict, Union
+from typing import Any, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -150,8 +151,15 @@ class Qwen2AudioMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, Any],
     ) -> BatchFeature:
+        # NOTE - we rename audios -> audio in mm data because transformers has
+        # deprecated audios for the qwen2audio processor and will remove
+        # support for it in transformers 4.54.
+        audios = mm_data.pop("audios", [])
+        if audios:
+            mm_data["audio"] = audios
+
         # Text-only input not supported in composite processor
-        if not mm_data.get("audios", []):
+        if not mm_data.get("audio", []):
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
@@ -396,7 +404,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

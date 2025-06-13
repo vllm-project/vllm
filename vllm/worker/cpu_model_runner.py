@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import weakref
@@ -22,8 +23,8 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs, MultiModalPlaceholderMap)
+from vllm.multimodal import (BatchedTensorInputs, MultiModalKwargs,
+                             MultiModalPlaceholderMap)
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
 from vllm.worker.model_runner_base import (
@@ -154,7 +155,6 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.sliding_window = self.runner.sliding_window
         self.block_size = self.runner.block_size
         self.device = self.runner.device
-        self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.enable_lora = self.runner.lora_config is not None
         if self.runner.attn_backend is not None:
             # spec decode (e.g. Medusa) does not have atten backend
@@ -359,21 +359,13 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         computed_len = seq_data.get_num_computed_tokens()
         seq_len = self.input_data.seq_lens[-1]
 
-        # NOTE: mm_data only includes the subset of multi-modal items that
+        # NOTE: mm_kwargs only includes the subset of multi-modal items that
         # intersect with the current prefill positions.
-        mm_data, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
+        mm_kwargs, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
             seq_group_metadata, range(computed_len, seq_len))
 
-        if not mm_data:
+        if not mm_kwargs:
             return
-
-        if self.runner.mm_registry.has_processor(self.runner.model_config):
-            mm_kwargs = mm_data
-        else:
-            mm_kwargs = self.multi_modal_input_mapper(
-                mm_data,
-                seq_group_metadata.mm_processor_kwargs,
-            )
 
         # special processing for mrope position deltas.
         if self.runner.model_config.uses_mrope:
@@ -479,12 +471,6 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             self.model_config.is_attention_free,
             use_mla=self.model_config.use_mla,
         ) if needs_attn_backend else None
-
-        # Multi-modal data support
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.multi_modal_input_mapper = self.mm_registry \
-            .create_input_mapper(self.model_config)
-        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
@@ -643,7 +629,9 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
         multimodal_kwargs = {}
         if model_input.multi_modal_kwargs is not None:
             multimodal_kwargs = MultiModalKwargs.as_kwargs(
-                model_input.multi_modal_kwargs, device=self.device)
+                model_input.multi_modal_kwargs,
+                device=self.device,
+            )
         execute_model_kwargs = {}
         if previous_hidden_states is not None:
             execute_model_kwargs.update(

@@ -7,6 +7,6 @@ triton==3.1.0
 pandas
 numpy==1.26.4
 tabulate
-setuptools>=61
+setuptools>=77.0.3,<80.0.0
 setuptools-scm>=8
 vllm-hpu-extension @ git+https://github.com/HabanaAI/vllm-hpu-extension.git@f1f6624

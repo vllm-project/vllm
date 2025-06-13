@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Optional, Tuple
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
 
 import torch
 
@@ -51,7 +52,7 @@ def _check_bitblas_supported(
         quant_type: ScalarType,
         group_size: Optional[int],
         has_zp: bool,
-        device_capability: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+        device_capability: Optional[int] = None) -> tuple[bool, Optional[str]]:
 
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
@@ -70,6 +71,15 @@ def _check_bitblas_supported(
         return (False, f"BitBLAS does not support group_size = {group_size}. "
                 f"Only group_sizes = {BITBLAS_SUPPORTED_GROUP_SIZES} "
                 "are supported.")
+
+    # Finally, check if bitblas is installed
+    try:
+        import bitblas
+        if bitblas.__version__ < MINIMUM_BITBLAS_VERSION:
+            raise ImportError("bitblas version is wrong. Please "
+                              f"install bitblas>={MINIMUM_BITBLAS_VERSION}")
+    except ImportError:
+        return False, "BitBLAS is not installed."
 
     return True, None
 
@@ -124,7 +134,7 @@ def verify_bitblas_supports_shape(output_size_per_partition: int,
 def check_bitblas_supports_shape(output_size_per_partition: int,
                                 input_size_per_partition: int,
                                 input_size: int, group_size: int) \
-                                    -> Tuple[bool, Optional[str]]:
+                                    -> tuple[bool, Optional[str]]:
     try:
         verify_bitblas_supports_shape(output_size_per_partition,
                                       input_size_per_partition, input_size,
@@ -157,7 +167,7 @@ def bitblas_make_empty_zp(device: torch.device) -> torch.Tensor:
 
 
 def bitblas_sort_g_idx(
-        g_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        g_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     g_idx_sort_indices = torch.argsort(g_idx).to(torch.int)
     return g_idx[g_idx_sort_indices], g_idx_sort_indices
 

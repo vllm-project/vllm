@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
-                    TypeVar, Union)
+from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -18,6 +19,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -31,7 +33,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -270,12 +273,8 @@ class Mistral3MultiModalProcessor(
         image_token_id = hf_config.image_token_index
         image_end_id = vocab[processor.image_end_token]
 
-        vision_config = hf_config.vision_config
-        assert isinstance(vision_config, PixtralVisionConfig)
-        # Need to sneak in spatial_merge_size for Mistral3
-        vision_config.spatial_merge_size = getattr(hf_config,
-                                                   "spatial_merge_size", 1)
-        encoder_info = PixtralHFEncoderInfo(vision_config)
+        assert isinstance(hf_config.vision_config, PixtralVisionConfig)
+        encoder_info = PixtralHFEncoderInfo(hf_config)
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
@@ -312,14 +311,12 @@ def _build_mistral3_processor(
     dummy_inputs: BaseDummyInputsBuilder[_I],
     *,
     cache: Optional[ProcessingCache] = None,
-    enable_sanity_checks: bool = True,
 ) -> BaseMultiModalProcessor:
     assert isinstance(info, Mistral3ProcessingInfo)
     return Mistral3MultiModalProcessor(
         info,
         dummy_inputs,  # type: ignore
         cache=cache,
-        enable_sanity_checks=enable_sanity_checks,
     )
 
 
@@ -384,8 +381,8 @@ def init_vision_tower_for_llava(
     _build_mistral3_processor,
     info=_build_mistral3_info,
     dummy_inputs=Mistral3DummyInputsBuilder)
-class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                       SupportsPP):
+class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
+                                       SupportsMultiModal, SupportsPP):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -563,8 +560,8 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 batch.
             pixel_values: The pixels in each input image.
 
-        See also:
-            :class:`Mistral3ImagePixelInputs`
+        Info:
+            [Mistral3ImagePixelInputs][]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -592,7 +589,16 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_tower")

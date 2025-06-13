@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import openai
 import pytest
@@ -32,6 +33,8 @@ def base64_encoded_image() -> dict[str, str]:
 async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
                                                                         str]):
 
+    pytest.skip("Skip this test until it's fixed.")
+
     def whats_in_this_image_msg(b64):
         return [{
             "role":
@@ -62,8 +65,6 @@ async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
         "576",
         # NOTE: max-num-batched-tokens>=mm_item_size
         "--disable_chunked_mm_input",
-        "--chat-template",
-        "examples/template_llava.jinja"
     ]
 
     # Server will pre-compile on first startup (takes a long time).

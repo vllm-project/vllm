@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
 from abc import ABC, abstractmethod
@@ -94,6 +95,8 @@ class TokenizerBase(ABC):
     @abstractmethod
     def encode(self,
                text: str,
+               truncation: Optional[bool] = None,
+               max_length: Optional[int] = None,
                add_special_tokens: Optional[bool] = None) -> list[int]:
         raise NotImplementedError()
 

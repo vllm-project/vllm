@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import copy
@@ -28,8 +29,8 @@ from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
@@ -99,7 +100,8 @@ class RemoteOpenAIServer:
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
-        parser = make_arg_parser(parser)
+        subparsers = parser.add_subparsers(required=False, dest="subparser")
+        parser = ServeSubcommand().subparser_init(subparsers)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
@@ -952,7 +954,7 @@ def get_client_text_logprob_generations(
         completions: list[Completion]) -> list[TextTextLogprobs]:
     '''Operates on the output of a request made to an Open-AI-protocol
     completions endpoint; obtains top-rank logprobs for each token in
-    each :class:`SequenceGroup`
+    each {class}`SequenceGroup`
     '''
     text_generations = get_client_text_generations(completions)
     text = ''.join(text_generations)
