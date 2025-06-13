@@ -62,7 +62,7 @@ class TensorMemoryPool:
         required_size = self._round_to_power_of_two(
             max(size, self.min_block_size))
         if required_size > self.max_block_size:
-            raise MemoryError("Requested size exceeds maximum block size")
+            raise ValueError("Requested size exceeds maximum block size")
 
         current_size = required_size
         while current_size <= self.max_block_size:
@@ -73,7 +73,7 @@ class TensorMemoryPool:
                 return block.addr
             current_size *= 2
 
-        raise MemoryError("Insufficient memory")
+        raise ValueError("Insufficient memory")
 
     def _split_block(self, block: MemoryBlock, required_size: int):
         while (block.size > required_size
@@ -122,7 +122,7 @@ class TensorMemoryPool:
 
         if block.size < size:
             self.free(addr)
-            raise MemoryError(
+            raise ValueError(
                 f"Allocated block size {block.size} is smaller than "
                 f"required size {size}")
 
@@ -134,7 +134,7 @@ class TensorMemoryPool:
                                               tensor.shape)
         except ValueError as err:
             self.free(addr)
-            raise MemoryError(f"Failed to create tensor view: {err}") from err
+            raise ValueError(f"Failed to create tensor view: {err}") from err
 
         cpu_tensor.copy_(tensor)
 
