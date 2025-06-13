@@ -752,6 +752,7 @@ steps:
 ##### A100 test #####
 
 - label: Distributed Tests (A100) # optional
+  working_dir: "/vllm-workspace/tests"
   gpu: a100
   optional: true
   num_gpus: 4
