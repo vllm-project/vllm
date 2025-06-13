@@ -1,4 +1,33 @@
 {
+  "__inputs": [
+  ],
+  "__elements": {},
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "11.2.0"
+    },
+    {
+      "type": "panel",
+      "id": "heatmap",
+      "name": "Heatmap",
+      "version": ""
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    }
+  ],
   "annotations": {
     "list": [
       {
@@ -25,7 +54,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 1,
+  "id": null,
   "links": [],
   "liveNow": false,
   "panels": [
@@ -1362,7 +1391,6 @@
     },
     {
       "datasource": {
-        "default": false,
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
@@ -1467,11 +1495,7 @@
   "templating": {
     "list": [
       {
-        "current": {
-          "selected": false,
-          "text": "prometheus",
-          "value": "edx8memhpd9tsa"
-        },
+        "current": {},
         "hide": 0,
         "includeAll": false,
         "label": "datasource",
@@ -1486,11 +1510,7 @@
         "type": "datasource"
       },
       {
-        "current": {
-          "selected": false,
-          "text": "/share/datasets/public_models/Meta-Llama-3-8B-Instruct",
-          "value": "/share/datasets/public_models/Meta-Llama-3-8B-Instruct"
-        },
+        "current": {},
         "datasource": {
           "type": "prometheus",
           "uid": "${DS_PROMETHEUS}"
