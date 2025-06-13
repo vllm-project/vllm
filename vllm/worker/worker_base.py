@@ -561,7 +561,8 @@ class WorkerWrapperBase:
                 is_pooling_model=(model_config.runner_type == "pooling"),
             )
 
-            if model_config.dtype not in V1_SUPPORTED_DTYPES:
+            if (envs.VLLM_USE_V1
+                    and model_config.dtype not in V1_SUPPORTED_DTYPES):
                 raise ValueError(
                     f"dtype 'auto' resolved to {model_config.dtype}, "
                     f"which is not supported in V1. "
