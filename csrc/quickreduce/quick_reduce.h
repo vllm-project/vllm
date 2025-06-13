@@ -95,7 +95,7 @@ allreduce_prototype_twoshot(T const* A, T* B, uint32_t N, int num_blocks,
 enum QuickReduceQuantLevel {
   FP16 = 0,
   INT8 = 1,
-  int6 = 2,
+  INT6 = 2,
   INT4 = 3,
 };
 
