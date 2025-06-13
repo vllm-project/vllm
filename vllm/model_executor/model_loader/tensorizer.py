@@ -14,7 +14,7 @@ import time
 from typing import TYPE_CHECKING
 from collections.abc import Generator, MutableMapping
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, ClassVar
 
 import regex as re
 import torch
@@ -169,6 +169,8 @@ class TensorizerConfig(MutableMapping):
     _model_cls_dtype: Optional[Union[str, torch.dtype]] = field(init=False,
                                                                 default=None)
     _is_sharded: bool = field(init=False, default=None)
+    _fields: ClassVar[tuple[str, ...]]
+    _keys: ClassVar[frozenset[str]]
     """
     Args for the TensorizerConfig class. These are used to configure the 
     behavior of model serialization and deserialization using Tensorizer.
@@ -309,21 +311,33 @@ class TensorizerConfig(MutableMapping):
         return open_stream(self.tensorizer_uri,
                            **tensorizer_args.stream_kwargs)
 
+    def keys(self):
+        return self._keys
+
     def __len__(self):
         return len(fields(self))
 
     def __iter__(self):
-        return (f.name for f in fields(self))
+        return iter(self._fields)
 
     def __getitem__(self, item: str) -> Any:
+        if item not in self.keys():
+            raise KeyError(item)
         return getattr(self, item)
 
     def __setitem__(self, key: str, value: Any) -> None:
+        if key not in self.keys():
+            # Disallow modifying invalid keys
+            raise KeyError(key)
         setattr(self, key, value)
 
     def __delitem__(self, key, /):
+        if key not in self.keys():
+            raise KeyError(key)
         delattr(self, key)
 
+TensorizerConfig._fields = tuple(f.name for f in fields(TensorizerConfig))
+TensorizerConfig._keys = frozenset(TensorizerConfig._fields)
 
 @dataclass
 class TensorizerArgs:
