@@ -1,23 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This script demonstrates how to use the vLLM API server to perform audio
-transcription with the `openai/whisper-large-v3` model.
-
-Before running this script, you must start the vLLM server with the following command:
-
-    vllm serve openai/whisper-large-v3
-
-Requirements:
-- vLLM with audio support
-- openai Python SDK
-- httpx for streaming support
-
-The script performs:
-1. Synchronous transcription using OpenAI-compatible API.
-2. Streaming transcription using raw HTTP request to the vLLM server.
-"""
-
 import asyncio
 import json
 
@@ -26,6 +8,7 @@ from openai import OpenAI
 
 from vllm.assets.audio import AudioAsset
 
+# TODO get actual asset
 mary_had_lamb = AudioAsset("mary_had_lamb").get_local_path()
 winning_call = AudioAsset("winning_call").get_local_path()
 
@@ -39,38 +22,35 @@ client = OpenAI(
 
 
 def sync_openai():
-    """
-    Perform synchronous transcription using OpenAI-compatible API.
-    """
     with open(str(mary_had_lamb), "rb") as f:
-        transcription = client.audio.transcriptions.create(
+        translation = client.audio.translations.create(
             file=f,
             model="openai/whisper-large-v3",
-            language="en",
             response_format="json",
             temperature=0.0,
             # Additional sampling params not provided by OpenAI API.
             extra_body=dict(
+                language="it",
                 seed=4419,
                 repetition_penalty=1.3,
             ),
         )
-        print("transcription result:", transcription.text)
+        print("translation result:", translation.text)
 
 
-# OpenAI Transcription API client does not support streaming.
+sync_openai()
+
+
+# OpenAI translation API client does not support streaming.
 async def stream_openai_response():
-    """
-    Perform streaming transcription using vLLM's raw HTTP streaming API.
-    """
     data = {
-        "language": "en",
+        "language": "it",
         "stream": True,
-        "model": "openai/whisper-large-v3-turbo",
+        "model": "openai/whisper-large-v3",
     }
-    url = openai_api_base + "/audio/transcriptions"
+    url = openai_api_base + "/audio/translations"
     headers = {"Authorization": f"Bearer {openai_api_key}"}
-    print("transcription result:", end=" ")
+    print("translation result:", end=" ")
     async with httpx.AsyncClient() as client:
         with open(str(winning_call), "rb") as f:
             async with client.stream(
@@ -89,15 +69,7 @@ async def stream_openai_response():
                         # Extract and print the content
                         content = chunk["choices"][0].get("delta", {}).get("content")
                         print(content, end="")
-    print()  # Final newline after stream ends
 
 
-def main():
-    sync_openai()
-
-    # Run the asynchronous function
-    asyncio.run(stream_openai_response())
-
-
-if __name__ == "__main__":
-    main()
+# Run the asynchronous function
+asyncio.run(stream_openai_response())

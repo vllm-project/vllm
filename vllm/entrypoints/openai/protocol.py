@@ -1978,15 +1978,6 @@ class TranslationRequest(OpenAIBaseModel):
     """ID of the model to use.
     """
 
-    language: Optional[str] = None
-    """The language of the input audio.
-
-    Supplying the input language in
-    [ISO-639-1](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) format
-    will improve accuracy and latency.
-    This is a custom field not present in the openai specification.
-    """
-
     prompt: str = Field(default="")
     """An optional text to guide the model's style or continue a previous audio
     segment.
@@ -2001,7 +1992,8 @@ class TranslationRequest(OpenAIBaseModel):
     `verbose_json`, or `vtt`.
     """
 
-    ## TODO (varun) : Support if set to 0, certain thresholds are met !!
+    # TODO support additional sampling parameters
+    # --8<-- [start:transcription-sampling-params]
     temperature: float = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
 
@@ -2010,15 +2002,15 @@ class TranslationRequest(OpenAIBaseModel):
     will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
     to automatically increase the temperature until certain thresholds are hit.
     """
+    # --8<-- [end:transcription-sampling-params]
 
-    timestamp_granularities: list[Literal["word", "segment"]] = Field(
-        alias="timestamp_granularities[]", default=[])
-    """The timestamp granularities to populate for this translation.
+    # --8<-- [start:translation-extra-params]
+    language: Optional[str] = None
+    """The language of the input audio we translate from.
 
-    `response_format` must be set `verbose_json` to use timestamp granularities.
-    Either or both of these options are supported: `word`, or `segment`. Note:
-    There is no additional latency for segment timestamps, but generating word
-    timestamps incurs additional latency.
+    Supplying the input language in
+    [ISO-639-1](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) format
+    will improve accuracy.
     """
 
     stream: Optional[bool] = False
@@ -2029,6 +2021,7 @@ class TranslationRequest(OpenAIBaseModel):
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
+    # --8<-- [end:translation-extra-params]
 
     # Default sampling parameters for translation requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
