@@ -310,7 +310,7 @@ if __name__ == '__main__':
 
 
     tensorizer_dir = args.serialized_directory or extra_config.get("tensorizer_dir")
-    tensorizer_uri = args.path_to_tensors or extra_config.get("tensorizer_uri")
+    tensorizer_uri = getattr(args, "path_to_tensors", None) or extra_config.get("tensorizer_uri")
 
     if tensorizer_dir and tensorizer_uri:
         parser.error("--serialized-directory and --path-to-tensors cannot both be provided")

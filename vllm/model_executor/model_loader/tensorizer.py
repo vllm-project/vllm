@@ -222,7 +222,7 @@ class TensorizerConfig(MutableMapping):
             raise ValueError(
                 "Only one of tensorizer_dir or lora_dir may be specified. "
                 "Use lora_dir exclusively when serializing LoRA adapters, "
-                "and tensorizer_dir otherwise.")
+                "and tensorizer_dir or tensorizer_uri otherwise.")
         if not self.tensorizer_uri:
             if self.lora_dir:
                 self.tensorizer_uri = f"{self.lora_dir}/adapter_model.tensors"
@@ -265,7 +265,7 @@ class TensorizerConfig(MutableMapping):
             blacklisted.append("tensorizer_dir")
 
         if "tensorizer_dir" in raw_tc_dict and "lora_dir" in raw_tc_dict:
-            blacklisted.append("lora_dir")
+            blacklisted.append("tensorizer_dir")
 
         tc_dict = {}
         for k, v in raw_tc_dict.items():
@@ -349,8 +349,8 @@ class TensorizerArgs:
             "encryption":
             tensorizer_config.encryption_keyfile,
             "num_readers":
-            tensorizer_config.num_readers**(
-                tensorizer_config.deserialization_kwargs or {})
+            tensorizer_config.num_readers,
+            **(tensorizer_config.deserialization_kwargs or {})
         }
 
         if self.encryption_keyfile:
@@ -604,9 +604,10 @@ def serialize_extra_artifacts(tensorizer_args: TensorizerArgs,
             if not artifact.is_file():
                 continue
             with open(artifact.path, "rb") as f:
-                with _write_stream(
+                with open_stream(
                         f"{tensorizer_args.tensorizer_dir}/{artifact.name}",
-                        **tensorizer_args.stream_params) as stream:
+                        mode="wb+",
+                        **tensorizer_args.stream_kwargs) as stream:
                     logger.info("Writing artifact %s", artifact.name)
                     stream.write(f.read())
 

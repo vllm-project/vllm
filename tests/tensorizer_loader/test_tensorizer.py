@@ -378,7 +378,7 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
         self.save_tensorized_model(tensorizer_config=tensorizer_config, )
         return to_compare | original_dict == to_compare
 
-    kwargs = {"tensorizer_config": config.to_dict()}
+    kwargs = {"tensorizer_config": config.to_serializable()}
 
     assert assert_from_collective_rpc(llm, serialization_test, kwargs)
 
@@ -412,7 +412,7 @@ def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(
     engine_args = EngineArgs(
         model="facebook/opt-125m",
         load_format="tensorizer",
-        model_loader_extra_config=loader_tc.to_dict(),
+        model_loader_extra_config=loader_tc.to_serializable(),
     )
 
     vllm_config = engine_args.create_engine_config()
@@ -455,7 +455,7 @@ def test_assert_stream_kwargs_passed_to_tensor_deserializer(tmp_path, capfd):
     engine_args = EngineArgs(
         model="facebook/opt-125m",
         load_format="tensorizer",
-        model_loader_extra_config=loader_tc.to_dict(),
+        model_loader_extra_config=loader_tc.to_serializable(),
     )
 
     vllm_config = engine_args.create_engine_config()

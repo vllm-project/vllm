@@ -64,22 +64,10 @@ def server(model_uri, tensorize_model_and_lora):
     # `TensorizerConfig` so --model-loader-extra-config can be completely
     # omitted.
 
-    model_loader_extra_config = {
-        "tensorizer_uri": model_uri,
-        "stream_kwargs": {
-            "force_http": False,
-        },
-        "deserialization_kwargs": {
-            "verify_hash": True,
-            "num_readers": 8,
-        }
-    }
-
     ## Start OpenAI API server
     args = [
         "--load-format", "tensorizer", "--served-model-name", MODEL_NAME,
-        "--model-loader-extra-config",
-        json.dumps(model_loader_extra_config), "--enable-lora"
+        "--enable-lora"
     ]
 
     model_dir = os.path.dirname(model_uri)
