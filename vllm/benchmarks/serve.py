@@ -77,8 +77,8 @@ class BenchmarkMetrics:
 
 def _get_current_request_rate(
     ramp_up_strategy: Optional[Literal["linear", "exponential"]],
-    ramp_up_start_rps: Optional[float],
-    ramp_up_end_rps: Optional[float],
+    ramp_up_start_rps: Optional[int],
+    ramp_up_end_rps: Optional[int],
     request_index: int,
     total_requests: int,
     request_rate: float,
@@ -102,8 +102,8 @@ async def get_request(
     request_rate: float,
     burstiness: float = 1.0,
     ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[float] = None,
-    ramp_up_end_rps: Optional[float] = None,
+    ramp_up_start_rps: Optional[int] = None,
+    ramp_up_end_rps: Optional[int] = None,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
@@ -306,8 +306,8 @@ async def benchmark(
     lora_modules: Optional[Iterable[str]],
     extra_body: Optional[dict],
     ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[float] = None,
-    ramp_up_end_rps: Optional[float] = None,
+    ramp_up_start_rps: Optional[int] = None,
+    ramp_up_end_rps: Optional[int] = None,
 ):
     if endpoint_type in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -861,14 +861,14 @@ def add_cli_args(parser: argparse.ArgumentParser):
     )
     parser.add_argument(
         "--ramp-up-start-rps",
-        type=float,
+        type=int,
         default=None,
         help="The starting request rate for ramp-up (RPS). "
         "Needs to be specified when --ramp-up-strategy is used.",
     )
     parser.add_argument(
         "--ramp-up-end-rps",
-        type=float,
+        type=int,
         default=None,
         help="The ending request rate for ramp-up (RPS). "
         "Needs to be specified when --ramp-up-strategy is used.",
