@@ -348,8 +348,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
-        assert prepare_finalize.activation_format == fused_experts.activation_formats[  # noqa: E501
-            0]
+        assert prepare_finalize.activation_format == \
+            fused_experts.activation_formats[0]
 
     def forward(
         self,
