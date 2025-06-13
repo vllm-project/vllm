@@ -8,6 +8,7 @@ from openai import OpenAI
 
 from vllm.assets.audio import AudioAsset
 
+# TODO get actual asset
 mary_had_lamb = AudioAsset("mary_had_lamb").get_local_path()
 winning_call = AudioAsset("winning_call").get_local_path()
 
@@ -22,34 +23,34 @@ client = OpenAI(
 
 def sync_openai():
     with open(str(mary_had_lamb), "rb") as f:
-        transcription = client.audio.transcriptions.create(
+        translation = client.audio.translations.create(
             file=f,
             model="openai/whisper-large-v3",
-            language="en",
             response_format="json",
             temperature=0.0,
             # Additional sampling params not provided by OpenAI API.
             extra_body=dict(
+                language="it",
                 seed=4419,
                 repetition_penalty=1.3,
             ),
         )
-        print("transcription result:", transcription.text)
+        print("translation result:", translation.text)
 
 
 sync_openai()
 
 
-# OpenAI Transcription API client does not support streaming.
+# OpenAI translation API client does not support streaming.
 async def stream_openai_response():
     data = {
-        "language": "en",
+        "language": "it",
         "stream": True,
-        "model": "openai/whisper-large-v3-turbo",
+        "model": "openai/whisper-large-v3",
     }
-    url = openai_api_base + "/audio/transcriptions"
+    url = openai_api_base + "/audio/translations"
     headers = {"Authorization": f"Bearer {openai_api_key}"}
-    print("transcription result:", end=" ")
+    print("translation result:", end=" ")
     async with httpx.AsyncClient() as client:
         with open(str(winning_call), "rb") as f:
             async with client.stream(
