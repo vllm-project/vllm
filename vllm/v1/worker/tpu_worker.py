@@ -99,6 +99,9 @@ class TPUWorker:
         # ring, the xla tpu compiler flag
         # `xla_tpu_force_1d_allreduce_at_chunk_count` is a temporary solution to
         # fix this. It will be removed after the bug in XLA compiler is fixed.
+        # os.environ["LIBTPU_INIT_ARGS"] = (
+        #     "--xla_tpu_force_1d_allreduce_at_chunk_count=1
+        #  --xla_jf_conv_input_fusion=False")
         os.environ["LIBTPU_INIT_ARGS"] = (
             os.environ.get("LIBTPU_INIT_ARGS", "") +
             " --xla_tpu_force_1d_allreduce_at_chunk_count=1"
