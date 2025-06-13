@@ -171,3 +171,20 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
             # If generation stops right after end-of-think, return null content
             final_content = content or None
             return reasoning_content, final_content
+
+    def count_reasoning_tokens(self, input_ids: list[int]) -> int:
+        """
+        Count the number of reasoning tokens in the input_ids.
+
+        The reasoning tokens are the tokens between the <think> and </think>
+        tokens in the input_ids.
+
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output.
+
+        Returns:
+        int
+            The number of reasoning tokens in the input_ids.
+        """
+        return input_ids.index(self.end_token_id) - 1

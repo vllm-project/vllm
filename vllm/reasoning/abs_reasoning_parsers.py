@@ -104,6 +104,21 @@ class ReasoningParser:
         previously been parsed and extracted (see constructor)
         """
 
+    @abstractmethod
+    def count_reasoning_tokens(self, input_ids: list[int]) -> int:
+        """
+        Count the number of reasoning tokens from
+        the model's output `input_ids`.
+
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output.
+
+        Returns:
+        int
+            The total number of reasoning tokens in the input_ids.
+        """
+
 
 class ReasoningParserManager:
     reasoning_parsers: dict[str, type] = {}

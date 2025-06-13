@@ -361,3 +361,23 @@ class GraniteReasoningParser(ReasoningParser):
         if start_reasoning_content and not parsed_content:
             return current_text[start_reasoning_content:], None, None
         return None, None, None
+
+    def count_reasoning_tokens(self, input_ids: list[int]) -> int:
+        """
+        Count the number of reasoning tokens in the input_ids.
+
+        The reasoning tokens are the tokens between the <think> and </think>
+        tokens in the input_ids.
+
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output.
+
+        Returns:
+        int
+            The number of reasoning tokens in the input_ids.
+        """
+        # TODO(chauncey): Implement this method
+        # Currently, we don't have a way to count reasoning tokens in
+        # the input_ids for granite models.
+        return 0
