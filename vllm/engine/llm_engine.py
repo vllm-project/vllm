@@ -1691,6 +1691,14 @@ class LLMEngine:
                 if skip and idx in skip:
                     continue
 
+                for group in scheduler_outputs.scheduled_seq_groups:
+                    seq_group = group.seq_group
+
+                    for seq in seq_group.seqs:
+                        num_generation_tokens_iter += len(
+                            seq.data.get_delta_and_reset(
+                            ).new_output_token_ids)
+
                 group_was_prefill = idx < scheduler_outputs.num_prefill_groups
                 seq_group = scheduled_seq_group.seq_group
 
@@ -1771,9 +1779,6 @@ class LLMEngine:
             #   num_generation_tokens = num_batched_tokens - num_prompt_tokens
             #   + num_generation_tokens_from_prefill_groups (since we generate
             #   one token on prefills on iters where the prefill finishes).
-            num_generation_tokens_iter = (
-                actual_num_batched_tokens - num_prompt_tokens_iter +
-                num_generation_tokens_from_prefill_groups)
             num_tokens_iter = (num_generation_tokens_iter +
                                num_prompt_tokens_iter)
         # Spec decode, if enabled, emits specialized metrics from the worker in
