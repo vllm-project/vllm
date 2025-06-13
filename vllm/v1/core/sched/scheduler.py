@@ -1015,6 +1015,7 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens = min(num_computed_tokens, request.num_tokens)
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1
+        # This will cache the blocks iff caching is enabled.
         self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
 
         # Update the request state for scheduling.
