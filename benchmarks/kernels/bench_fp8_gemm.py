@@ -50,7 +50,7 @@ def _quant_weight_fp8(b: torch.Tensor, w_type: str, device: str):
     return b_fp8.t(), scale_b_fp8
 
 
-def build_fp8_runner(cfg, a, b, N, dtype, device):
+def build_fp8_runner(cfg, a, b, dtype, device):
     b_fp8, scale_b_fp8 = _quant_weight_fp8(b, cfg["w"], device)
 
     scale_a_const = (
@@ -114,7 +114,7 @@ def benchmark(batch_size, provider, N, K):
         )
     else:
         cfg = PROVIDER_CFGS[provider]
-        run_quant = build_fp8_runner(cfg, a, b, N, dtype, device)
+        run_quant = build_fp8_runner(cfg, a, b, dtype, device)
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
             lambda: run_quant(), quantiles=quantiles
         )

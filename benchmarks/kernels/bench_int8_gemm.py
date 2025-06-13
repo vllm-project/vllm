@@ -51,7 +51,7 @@ def _quant_weight(b, w_type, device):
     return b_int8.t(), scale_b_int8
 
 
-def build_int8_runner(cfg, a, b, N, dtype, device):
+def build_int8_runner(cfg, a, b, dtype, device):
     # quant before running the kernel
     b_int8, scale_b_int8 = _quant_weight(b, cfg["w"], device)
 
@@ -118,7 +118,7 @@ def benchmark(batch_size, provider, N, K):
         )
     else:
         cfg = PROVIDER_CFGS[provider]
-        run_quant = build_int8_runner(cfg, a, b, N, dtype, device)
+        run_quant = build_int8_runner(cfg, a, b, dtype, device)
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
             lambda: run_quant(), quantiles=quantiles
         )
