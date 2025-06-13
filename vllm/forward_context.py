@@ -89,7 +89,8 @@ class ForwardContext:
     attention layer to its attention metadata
     set dynamically for each forward pass
     """
-    attn_metadata: Union["AttentionMetadata", dict[str, "AttentionMetadata"]]
+    attn_metadata: Optional[Union["AttentionMetadata",
+                                  dict[str, "AttentionMetadata"]]]
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
