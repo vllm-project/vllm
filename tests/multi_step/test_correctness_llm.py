@@ -75,7 +75,7 @@ def test_multi_step_llm(
     if current_platform.is_rocm() and \
         (attention_backend == "FLASHINFER" or enable_chunked_prefill):
         pytest.skip(
-            "Multi-Step with FLASHINFER or Chunked-Prefill is notsupported"
+            "Multi-Step with FLASHINFER or Chunked-Prefill is not supported"
             "on ROCm")
 
     with monkeypatch.context() as m:
