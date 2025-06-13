@@ -17,6 +17,9 @@ from vllm.utils import cdiv, next_power_of_2
 
 logger = init_logger(__name__)
 
+# TPU requires the head size to be a multiple of 128.
+TPU_HEAD_SIZE_ALIGNMENT = 128
+
 
 class PallasAttentionBackend(AttentionBackend):
 
@@ -43,11 +46,10 @@ class PallasAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[int, ...]:
-        # TPU requires the head size to be a multiple of 128.
-        if head_size % 128 != 0:
-            padded_head_size = cdiv(head_size, 128) * 128
-            num_blocks = num_blocks * head_size // padded_head_size
-            head_size = padded_head_size
+        padded_head_size = cdiv(
+            head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
+        num_blocks = num_blocks * head_size // padded_head_size
+        head_size = padded_head_size
         return (num_blocks, block_size, num_kv_heads * 2, head_size)
 
     @staticmethod
@@ -193,8 +195,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query = query.view(num_tokens, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
-        if self.head_size % 128 != 0:
-            padded_head_size = cdiv(self.head_size, 128) * 128
+        if self.head_size % TPU_HEAD_SIZE_ALIGNMENT != 0:
+            padded_head_size = cdiv(
+                self.head_size,
+                TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
             query = torch.nn.functional.pad(
                 query, (0, padded_head_size - self.head_size), value=0.0)
             key = torch.nn.functional.pad(
@@ -227,7 +231,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             soft_cap=self.logits_soft_cap,
         )
 
-        if self.head_size % 128 != 0:
+        if self.head_size % TPU_HEAD_SIZE_ALIGNMENT != 0:
             output = output[:, :, :self.head_size]
 
         return output.reshape(num_tokens, hidden_size)
@@ -248,8 +252,8 @@ def write_to_kv_cache(
 
     """
     _, _, num_combined_kv_heads, head_size = kv_cache.shape
-    if head_size % 128 != 0:
-        head_size = cdiv(head_size, 128) * 128
+    head_size = cdiv(head_size,
+                     TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)
 
