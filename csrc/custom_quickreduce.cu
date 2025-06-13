@@ -59,7 +59,7 @@ void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
 
   TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
   TORCH_CHECK_EQ(inp.numel(), out.numel());
-
+  TORCH_CHECK_LE(out.numel(), quickreduce::DeviceComms::kMaxProblemSize);
   if (out.scalar_type() == at::ScalarType::Half) {
     fa->allreduce<half>(reinterpret_cast<half*>(inp.data_ptr()),
                         reinterpret_cast<half*>(out.data_ptr()), out.numel(),

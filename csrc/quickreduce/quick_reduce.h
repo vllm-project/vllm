@@ -18,10 +18,10 @@ namespace quickreduce {
 using fptr_t = int64_t;
 static_assert(sizeof(void*) == sizeof(fptr_t));
 
-static constexpr int kOneShotAllreduceMaxElemsWorldSize2 = 8192 * 12;
-static constexpr int kOneShotAllreduceMaxElemsWorldSize4 = 8192 * 8;
-static constexpr int kOneShotAllreduceMaxElemsWorldSize8 = 8192 * 4;
-static constexpr long kOneShotAllreduceMaxSize =
+static constexpr unsigned int kOneShotAllreduceMaxElemsWorldSize2 = 8192 * 12;
+static constexpr unsigned int kOneShotAllreduceMaxElemsWorldSize4 = 8192 * 8;
+static constexpr unsigned int kOneShotAllreduceMaxElemsWorldSize8 = 8192 * 4;
+static constexpr unsigned int kOneShotAllreduceMaxSize =
     std::max(kOneShotAllreduceMaxElemsWorldSize2 * 2,
              std::max(kOneShotAllreduceMaxElemsWorldSize4 * 4,
                       kOneShotAllreduceMaxElemsWorldSize8 * 8)) *
@@ -29,17 +29,17 @@ static constexpr long kOneShotAllreduceMaxSize =
 
 template <typename AllReduceKernel, typename T>
 __global__ __quickreduce_launch_bounds_one_shot__ static void
-allreduce_prototype_oneshot(T const* A, T* B, int N, int rank,
-                            uint8_t** dbuffer_list, long data_offset,
-                            int flag_color) {
+allreduce_prototype_oneshot(T const* A, T* B, uint32_t N, int rank,
+                            uint8_t** dbuffer_list, uint32_t data_offset,
+                            uint32_t flag_color) {
   AllReduceKernel::run(A, B, N, rank, dbuffer_list, data_offset, flag_color);
 }
 
 template <typename AllReduceKernel, typename T>
 __global__ __quickreduce_launch_bounds_two_shot__ static void
-allreduce_prototype_twoshot(T const* A, T* B, int N, int num_blocks, int rank,
-                            uint8_t** dbuffer_list, long data_offset,
-                            int flag_color) {
+allreduce_prototype_twoshot(T const* A, T* B, uint32_t N, int num_blocks,
+                            int rank, uint8_t** dbuffer_list,
+                            uint32_t data_offset, uint32_t flag_color) {
   int block = blockIdx.x;
   int grid = gridDim.x;
 
@@ -102,15 +102,15 @@ struct DeviceComms {
   // Workgroup scope = Tile = (256 threads x 16B x 8 atoms)
   static long constexpr kTileSize = 256 * 16 * 8;
 
-  // Max problem size is 8GB (in bytes)
-  static long constexpr kMaxProblemSize = 8589934592;
-  static long constexpr kMaxTiles = kMaxProblemSize / kTileSize;
+  // Max problem size is 2GB (in bytes) or half of uint32_t max value.
+  static int64_t constexpr kMaxProblemSize = 2147483647;
+  static int64_t constexpr kMaxTiles = kMaxProblemSize / kTileSize;
 
   // Max TP-8
   static int constexpr kMaxWorldSize = 8;
 
   bool initialized = false;
-  int flag_color = 1;
+  uint32_t flag_color = 1;
   int world_size;
   int rank;
 
@@ -119,7 +119,7 @@ struct DeviceComms {
   hipIpcMemHandle_t buffer_ipc_handle;
   std::vector<hipIpcMemHandle_t> all_buffer_ipc_handles;
   std::vector<uint8_t*> buffer_list;
-  long data_offset;
+  uint32_t data_offset;
 
   DeviceComms() : initialized(false), world_size(1), rank(0) {}
   ~DeviceComms() { destroy(); }
@@ -130,10 +130,10 @@ struct DeviceComms {
     this->rank = rank;
 
     // Allocate buffer size for worst case: Twoshot FP16 2-stage buffer.
-    long flags_buffer_size = 2 * world_size * kMaxTiles * sizeof(int);
-    static constexpr long data_buffer_size =
-        std::max(2 * kMaxProblemSize, kOneShotAllreduceMaxSize);
-    long total_buffer_size = flags_buffer_size + data_buffer_size;
+    uint32_t flags_buffer_size = 2 * world_size * kMaxTiles * sizeof(int);
+    static constexpr int64_t data_buffer_size = std::max(
+        2 * kMaxProblemSize, static_cast<int64_t>(kOneShotAllreduceMaxSize));
+    int64_t total_buffer_size = flags_buffer_size + data_buffer_size;
     data_offset = flags_buffer_size;
     HIP_CHECK(hipExtMallocWithFlags((void**)&dbuffer, total_buffer_size,
                                     hipDeviceMallocUncached));
@@ -194,26 +194,27 @@ struct DeviceComms {
   }
 
   template <typename T>
-  void allreduce(T const* A, T* B, int N, int quant_level, hipStream_t stream) {
+  void allreduce(T const* A, T* B, uint32_t N, int quant_level,
+                 hipStream_t stream) {
     if (world_size != 2 && world_size != 4 && world_size != 8) {
       throw std::runtime_error("All Reduce not supported for world_size = " +
                                std::to_string(world_size));
     }
 
     // Configuration.
-    long msg_size = N * sizeof(T);
+    uint32_t msg_size = N * sizeof(T);
     bool use_one_shot_allreduce =
         (world_size == 2 and N <= kOneShotAllreduceMaxElemsWorldSize2) or
         (world_size == 4 and N <= kOneShotAllreduceMaxElemsWorldSize4) or
         (world_size == 8 and N <= kOneShotAllreduceMaxElemsWorldSize8);
     if (use_one_shot_allreduce) {
       // Each thread processes blocks out of 4 elements
-      unsigned long num_blocks = divceil(N, (4 * kThreadsOneShot));
-      unsigned long grid = min(kMaxNumBlocks, num_blocks);
+      uint64_t num_blocks = divceil(N, (4 * kThreadsOneShot));
+      uint64_t grid = min(kMaxNumBlocks, num_blocks);
       ONESHOT_DISPATCH()
     } else {
-      unsigned long num_blocks = divceil(msg_size, kTileSize);
-      unsigned long grid = min(kMaxNumBlocks, num_blocks);
+      uint64_t num_blocks = divceil(msg_size, kTileSize);
+      uint64_t grid = min(kMaxNumBlocks, num_blocks);
       auto quant_level_ = static_cast<QuickReduceQuantLevel>(quant_level);
       switch (quant_level_) {
         case QuickReduceQuantLevel::INT8:
