@@ -68,7 +68,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             result_generator: AsyncGenerator[RequestOutput, None],
             request_id: str, request_metadata: RequestResponseMetadata,
             audio_duration_s: float) -> AsyncGenerator[str, None]:
-        return await self._speech_to_text_stream_generator(
+        generator = self._speech_to_text_stream_generator(
             request=request,
             result_generator=result_generator,
             request_id=request_id,
@@ -78,6 +78,8 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             response_stream_choice_class=TranscriptionResponseStreamChoice,
             stream_response_class=TranscriptionStreamResponse,
         )
+        async for chunk in generator:
+            yield chunk
 
 
 class OpenAIServingTranslation(OpenAISpeechToText):
@@ -121,7 +123,7 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             result_generator: AsyncGenerator[RequestOutput, None],
             request_id: str, request_metadata: RequestResponseMetadata,
             audio_duration_s: float) -> AsyncGenerator[str, None]:
-        return await self._speech_to_text_stream_generator(
+        generator = self._speech_to_text_stream_generator(
             request=request,
             result_generator=result_generator,
             request_id=request_id,
@@ -131,3 +133,5 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             response_stream_choice_class=TranslationResponseStreamChoice,
             stream_response_class=TranslationStreamResponse,
         )
+        async for chunk in generator:
+            yield chunk
