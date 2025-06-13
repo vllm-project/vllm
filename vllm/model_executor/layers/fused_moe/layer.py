@@ -23,9 +23,9 @@ from vllm.distributed import (get_dp_group, get_ep_group,
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-    from .modular_kernel import (FusedMoEModularKernel,
-                                 FusedMoEPermuteExpertsUnpermute,
-                                 FusedMoEPrepareAndFinalize)
+from .modular_kernel import (FusedMoEModularKernel,
+                             FusedMoEPermuteExpertsUnpermute,
+                             FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.quantization.base_config import (
