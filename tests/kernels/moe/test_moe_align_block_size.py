@@ -17,11 +17,11 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
             [32, 64, 128, 256],  # block_size
             [
                 1,
-                4,
+                3,
+                7,
                 16,
-                64,
                 256,
-                1024,
+                2256,
                 4096,
             ],  # num_tokens
             [1, 4, 16, 64],  # topk
