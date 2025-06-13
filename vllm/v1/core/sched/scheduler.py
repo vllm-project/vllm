@@ -203,18 +203,13 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens):
                 num_new_tokens = (
                     self.scheduler_config.long_prefill_token_threshold)
+            num_new_tokens = min(num_new_tokens, token_budget)
 
-            remaining_len = self.max_model_len - request.num_computed_tokens
-
-            if not self.scheduler_config.chunked_prefill_enabled:
-                if num_new_tokens > min(token_budget, remaining_len):
-                    num_new_tokens = 0
-            else:
-                num_new_tokens = min(num_new_tokens, token_budget)
-
-                # Make sure the input position does not exceed the max model
-                # len. This is necessary when using spec decoding.
-                num_new_tokens = min(num_new_tokens, remaining_len)
+            # Make sure the input position does not exceed the max model len.
+            # This is necessary when using spec decoding.
+            num_new_tokens = min(
+                num_new_tokens,
+                self.max_model_len - request.num_computed_tokens)
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
