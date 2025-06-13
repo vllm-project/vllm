@@ -686,10 +686,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if "tool_choice" not in data and data.get("tools"):
             data["tool_choice"] = "auto"
 
-        # if "tool_choice" is "none" -- ignore tools if present
+        # if "tool_choice" is "none" -- no validation is needed for tools
         if "tool_choice" in data and data["tool_choice"] == "none":
-            # ensure that no tools are present
-            data.pop("tools", None)
             return data
 
         # if "tool_choice" is specified -- validation
