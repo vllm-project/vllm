@@ -177,6 +177,11 @@ steps:
   - tests/tracing
   commands:
   - pytest -v -s metrics
+  - "pip install \
+      'opentelemetry-sdk>=1.26.0' \
+      'opentelemetry-api>=1.26.0' \
+      'opentelemetry-exporter-otlp>=1.26.0' \
+      'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s tracing
 
 ##### fast check tests  #####
@@ -305,6 +310,7 @@ steps:
   commands:
     - pytest -v -s compile/test_pass_manager.py
     - pytest -v -s compile/test_fusion.py
+    - pytest -v -s compile/test_fusion_attn.py
     - pytest -v -s compile/test_silu_mul_quant_fusion.py
     - pytest -v -s compile/test_sequence_parallelism.py
     - pytest -v -s compile/test_async_tp.py

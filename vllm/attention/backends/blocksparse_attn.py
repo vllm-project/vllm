@@ -374,6 +374,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: BlocksparseFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -388,6 +389,11 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for BlocksparseFlashAttentionImpl")
+
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)

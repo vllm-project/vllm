@@ -277,7 +277,7 @@ class StatefulModelInput(BroadcastableModelInput):
         assert fmi.input_tokens.shape[0] >= self.num_seqs
         fmi_new_input_tokens: torch.Tensor = fmi.input_tokens[:self.num_seqs]
 
-        # Update frozen_model_input::input_positons.
+        # Update frozen_model_input::input_positions.
         assert fmi.input_positions is not None
         assert fmi.input_positions.shape[0] >= self.num_seqs
         fmi_new_input_positions: torch.Tensor = fmi.input_positions[:self.

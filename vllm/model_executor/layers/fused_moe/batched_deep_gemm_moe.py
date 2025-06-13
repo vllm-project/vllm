@@ -36,6 +36,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert (len(self.block_shape) == 2 and all(
             [v == self.DEEPGEMM_BLOCK_SHAPE for v in self.block_shape]))
 
+    def supports_chunking(self) -> bool:
+        return False
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -44,18 +47,26 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         N: int,
         K: int,
         topk: int,
-        num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
+        global_num_experts: int,
+        local_num_experts: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        num_dp = self.world_size // self.dp_size
+        # FIXME (varun): We should be able to dispatch only from the leader
+        # DP ranks in the case of TP > 1. At the moment, all the Ranks
+        # end up sending their tokens. This needs to be fixed.
+        num_dispatchers = self.world_size
+        num_experts = local_num_experts
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = num_experts * max_num_tokens * num_dp * max(K, N)
-        workspace2 = num_experts * max_num_tokens * num_dp * (N // 2)
-        return (workspace13, workspace2, a.dtype)
+        workspace13 = (num_experts, max_num_tokens * num_dispatchers,
+                       max(K, N))
+        workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
+        output = (num_experts, max_num_tokens * num_dispatchers, K)
+        return (workspace13, workspace2, output, a.dtype)
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -72,15 +83,12 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ):
         import deep_gemm as dg
         assert hidden_states.ndim == 3
 
         a1q = hidden_states
         _, N, K = w1.size()
-
-        if global_num_experts == -1:
-            global_num_experts = w1.size(0)
 
         assert w2.size(1) == K
 
@@ -89,7 +97,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
         workspace2 = _resize_cache(workspace2, (E, max_num_tokens, N // 2))
-        workspace3 = _resize_cache(workspace13, (E, max_num_tokens, K))
 
         # (from deepgemm docs) : A value hint (which is a value on CPU)
         # for the M expectation of each batch, correctly setting this value
@@ -118,8 +125,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a2q, a2q_scale),
                                                  (w2, w2_scale),
-                                                 out=workspace3,
+                                                 out=output,
                                                  masked_m=expert_num_tokens,
                                                  expected_m=expected_m)
-
-        return workspace3
