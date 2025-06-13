@@ -52,7 +52,7 @@ void qr_open_handles(quickreduce::fptr_t _fa,
 }
 
 void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
-                   torch::Tensor& out, bool quantized) {
+                   torch::Tensor& out, int64_t quant_level) {
   auto fa = reinterpret_cast<quickreduce::DeviceComms*>(_fa);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
   auto stream = at::cuda::getCurrentHIPStreamMasqueradingAsCUDA();
@@ -63,12 +63,12 @@ void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
   if (out.scalar_type() == at::ScalarType::Half) {
     fa->allreduce<half>(reinterpret_cast<half*>(inp.data_ptr()),
                         reinterpret_cast<half*>(out.data_ptr()), out.numel(),
-                        quantized, stream);
+                        quant_level, stream);
   } else if (out.scalar_type() == at::ScalarType::BFloat16) {
     fa->allreduce<quickreduce::nv_bfloat16>(
         reinterpret_cast<quickreduce::nv_bfloat16*>(inp.data_ptr()),
         reinterpret_cast<quickreduce::nv_bfloat16*>(out.data_ptr()),
-        out.numel(), quantized, stream);
+        out.numel(), quant_level, stream);
   } else {
     throw std::runtime_error(
         "quick allreduce only supports float16 and bfloat16");
