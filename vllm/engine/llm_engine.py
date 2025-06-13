@@ -2062,7 +2062,8 @@ class LLMEngine:
             processors = get_openai_logits_processors(
                 logit_bias=sampling_params.logit_bias,
                 allowed_token_ids=sampling_params.allowed_token_ids,
-                tokenizer=tokenizer)
+                tokenizer=tokenizer,
+                dtype=self.model_config.dtype)
             logits_processors.extend(processors)
 
             # Unset so these don't get passed down to the model
