@@ -20,9 +20,9 @@ class MemoryBlock:
 
 """A memory pool for managing pinned host memory allocations for tensors.
 
-This class implements a buddy allocation system to efficiently manage pinned host
-memory for tensor storage. It supports allocation, deallocation, and tensor
-storage/retrieval operations.
+This class implements a buddy allocation system to efficiently manage pinned
+host memory for tensor storage. It supports allocation, deallocation, and
+tensor storage/retrieval operations.
 
 Key Features:
 - Uses power-of-two block sizes for efficient buddy allocation
@@ -43,7 +43,8 @@ Example:
     >>> pool = TensorMemoryPool(max_block_size=1024*1024)
     >>> tensor = torch.randn(100, device='cuda')
     >>> addr = pool.store_tensor(tensor)
-    >>> loaded_tensor = pool.load_tensor(addr, tensor.dtype, tensor.shape, 'cuda')
+    >>> loaded_tensor = pool.load_tensor(addr, tensor.dtype,
+    ...                                  tensor.shape, 'cuda')
     >>> pool.free(addr)
 """
 
@@ -53,11 +54,12 @@ class TensorMemoryPool:
 
     Args:
         max_block_size (int): Maximum size of memory blocks to manage
-        min_block_size (int, optional): Minimum size of memory blocks to manage.
-            Defaults to 512.
+        min_block_size (int, optional): Minimum size of memory blocks
+            to manage. Defaults to 512.
 
     Raises:
-        ValueError: If block sizes are invalid or max_block_size < min_block_size
+        ValueError: If block sizes are invalid or max_block_size is less
+            than min_block_size
     """
 
     def __init__(self, max_block_size: int, min_block_size: int = 512):
