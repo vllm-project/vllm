@@ -370,14 +370,14 @@ struct CodecQ6 : public CodecBase {
             nv_bfloat16 bf_high = __float2bfloat16(static_cast<float>(high));
             nv_bfloat162 bf2 = __halves2bfloat162(bf_low, bf_high);
             int32_t packed_bf16 = *reinterpret_cast<int32_t*>(&bf2);
-            w[i] = pk_add<nv_bfloat16>(packed_bf16, kRangeMin);
+            w[i] = packed_add<nv_bfloat16>(packed_bf16, kRangeMin);
           }
         }
       }
 
       // Apply decoding scales
       for (int i = 0; i < 4; i++) {
-        w[i] = pk_mul<T>(w[i], qs);
+        w[i] = packed_mul<T>(w[i], qs);
       }
 
       // That's pretty much it...
