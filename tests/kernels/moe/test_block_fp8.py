@@ -45,7 +45,7 @@ D = [512, 4096, 5120, 13824]
 GROUP_SIZE = [64, 128, 512]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
-M = [1, 2, 83, 128, 2048, 1024 * 128]
+M = [1, 2, 83, 128, 2048, 32768]
 M_dg = [128, 192, 1335, 2048]
 N = [128, 256, 1024, 4608]  # [13824]
 K = [256, 512, 7168]  # [13824]
@@ -104,11 +104,15 @@ def setup_cuda():
     "M,N,K,E,topk,block_size,dtype,seed",
     itertools.product(M, N, K, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
-def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
+def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
+                                  monkeypatch):
     if topk > E:
         pytest.skip(f"Skipping test; topk={topk} > E={E}")
 
     torch.manual_seed(seed)
+
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
+
     factor_for_scale = 1e-2
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max, fp8_min = fp8_info.max, fp8_info.min
@@ -262,12 +266,8 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     itertools.product(M_dg, N, K, E, TOP_KS, SEEDS))
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
-def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
-
-    block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
-    block_size = [block_m, block_m]
-    dtype = torch.bfloat16
-
+def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
+                                            monkeypatch):
     if topk > E:
         pytest.skip(f"Skipping test: topk={topk} > E={E}")
 
@@ -275,6 +275,11 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
 
     torch.manual_seed(seed)
+
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
+    block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
+    block_size = [block_m, block_m]
+    dtype = torch.bfloat16
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max, fp8_min = fp8_info.max, fp8_info.min
 

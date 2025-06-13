@@ -40,7 +40,7 @@ vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
 
 
-@pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
+@pytest.mark.parametrize("m", [1, 33, 64, 222, 32768])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
@@ -57,7 +57,11 @@ def test_fused_moe(
     ep_size: int,
     dtype: torch.dtype,
     padding: bool,
+    monkeypatch,
 ):
+    current_platform.seed_everything(7)
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
+
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -81,7 +85,7 @@ def test_fused_moe(
                                            use_int8_w8a8=False,
                                            use_int8_w8a16=False,
                                            use_int4_w4a16=False,
-                                           per_channel_quant=False,
+                                           per_act_token_quant=False,
                                            block_shape=None)
 
     with set_current_vllm_config(vllm_config):
