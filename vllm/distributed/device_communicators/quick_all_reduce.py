@@ -21,10 +21,11 @@ except Exception:
     ops_available = False
 
 
-class QuickReduceQuantLevel(Enum):
+class QuickReduceRegime(Enum):
     FP = 0
     INT8 = 1
     INT4 = 2
+    NONE = 3
 
 
 class QuickAllReduce:
@@ -43,12 +44,16 @@ class QuickAllReduce:
 
         self.max_size = ops.qr_max_size()
         self.group = group
-        quant_level_str = envs.VLLM_ROCM_CA_QUANT_LEVEL
-        assert quant_level_str in QuickReduceQuantLevel.__members__, (
-            f"Invalid quantization level: {quant_level_str}. "
+        regime_str = envs.VLLM_ROCM_CA_QUANT_REGIME
+        assert regime_str in QuickReduceRegime.__members__, (
+            f"Invalid quantization level: {regime_str}. "
             "Supported levels: "
-            f"{list(QuickReduceQuantLevel.__members__.keys())}")
-        self.quant_level = QuickReduceQuantLevel[quant_level_str]
+            f"{list(QuickReduceRegime.__members__.keys())}")
+        if regime_str == "NONE":
+            logger.debug("Custom quickreduce is disabled based on "
+                         "env variable VLLM_ROCM_CA_QUANT_REGIME")
+            return
+        self.quant_level = QuickReduceRegime[regime_str]
         # On RocM bfloat16 kernels are slower than fp16
         # due to slower match operations
         # If environment is not set to 1 we convert input to fp16

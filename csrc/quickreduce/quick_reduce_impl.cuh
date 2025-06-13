@@ -374,11 +374,11 @@ struct AllReduceOneshot {
   __device__ static void run(
       T const* __restrict__ A,             // input
       T* __restrict__ B,                   // output
-      int const N,                         // number of elements
-      int const rank,                      // rank index
+      uint32_t const N,                    // number of elements
+      uint32_t const rank,                 // rank index
       uint8_t** __restrict__ buffer_list,  // communication buffers
       long const data_offset,              // offset to start of the data buffer
-      int flag_color) {
+      uint32_t flag_color) {
     BufferResource src_buffer(const_cast<T*>(A), N * sizeof(T));
     BufferResource dst_buffer(B, N * sizeof(T));
 
@@ -387,7 +387,7 @@ struct AllReduceOneshot {
     const int block_size = blockDim.x;
     const int thread = threadIdx.x;
     const int block = blockIdx.x;
-    const int problem_size = (N + 3) / 4;
+    const uint32_t problem_size = (N + 3) / 4;
 
     int32x4_t tA, tB;
     long grid = gridDim.x;
@@ -479,13 +479,13 @@ struct AllReduceTwoshot {
 
   __device__ static void run(
       T const* __restrict__ input, T* __restrict__ output,
-      int const N,                         // number of elements
+      uint32_t const N,                    // number of elements
       int const block,                     // block index
       int const num_blocks,                // number of blocks
       int const rank,                      // rank index
       uint8_t** __restrict__ buffer_list,  // communication buffers
-      long const data_offset,              // offset to start of the data buffer
-      int flag_color) {
+      uint32_t const data_offset,          // offset to start of the data buffer
+      uint32_t flag_color) {
     // Topology
     int thread = threadIdx.x + threadIdx.y * kWavefront;
     uint8_t* rank_buffer = buffer_list[rank];
@@ -496,7 +496,7 @@ struct AllReduceTwoshot {
     int32x4_t tA[kAtoms];
 
     BufferResource src_buffer(const_cast<T*>(input), N * sizeof(T));
-    int src_offset = block * kTileSize + thread * sizeof(int32x4_t);
+    uint32_t src_offset = block * kTileSize + thread * sizeof(int32x4_t);
     int32x4_t* src = reinterpret_cast<int32x4_t*>(const_cast<T*>(input));
 
     for (int i = 0; i < kAtoms; i++) {
@@ -507,13 +507,14 @@ struct AllReduceTwoshot {
     // --------------------------------------------------------
     // Phase-1A: Write segment data into the communication buffer of the target
     // rank responsible for this segment.
-    long comm_data0_offset = data_offset + block * Codec::kTransmittedTileSize;
-    long comm_data1_offset =
+    uint32_t comm_data0_offset =
+        data_offset + block * Codec::kTransmittedTileSize;
+    uint32_t comm_data1_offset =
         num_blocks * Codec::kTransmittedTileSize + comm_data0_offset;
 
-    long comm_flags0_offset = block * (kWorldSize * sizeof(int));
-    long comm_flags1_offset =
-        num_blocks * (kWorldSize * sizeof(int)) + comm_flags0_offset;
+    uint32_t comm_flags0_offset = block * (kWorldSize * sizeof(uint32_t));
+    uint32_t comm_flags1_offset =
+        num_blocks * (kWorldSize * sizeof(uint32_t)) + comm_flags0_offset;
 
     for (int r = 0; r < kWorldSize; r++) {
       int32x4_t* send_buffer =
@@ -525,8 +526,8 @@ struct AllReduceTwoshot {
     __syncthreads();
     if (thread < kWorldSize) {
       int r = thread;
-      int* flag_ptr = reinterpret_cast<int*>(
-          buffer_list[r] + comm_flags0_offset + rank * sizeof(int));
+      uint32_t* flag_ptr = reinterpret_cast<uint32_t*>(
+          buffer_list[r] + comm_flags0_offset + rank * sizeof(uint32_t));
       set_sync_flag(flag_ptr, flag_color);
     }
     // --------------------------------------------------------
@@ -536,7 +537,8 @@ struct AllReduceTwoshot {
       // Read the data from the communication buffer.
       int32x4_t* recv_buffer =
           reinterpret_cast<int32x4_t*>(rank_buffer + comm_data0_offset);
-      int* flag_ptr = reinterpret_cast<int*>(rank_buffer + comm_flags0_offset);
+      uint32_t* flag_ptr =
+          reinterpret_cast<uint32_t*>(rank_buffer + comm_flags0_offset);
 
       for (int r = 0; r < kWorldSize; r++) {
         // Wait for the flags to be set.
@@ -565,8 +567,8 @@ struct AllReduceTwoshot {
     __syncthreads();
     if (thread < kWorldSize) {
       int r = thread;
-      int* flag_ptr = reinterpret_cast<int*>(
-          buffer_list[r] + comm_flags1_offset + rank * sizeof(int));
+      uint32_t* flag_ptr = reinterpret_cast<uint32_t*>(
+          buffer_list[r] + comm_flags1_offset + rank * sizeof(uint32_t));
       set_sync_flag(flag_ptr, flag_color);
     }
 
@@ -575,7 +577,8 @@ struct AllReduceTwoshot {
       // Read the data from the communication buffer.
       int32x4_t* recv_buffer =
           reinterpret_cast<int32x4_t*>(rank_buffer + comm_data1_offset);
-      int* flag_ptr = reinterpret_cast<int*>(rank_buffer + comm_flags1_offset);
+      uint32_t* flag_ptr =
+          reinterpret_cast<uint32_t*>(rank_buffer + comm_flags1_offset);
 
       for (int r = 0; r < kWorldSize; r++) {
         // Wait for the flags to be set.
@@ -592,7 +595,7 @@ struct AllReduceTwoshot {
     // --------------------------------------------------------
     // Write the result to output.
     BufferResource dst_buffer(output, N * sizeof(T));
-    int dst_offset = block * kTileSize + thread * sizeof(int32x4_t);
+    uint32_t dst_offset = block * kTileSize + thread * sizeof(int32x4_t);
     int32x4_t* dst = reinterpret_cast<int32x4_t*>(output);
 
     for (int i = 0; i < kAtoms; i++) {
