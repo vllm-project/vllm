@@ -1562,14 +1562,20 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
             }
-            default_max_num_seqs = 1024
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 1024,
+                UsageContext.OPENAI_API_SERVER: 1024,
+            }
         else:
             # TODO(woosuk): Tune the default values for other hardware.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 8192,
                 UsageContext.OPENAI_API_SERVER: 2048,
             }
-            default_max_num_seqs = 256
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 256,
+                UsageContext.OPENAI_API_SERVER: 256,
+            }
 
         # tpu specific default values.
         if current_platform.is_tpu():
@@ -1584,6 +1590,17 @@ class EngineArgs:
                     'V5E': 512,
                     'V5P': 256,
                 }
+            }
+
+        # cpu specific default values.
+        if current_platform.is_cpu():
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 4096,
+                UsageContext.OPENAI_API_SERVER: 2048,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 128,
+                UsageContext.OPENAI_API_SERVER: 32,
             }
 
         use_context_value = usage_context.value if usage_context else None
@@ -1606,8 +1623,9 @@ class EngineArgs:
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
 
-        if self.max_num_seqs is None:
-            self.max_num_seqs = default_max_num_seqs
+        if (self.max_num_seqs is None
+                and usage_context in default_max_num_seqs):
+            self.max_num_seqs = default_max_num_seqs[usage_context]
 
             logger.debug("Setting max_num_seqs to %d for %s usage context.",
                          self.max_num_seqs, use_context_value)
