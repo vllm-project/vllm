@@ -4,11 +4,13 @@ import atexit
 import ctypes
 import math
 from dataclasses import dataclass
-from vllm.logger import init_logger
 
 import torch
 
+from vllm.logger import init_logger
+
 logger = init_logger(__name__)
+
 
 @dataclass
 class MemoryBlock:
