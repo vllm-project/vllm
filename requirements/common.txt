@@ -31,7 +31,7 @@ pyzmq >= 25.0.0
 msgspec
 gguf >= 0.13.0
 importlib_metadata; python_version < '3.10'
-mistral_common[opencv] >= 1.5.4
+mistral_common[opencv] >= 1.6.2
 opencv-python-headless >= 4.11.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
