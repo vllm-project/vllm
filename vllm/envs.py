@@ -129,7 +129,7 @@ if TYPE_CHECKING:
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_KV_CACHE_LAYOUT: Optional[str] = None
-    VLLM_ROCM_CA_QUANT_LEVEL: str = "FP"
+    VLLM_ROCM_CA_QUANT_REGIME: str = "FP"
     VLLM_ROCM_CA_CAST_BF16_TO_FP16: bool = True
 
 
@@ -674,10 +674,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
              ("true", "1")),
 
     # Custom quick allreduce kernel for MI3* cards.
-    # Choice of quantization level: FP16, INT8, INT4
+    # Choice of quantization level: FP, INT8, INT4 or NONE
     # Recommended for large models to get allreduce
-    "VLLM_ROCM_CA_QUANT_LEVEL":
-    lambda: os.getenv("VLLM_ROCM_CA_QUANT_LEVEL", "FP").upper(),
+    "VLLM_ROCM_CA_QUANT_REGIME":
+    lambda: os.getenv("VLLM_ROCM_CA_QUANT_REGIME", "FP").upper(),
 
     # Custom quick allreduce kernel for MI3* cards
     # Due to the lack of the bfloat16 asm instruction, bfloat16

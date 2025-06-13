@@ -423,11 +423,13 @@ __quickreduce_device_inline__ void group_max_min(int32x4_t atom, int& wblockmax,
   wblockmin = __shfl(wmin, group_leader);
 }
 
-__quickreduce_device_inline__ void set_sync_flag(int* flag_ptr, int flag) {
+__quickreduce_device_inline__ void set_sync_flag(uint32_t* flag_ptr,
+                                                 uint32_t flag) {
   __atomic_store_n(flag_ptr, flag, __ATOMIC_RELEASE);
 }
 
-__quickreduce_device_inline__ void wait_sync_flag(int* flag_ptr, int flag) {
+__quickreduce_device_inline__ void wait_sync_flag(uint32_t* flag_ptr,
+                                                  uint32_t flag) {
   while (__atomic_load_n(flag_ptr, __ATOMIC_RELAXED) != flag) {
   }
 }
