@@ -92,6 +92,12 @@ allreduce_prototype_twoshot(T const* A, T* B, int N, int num_blocks, int rank,
                        flag_color);                                         \
   }
 
+enum QuickReduceQuantLevel {
+  FP16 = 0,
+  INT8,
+  INT4,
+};
+
 struct DeviceComms {
   // Workgroup scope = Tile = (256 threads x 16B x 8 atoms)
   static long constexpr kTileSize = 256 * 16 * 8;
@@ -188,7 +194,7 @@ struct DeviceComms {
   }
 
   template <typename T>
-  void allreduce(T const* A, T* B, int N, bool quantized, hipStream_t stream) {
+  void allreduce(T const* A, T* B, int N, int quant_level, hipStream_t stream) {
     if (world_size != 2 && world_size != 4 && world_size != 8) {
       throw std::runtime_error("All Reduce not supported for world_size = " +
                                std::to_string(world_size));
@@ -208,11 +214,17 @@ struct DeviceComms {
     } else {
       unsigned long num_blocks = divceil(msg_size, kTileSize);
       unsigned long grid = min(kMaxNumBlocks, num_blocks);
-
-      if (quantized) {
-        TWOSHOT_DISPATCH(CodecQ4Symm)
-      } else {
-        TWOSHOT_DISPATCH(CodecFP16)
+      auto quant_level_ = static_cast<QuickReduceQuantLevel>(quant_level);
+      switch (quant_level_) {
+        case QuickReduceQuantLevel::INT8:
+          TWOSHOT_DISPATCH(CodecQ8)
+          break;
+        case QuickReduceQuantLevel::INT4:
+          TWOSHOT_DISPATCH(CodecQ4)
+          break;
+        default:
+          TWOSHOT_DISPATCH(CodecFP)
+          break;
       }
     }
     HIP_CHECK(cudaGetLastError());

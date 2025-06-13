@@ -56,8 +56,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(group=self.cpu_group,
-                                           device=self.device,
-                                           max_size=8192 * 1024 * 2)
+                                           device=self.device)
 
         self.qr_comm: Optional[QuickAllReduce] = None
         if (use_custom_allreduce and current_platform.is_rocm()
