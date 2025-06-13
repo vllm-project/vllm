@@ -173,13 +173,15 @@ def _logit_bias_params(kwargs: dict) -> None:
 
 def _logit_bias_validate(
     test_fakes: LogitsprocsTestFakes,
+    persistent_batch: list[LogitsProcsRequestParams],
     logits_new: torch.Tensor,
     batch_index: int,
     request_params: LogitsProcsRequestParams,
 ) -> bool:
     """Validate logit bias logitproc applied correctly"""
     logit_bias = request_params.params.logit_bias
-    logits_old = test_fakes.logits[batch_index].cpu()
+    logits_old = (
+        test_fakes.logits[persistent_batch[batch_index].workload_index].cpu())
     logits_new = logits_new[batch_index].cpu()
     for token_id in range(VOCAB_SIZE):
         logit_old_value = logits_old[token_id]
@@ -210,6 +212,7 @@ def _min_p_params(kwargs: dict) -> None:
 
 def _min_p_validate(
     test_fakes: LogitsprocsTestFakes,
+    persistent_batch: list[LogitsProcsRequestParams],
     logits_new: torch.Tensor,
     batch_index: int,
     request_params: LogitsProcsRequestParams,
@@ -247,6 +250,7 @@ def _min_tokens_params(kwargs: dict) -> None:
 
 def _min_tokens_validate(
     test_fakes: LogitsprocsTestFakes,
+    persistent_batch: list[LogitsProcsRequestParams],
     logits_new: torch.Tensor,
     batch_index: int,
     request_params: LogitsProcsRequestParams,
@@ -275,13 +279,14 @@ def _min_tokens_validate(
 
 def _none_validate(
     test_fakes: LogitsprocsTestFakes,
+    persistent_batch: list[LogitsProcsRequestParams],
     logits_new: torch.Tensor,
     batch_index: int,
     request_params: LogitsProcsRequestParams,
 ) -> bool:
     """Validate that no logits processors are applied"""
-    return torch.all(
-        logits_new[batch_index] == test_fakes.logits.cpu()[batch_index])
+    return torch.all(logits_new[batch_index] == (
+        test_fakes.logits[persistent_batch[batch_index].workload_index].cpu()))
 
 
 class LogitsprocTestHelpers(NamedTuple):
@@ -449,13 +454,23 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
         slice_idxs = [req.workload_index for req in persistent_batch]
         logits_w_lp = fake_apply_logitsprocs(test_fakes, slice_idxs).cpu()
 
-        # # Validate logits for each fake request
-        # for batch_index in range(workload_size):
-        #     request_params = workload_params[batch_index]
-        #     fxn = logitsprocs_test_mapping[request_params.logitproc_id].eval_fxn
-        #     assert fxn(test_fakes=test_fakes,
-        #             logits_new=logits_w_lp,
-        #             batch_index=batch_index,
-        #             request_params=request_params), (
-        #                 f"Validation failed for batch_index={batch_index}, "
-        #                 f"req_params={request_params}")
+        # Validate output
+        if not slice_idxs:
+            if logits_w_lp.shape[0] != 0:
+                raise ValueError(
+                    "Fake persistent batch is impty but logitsprocs "
+                    f"output batch with shape {logits_w_lp.shape}")
+            return
+
+        # Validate logits for each fake request
+        for batch_index in range(condensed_batch_size):
+            request_params = persistent_batch[batch_index]
+            fxn = logitsprocs_test_mapping[
+                request_params.logitproc_id].eval_fxn
+            assert fxn(test_fakes=test_fakes,
+                       persistent_batch=persistent_batch,
+                       logits_new=logits_w_lp,
+                       batch_index=batch_index,
+                       request_params=request_params), (
+                           f"Validation failed for batch_index={batch_index}, "
+                           f"req_params={request_params}")
