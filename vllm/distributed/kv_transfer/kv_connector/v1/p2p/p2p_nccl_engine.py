@@ -139,7 +139,7 @@ class P2pNcclEngine:
         self.buffer_size_threshold = float(self.config.kv_buffer_size)
 
         self.nccl_num_chennels = self.config.get_from_extra_config(
-            "nccl_num_chennels", "16")
+            "nccl_num_chennels", "8")
 
         self._listener_thread = threading.Thread(
             target=self._listen_for_requests, daemon=True)
