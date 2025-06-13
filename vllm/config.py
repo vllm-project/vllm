@@ -1311,12 +1311,14 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
-        if self.generation_config in ("auto", "vllm"):
+        if self.generation_config == "auto":
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
             )
+        elif self.generation_config == "vllm":
+            config = None
         else:
             config = try_get_generation_config(
                 self.generation_config,
