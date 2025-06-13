@@ -5,10 +5,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
     _query_start_loc_to_chunk_indices_offsets)
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -27,7 +29,34 @@ def get_mamba2_chunk_size(vllm_config: VllmConfig) -> int:
     return chunk_sizes.pop()
 
 
-class Mamba2AttentionMetadataBuilder:
+class Mamba2AttentionBackend(AttentionBackend):
+
+    @staticmethod
+    def get_builder_cls() -> type["Mamba2AttentionMetadataBuilder"]:
+        return Mamba2AttentionMetadataBuilder
+
+
+@dataclass
+class Mamba2AttentionMetadata:
+    num_prefills: int
+    num_prefill_tokens: int
+    num_decodes: int
+    num_decode_tokens: int
+    query_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
+
+    has_initial_states: torch.Tensor
+    prep_initial_states: bool
+    chunk_size: int
+    seq_idx: torch.Tensor
+    chunk_indices: torch.Tensor
+    chunk_offsets: torch.Tensor
+
+    state_indices_tensor: torch.Tensor  # shape: [batch,]
+
+
+class Mamba2AttentionMetadataBuilder(
+        AttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: MambaSpec,
                  block_table: BlockTable):
@@ -98,9 +127,9 @@ class Mamba2AttentionMetadataBuilder:
 
         return modified_batch
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
+    def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
+        num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
 
@@ -161,29 +190,3 @@ class Mamba2AttentionMetadataBuilder:
             state_indices_tensor=state_indices_tensor,
         )
         return attn_metadata
-
-
-class Mamba2AttentionBackend:
-
-    @staticmethod
-    def get_builder_cls() -> type[Mamba2AttentionMetadataBuilder]:
-        return Mamba2AttentionMetadataBuilder
-
-
-@dataclass
-class Mamba2AttentionMetadata:
-    num_prefills: int
-    num_prefill_tokens: int
-    num_decodes: int
-    num_decode_tokens: int
-    query_start_loc: torch.Tensor
-    seq_lens: torch.Tensor
-
-    has_initial_states: torch.Tensor
-    prep_initial_states: bool
-    chunk_size: int
-    seq_idx: torch.Tensor
-    chunk_indices: torch.Tensor
-    chunk_offsets: torch.Tensor
-
-    state_indices_tensor: torch.Tensor  # shape: [batch,]
