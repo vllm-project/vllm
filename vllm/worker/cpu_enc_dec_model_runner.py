@@ -184,12 +184,13 @@ class CPUEncoderDecoderModelRunner(
                 [],
                 [],
             )
+            cross_block_tables = []
             for seq_group_metadata in seq_group_metadata_list:
                 # Build seq lens
                 seq_len = seq_group_metadata.encoder_seq_data.get_len()
                 token_ids = seq_group_metadata.encoder_seq_data.get_token_ids()
                 encoder_seq_lens.append(seq_len)
-
+                cross_block_tables.append(seq_group_metadata.cross_block_table)
                 # Build slot mapping
                 for i in range(0, seq_len):
                     block_number = seq_group_metadata.cross_block_table[
@@ -201,6 +202,17 @@ class CPUEncoderDecoderModelRunner(
                 # Build encoder input tokens
                 encoder_input_tokens.extend(token_ids)
                 encoder_input_positions.extend(list(range(0, seq_len)))
+
+            max_len_of_block_table = max(
+                len(block_table) for block_table in cross_block_tables)
+
+            cross_block_tables = make_tensor_with_pad(
+                cross_block_tables,
+                max_len=max_len_of_block_table,
+                pad=0,
+                dtype=torch.int32,
+                device=self.device,
+            )
 
             # Convert tokens/positions & cross-attention
             # slot-mapping to encoder input tensors
@@ -263,6 +275,8 @@ class CPUEncoderDecoderModelRunner(
             attn_metadata.max_encoder_seq_len,
             attn_metadata.cross_slot_mapping,
             attn_metadata.cross_block_tables,
+            attn_metadata.cross_max_kv_len,
+            attn_metadata.cross_kv_start_loc,
         ) = (
             sum(encoder_seq_lens),
             encoder_seq_lens,
@@ -270,6 +284,8 @@ class CPUEncoderDecoderModelRunner(
             max_encoder_seq_len,
             cross_slot_mapping_tensor,
             cross_block_tables,
+            max_encoder_seq_len,
+            encoder_seq_start_loc,
         )
 
         return (attn_metadata, encoder_input_tokens_tensor,

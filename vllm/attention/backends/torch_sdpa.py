@@ -108,6 +108,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     # and block tables
     cross_slot_mapping: Optional[torch.Tensor] = None
     cross_block_tables: Optional[torch.Tensor] = None
+    cross_max_kv_len: Optional[int] = None
+    cross_kv_start_loc: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -304,8 +306,7 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
                                     dtype=torch.long,
                                     device="cpu")
 
-        # For chunked-prefill
-        if self.chunked_prefill and input_data.num_prefill_tokens != 0:
+        if input_data.num_prefill_tokens != 0:
             prefill_block_tables = make_tensor_with_pad(
                 self.input_data.prefill_block_tables,
                 pad=0,
@@ -537,17 +538,64 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         if prefill_meta := attn_metadata.prefill_metadata:
             if not prefill_meta.prefill_metadata.chunked_prefill:  # type: ignore
                 assert attn_metadata.seq_lens is not None
-                self._run_sdpa_forward(output,
-                                       query,
-                                       key,
-                                       value,
-                                       prefill_meta,
-                                       attn_type=attn_type)
+                if attn_type == AttentionType.ENCODER:
+                    self._run_sdpa_forward(output,
+                                        query,
+                                        key,
+                                        value,
+                                        prefill_meta,
+                                        attn_type=attn_type)
+                else:
+                    assert not self.need_mask
+                    if attn_type == AttentionType.DECODER:
+                        kv_start_loc = prefill_meta.kv_start_loc
+                        seq_lens = prefill_meta.seq_lens_tensor
+                        max_kv_len = prefill_meta.max_kv_len
+                        block_tables = prefill_meta.prefill_block_tables
+                    elif attn_type == AttentionType.ENCODER_DECODER:
+                        kv_start_loc = prefill_meta.cross_kv_start_loc
+                        seq_lens = prefill_meta.encoder_seq_lens_tensor
+                        max_kv_len = prefill_meta.cross_max_kv_len
+                        block_tables = prefill_meta.cross_block_tables
+                    else:
+                        raise RuntimeError(f"Unsupported attn type: {attn_type}")
+
+                    if attn_metadata.max_query_len == 1:
+                        PagedAttention.forward_decode(
+                            output,
+                            query,
+                            key_cache,
+                            value_cache,
+                            block_tables,
+                            seq_lens,
+                            max_kv_len,
+                            self.kv_cache_dtype,
+                            self.num_kv_heads,
+                            self.scale,
+                            self.alibi_slopes,
+                            layer._k_scale,
+                            layer._v_scale,
+                        )
+                    else:
+                        import intel_extension_for_pytorch.llm.modules as ipex_modules
+                        ipex_modules.PagedAttention.flash_attn_varlen_func(
+                            output,
+                            query,
+                            key_cache,
+                            value_cache,
+                            prefill_meta.prefill_query_start_loc,
+                            kv_start_loc,
+                            prefill_meta.max_query_len,
+                            max_kv_len,
+                            self.scale,
+                            True,
+                            block_tables,
+                            self.alibi_slopes,
+                        )
             else:
                 # prefix-enabled attention
                 assert not self.need_mask
                 import intel_extension_for_pytorch.llm.modules as ipex_modules
-                output = torch.empty_like(query)
                 ipex_modules.PagedAttention.flash_attn_varlen_func(
                     output[:prefill_meta.num_prefill_tokens, :, :],
                     query[:prefill_meta.num_prefill_tokens, :, :],
