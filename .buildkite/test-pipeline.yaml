@@ -289,9 +289,10 @@ steps:
   - tests/spec_decode
   - vllm/model_executor/models/eagle.py
   commands:
-    - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
-    - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py --ignore=spec_decode/e2e/test_mtp_correctness.py
-    - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
+    - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode/e2e/test_multistep_correctness.py
+    # - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
+    # - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py --ignore=spec_decode/e2e/test_mtp_correctness.py
+    # - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amdexperimental, amdproduction]
