@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Optional, Union
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
@@ -155,15 +156,30 @@ class OpenAIServingModels:
             request: LoadLoRAAdapterRequest,
             base_model_name: Optional[str] = None
     ) -> Union[ErrorResponse, str]:
-        error_check_ret = await self._check_load_lora_adapter_request(request)
-        if error_check_ret is not None:
-            return error_check_ret
+        lora_request = None
+        # Try to resolve the lora adapter using available resolvers
+        # First attempt to resolve using registered resolvers
+        if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+            lora_request = await self.resolve_lora(request.lora_name)
 
-        lora_name, lora_path = request.lora_name, request.lora_path
-        unique_id = self.lora_id_counter.inc(1)
-        lora_request = LoRARequest(lora_name=lora_name,
-                                   lora_int_id=unique_id,
-                                   lora_path=lora_path)
+        if not isinstance(lora_request, LoRARequest):
+            # Failed to resolve, fallback to direct loading
+            logger.warning(
+                "Failed to resolve LoRA adapter '%s', "
+                "falling back to direct loading",
+                request.lora_name,
+            )
+            error_check_ret = await self._check_load_lora_adapter_request(
+                request)
+            if error_check_ret is not None:
+                return error_check_ret
+
+            unique_id = self.lora_id_counter.inc(1)
+            lora_request = LoRARequest(
+                lora_name=request.lora_name,
+                lora_int_id=unique_id,
+                lora_path=request.lora_path,
+            )
         if base_model_name is not None and self.is_base_model(base_model_name):
             lora_request.base_model_name = base_model_name
 
@@ -183,6 +199,7 @@ class OpenAIServingModels:
                                          status_code=status_code)
 
         self.lora_requests.append(lora_request)
+        lora_name, lora_path = lora_request.lora_name, lora_request.lora_path
         logger.info("Loaded new LoRA adapter: name '%s', path '%s'", lora_name,
                     lora_path)
         return f"Success: LoRA adapter '{lora_name}' added successfully."
