@@ -145,6 +145,20 @@ def _cached_get_attn_backend(
         if backend_by_env_var is not None:
             selected_backend = backend_name_to_enum(backend_by_env_var)
 
+    if selected_backend is not None and use_v1:
+        if (selected_backend in (_Backend.FLASH_ATTN, _Backend.FLASHINFER,
+                                 _Backend.XFORMERS)):
+            raise ValueError(
+                f"{selected_backend.name} is not compatible with vLLM V1. "
+                "Please either do `export VLLM_ATTENTION_BACKEND="
+                f"{_Backend.FLASH_ATTN_VLLM_V1.name}` or unset it to use "
+                "the default backend.")
+        elif selected_backend not in _Backend.get_v1_backends():
+            raise ValueError(
+                f"{selected_backend.name} attention backend is not compatible "
+                "with vLLM V1. Please use a different backend or unset the "
+                "VLLM_ATTENTION_BACKEND env variable.")
+
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
         selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
