@@ -230,7 +230,8 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         N: int,
         K: int,
         topk: int,
-        num_experts: int,
+        global_num_experts: int,
+        local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         workspace1: tuple[int, ...] = ()
         workspace2: tuple[int, ...] = ()

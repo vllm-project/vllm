@@ -159,6 +159,12 @@ def moe_align_block_size(
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.
 
+    Note: In the case of expert_parallel, moe_align_block_size initially
+    considers all experts as valid and aligns all tokens appropriately.
+    Before the function returns it marks the experts_ids that are not in
+    the current GPU rank as -1 so the MoE matmuls could skip those blocks.
+    This requires the num_experts input arg to be the num global experts.
+
     Parameters:
     - topk_ids: A tensor of shape [total_tokens, top_k] representing the
         top-k expert indices for each token.

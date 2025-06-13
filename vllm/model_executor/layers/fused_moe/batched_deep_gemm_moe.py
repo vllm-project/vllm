@@ -47,15 +47,21 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         N: int,
         K: int,
         topk: int,
-        num_experts: int,
+        global_num_experts: int,
+        local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        num_dp = self.world_size // self.dp_size
+        # FIXME (varun): We should be able to dispatch only from the leader
+        # DP ranks in the case of TP > 1. At the moment, all the Ranks
+        # end up sending their tokens. This needs to be fixed.
+        num_dispatchers = self.world_size
+        num_experts = local_num_experts
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
-        workspace2 = (num_experts, max_num_tokens * num_dp, (N // 2))
-        output = (num_experts, max_num_tokens * num_dp, K)
+        workspace13 = (num_experts, max_num_tokens * num_dispatchers,
+                       max(K, N))
+        workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
+        output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output, a.dtype)
 
     def apply(
@@ -83,9 +89,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         a1q = hidden_states
         _, N, K = w1.size()
-
-        if global_num_experts == -1:
-            global_num_experts = w1.size(0)
 
         assert w2.size(1) == K
 
