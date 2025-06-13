@@ -1185,6 +1185,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 # Use get_text_config() in case of multimodal models
                 text_config = self.model_config.hf_config.get_text_config()
 
+                max_position_embeddings_tmp = 2048  
+                if hasattr(text_config, 'max_position_embeddings') and text_config.max_position_embeddings is not None:
+                    max_position_embeddings_tmp = text_config.max_position_embeddings
                 self.lora_manager = LRUCacheWorkerLoRAManager(
                     self.scheduler_config.max_num_seqs,
                     self.scheduler_config.max_num_batched_tokens,
@@ -1193,8 +1196,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.device,
                     self.model.embedding_modules,
                     self.model.embedding_padding_modules,
-                    max_position_embeddings=text_config.
-                    max_position_embeddings,
+                    max_position_embeddings = max_position_embeddings_tmp 
                 )
                 self.model = self.lora_manager.create_lora_manager(self.model)
             time_after_load = time.perf_counter()
