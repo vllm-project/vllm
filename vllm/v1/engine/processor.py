@@ -240,13 +240,81 @@ class Processor:
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
         # 3. Apply prompt adapter to prompt token ids if one exists.
-        processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
+        processed_inputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=self.use_hash,
         )
+
+        return self._postprocess_inputs(
+            request_id,
+            prompt,
+            params,
+            processed_inputs,
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+        )
+
+    async def process_inputs_async(
+        self,
+        request_id: str,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> tuple[Optional[str], EngineCoreRequest]:
+
+        # TODO(woosuk): Support pooling models.
+        # TODO(woosuk): Support encoder-decoder models.
+        self._validate_lora(lora_request)
+        self._validate_params(params, lora_request)
+        if priority != 0:
+            raise ValueError("V1 does not support priority yet.")
+        if trace_headers is not None:
+            raise ValueError("V1 does not support tracing yet.")
+        if prompt_adapter_request is not None:
+            raise ValueError("V1 does not support prompt_adapter_request.")
+
+        if arrival_time is None:
+            arrival_time = time.time()
+
+        # Process inputs, which includes:
+        # 1. Tokenize text prompt, with LoRA request if one exists.
+        # 2. For multimodal models with a merged preprocessor, preprocess
+        #   multimodal data and expand prompt token ids accordingly.
+        # 3. Apply prompt adapter to prompt token ids if one exists.
+        processed_inputs = await self.input_preprocessor.preprocess_async(
+            prompt,
+            tokenization_kwargs=tokenization_kwargs,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
+            return_mm_hashes=self.use_hash,
+        )
+
+        return self._postprocess_inputs(
+            request_id,
+            prompt,
+            params,
+            processed_inputs,
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+        )
+
+    def _postprocess_inputs(
+        self,
+        request_id: str,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        processed_inputs: ProcessorInputs,
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> tuple[Optional[str], EngineCoreRequest]:
         from vllm.platforms import current_platform
         current_platform.validate_request(
             prompt=prompt,
