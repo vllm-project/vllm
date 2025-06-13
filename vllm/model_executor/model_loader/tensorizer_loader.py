@@ -20,6 +20,18 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 
 logger = init_logger(__name__)
 
+BLACKLISTED_TENSORIZER_ARGS = {
+    "device",  # vLLM decides this
+    "dtype",  # vLLM decides this
+    "mode",  # Not meant to be configurable by the user
+}
+
+
+def validate_config(config: dict):
+    for k, v in config.items():
+        if v is not None and k in BLACKLISTED_TENSORIZER_ARGS:
+            raise ValueError(f"{k} is not an allowed Tensorizer argument.")
+
 
 class TensorizerLoader(BaseModelLoader):
     """Model loader using CoreWeave's tensorizer library."""
@@ -29,6 +41,7 @@ class TensorizerLoader(BaseModelLoader):
         if isinstance(load_config.model_loader_extra_config, TensorizerConfig):
             self.tensorizer_config = load_config.model_loader_extra_config
         else:
+            validate_config(load_config.model_loader_extra_config)
             self.tensorizer_config = TensorizerConfig(
                 **load_config.model_loader_extra_config)
 
@@ -72,9 +85,9 @@ class TensorizerLoader(BaseModelLoader):
             self, model_config: ModelConfig) -> TensorizerConfig:
         model_class = get_model_architecture(model_config)[0]
         tensorizer_config = copy.copy(self.tensorizer_config)
-        tensorizer_config.model_class = model_class
-        tensorizer_config.hf_config = model_config.hf_config
-        tensorizer_config.dtype = model_config.dtype
+        tensorizer_config._model_cls = model_class
+        tensorizer_config._hf_config = model_config.hf_config
+        tensorizer_config._model_cls_dtype = model_config.dtype
         return tensorizer_config
 
     def load_weights(self, model: nn.Module,
@@ -114,10 +127,12 @@ class TensorizerLoader(BaseModelLoader):
     def save_model(
         model: torch.nn.Module,
         tensorizer_config: Union[TensorizerConfig, dict],
+        model_config: ModelConfig,
     ) -> None:
         if isinstance(tensorizer_config, dict):
             tensorizer_config = TensorizerConfig(**tensorizer_config)
         serialize_vllm_model(
             model=model,
             tensorizer_config=tensorizer_config,
+            model_config=model_config,
         )
