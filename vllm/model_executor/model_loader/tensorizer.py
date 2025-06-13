@@ -464,14 +464,14 @@ def _resize_lora_embeddings(model: nn.Module):
 
 def init_tensorizer_model(tensorizer_config: TensorizerConfig,
                           vllm_config: VllmConfig) -> nn.Module:
-    assert tensorizer_config.hf_config is not None
-    model_args = tensorizer_config.hf_config
-    model_args.torch_dtype = tensorizer_config.dtype
-    assert tensorizer_config.model_class is not None
+    assert tensorizer_config._hf_config is not None
+    model_args = tensorizer_config._hf_config
+    model_args.torch_dtype = tensorizer_config._model_cls_dtype
+    assert tensorizer_config._model_cls is not None
     # TODO: Do we need to consider old-style model class?
     with meta_tensor_mode(), set_current_vllm_config(vllm_config,
                                                      check_compile=True):
-        return tensorizer_config.model_class(vllm_config=vllm_config)
+        return tensorizer_config._model_cls(vllm_config=vllm_config)
 
 
 def deserialize_tensorizer_model(model: nn.Module,
@@ -484,32 +484,32 @@ def deserialize_tensorizer_model(model: nn.Module,
                 f"tensorizer URI. Please check that the URI is correct. "
                 f"It must either point to a local existing file, or have a "
                 f"S3, HTTP or HTTPS scheme.")
-        before_mem = get_mem_usage()
-        start = time.perf_counter()
-        with open_stream(
-            tensorizer_config.tensorizer_uri,
-            mode="rb",
-                **tensorizer_args.stream_kwargs) as stream, TensorDeserializer(
-                stream,
-                dtype=tensorizer_config._model_cls_dtype,
-                device=torch.device("cuda", torch.cuda.current_device()),
-                **tensorizer_args.deserialization_kwargs) as deserializer:
-            deserializer.load_into_module(model)
-            end = time.perf_counter()
+    before_mem = get_mem_usage()
+    start = time.perf_counter()
+    with open_stream(
+        tensorizer_config.tensorizer_uri,
+        mode="rb",
+            **tensorizer_args.stream_kwargs) as stream, TensorDeserializer(
+            stream,
+            dtype=tensorizer_config._model_cls_dtype,
+            device=torch.device("cuda", torch.cuda.current_device()),
+            **tensorizer_args.deserialization_kwargs) as deserializer:
+        deserializer.load_into_module(model)
+        end = time.perf_counter()
 
-        total_bytes_str = convert_bytes(deserializer.total_tensor_bytes)
-        duration = end - start
-        per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
-        after_mem = get_mem_usage()
-        deserializer.close()
-        logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str,
-                    end - start, per_second)
-        logger.info("Memory usage before: %s", before_mem)
-        logger.info("Memory usage after: %s", after_mem)
+    total_bytes_str = convert_bytes(deserializer.total_tensor_bytes)
+    duration = end - start
+    per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
+    after_mem = get_mem_usage()
+    deserializer.close()
+    logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str,
+                end - start, per_second)
+    logger.info("Memory usage before: %s", before_mem)
+    logger.info("Memory usage after: %s", after_mem)
 
-        _check_tensors_on_meta_device(model)
-        _resize_lora_embeddings(model)
-        del model.vllm_tensorized_marker
+    _check_tensors_on_meta_device(model)
+    _resize_lora_embeddings(model)
+    del model.vllm_tensorized_marker
 
 
 def tensorizer_weights_iterator(
