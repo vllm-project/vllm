@@ -10,6 +10,7 @@ OR
 
 vllm serve --model Salesforce/xLAM-2-3b-fc-r --enable-auto-tool-choice --tool-call-parser xlam
 """
+
 import json
 import time
 
@@ -38,71 +39,67 @@ def translate_text(text: str, target_language: str):
 
 
 # Define tools
-tools = [{
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get the current weather in a given location",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "location": {
-                    "type": "string",
-                    "description": "City and state, e.g., 'San Francisco, CA'"
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City and state, e.g., 'San Francisco, CA'",
+                    },
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
                 },
-                "unit": {
-                    "type": "string",
-                    "enum": ["celsius", "fahrenheit"]
-                }
+                "required": ["location", "unit"],
             },
-            "required": ["location", "unit"]
-        }
-    }
-}, {
-    "type": "function",
-    "function": {
-        "name": "calculate_expression",
-        "description": "Calculate a mathematical expression",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "expression": {
-                    "type":
-                    "string",
-                    "description":
-                    "Mathematical expression to evaluate, needs to be a valid python expression"
-                }
-            },
-            "required": ["expression"]
-        }
-    }
-}, {
-    "type": "function",
-    "function": {
-        "name": "translate_text",
-        "description": "Translate text to another language",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "Text to translate"
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_expression",
+            "description": "Calculate a mathematical expression",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "Mathematical expression to evaluate, needs to be a valid python expression",
+                    }
                 },
-                "target_language": {
-                    "type": "string",
-                    "description": "Target language for translation"
-                }
+                "required": ["expression"],
             },
-            "required": ["text", "target_language"]
-        }
-    }
-}]
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "translate_text",
+            "description": "Translate text to another language",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to translate"},
+                    "target_language": {
+                        "type": "string",
+                        "description": "Target language for translation",
+                    },
+                },
+                "required": ["text", "target_language"],
+            },
+        },
+    },
+]
 
 # Map of function names to implementations
 tool_functions = {
     "get_weather": get_weather,
     "calculate_expression": calculate_expression,
-    "translate_text": translate_text
+    "translate_text": translate_text,
 }
 
 
@@ -150,21 +147,22 @@ def process_response(response, tool_functions, original_query):
                 print(f"\n--- Function Result ---\n{function_result}\n")
 
                 # Add tool call to assistant message
-                assistant_tool_calls.append({
-                    "id": function_id,
-                    "type": "function",
-                    "function": {
-                        "name": function_name,
-                        "arguments": function_args
+                assistant_tool_calls.append(
+                    {
+                        "id": function_id,
+                        "type": "function",
+                        "function": {"name": function_name, "arguments": function_args},
                     }
-                })
+                )
 
                 # Add tool result to tool_results
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": function_id,
-                    "content": function_result
-                })
+                tool_results.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": function_id,
+                        "content": function_result,
+                    }
+                )
 
             except Exception as e:
                 print(f"Error executing function: {e}")
@@ -174,10 +172,7 @@ def process_response(response, tool_functions, original_query):
 
         # Create a follow-up message with all function results
         follow_up_messages = [
-            {
-                "role": "user",
-                "content": original_query
-            },
+            {"role": "user", "content": original_query},
             assistant_message,
         ]
 
@@ -188,7 +183,8 @@ def process_response(response, tool_functions, original_query):
         follow_up_response = client.chat.completions.create(
             model=client.models.list().data[0].id,
             messages=follow_up_messages,
-            stream=False)
+            stream=False,
+        )
 
         print("\n--- Follow-up Response ---")
         print(follow_up_response.choices[0].message.content)
@@ -199,7 +195,7 @@ def process_response(response, tool_functions, original_query):
 
 def run_test_case(query, test_name):
     """Run a single test case with the given query"""
-    print(f"\n{'='*50}\nTEST CASE: {test_name}\n{'='*50}")
+    print(f"\n{'=' * 50}\nTEST CASE: {test_name}\n{'=' * 50}")
     print(f"Query: '{query}'")
 
     start_time = time.time()
@@ -207,13 +203,11 @@ def run_test_case(query, test_name):
     # Create non-streaming chat completion request
     response = client.chat.completions.create(
         model=client.models.list().data[0].id,
-        messages=[{
-            "role": "user",
-            "content": query
-        }],
+        messages=[{"role": "user", "content": query}],
         tools=tools,
         tool_choice="auto",
-        stream=False)
+        stream=False,
+    )
 
     # Process the non-streaming response, passing the original query
     process_response(response, tool_functions, query)
@@ -231,12 +225,12 @@ def main():
     )
 
     # Run test cases
-    test_cases = [("I want to know the weather in San Francisco",
-                   "Weather Information"),
-                  ("Calculate 25 * 17 + 31", "Math Calculation"),
-                  ("Translate 'Hello world' to Spanish", "Text Translation"),
-                  ("What is the weather in Tokyo and New York in celsius",
-                   "Multiple Tool Usage")]
+    test_cases = [
+        ("I want to know the weather in San Francisco", "Weather Information"),
+        ("Calculate 25 * 17 + 31", "Math Calculation"),
+        ("Translate 'Hello world' to Spanish", "Text Translation"),
+        ("What is the weather in Tokyo and New York in celsius", "Multiple Tool Usage"),
+    ]
 
     # Execute all test cases
     for query, test_name in test_cases:
