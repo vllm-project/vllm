@@ -218,7 +218,7 @@ class GemmaDecoderLayer(nn.Module):
         self.mlp = GemmaMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
+            hidden_act=getattr(config, "hidden_act", None),
             hidden_activation=getattr(config, "hidden_activation", None),
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
