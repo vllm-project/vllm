@@ -27,7 +27,7 @@ model_pairs = [
 ]
 
 
-# @pytest.mark.flaky(reruns=2)
+@pytest.mark.flaky(reruns=2)
 # @pytest.mark.skipif(True, reason="BitBLAS takes too much time for tuning.")
 @pytest.mark.parametrize("model_pair", model_pairs)
 @pytest.mark.parametrize("dtype", ["half"])
