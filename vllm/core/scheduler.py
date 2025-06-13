@@ -901,6 +901,7 @@ class Scheduler:
                     num_new_tokens=num_new_tokens_uncached,
                     num_new_seqs=num_new_seqs,
             ):
+                self.block_manager.clear_computed_blocks_tracker(seq_group)
                 break
 
             if lora_int_id > 0 and curr_loras is not None:
@@ -1022,6 +1023,7 @@ class Scheduler:
                 waiting_queue.appendleft(vseq_group)
                 force_preemption_count += 1
             # Put the sequence back into the waiting queue
+            self.block_manager.clear_computed_blocks_tracker(seq_group)
             waiting_queue.appendleft(seq_group)
 
         waiting_queue = deque(sorted(waiting_queue, key=self._get_priority))
@@ -1126,6 +1128,7 @@ class Scheduler:
             can_allocate = self.block_manager.can_allocate(
                 seq_group, num_lookahead_slots=num_lookahead_slots)
             if can_allocate == AllocStatus.LATER:
+                self.block_manager.clear_computed_blocks_tracker(seq_group)
                 break
             elif can_allocate == AllocStatus.NEVER:
                 logger.warning(
@@ -1159,6 +1162,7 @@ class Scheduler:
                         and len(curr_loras) >= self.lora_config.max_loras):
                     # We don't have a space for another LoRA, so
                     # we ignore this request for now.
+                    self.block_manager.clear_computed_blocks_tracker(seq_group)
                     leftover_waiting_sequences.appendleft(seq_group)
                     waiting_queue.popleft()
                     continue
@@ -1168,6 +1172,7 @@ class Scheduler:
                 # We've reached the budget limit - since there might be
                 # continuous prefills in the running queue, we should break
                 # to avoid scheduling any new prefills.
+                self.block_manager.clear_computed_blocks_tracker(seq_group)
                 break
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
@@ -1175,6 +1180,7 @@ class Scheduler:
                     num_new_tokens=num_new_tokens_uncached,
                     num_new_seqs=num_new_seqs,
             ):
+                self.block_manager.clear_computed_blocks_tracker(seq_group)
                 break
 
             # Can schedule this request.
