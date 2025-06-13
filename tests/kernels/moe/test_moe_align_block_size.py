@@ -17,20 +17,14 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
             [32, 64, 128, 256],  # block_size
             [
                 1,
-                2,
                 4,
-                8,
                 16,
-                32,
                 64,
-                128,
                 256,
-                512,
                 1024,
-                2048,
                 4096,
             ],  # num_tokens
-            [1, 2, 4, 8, 16, 32, 64],  # topk
+            [1, 4, 16, 64],  # topk
             [64, 160, 256, 257, 260, 264],  #  num_experts
         )),
 )
