@@ -3,11 +3,11 @@
 import asyncio
 import io
 import time
-import numpy as np
 from collections.abc import AsyncGenerator
 from math import ceil
 from typing import Final, Optional, Union, cast
 
+import numpy as np
 from fastapi import Request
 
 from vllm.config import ModelConfig
@@ -277,7 +277,8 @@ class OpenAIServingTranscription(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        list_result_generator: Optional[list[AsyncGenerator[RequestOutput, None]]] = None
+        list_result_generator: Optional[list[AsyncGenerator[RequestOutput,
+                                                            None]]] = None
         try:
             # Unlike most decoder-only models, whisper generation length is not
             # constrained by the size of the input audio, which is mapped to a
@@ -293,11 +294,13 @@ class OpenAIServingTranscription(OpenAIServing):
                 lora_request=None,
                 prompt_adapter_request=None)
 
-            list_result_generator = [self.engine_client.generate(
-                prompt,
-                sampling_params,
-                request_id,
-            ) for prompt in prompts]
+            list_result_generator = [
+                self.engine_client.generate(
+                    prompt,
+                    sampling_params,
+                    request_id,
+                ) for prompt in prompts
+            ]
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -352,8 +355,8 @@ class OpenAIServingTranscription(OpenAIServing):
                         # NOTE(NickLucche) user can't pass encoder prompts directly
                         # at least not to Whisper. One indicator of the encoder
                         # amount of processing is the log-mel spectogram length.
-                        num_prompt_tokens += ceil(audio_duration_s *
-                                                  self.model_sr / self.hop_length)
+                        num_prompt_tokens += ceil(
+                            audio_duration_s * self.model_sr / self.hop_length)
 
                     # We need to do it here, because if there are exceptions in
                     # the result_generator, it needs to be sent as the FIRST
@@ -377,11 +380,12 @@ class OpenAIServingTranscription(OpenAIServing):
                             finish_reason=output.finish_reason,
                             stop_reason=output.stop_reason)
 
-                    chunk = TranscriptionStreamResponse(id=request_id,
-                                                        object=chunk_object_type,
-                                                        created=created_time,
-                                                        choices=[choice_data],
-                                                        model=model_name)
+                    chunk = TranscriptionStreamResponse(
+                        id=request_id,
+                        object=chunk_object_type,
+                        created=created_time,
+                        choices=[choice_data],
+                        model=model_name)
 
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
@@ -427,7 +431,8 @@ class OpenAIServingTranscription(OpenAIServing):
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 
-    def _split_audio(self, audio_data: np.ndarray, sample_rate: int) -> list[np.ndarray]:
+    def _split_audio(self, audio_data: np.ndarray,
+                     sample_rate: int) -> list[np.ndarray]:
         chunk_size = sample_rate * self.max_audio_clip_s
         overlap_size = sample_rate * OVERLAP_CHUNK_SECOND
         chunks = []
@@ -441,17 +446,15 @@ class OpenAIServingTranscription(OpenAIServing):
             # Find the best split point in the overlap region
             search_start = i + chunk_size - overlap_size
             search_end = min(i + chunk_size, audio_data.shape[-1])
-            split_point = self._find_split_point(
-                audio_data, search_start, search_end, sample_rate)
+            split_point = self._find_split_point(audio_data, search_start,
+                                                 search_end, sample_rate)
 
             # Extract chunk up to the split point
             chunks.append(audio_data[..., i:split_point])
             i = split_point
         return chunks
 
-    def _find_split_point(self, wav: np.ndarray, 
-                          start_idx: int, 
-                          end_idx: int, 
+    def _find_split_point(self, wav: np.ndarray, start_idx: int, end_idx: int,
                           sample_rate: int) -> int:
         """Find the best point to split audio by looking for silence or low amplitude.
         Args:
@@ -467,8 +470,8 @@ class OpenAIServingTranscription(OpenAIServing):
         window_size = sample_rate // 10  # 100ms windows
         energies = []
         for i in range(0, len(segment) - window_size, window_size):
-            window = segment[i: i + window_size]
-            energy = (window**2).mean() ** 0.5
+            window = segment[i:i + window_size]
+            energy = (window**2).mean()**0.5
             energies.append((i + start_idx, energy))
 
         quietest_idx, _ = min(energies, key=lambda x: x[1])
