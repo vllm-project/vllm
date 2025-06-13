@@ -1505,7 +1505,7 @@ class BatchRequestInput(OpenAIBaseModel):
 
     # The HTTP method to be used for the request. Currently only POST is
     # supported.
-    method: str
+    method: Literal["POST"] = "POST"
 
     # The OpenAI API relative URL to be used for the request. Currently
     # /v1/chat/completions is supported.
