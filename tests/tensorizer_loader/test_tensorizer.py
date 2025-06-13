@@ -505,9 +505,10 @@ async def test_serialize_and_serve_entrypoints(tmp_path):
         stderr=asyncio.subprocess.STDOUT,
     )
 
+    fut = proc.stdout.readuntil(b"Application startup complete.")
+
     try:
-        async with asyncio.timeout(180):
-            await proc.stdout.readuntil(b"Application startup complete.")
+        await asyncio.wait_for(fut, 180)
     except asyncio.TimeoutError:
         pytest.fail("Server did not start successfully")
     finally:
