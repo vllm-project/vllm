@@ -23,10 +23,10 @@ pip install -e . -v
 ## Instructions
 - The following examples are run on an A800 (80GB) device, using the Meta-Llama-3.1-8B-Instruct model.
 - Pay attention to the setting of the `kv_buffer_size` (in bytes). The empirical value is 10% of the GPU memory size. This is related to the kvcache size. If it is too small, the GPU memory buffer for temporarily storing the received kvcache will overflow, causing the kvcache to be stored in the tensor memory pool, which increases latency. If it is too large, the kvcache available for inference will be reduced, leading to a smaller batch size and decreased throughput.
-- For Prefill instances, the `kv_buffer_size` can be set to 1, as Prefill currently does not need to receive kvcache.
-- The `--port` must be consistent with the `http_port` in the `--kv-transfer-config`.
-- `PUT_ASYNC` offers the best performance and should be prioritized.
+- For Prefill instances, when using non-GET mode, the `kv_buffer_size` can be set to 1, as Prefill currently does not need to receive kvcache. However, when using GET mode, a larger `kv_buffer_size` is required because it needs to store the kvcache sent to the D instance.
 - You may need to modify the `kv_buffer_size` and `port` in the following commands (if there is a conflict).
+- `PUT_ASYNC` offers the best performance and should be prioritized.
+- The `--port` must be consistent with the `http_port` in the `--kv-transfer-config`.
 - The `disagg_prefill_proxy_xpyd.py` script will use port 10001 (for receiving client requests) and port 30001 (for receiving service discovery from P and D instances).
 - The node running the proxy must have `quart` installed.
 - Supports multiple nodes; you just need to modify the `proxy_ip` and `proxy_port` in `--kv-transfer-config`.
@@ -40,6 +40,7 @@ pip install -e . -v
 cd {your vllm directory}/examples/online_serving/disagg_xpyd/
 python3 disagg_prefill_proxy_xpyd.py &
 ```
+
 ### Prefill1 (e.g. 10.0.1.2 or 10.0.1.1)
 
 ```shell
@@ -58,6 +59,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=0 vllm serve {your model directory} \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20005","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
+
 ### Decode1 (e.g. 10.0.1.3 or 10.0.1.1)
 
 ```shell
@@ -76,6 +78,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=1 vllm serve {your model directory} \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20009","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
+
 ### Decode2 (e.g. 10.0.1.4 or 10.0.1.1)
 
 ```shell
@@ -94,6 +97,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=2 vllm serve {your model directory} \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
+
 ### Decode3 (e.g. 10.0.1.5 or 10.0.1.1)
 
 ```shell
@@ -121,6 +125,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=3 vllm serve {your model directory} \
 cd {your vllm directory}/examples/online_serving/disagg_xpyd/
 python3 disagg_prefill_proxy_xpyd.py &
 ```
+
 ### Prefill1 (e.g. 10.0.1.2 or 10.0.1.1)
 
 ```shell
@@ -233,6 +238,7 @@ python3 benchmark_serving.py \
 ```
 
 # Shut down
+
 ```shell
 pgrep python | xargs kill -9 && pkill -f python
 ```
