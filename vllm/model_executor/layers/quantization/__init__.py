@@ -14,6 +14,7 @@ QuantizationMethods = Literal[
     "fp8",
     "ptpc_fp8",
     "fbgemm_fp8",
+    "deepgemm_fp8",
     "modelopt",
     "modelopt_fp4",
     "marlin",
@@ -97,6 +98,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
+    from .deepgemm_fp8 import DeepGEMMFp8Config
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
     from .gptq_bitblas import GPTQBitBLASConfig
@@ -120,6 +122,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "tpu_int8": Int8TpuConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
+        "deepgemm_fp8": DeepGEMMFp8Config,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
         "marlin": MarlinConfig,
