@@ -18,8 +18,46 @@ class MemoryBlock:
     addr: int
 
 
-class TensorMemoryPool:
+"""A memory pool for managing pinned host memory allocations for tensors.
 
+This class implements a buddy allocation system to efficiently manage pinned host
+memory for tensor storage. It supports allocation, deallocation, and tensor
+storage/retrieval operations.
+
+Key Features:
+- Uses power-of-two block sizes for efficient buddy allocation
+- Supports splitting and merging of memory blocks
+- Provides methods to store CUDA tensors in pinned host memory
+- Allows loading tensors from pinned memory back to device
+- Automatically cleans up memory on destruction
+
+Attributes:
+    max_block_size (int): Maximum block size (rounded to nearest power of two)
+    min_block_size (int): Minimum block size (rounded to nearest power of two)
+    free_lists (dict): Dictionary of free memory blocks by size
+    allocated_blocks (dict): Dictionary of currently allocated blocks
+    base_tensor (torch.Tensor): Base pinned memory tensor
+    base_address (int): Base memory address of the pinned memory region
+
+Example:
+    >>> pool = TensorMemoryPool(max_block_size=1024*1024)
+    >>> tensor = torch.randn(100, device='cuda')
+    >>> addr = pool.store_tensor(tensor)
+    >>> loaded_tensor = pool.load_tensor(addr, tensor.dtype, tensor.shape, 'cuda')
+    >>> pool.free(addr)
+"""
+
+class TensorMemoryPool:
+    """Initializes the memory pool with given size constraints.
+
+    Args:
+        max_block_size (int): Maximum size of memory blocks to manage
+        min_block_size (int, optional): Minimum size of memory blocks to manage.
+            Defaults to 512.
+
+    Raises:
+        ValueError: If block sizes are invalid or max_block_size < min_block_size
+    """
     def __init__(self, max_block_size: int, min_block_size: int = 512):
         if max_block_size <= 0 or min_block_size <= 0:
             raise ValueError("Block sizes must be positive")
@@ -60,6 +98,17 @@ class TensorMemoryPool:
                      self.base_address % self.max_block_size)
 
     def allocate(self, size: int) -> int:
+        """Allocates a memory block of at least the requested size.
+
+        Args:
+            size (int): Minimum size of memory to allocate
+
+        Returns:
+            int: Address of the allocated memory block
+
+        Raises:
+            ValueError: If size is invalid or insufficient memory is available
+        """
         if size <= 0:
             raise ValueError("Allocation size must be positive")
 
@@ -91,6 +140,14 @@ class TensorMemoryPool:
             self.free_lists[buddy_size][buddy.addr] = buddy
 
     def free(self, addr: int):
+        """Frees an allocated memory block.
+
+        Args:
+            addr (int): Address of the block to free
+
+        Raises:
+            ValueError: If address is invalid or not allocated
+        """
         if addr not in self.allocated_blocks:
             raise ValueError("Invalid address to free")
 
@@ -117,6 +174,17 @@ class TensorMemoryPool:
         self.free_lists[block.size][block.addr] = block
 
     def store_tensor(self, tensor: torch.Tensor) -> int:
+        """Stores a CUDA tensor in pinned host memory.
+
+        Args:
+            tensor (torch.Tensor): CUDA tensor to store
+
+        Returns:
+            int: Address where the tensor is stored
+
+        Raises:
+            ValueError: If tensor is not on CUDA or allocation fails
+        """
         if not tensor.is_cuda:
             raise ValueError("Only CUDA tensors can be stored")
 
@@ -146,6 +214,20 @@ class TensorMemoryPool:
 
     def load_tensor(self, addr: int, dtype: torch.dtype,
                     shape: tuple[int, ...], device) -> torch.Tensor:
+        """Loads a tensor from pinned host memory to the specified device.
+
+        Args:
+            addr (int): Address where tensor is stored
+            dtype (torch.dtype): Data type of the tensor
+            shape (tuple[int, ...]): Shape of the tensor
+            device: Target device for the loaded tensor
+
+        Returns:
+            torch.Tensor: The loaded tensor on the specified device
+
+        Raises:
+            ValueError: If address is invalid or sizes don't match
+        """
         if addr not in self.allocated_blocks:
             raise ValueError("Invalid address to load")
 
@@ -168,6 +250,7 @@ class TensorMemoryPool:
         return cuda_tensor
 
     def cleanup(self):
+        """Cleans up all memory resources and resets the pool state."""
         self.free_lists.clear()
         self.allocated_blocks.clear()
         if hasattr(self, 'base_tensor'):
