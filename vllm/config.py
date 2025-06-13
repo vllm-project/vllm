@@ -44,7 +44,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, try_get_safetensors_metadata, uses_mrope)
+    try_get_generation_config, try_get_safetensors_metadata,
+    try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
@@ -416,6 +417,8 @@ class ModelConfig:
     available.\n
     - "vllm" will use the vLLM model implementation.\n
     - "transformers" will use the Transformers model implementation."""
+    override_attention_dtype: Optional[str] = None
+    """Override dtype for attention"""
 
     def compute_hash(self) -> str:
         """
@@ -515,6 +518,12 @@ class ModelConfig:
                 "for instructions on how to install it.")
 
         from vllm.platforms import current_platform
+
+        if (self.override_attention_dtype is not None
+                and not current_platform.is_rocm()):
+            warnings.warn(
+                "override-attention-dtype is set but not using ROCm platform",
+                stacklevel=2)
 
         if (self.enable_sleep_mode
                 and not current_platform.is_sleep_mode_available()):
@@ -1427,6 +1436,18 @@ class ModelConfig:
             sliding_window_len=self.get_hf_config_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config)
+
+        tokenizer_config = try_get_tokenizer_config(
+            self.tokenizer,
+            trust_remote_code=self.trust_remote_code,
+            revision=self.tokenizer_revision)
+
+        if tokenizer_config is None:
+            return max_model_len
+
+        model_max_length = tokenizer_config.get("model_max_length",
+                                                max_model_len)
+        max_model_len = min(max_model_len, model_max_length)
         return max_model_len
 
 
@@ -3783,15 +3804,18 @@ class PassConfig:
     its own stages (before, after, maybe in-between)."""
     dump_graph_dir: Path = Path(".")
     """Directory to dump the graphs."""
-    # TODO(luka) better pass enabling system.
     enable_fusion: bool = True
-    """Whether to enable the custom fusion pass."""
+    """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
+    enable_attn_fusion: bool = False
+    """Whether to enable the custom attention+quant fusion pass."""
     enable_noop: bool = True
     """Whether to enable the custom no-op elimination pass."""
     enable_sequence_parallelism: bool = False
     """Whether to enable sequence parallelism."""
     enable_async_tp: bool = False
     """Whether to enable async TP."""
+
+    # TODO(luka) better pass enabling system.
 
     def uuid(self):
         """
@@ -3800,18 +3824,20 @@ class PassConfig:
         Do not include dump_graph_* in the hash - they don't affect
         compilation.
         """
-        include = {
-            "enable_fusion", "enable_noop", "enable_sequence_parallelism",
-            "enable_async_tp"
-        }
-        dict_ = {k: v for k, v in asdict(self).items() if k in include}
+        exclude = {"dump_graph_stages", "dump_graph_dir"}
+        dict_ = {k: v for k, v in asdict(self).items() if k not in exclude}
         return InductorPass.hash_dict(dict_)
 
     def __post_init__(self) -> None:
-        if not self.enable_noop and self.enable_fusion:
-            logger.warning_once(
-                "Fusion enabled but reshape elimination disabled. "
-                "RMSNorm + quant (fp8) fusion might not work")
+        if not self.enable_noop:
+            if self.enable_fusion:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "RMSNorm/SiluMul + quant (fp8) fusion might not work")
+            if self.enable_attn_fusion:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "Attention + quant (fp8) fusion might not work")
 
 
 @config
@@ -3918,12 +3944,14 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    use_cudagraph: bool = False
+    use_cudagraph: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
     """Whether to use cudagraph inside compilation.
     - False: cudagraph inside compilation is not used.
     - True: cudagraph inside compilation is used. It requires
         that all input buffers have fixed addresses, and all
         splitting ops write their outputs to input buffers.
+    In the vLLM V1 Engine, this flag only applies for
+    CompilationLevel.PIECEWISE (aka -O3).
     Note that this is orthogonal to the cudagraph capture logic
     outside of compilation.
     TODO: move outside cudagraph logic into compilation.
@@ -4425,7 +4453,6 @@ class VllmConfig:
             # FIXME(rob): Add function to set all of these.
             if not self.compilation_config.custom_ops:
                 self.compilation_config.custom_ops = ["none"]
-            self.compilation_config.use_cudagraph = True
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
@@ -4483,13 +4510,13 @@ class VllmConfig:
             # warning message here and will log it later.
             if not (current_platform.is_cuda() or current_platform.is_rocm()):
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
-                self.disable_hybrid_kv_cache_manager = True
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_transfer_config is not None:
                 # Hybrid KV cache manager is not compatible with KV transfer.
-                self.disable_hybrid_kv_cache_manager = True
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
-                self.disable_hybrid_kv_cache_manager = True
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
@@ -4639,10 +4666,13 @@ class VllmConfig:
 
 
 _current_vllm_config: Optional[VllmConfig] = None
+_current_prefix: Optional[str] = None
 
 
 @contextmanager
-def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
+def set_current_vllm_config(vllm_config: VllmConfig,
+                            check_compile=False,
+                            prefix: Optional[str] = None):
     """
     Temporarily set the current vLLM config.
     Used during model initialization.
@@ -4650,12 +4680,14 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     so that all modules can access it, e.g. custom ops
     can access the vLLM config to determine how to dispatch.
     """
-    global _current_vllm_config
+    global _current_vllm_config, _current_prefix
     old_vllm_config = _current_vllm_config
+    old_prefix = _current_prefix
     from vllm.compilation.counter import compilation_counter
     num_models_seen = compilation_counter.num_models_seen
     try:
         _current_vllm_config = vllm_config
+        _current_prefix = prefix
         yield
     except Exception:
         raise
@@ -4679,6 +4711,7 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
                 vllm_config.model_config.model)
     finally:
         _current_vllm_config = old_vllm_config
+        _current_prefix = old_prefix
 
 
 def get_current_vllm_config() -> VllmConfig:
@@ -4690,6 +4723,15 @@ def get_current_vllm_config() -> VllmConfig:
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config
+
+
+def get_current_model_prefix() -> str:
+    """
+    Get the prefix of the model that's currently being initialized.
+    """
+    assert _current_prefix is not None, \
+        "Current model prefix is not set. "
+    return _current_prefix
 
 
 def contains_object_print(text):

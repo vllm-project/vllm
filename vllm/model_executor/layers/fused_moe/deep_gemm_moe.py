@@ -70,24 +70,27 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         super().__init__()
         self.block_shape = deep_gemm_block_shape()
 
+    def supports_chunking(self) -> bool:
+        return True
+
     def workspace_shapes(
-        self,
-        a: torch.Tensor,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
+        self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
+        topk: int, global_num_experts: int, local_num_experts: int
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        # We use global_num_experts due to how moe_align_block_size handles
+        # expert_maps.
+        num_experts = global_num_experts
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
-        workspace1 = M_sum * max(N * 2, K)
-        workspace2 = M_sum * N
-        return (workspace1, workspace2, a.dtype)
+        workspace1 = (M_sum, max(N * 2, K))
+        workspace2 = (M_sum, max(N, K))
+        output = (M * topk, K)
+        return (workspace1, workspace2, output, a.dtype)
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -104,7 +107,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ):
         import deep_gemm as dg
 
         a1q = hidden_states
@@ -134,26 +137,28 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Note: M_sum is different than the pre-permuted shape of a1q.
         M_sum = a1q.size(0)
-        workspace1 = _resize_cache(workspace13, (M_sum, N))
-        workspace2 = _resize_cache(workspace2, (M_sum, N // 2))
-        workspace3 = _resize_cache(workspace13, (M_sum, K))
+
+        mm1_out = _resize_cache(workspace13, (M_sum, N))
+        act_out = _resize_cache(workspace2, (M_sum, N // 2))
+        quant_out = _resize_cache(workspace13.view(dtype=torch.float8_e4m3fn),
+                                  (M_sum, N // 2))
+        mm2_out = _resize_cache(workspace2, (M_sum, K))
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (a1q, a1q_scale), (w1, w1_scale), workspace1, expert_ids)
+            (a1q, a1q_scale), (w1, w1_scale), mm1_out, expert_ids)
 
-        self.activation(activation, workspace2, workspace1.view(-1, N))
+        self.activation(activation, act_out, mm1_out.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None
-        a2q, a2q_scale = per_token_group_quant_fp8(workspace2,
+        a2q, a2q_scale = per_token_group_quant_fp8(act_out,
                                                    self.block_shape[1],
-                                                   column_major_scales=True)
+                                                   column_major_scales=True,
+                                                   out_q=quant_out)
 
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
-            (a2q, a2q_scale), (w2, w2_scale), workspace3, expert_ids)
+            (a2q, a2q_scale), (w2, w2_scale), mm2_out, expert_ids)
 
-        workspace3 = workspace3[inv_perm, ...]
-
-        return workspace3
+        torch.index_select(mm2_out, 0, inv_perm, out=output)
 
 
 def deep_gemm_moe_fp8(

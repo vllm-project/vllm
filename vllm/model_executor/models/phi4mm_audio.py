@@ -41,7 +41,7 @@ class ConformerEncoderLayer(nn.Module):
              for the last pointwise conv after swish activation.
         depthwise_seperable_out_channel: int
             if set different to 0, the number of 
-             depthwise_seperable_out_channel will be used as a 
+             depthwise_seperable_out_channel will be used as a
              channel_out of the second conv1d layer. 
              otherwise, it equal to 0, the second conv1d layer is skipped.
         depthwise_multiplier: int
@@ -126,7 +126,7 @@ class ConformerEncoderLayer(nn.Module):
             (Multi-Head Attention),
             1 = typical Multi-Head Attention,
             1 < attn_group_sizes < attention_heads = Grouped-Query Attention
-            attn_group_sizes = attenion_heads = Multi-Query Attention
+            attn_group_sizes = attention_heads = Multi-Query Attention
     """
 
     def __init__(
@@ -318,7 +318,7 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             1 = typical Multi-Head Attention,
             1 < attention_group_size < attention_heads = Grouped-Query 
             Attention
-            attention_group_size = attenion_heads = Multi-Query Attention
+            attention_group_size = attention_heads = Multi-Query Attention
     """
 
     def __init__(
@@ -744,7 +744,7 @@ class ConformerEncoder(TransformerEncoderBase):
             1 = typical Multi-Head Attention,
             1 < attention_group_size < attention_heads = Grouped-Query
             Attention
-            attention_group_size = attenion_heads = Multi-Query Attention
+            attention_group_size = attention_heads = Multi-Query Attention
     """
 
     extra_multi_layer_output_idxs: list[int]

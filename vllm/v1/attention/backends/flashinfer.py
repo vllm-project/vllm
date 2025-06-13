@@ -18,7 +18,8 @@ from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -202,7 +203,7 @@ class FlashInferMetadata:
                 f" received {self.head_dim}.")
 
 
-class FlashInferMetadataBuilder:
+class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def __init__(self, runner: GPUModelRunner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -399,9 +400,11 @@ class FlashInferMetadataBuilder:
                     kv_data_type=attn_metadata.data_type,
                 )
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
+    def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+
         assert self._num_decodes + self._num_prefills == num_reqs
         assert (self._num_decode_tokens +
                 self._num_prefill_tokens == num_actual_tokens)
@@ -508,7 +511,12 @@ class FlashInferImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
+        use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in FlashInfer is not supported yet, it will fall"
+                " back to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -542,6 +550,7 @@ class FlashInferImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 
@@ -555,6 +564,11 @@ class FlashInferImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashInferImpl")
 
         if attn_metadata is None:
             # Profiling run.

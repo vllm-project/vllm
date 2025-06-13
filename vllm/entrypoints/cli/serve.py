@@ -95,10 +95,9 @@ class ServeSubcommand(CLISubcommand):
             type=str,
             default='',
             required=False,
-            help="Read CLI options from a config file."
-            "Must be a YAML with the following options:"
-            "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference"
-        )
+            help="Read CLI options from a config file. "
+            "Must be a YAML with the following options: "
+            "https://docs.vllm.ai/en/latest/configuration/serve_args.html")
 
         serve_parser = make_arg_parser(serve_parser)
         show_filtered_argument_or_group_from_help(serve_parser, "serve")
