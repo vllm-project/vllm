@@ -145,16 +145,17 @@ def run_blocked_cutlass_moe_fp8(
     c_strides1 = c_strides1[ps_mask].contiguous()
     c_strides2 = c_strides2[ps_mask].contiguous()
 
-    ops.cutlass_moe_blockwise_mm(c1, a1q, w1.transpose(1, 2).contiguous(), a1q_scale, w1_scale,
+    ops.cutlass_moe_blockwise_mm(c1, a1q.contiguous(), w1.contiguous(),
+                                 a1q_scale.contiguous(), w1_scale.transpose(1, 2).contiguous(),
                                  expert_offsets,
                                  problem_sizes1, ab_strides1,
-                                 ab_strides1, c_strides1, per_act_token, False)
+                                 ab_strides1, c_strides1, per_act_token)
 
-    print("out c1:", c1)
+    # print("out c1:", c1)
 
     activation_callable(c2, c1)
 
-    print("out c2:", c2)
+    # print("out c2:", c2)
 
     a2q, a2q_scale = ops.scaled_fp8_quant(
         c2, a2_scale, use_per_token_if_dynamic=per_act_token)
@@ -164,12 +165,12 @@ def run_blocked_cutlass_moe_fp8(
     # print("a1q_scale:", a1q_scale.shape)
     # print("a2q_scale:", a2q_scale.shape)
 
-    ops.cutlass_moe_blockwise_mm(c3, a2q, w2, a2q_scale, w2_scale,
+    ops.cutlass_moe_blockwise_mm(c3, a2q, w2, a2q_scale, w2_scale.transpose(1, 2).contiguous(),
                                  expert_offsets,
                                  problem_sizes2, ab_strides2,
-                                 ab_strides2, c_strides2, per_act_token, False)
+                                 ab_strides2, c_strides2, per_act_token)
 
-    print("out c3:", c3)
+    # print("out c3:", c3)
 
     return c3[c_map].view(M, topk, K)
 

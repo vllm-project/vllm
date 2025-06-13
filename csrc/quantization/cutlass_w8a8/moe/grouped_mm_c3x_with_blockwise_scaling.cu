@@ -107,7 +107,7 @@ void run_cutlass_moe_blockwise_mm_sm90(
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token, bool per_out_ch) {
+    bool per_act_token) {
   TORCH_CHECK(a_tensors.size(0) > 0, "No input A tensors provided.");
   TORCH_CHECK(b_tensors.size(0) > 0, "No input B tensors provided.");
   TORCH_CHECK(out_tensors.size(0) > 0, "No output tensors provided.");
@@ -137,22 +137,21 @@ void run_cutlass_moe_blockwise_mm_sm90(
   //     cutlass_blockwise_group_gemm_caller<Cutlass3xGemmN8192>(
   //         out_tensors, a_tensors, b_tensors, a_scales, b_scales,
   //         expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
-  //         per_act_token, per_out_ch);
+  //         per_act_token);
   //   } else if (k >= 8192) {
   //     cutlass_blockwise_group_gemm_caller<Cutlass3xGemmK8192>(
   //         out_tensors, a_tensors, b_tensors, a_scales, b_scales,
   //         expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
-  //         per_act_token, per_out_ch);
+  //         per_act_token);
   //   } else if (m <= 16) {
   //     cutlass_blockwise_group_gemm_caller<Cutlass3xGemmM16>(
   //         out_tensors, a_tensors, b_tensors, a_scales, b_scales,
   //         expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
-  //         per_act_token, per_out_ch);
+  //         per_act_token,);
   //   } else {
   cutlass_blockwise_group_gemm_caller<Cutlass3xGemmDefault>(
       out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-      problem_sizes, a_strides, b_strides, c_strides, per_act_token,
-      per_out_ch);
+      problem_sizes, a_strides, b_strides, c_strides, per_act_token);
   //   }
 }
 
@@ -162,18 +161,16 @@ void dispatch_moe_blockwise_mm_sm90(
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token, bool per_out_ch) {
+    bool per_act_token) {
   if (out_tensors.dtype() == torch::kBFloat16) {
     run_cutlass_moe_blockwise_mm_sm90<cutlass::float_e4m3_t,
                                       cutlass::bfloat16_t>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
-        per_out_ch);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token);
   } else {
     run_cutlass_moe_blockwise_mm_sm90<cutlass::float_e4m3_t, cutlass::half_t>(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
-        per_out_ch);
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token);
   }
 }
 
@@ -185,9 +182,9 @@ void cutlass_moe_blockwise_mm_sm90(
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token, bool per_out_ch) {
+    bool per_act_token) {
   vllm::cutlass_moe::blockwise_scaling::dispatch_moe_blockwise_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales,
                                  b_scales, expert_offsets, problem_sizes,
-                                 a_strides, b_strides, c_strides, per_act_token,
-                                 per_out_ch);
+                                 a_strides, b_strides, c_strides, per_act_token
+                                 );
 }

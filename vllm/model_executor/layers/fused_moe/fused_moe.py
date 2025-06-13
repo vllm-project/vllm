@@ -1361,7 +1361,7 @@ def fused_experts_impl(
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
-        print("intermediate_cache1:", intermediate_cache1)
+        # print("intermediate_cache1:", intermediate_cache1)
 
         if activation == "silu":
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1372,7 +1372,7 @@ def fused_experts_impl(
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
-        print("intermediate_cache2:", intermediate_cache2)
+        # print("intermediate_cache2:", intermediate_cache2)
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,
@@ -1401,7 +1401,7 @@ def fused_experts_impl(
                                 use_int4_w4a16=use_int4_w4a16,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
-        print("intermediate_cache3:", intermediate_cache3)
+        # print("intermediate_cache3:", intermediate_cache3)
 
         ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])

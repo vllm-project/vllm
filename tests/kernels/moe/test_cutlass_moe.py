@@ -53,9 +53,9 @@ class MOETensors:
     @staticmethod
     def make_moe_tensors(m: int, k: int, n: int, e: int,
                          dtype: torch.dtype) -> "MOETensors":
-        a = torch.ones((m, k), device="cuda", dtype=dtype) / 10
-        w1 = torch.ones((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-        w2 = torch.ones((e, k, n), device="cuda", dtype=dtype) / 10
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+        w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
         ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
         c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
         ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
@@ -476,11 +476,15 @@ def test_cutlass_moe_8_bit_EP(
                                    rtol=1e-2)
 
 
-@pytest.mark.parametrize("m", [8]) #[64])
-@pytest.mark.parametrize("n", [128]) #[1024])
-@pytest.mark.parametrize("k", [256]) #[4096])
-@pytest.mark.parametrize("e", [1])#[16])
-@pytest.mark.parametrize("topk", [1])#[1, 8])
+# @pytest.mark.parametrize("m", [64]) #[64])
+# @pytest.mark.parametrize("n", [1024]) #[1024])
+# @pytest.mark.parametrize("k", [512]) #[4096])
+# @pytest.mark.parametrize("e", [16])#[16])
+# @pytest.mark.parametrize("topk", [8])#[1, 8])
+# @pytest.mark.parametrize("per_act_token", [False])
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("per_act_token", [False])
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
@@ -505,8 +509,6 @@ def test_blocked_cutlass_moe_8_bit(
                                                score,
                                                topk,
                                                renormalize=False)
-
-        print("w1_d:", mt.w1_d)
 
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.

@@ -8,6 +8,8 @@
 #include "cutlass/bfloat16.h"
 #include "cutlass/float8.h"
 
+#include <iostream>
+
 template <typename ElementAB, typename ElementC, typename ElementAccumulator>
 __global__ void get_group_gemm_starts(
     int32_t* expert_offsets, ElementAB** a_offsets, ElementAB** b_offsets,
@@ -70,22 +72,16 @@ __global__ void __get_group_gemm_starts_blockscale_fp8(
   b_offsets[expert_id] = b_base_as_int + expert_id * k * n;
   out_offsets[expert_id] = out_base_as_int + expert_offset * n;
   a_scales_offsets[expert_id] =
-      a_scales_base_as_int;// + (per_act_token ? expert_offset : 0) * k_scale;
+      a_scales_base_as_int + (per_act_token ? expert_offset : 0) * k_scale;
   b_scales_offsets[expert_id] =
       b_scales_base_as_int + n_scale * expert_id * k_scale;
-  // printf("computed offsets for %d: %ld %ld %ld %ld %ld\n",
-  //     expert_id, a_offsets[expert_id], b_offsets[expert_id],
-  //     out_offsets[expert_id], a_scales_offsets[expert_id],
-  //     b_scales_offsets[expert_id]);
 
-  // LayoutSFA* layout_sfa_ptr = layout_sfa_base_as_int + expert_id;
-  // LayoutSFB* layout_sfb_ptr = layout_sfb_base_as_int + expert_id;
-
-  layout_sfa_base_as_int[expert_id] = ScaleConfig::tile_atom_to_shape_SFA(cute::make_shape(
+  layout_sfa_base_as_int[expert_id] = ScaleConfig::tile_atom_to_shape_SFA(
+    cute::make_shape(
       static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));
-  layout_sfb_base_as_int[expert_id] = ScaleConfig::tile_atom_to_shape_SFB(cute::make_shape(
+  layout_sfb_base_as_int[expert_id] = ScaleConfig::tile_atom_to_shape_SFB(
+     cute::make_shape(
       static_cast<int>(m), static_cast<int>(n), static_cast<int>(k), 1));
-
 }
 
 #define __CALL_GET_STARTS_KERNEL_BLOCKSCALE_FP8(                             \

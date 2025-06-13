@@ -35,8 +35,6 @@ struct cutlass_3x_blockwise_group_gemm {
   using ElementD = ElementC_;
   using ElementAccumulator = float;
   using ElementScale = float;
-  //   static constexpr auto RoundStyle =
-  //   cutlass::FloatRoundStyle::round_to_nearest;
 
   using Epilogue = Epilogue_<ElementAccumulator, ElementD, TileShape>;
 
@@ -61,15 +59,10 @@ struct cutlass_3x_blockwise_group_gemm {
       decltype(ScaleConfig::deduce_layoutSFB());  // Layout type for SFB matrix
                                                   // operand
 
-//   using ScaleConfig = typename Gemm::GemmKernel::CollectiveMainloop::Sm90BlockwiseScaleConfig;
-//   using LayoutSFA = typename Gemm::GemmKernel::CollectiveMainloop::InternalLayoutSFA;
-//   using LayoutSFB = typename Gemm::GemmKernel::CollectiveMainloop::InternalLayoutSFB;
-
   static constexpr int AlignmentAB =
       128 / cutlass::sizeof_bits<ElementAB>::value;
   static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementD>::value;
 
-  //   using EVTCompute = typename Epilogue::EVTCompute;
   using DefaultOperation =
       cutlass::epilogue::fusion::LinearCombination<ElementD,
                                                    ElementAccumulator>;
@@ -107,17 +100,13 @@ void cutlass_blockwise_group_gemm_caller(
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
-    bool per_act_token, bool per_out_ch) {
+    bool per_act_token) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
   using ElementScale = typename Gemm::ElementScale;
-  using ElementBlockScale = typename Gemm::ElementScale;
   using ScaleConfig = typename Gemm::ScaleConfig;
   using LayoutSFA = typename Gemm::LayoutSFA;
   using LayoutSFB = typename Gemm::LayoutSFB;
-
-//   std::cout << "ltypes: " << typeid(LayoutSFA).name() << " " <<
-//         typeid(LayoutSFB).name() << std::endl;
 
   int num_experts = static_cast<int>(expert_offsets.size(0));
   int k_size = a_tensors.size(1);
@@ -142,36 +131,15 @@ void cutlass_blockwise_group_gemm_caller(
   torch::Tensor layout_SFA = torch::empty({num_experts, 5}, options_int32);
   torch::Tensor layout_SFB = torch::empty({num_experts, 5}, options_int32);
 
-//   std::cout << "layout_SFA pre: " << layout_SFA << std::endl;
-//   std::cout << "layout_SFB pre: " << layout_SFB << std::endl;
-//   std::cout << "*\n";
-
   run_get_group_gemm_starts_blockscale_fp8<LayoutSFA, LayoutSFB, ScaleConfig>(
       expert_offsets, problem_sizes, a_ptrs, b_ptrs, out_ptrs, a_scales_ptrs,
       b_scales_ptrs, a_tensors, b_tensors, out_tensors, a_scales, b_scales,
       layout_SFA, layout_SFB, n_scale_size, k_scale_size, per_act_token);
 
-  std::cout << "layout_SFA post: " << layout_SFA << std::endl;
-  std::cout << "layout_SFB post: " << layout_SFB << std::endl;
-  std::cout << "*\n";
-
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;
   using StrideB = Stride<int64_t, Int<1>, Int<0>>;
   using StrideC = typename GemmKernel::InternalStrideC;
-
-//   torch::Tensor c_strides2 =
-//       torch::full({num_experts}, out_tensors.stride(0), options_int);
-//   torch::Tensor a_strides2 =
-//       torch::full({num_experts}, a_tensors.stride(0), options_int);
-//   torch::Tensor b_strides2 =
-//       torch::full({num_experts}, b_tensors.stride(1), options_int);
-//     std::cout << "a strides: " << a_strides << "\n";
-//     std::cout << "b strides: " << b_strides << "\n";
-//     std::cout << "c strides: " << c_strides << "\n";
-//     std::cout << "a strides2: " << a_strides2 << "\n";
-//     std::cout << "b strides2: " << b_strides2 << "\n";
-//     std::cout << "c strides2: " << c_strides2 << "\n";
 
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(
