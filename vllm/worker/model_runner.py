@@ -1839,6 +1839,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
+            if (model_input.attn_metadata is not None
+                    and prefill_meta is not None and not self.in_profile_run):
+                self.stats_monitor.on_prefill(
+                    model_input.attn_metadata.num_prefill_tokens)
+                logger.debug("Running prefill and will prefill %d tokens",
+                             model_input.attn_metadata.num_prefill_tokens)
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):
                 hidden_or_intermediate_states = model_executable(
