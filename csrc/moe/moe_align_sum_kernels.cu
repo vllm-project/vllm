@@ -235,16 +235,6 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
       });
 }
 
-// TODO(wentao): deprecate this function
-void sgl_moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
-                              int64_t block_size,
-                              torch::Tensor sorted_token_ids,
-                              torch::Tensor experts_ids,
-                              torch::Tensor num_tokens_post_pad) {
-  moe_align_block_size(topk_ids, num_experts, block_size, sorted_token_ids,
-                       experts_ids, num_tokens_post_pad);
-}
-
 void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]
              torch::Tensor& output)  // [num_tokens, hidden_size]
 {

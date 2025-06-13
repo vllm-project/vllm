@@ -54,7 +54,7 @@ def check_correctness(num_tokens, num_experts=256, block_size=256, topk=8):
         num_tokens_post_pad_triton,
     )
 
-    ops.sgl_moe_align_block_size(
+    ops.moe_align_block_size(
         topk_ids,
         num_experts,
         block_size,
@@ -89,8 +89,8 @@ configs = list(itertools.product(num_tokens_range, num_experts_range, topk_range
         x_names=["num_tokens", "num_experts", "topk"],
         x_vals=configs,
         line_arg="provider",
-        line_vals=["vllm", "triton"],  # "sgl", "triton"
-        line_names=["VLLM", "Triton"],  # "SGL", "Triton"
+        line_vals=["vllm", "triton"],  # "triton"
+        line_names=["VLLM", "Triton"],  # "Triton"
         plot_name="moe-align-block-size-performance",
         args={},
     )
@@ -124,18 +124,6 @@ def benchmark(num_tokens, num_experts, topk, provider):
     elif provider == "triton":
         ms, min_ms, max_ms = triton.testing.do_bench(
             lambda: moe_align_block_size_triton(
-                topk_ids,
-                num_experts,
-                block_size,
-                sorted_ids.clone(),
-                expert_ids.clone(),
-                num_tokens_post_pad.clone(),
-            ),
-            quantiles=quantiles,
-        )
-    elif provider == "sgl":
-        ms, min_ms, max_ms = triton.testing.do_bench(
-            lambda: ops.sgl_moe_align_block_size(
                 topk_ids,
                 num_experts,
                 block_size,
