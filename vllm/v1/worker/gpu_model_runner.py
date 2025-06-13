@@ -1790,7 +1790,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
-        skip_attn: bool = True,
+        capture_attn_cudagraph: bool = False,
     ) -> torch.Tensor:
 
         # Padding for DP
@@ -1811,9 +1811,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
 
-        if skip_attn:
-            attn_metadata: Optional[dict[str, Any]] = None
-        else:
+        attn_metadata: Optional[dict[str, Any]] = None
+        if capture_attn_cudagraph:
+            attn_metadata = {}
+
             query_start_loc = self.query_start_loc[:num_reqs + 1]
             # Make sure max_model_len is used at the graph capture time.
             self.seq_lens_np[:num_reqs] = self.max_model_len
@@ -1830,7 +1831,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=num_tokens,
             )
 
-            attn_metadata = {}
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
 
@@ -2061,14 +2061,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
-            skip_attn = not self.full_cuda_graph
+            full_cg = self.full_cuda_graph
             for num_tokens in tqdm(reversed(self.cudagraph_batch_sizes),
                                    desc="Capturing CUDA graphs",
                                    total=len(self.cudagraph_batch_sizes)):
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens, skip_attn=skip_attn)
-                self._dummy_run(num_tokens, skip_attn=skip_attn)
+                    self._dummy_run(num_tokens, capture_attn_cudagraph=full_cg)
+                self._dummy_run(num_tokens, capture_attn_cudagraph=full_cg)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
