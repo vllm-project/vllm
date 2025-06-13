@@ -673,8 +673,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
              ("true", "1")),
 
-    # Custom quick allreduce kernel for MI3* cards.
-    # Choice of quantization level: FP, INT8, INT4 or NONE
+    # Custom quick allreduce kernel for MI3* cards
+    # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
     # Recommended for large models to get allreduce
     "VLLM_ROCM_CA_QUANT_REGIME":
     lambda: os.getenv("VLLM_ROCM_CA_QUANT_REGIME", "FP").upper(),
