@@ -186,6 +186,7 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.float32: np.float32,
     torch.float64: np.float64,
     torch.uint8: np.uint8,
+    torch.int16: np.int16,
     torch.int32: np.int32,
     torch.int64: np.int64,
 }
