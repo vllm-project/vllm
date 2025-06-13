@@ -2905,6 +2905,10 @@ def sha256(input) -> int:
 def is_torch_equal_or_newer(target: str) -> bool:
     """Check if the installed torch version is >= the target version.
 
+    This function uses base_version for comparison such that pre release
+    versions are considered to be older than the target version. For example,
+    torch version 2.8.0a0+git093fd47 is considered to be older than 2.8.0.
+
     Args:
         target: a version string, like "2.6.0".
 
@@ -2913,7 +2917,8 @@ def is_torch_equal_or_newer(target: str) -> bool:
     """
     try:
         torch_version = version.parse(str(torch.__version__))
-        return torch_version >= version.parse(target)
+        base_version = version.parse(torch_version.base_version)
+        return base_version >= version.parse(target)
     except Exception:
         # Fallback to PKG-INFO to load the package info, needed by the doc gen.
         return Version(importlib.metadata.version('torch')) >= Version(target)
