@@ -214,8 +214,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
                                      request.slot_mapping, request.request_id)
 
-            logger.info("Inject KV cache of %d tokens to the paged memory, %s",
-                        len(request.slot_mapping), request.request_id)
+            logger.debug("Inject KV cache of %d tokens to the paged memory, %s",
+                         len(request.slot_mapping), request.request_id)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
