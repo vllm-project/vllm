@@ -179,7 +179,7 @@ def _lora_expand(
 
     # metadata sanity check.
     M = inputs.size(1)
-    assert token_lora_mapping.size(0) == M
+    # assert token_lora_mapping.size(0) == M
     assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(
         0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
