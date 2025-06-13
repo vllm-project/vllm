@@ -2,45 +2,49 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ctypes
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.platforms.cuda import set_cuda_context
 
 
-def check_cuda_context(label=""):
+def check_cuda_context():
     """Check CUDA driver context status"""
     try:
         cuda = ctypes.CDLL('libcuda.so')
         device = ctypes.c_int()
         result = cuda.cuCtxGetDevice(ctypes.byref(device))
-
-        if result == 0:
-            return True, device.value
-        else:
-            return False, None
+        return (True, device.value) if result == 0 else (False, None)
     except Exception:
         return False, None
 
 
-def unset_cuda_context(label=""):
-    """Unset/destroy the current CUDA context"""
+def run_cuda_test_in_thread(device_input, expected_device_id):
+    """Run CUDA context test in separate thread for isolation"""
     try:
-        cuda = ctypes.CDLL('libcuda.so')
-        # Get current context
-        context = ctypes.c_void_p()
-        result = cuda.cuCtxGetCurrent(ctypes.byref(context))
+        # New thread should have no CUDA context initially
+        valid_before, device_before = check_cuda_context()
+        if valid_before:
+            return False, \
+                "CUDA context should not exist in new thread, " \
+                f"got device {device_before}"
 
-        if result == 0 and context.value is not None:
-            # Destroy the current context
-            result = cuda.cuCtxDestroy(context)
-            return result == 0
-        else:
-            return True
-    except Exception:
-        return False
+        # Test setting CUDA context
+        current_platform.set_device(device_input)
+
+        # Verify context is created correctly
+        valid_after, device_id = check_cuda_context()
+        if not valid_after:
+            return False, "CUDA context should be valid after set_cuda_context"
+        if device_id != expected_device_id:
+            return False, \
+                f"Expected device {expected_device_id}, got {device_id}"
+
+        return True, "Success"
+    except Exception as e:
+        return False, f"Exception in thread: {str(e)}"
 
 
 class TestSetCudaContext:
@@ -48,47 +52,43 @@ class TestSetCudaContext:
 
     @pytest.mark.skipif(not current_platform.is_cuda(),
                         reason="CUDA not available")
-    @pytest.mark.parametrize("device_input,expected_device_id", [
-        (0, 0),
-        (torch.device('cuda:0'), 0),
-        (torch.device('cuda'), 0),
-    ],
-                             ids=[
-                                 "device_ID_as_int", "torch_device_with_index",
-                                 "torch_device_without_index"
-                             ])
+    @pytest.mark.parametrize(argnames="device_input,expected_device_id",
+                             argvalues=[
+                                 (0, 0),
+                                 (torch.device('cuda:0'), 0),
+                                 ('cuda:0', 0),
+                             ],
+                             ids=["int", "torch_device", "string"])
     def test_set_cuda_context_parametrized(self, device_input,
                                            expected_device_id):
-        """Parametrized test for setting CUDA context with various input types.
-        """
+        """Test setting CUDA context in isolated threads."""
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(run_cuda_test_in_thread, device_input,
+                                     expected_device_id)
+            success, message = future.result(timeout=30)
+        assert success, message
 
-        # Check context before setting - should now be invalid
-        valid_before, device_before = check_cuda_context(
-            "BEFORE set_cuda_context")
-        assert not valid_before, \
-            "CUDA context should not be valid after cleanup"
-
-        # Test setting CUDA context
-        result = set_cuda_context(device_input)
-        assert result is True, "set_cuda_context should succeed"
-
-        # Check context after setting - should always be valid now
-        valid_after, device_id = check_cuda_context("AFTER set_cuda_context")
-        assert valid_after is True, \
-            "CUDA context should be valid after set_cuda_context"
-        assert device_id == expected_device_id, \
-            f"Expected device {expected_device_id}, got {device_id}"
-
-        # Unset any existing CUDA context to start with a clean state
-        unset_cuda_context("CLEANUP before test")
-
+    @pytest.mark.skipif(not current_platform.is_cuda(),
+                        reason="CUDA not available")
     def test_set_cuda_context_invalid_device_type(self):
         """Test error handling for invalid device type."""
-        cpu_device = torch.device('cpu')
-        with pytest.raises(ValueError, match="Expected CUDA device, got cpu"):
-            set_cuda_context(cpu_device)
+
+        def test_invalid_device():
+            try:
+                current_platform.set_device(torch.device('cpu'))
+                return False, "Should have raised ValueError"
+            except ValueError as e:
+                return (True,
+                        "Success") if "Expected a cuda device" in str(e) else (
+                            False, f"Wrong error: {e}")
+            except Exception as e:
+                return False, f"Wrong exception: {type(e).__name__}: {e}"
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(test_invalid_device)
+            success, message = future.result(timeout=10)
+        assert success, message
 
 
 if __name__ == "__main__":
-    # Allow running tests directly
     pytest.main([__file__, "-v"])

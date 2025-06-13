@@ -113,9 +113,6 @@ try:
                     # Not needed
                     pass
                 else:
-                    if current_platform.is_cuda():
-                        from vllm.platforms.cuda import set_cuda_context
-                        set_cuda_context(self.worker.device)
                     current_platform.set_device(self.worker.device)
 
                 self.compiled_dag_cuda_device_set = True
