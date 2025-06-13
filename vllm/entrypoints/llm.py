@@ -179,7 +179,8 @@ class LLM:
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
-        compilation_config: Optional[Union[int, dict[str, Any]]] = None,
+        compilation_config: Optional[Union[int, dict[str, Any],
+                                           CompilationConfig]] = None,
         **kwargs,
     ) -> None:
         """LLM constructor."""
