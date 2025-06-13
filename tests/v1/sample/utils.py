@@ -190,10 +190,13 @@ def fake_update_logitsprocs_state(
         logitproc.update_state(batch_update)
 
 
-def fake_apply_logits_processors(
-        test_fakes: LogitsprocsTestFakes) -> torch.Tensor:
+def fake_apply_logitsprocs(
+    test_fakes: LogitsprocsTestFakes,
+    slice_indices: list[int],
+) -> torch.Tensor:
     """Imitate application of logits processors in engine core"""
-    logits = test_fakes.logits.clone()
+    logits = test_fakes.logits[torch.tensor(slice_indices,
+                                            dtype=torch.long)].clone()
     for processor in test_fakes.sampling_metadata.logitsprocs.all_list:
         logits = processor.apply(logits)
     return logits

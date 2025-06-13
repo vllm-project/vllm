@@ -10,7 +10,9 @@ import torch
 
 from tests.v1.sample.utils import (LogitsprocsTestFakes, create_fake_logits,
                                    create_penalty_tensor,
-                                   create_prompt_tokens_tensor)
+                                   create_prompt_tokens_tensor,
+                                   fake_apply_logitsprocs,
+                                   fake_update_logitsprocs_state)
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
@@ -40,13 +42,13 @@ class LogitsProcsRequestParams:
     
     Params can be customized based on the enabled logitproc
     """
-    batch_index: int
+    workload_index: int
     logitproc_id: str  # Logitproc enabled, specified by str id
     out_tokens: list[int]  # Output tokens required for min tokens test
     params: SamplingParams  # Settings customized for logitproc
 
-    def __init__(self, batch_index: int, logitproc_id: str):
-        self.batch_index = batch_index
+    def __init__(self, workload_index: int, logitproc_id: str):
+        self.workload_index = workload_index
         self.logitproc_id = logitproc_id
         # Number of output tokens is randomly 0 or twice the min-tokens
         # threshold which will be used in testing. Output token values
@@ -156,7 +158,7 @@ def _generate_mixed_logitsprocs_batch_params(
     batch_perm = random.sample(range(batch_size), k=batch_size)
     return [
         LogitsProcsRequestParams(
-            batch_index=idx,
+            workload_index=idx,
             logitproc_id=logitsprocs_ids[pdx // reqs_per_logitproc])
         for idx, pdx in enumerate(batch_perm)
     ]
@@ -326,11 +328,11 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
     workload_size = len(workload_params)
 
     # Create fake test data structures for testing.
-    #test_fakes = _generate_test_fakes(workload_size, device)
+    test_fakes = _generate_test_fakes(workload_size, device)
 
-    max_add_remove_per_step = max(1, int(0.1 * workload_size))
+    max_add_remove_per_step = max(1, int(0.2 * workload_size))
     wdx = 0  # Next request index in workload to add
-    persistent_batch = [
+    persistent_batch: list[LogitsProcsRequestParams] = [
     ]  # Persistent batch state, as list of workload indices
 
     # Break when entire workload has been added previously and persistent
@@ -394,8 +396,8 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
         last_nonempty_index = pre_condense_batch_size - 1
         condensed_to_idxs = set()
         while batch_update.removed:
-            if (last_nonempty_index in batch_update.removed or 
-                last_nonempty_index in condensed_to_idxs):
+            if (last_nonempty_index in batch_update.removed
+                    or last_nonempty_index in condensed_to_idxs):
                 last_nonempty_index -= 1
                 continue
             # last_nonempty_index is the highest persistent batch index that was
@@ -438,3 +440,22 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
             for adx, bdx in swaps:
                 persistent_batch[adx], persistent_batch[
                     bdx] = persistent_batch[bdx], persistent_batch[adx]
+        batch_update.batch_size = condensed_batch_size
+
+        # Apply fake batch update to logitsprocs
+        fake_update_logitsprocs_state(test_fakes, batch_update)
+
+        # Emulate application of greedy logits processors in engine
+        slice_idxs = [req.workload_index for req in persistent_batch]
+        logits_w_lp = fake_apply_logitsprocs(test_fakes, slice_idxs).cpu()
+
+        # # Validate logits for each fake request
+        # for batch_index in range(workload_size):
+        #     request_params = workload_params[batch_index]
+        #     fxn = logitsprocs_test_mapping[request_params.logitproc_id].eval_fxn
+        #     assert fxn(test_fakes=test_fakes,
+        #             logits_new=logits_w_lp,
+        #             batch_index=batch_index,
+        #             request_params=request_params), (
+        #                 f"Validation failed for batch_index={batch_index}, "
+        #                 f"req_params={request_params}")
