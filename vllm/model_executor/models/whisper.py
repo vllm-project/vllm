@@ -45,6 +45,8 @@ logger = init_logger(__name__)
 class WhisperAudioInputs(TypedDict):
     input_features: NestedTensors
     """Shape: `(batch_size, 128, M)`"""
+    seq_lens: torch.Tensor
+    """Shape: `(batch_size,)`"""
 
 
 class WhisperPositionalEmbedding(nn.Embedding):
@@ -384,13 +386,17 @@ class WhisperEncoder(nn.Module):
                 sinusoids(*self.embed_positions.weight.shape))
 
     def forward(self, input_features: Union[torch.Tensor, list[torch.Tensor]]):
+        seq_lens = input_features["seq_lens"]
+        input_features = input_features["input_features"]
+        max_seq_len = seq_lens.max() * 2
+        input_features = input_features[:,:,:max_seq_len]
         hidden_states = []
-        for features in input_features:
+        for i, features in enumerate(input_features):
             embeds = nn.functional.gelu(self.conv1(features))
             embeds = nn.functional.gelu(self.conv2(embeds))
             embeds = embeds.permute(1, 0)
             embeds = embeds + self.embed_positions.weight[:embeds.size(0), :]
-            hidden_states.append(embeds)
+            hidden_states.append(embeds[:seq_lens[i],:])
         hidden_states = torch.cat(hidden_states)
 
         for encoder_layer in self.layers:
@@ -487,7 +493,7 @@ class WhisperModel(nn.Module):
         self,
         input_features: Optional[Union[torch.Tensor, list[torch.Tensor]]],
     ) -> Optional[torch.Tensor]:
-        if input_features is None:
+        if input_features["input_features"] is None:
             return None
         return self.encoder(input_features)
 
@@ -618,6 +624,20 @@ class WhisperMultiModalProcessor(
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
+
+        if mm_data:
+            # Calculate actual encoder tokens
+            audio_len = mm_data['audio'][0].size 
+            audio_duration = audio_len / feature_extractor.sampling_rate
+            duration_ratio = audio_duration / feature_extractor.chunk_length
+            max_tokens = self.info.get_num_audio_tokens()
+            actual_tokens = duration_ratio * max_tokens
+            actual_tokens = min(
+                max_tokens,
+                ((int(actual_tokens) + 40) >> 5) << 5,
+            )
+            processed_outputs["seq_lens"] = [actual_tokens]
+
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -625,7 +645,10 @@ class WhisperMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(input_features=MultiModalFieldConfig.batched("audio"))
+        return dict(
+            input_features=MultiModalFieldConfig.batched("audio"),
+            seq_lens=MultiModalFieldConfig.batched("audio"),
+        )
 
     def _get_prompt_updates(
         self,
@@ -633,7 +656,7 @@ class WhisperMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        num_tokens = self.info.get_num_audio_tokens()
+        num_tokens = out_mm_kwargs['seq_lens'][0]
         return [
             PromptReplacement(
                 modality="audio",
@@ -688,7 +711,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
     ) -> torch.Tensor:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         decoder_outputs = self.model(
-            input_features=audio_input["input_features"],
+            input_features=audio_input,
             input_ids=input_ids,
             positions=positions,
         )
@@ -717,6 +740,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> WhisperAudioInputs:
         input_features = kwargs.pop("input_features", None)
+        seq_lens = kwargs.pop("seq_lens", None)
 
         if input_features is not None:
             if not isinstance(input_features, (torch.Tensor, list)):
@@ -724,8 +748,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
                                  f"Got type: {type(input_features)}")
             input_features = torch.cat(
                 [feat.to(self.dtype) for feat in input_features])
+            seq_lens = seq_lens.flatten()
 
-        return WhisperAudioInputs(input_features=input_features)
+        return WhisperAudioInputs(input_features=input_features, seq_lens=seq_lens)
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
