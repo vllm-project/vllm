@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from enum import Enum
 from math import prod
-from typing import Optional
+from typing import Optional, final
 
 import torch
 
@@ -202,7 +202,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     @property
     @abstractmethod
-    def activation_formats(self) -> tuple[FusedMoEActivationFormat, FusedMoEActivationFormat]:
+    def activation_formats(
+            self) -> tuple[FusedMoEActivationFormat, FusedMoEActivationFormat]:
         """
         Add comment
         """
@@ -325,6 +326,7 @@ def _chunk_scales(scales: Optional[torch.Tensor], start: int,
     return None
 
 
+@final
 class FusedMoEModularKernel(torch.nn.Module):
     """
     This class combines a FusedMoEPrepareAndFinalize instance and
@@ -346,7 +348,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
-        assert prepare_finalize.activation_format == fused_experts.activation_formats[0]
+        assert prepare_finalize.activation_format == fused_experts.activation_formats[  # noqa: E501
+            0]
 
     def forward(
         self,
