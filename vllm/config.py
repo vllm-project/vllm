@@ -4450,14 +4450,26 @@ class VllmConfig:
             self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
-            # FIXME(rob): Add function to set all of these.
-            if not self.compilation_config.custom_ops:
-                self.compilation_config.custom_ops = ["none"]
+            # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
+            # is set to True, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
+
+            # The behavior of custom ops with inductor depends on the config:
+            # - If use_inductor=True and custom_ops is empty:
+            #   Inductor generates Triton kernels for all registered custom ops
+            #   (default behavior)
+            # - If use_inductor=True and custom_ops is non-empty:
+            #   Custom CUDA kernels are used for specified ops while inductor
+            #   generates Triton kernels for remaining ops, including misc torch
+            #   ops in the model.
+            if (not self.compilation_config.custom_ops
+                    and self.compilation_config.use_inductor):
+                # Let inductor generate Triton kernels for the custom ops.
+                self.compilation_config.custom_ops = ["none"]
 
         self._set_cudagraph_sizes()
 
