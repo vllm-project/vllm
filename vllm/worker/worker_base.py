@@ -510,17 +510,7 @@ class WorkerWrapperBase:
         """
         self.rpc_rank = rpc_rank
         self.worker: Optional[WorkerBase] = None
-        # do not store this `vllm_config`, `init_worker` will set the final
-        # one. TODO: investigate if we can remove this field in
-        # `WorkerWrapperBase`, `init_cached_hf_modules` should be
-        # unnecessary now.
-        if vllm_config.model_config is not None:
-            # it can be None in tests
-            trust_remote_code = vllm_config.model_config.trust_remote_code
-            if trust_remote_code:
-                # note: lazy import to avoid importing torch before initializing
-                from vllm.utils import init_cached_hf_modules
-                init_cached_hf_modules()
+        self.vllm_config = None  # Will be set in init_worker
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
         """
