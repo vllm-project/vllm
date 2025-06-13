@@ -2,15 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                                  DeltaMessage)
 
 logger = init_logger(__name__)
 
@@ -53,7 +55,7 @@ class GraniteReasoningParser(ReasoningParser):
             len(think_start) for think_start in self.valid_think_starts)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: "ChatCompletionRequest"
     ) -> tuple[Optional[str], Optional[str]]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
@@ -83,7 +85,7 @@ class GraniteReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> Union["DeltaMessage", None]:
         """Extract the reasoning content / content emitted by granite models;
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
@@ -139,7 +141,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Args:
             text (str): Text to check for leading substr.
-        
+
         Returns:
             bool: True if any of the possible reasoning start seqs match.
         """
@@ -152,7 +154,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Args:
             text (str): Text to check for leading substr.
-        
+
         Returns:
             bool: True if any of the possible response start seqs match.
         """
@@ -164,7 +166,7 @@ class GraniteReasoningParser(ReasoningParser):
         self,
         current_text: str,
         delta_text: str,
-    ) -> DeltaMessage:
+    ) -> "DeltaMessage":
         """Parse the delta message when the current text has not yet completed
         its start of reasoning sequence.
 
@@ -175,6 +177,8 @@ class GraniteReasoningParser(ReasoningParser):
         Returns:
             DeltaMessage: Message containing the parsed content.
         """
+        from vllm.entrypoints.openai.protocol import DeltaMessage
+
         prev_longest_length = len(current_text) - len(delta_text)
         is_substr = self._is_reasoning_start_substr(current_text)
         was_substr = self._is_reasoning_start_substr(
@@ -200,7 +204,7 @@ class GraniteReasoningParser(ReasoningParser):
         current_text: str,
         reasoning_content: str,
         delta_text: str,
-    ) -> DeltaMessage:
+    ) -> "DeltaMessage":
         """Parse the delta message when the current text has both reasoning
         content with no (response) content. NOTE that we may have overlapping
         tokens with the start of reasoning / start of response sequences on
@@ -214,6 +218,8 @@ class GraniteReasoningParser(ReasoningParser):
         Returns:
             DeltaMessage: Message containing the parsed content.
         """
+        from vllm.entrypoints.openai.protocol import DeltaMessage
+
         # If we have no reasoning content or explicitly end with the start of
         # response sequence, we are in transition to the response; need to be
         # careful here, since the final token (:) will match the reasoning
@@ -273,7 +279,7 @@ class GraniteReasoningParser(ReasoningParser):
         response_content: str,
         current_text: str,
         response_seq_len: int,
-    ) -> DeltaMessage:
+    ) -> "DeltaMessage":
         """Parse the delta message when the current text has both reasoning
         content and normal (response) content.
 
@@ -287,6 +293,8 @@ class GraniteReasoningParser(ReasoningParser):
         Returns:
             DeltaMessage: Message containing the parsed content.
         """
+        from vllm.entrypoints.openai.protocol import DeltaMessage
+
         # Always have content; take length to the end
         delta_content = delta_text[-len(response_content):]
         reasoning_end_idx = len(delta_text) - (len(response_content) +
