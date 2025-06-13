@@ -22,7 +22,7 @@ If you want to run this script standalone with `uv`, you can use the following:
 uvx --from git+https://github.com/vllm-project/vllm#subdirectory=examples/online_serving/structured_outputs structured-output
 ```
 
-See [feature docs](../../../features/structured_outputs.md) for more information.
+See [feature docs](https://docs.vllm.ai/en/latest/features/structured_outputs.html) for more information.
 
 !!! tip
     If vLLM is running remotely, then set `OPENAI_BASE_URL=<remote_url>` before running the script.
