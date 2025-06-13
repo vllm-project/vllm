@@ -58,7 +58,7 @@ docker run --rm -it --device=/dev/neuron0 --network bridge \
             python3 /workspace/vllm/examples/offline_inference/neuron.py;
             python3 -m pytest /workspace/vllm/tests/neuron/1_core/ -v --capture=tee-sys;
             for f in /workspace/vllm/tests/neuron/2_core/*.py; do
-                printf "Running test file: %s\n" "\$f";
+                echo \"Running test file: \$f\";
                 python3 -m pytest \$f -v --capture=tee-sys;
             done
        "
