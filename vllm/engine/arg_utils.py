@@ -1519,16 +1519,20 @@ class EngineArgs:
                              model_config: ModelConfig) -> None:
         """Set Default Arguments for V1 Engine."""
 
-        # V1 always uses chunked prefills for non-pooling tasks.
+        # V1 always uses chunked prefills and prefix caching
+        # for non-pooling tasks.
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
             self.enable_chunked_prefill = True
-        elif self.enable_chunked_prefill is None:
-            self.enable_chunked_prefill = False
-
-        # V1 enables prefix caching by default.
-        if self.enable_prefix_caching is None:
             self.enable_prefix_caching = True
+        else:
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = False
+            if self.enable_prefix_caching is None:
+                self.enable_prefix_caching = False
+
+        if not self.enable_chunked_prefill:
+            self.max_num_batched_tokens = model_config.max_model_len
 
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default
