@@ -38,7 +38,7 @@ def full_cudagraph_llm():
             "VLLM_FLASH_ATTN_VERSION": "3"
     }):
         return LLM(model=MODEL,
-                   gpu_memory_utilization=0.3,
+                   gpu_memory_utilization=0.4,
                    compilation_config=CompilationConfig(full_cuda_graph=True))
 
 
@@ -49,7 +49,7 @@ def piecewise_llm():
             "VLLM_FLASH_ATTN_VERSION": "3"
     }):
         return LLM(model=MODEL,
-                   gpu_memory_utilization=0.6,
+                   gpu_memory_utilization=0.4,
                    compilation_config=CompilationConfig())
 
 
