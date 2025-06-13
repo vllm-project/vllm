@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import NamedTuple, Optional
 
 import numpy as np
@@ -10,13 +10,11 @@ import torch
 
 from tests.v1.sample.utils import (LogitsprocsTestFakes, create_fake_logits,
                                    create_penalty_tensor,
-                                   create_prompt_tokens_tensor,
-                                   fake_apply_logits_processors,
-                                   fake_update_logitsprocs_state)
+                                   create_prompt_tokens_tensor)
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
-from vllm.v1.sample.logits_processor import AddedRequestType, BatchUpdate
+from vllm.v1.sample.logits_processor import BatchUpdate, MoveDirectionalityEnum
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import (STR_LOGITS_BIAS_LOGITPROC_ID,
                                   STR_MIN_P_LOGITPROC_ID,
@@ -322,40 +320,121 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
 
     # Define a shuffled batch of requests which individually use a different
     # logitproc, or no logitproc at all
-    batch_params = _generate_mixed_logitsprocs_batch_params(
+    workload_params = _generate_mixed_logitsprocs_batch_params(
         reqs_per_logitproc=reqs_per_logitproc,
         logitsprocs_ids=logitsprocs_under_test)
-    batch_size = len(batch_params)
+    workload_size = len(workload_params)
 
     # Create fake test data structures for testing.
-    test_fakes = _generate_test_fakes(batch_size, device)
+    #test_fakes = _generate_test_fakes(workload_size, device)
 
-    # Construct logitsprocs batch update
-    added: Sequence[AddedRequestType] = [
-        (req_params.batch_index, req_params.params, req_params.out_tokens)
-        for req_params in batch_params
-    ]
-    fake_batch_update = BatchUpdate(
-        removed=[],
-        moved=[],
-        added=added,
-        batch_size=batch_size,
-    )
+    max_add_remove_per_step = max(1, int(0.1 * workload_size))
+    wdx = 0  # Next request index in workload to add
+    persistent_batch = [
+    ]  # Persistent batch state, as list of workload indices
 
-    # Apply fake batch update to logitsprocs
-    fake_update_logitsprocs_state(test_fakes, fake_batch_update)
+    # Break when entire workload has been added previously and persistent
+    # batch is empty
+    while True:
+        workload_reqs_remaining = workload_size - wdx
+        curr_batch_size = len(persistent_batch)
+        if not (workload_reqs_remaining or curr_batch_size):
+            break
 
-    # Emulate application of greedy logits processors in engine
-    logits_w_lp = fake_apply_logits_processors(test_fakes)
-    logits_w_lp = logits_w_lp.cpu()
+        # 50% of steps: add no reqs
+        # Other 50%: add a limited number of reqs (less than the number
+        # of workload reqs remaining, less than an arbitrary max)
+        # If no workload reqs remain: 100% of steps have 0 adds
+        num_step_add = random.choice([
+            0,
+            random.randint(
+                1, min(max_add_remove_per_step, workload_reqs_remaining))
+        ]) if workload_reqs_remaining else 0
 
-    # Validate logits for each fake request
-    for batch_index in range(batch_size):
-        request_params = batch_params[batch_index]
-        fxn = logitsprocs_test_mapping[request_params.logitproc_id].eval_fxn
-        assert fxn(test_fakes=test_fakes,
-                   logits_new=logits_w_lp,
-                   batch_index=batch_index,
-                   request_params=request_params), (
-                       f"Validation failed for batch_index={batch_index}, "
-                       f"req_params={request_params}")
+        # 50% of steps: remove no requests
+        # Other 50%: remove a limited number of reqs (less than the number
+        # persistent batch reqs remaining, less than an arbitrary max)
+        # If persistent batch is empty: 100% of steps have 0 removals until
+        # more requests are added. Assume that removed requests are always
+        # drawn from the current batch, before new adds
+        num_step_remove = random.choice([
+            0,
+            random.randint(1, min(max_add_remove_per_step, curr_batch_size))
+        ]) if curr_batch_size else 0
+
+        num_step_add_replace = min(num_step_add, num_step_remove)
+
+        # Generate fake removed request indices from current persistent
+        # batch before adds
+        batch_update = BatchUpdate(
+            removed=random.sample(range(curr_batch_size), num_step_remove))
+
+        # Get added requests from workload
+        for add_req_params in workload_params[wdx:(wdx +
+                                                   num_step_add_replace)]:
+            # Replace as many removed requests as possible with added requests
+            add_remove_idx = batch_update.pop_removed_if_can()
+            batch_update.added.append((add_remove_idx, add_req_params.params,
+                                       add_req_params.out_tokens))
+            persistent_batch[add_remove_idx] = add_req_params
+
+        # Append remaining added requests to end of batch
+        add_reqs_append = workload_params[(wdx + num_step_add_replace):(
+            wdx + num_step_add)]
+        batch_update.added.extend([
+            (adx + curr_batch_size, add_req_params.params,
+             add_req_params.out_tokens)
+            for adx, add_req_params in enumerate(add_reqs_append)
+        ])
+        persistent_batch.extend(add_reqs_append)
+        pre_condense_batch_size = len(persistent_batch)
+        wdx += num_step_add  # Update workload offset
+
+        # Simulate condensing persistent batch
+        last_nonempty_index = pre_condense_batch_size - 1
+        condensed_to_idxs = set()
+        while batch_update.removed:
+            if (last_nonempty_index in batch_update.removed or 
+                last_nonempty_index in condensed_to_idxs):
+                last_nonempty_index -= 1
+                continue
+            # last_nonempty_index is the highest persistent batch index that was
+            # not removed
+            first_empty_index = batch_update.peek_removed_if_can()
+            assert first_empty_index is not None
+            if first_empty_index > last_nonempty_index:
+                break
+            # first_empty_index is the lowest removed persistent batch index
+            # that is less than last_nonempty_index
+            #
+            # move last_nonempty_index -> first_empty_index
+            batch_update.pop_removed_if_can()
+            condensed_to_idxs.add(first_empty_index)
+            persistent_batch[first_empty_index] = persistent_batch[
+                last_nonempty_index]
+            batch_update.moved.append((last_nonempty_index, first_empty_index,
+                                       MoveDirectionalityEnum.UNIDIRECTIONAL))
+
+            last_nonempty_index -= 1
+
+        # Now removed requests & gaps left by non-removed requests that got
+        # moved downward are grouped consecutively in the upper indices of
+        # the persistent batch. Truncate them to get condensed persistent batch
+        condensed_batch_size = curr_batch_size + num_step_add - num_step_remove
+        persistent_batch = persistent_batch[0:condensed_batch_size]
+
+        if condensed_batch_size > 1:
+            # Simulate arbitrary reorder_batch() in the kernel backend
+            # Generate a random number k of non-overlapping swap tuples
+            k = random.randint(0, condensed_batch_size // 2)
+            idxs = list(range(condensed_batch_size))
+            random.shuffle(idxs)
+            swaps = [
+                tuple(sorted([idxs[2 * i], idxs[2 * i + 1]])) for i in range(k)
+            ]
+            batch_update.moved.extend([
+                (sw[0], sw[1], MoveDirectionalityEnum.SWAP) for sw in swaps
+            ])
+            for adx, bdx in swaps:
+                persistent_batch[adx], persistent_batch[
+                    bdx] = persistent_batch[bdx], persistent_batch[adx]

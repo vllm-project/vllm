@@ -538,8 +538,9 @@ class InputBatch:
                 last_req_index -= 1
 
             # Find the smallest empty index.
-            empty_index = (empty_req_indices.pop()
-                           if is_tpu else self.batch_update.peek_removed())
+            empty_index = (empty_req_indices.pop() if is_tpu else
+                           self.batch_update.peek_removed_if_can())
+            assert empty_index is not None
             if empty_index >= last_req_index:
                 break
 

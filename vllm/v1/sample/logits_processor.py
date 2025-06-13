@@ -75,9 +75,11 @@ class BatchUpdate:
     def num_removed(self) -> int:
         return len(self._removed)
 
-    def peek_removed(self) -> int:
-        self._sort_removed()
-        return self._removed[-1]
+    def peek_removed_if_can(self) -> Optional[int]:
+        if self.num_removed():
+            self._sort_removed()
+            return self._removed[-1]
+        return None
 
     def pop_removed_if_can(self) -> Optional[int]:
         if self.has_removed():
