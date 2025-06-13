@@ -70,11 +70,12 @@ class CustomAllreduce:
         """
         Custom allredcue (cr) is non-destructive acceleration, which is
         available for cuda and rocm MI300 series.
-        Quick allreduce (qr) is accelerated by quantization, currently
-        supports fp16, fp8, Q8, Q6, Q4 quantization. 
+        Custom quick allreduce (qr) is accelerated by quantization, 
+        currently supports fp16, fp8, Q8, Q6, Q4 quantization. 
         We view qr as complementary to cr, the condition for qr is 
         even more demanding; qr is initialized, then cr must also 
-        be initialized.
+        be initialized. If the conditions of cr are not met, qr is 
+        naturally not initialized.
         Qr level equal to 0 means closed, 1 for fp16, 2 for fp8, 3 for Q8,
         4 for Q6, 5 for Q4.
         Due to instruction set limitations, only rocm MI300 series
@@ -103,7 +104,7 @@ class CustomAllreduce:
             logger.info("Custom allreduce is disabled because "
                         "of missing custom allreduce library")
         if not quick_ar:
-            logger.info("Quick allreduce is disabled because "
+            logger.info("Custom quick allreduce is disabled because "
                         "of missing quick allreduce library")
             self._QR_SHOULD_INIT = False
         if not quick_ar and not custom_ar:
@@ -125,8 +126,8 @@ class CustomAllreduce:
         self.rank = rank
         world_size = dist.get_world_size(group=self.group)
         if world_size == 1:
-            # No need to initialize custom allreduce or quick allreduce
-            # for single GPU case.
+            # No need to initialize custom allreduce or custom quick
+            #  allreduce for single GPU case.
             return
 
         if world_size not in CustomAllreduce._SUPPORTED_WORLD_SIZES:
@@ -137,12 +138,12 @@ class CustomAllreduce:
                 world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
             return
 
-        if world_size not in CustomAllreduce._SUPPORTED_WORLD_SIZES \
-            and self._QR_SHOULD_INIT:
+        if self._QR_SHOULD_INIT and \
+            world_size not in CustomAllreduce._SUPPORTED_WORLD_SIZES:
             self._QR_SHOULD_INIT = False
             logger.warning(
-                "Quick allreduce is disabled due to an unsupported world"
-                " size: %d.", world_size)
+                "Quick allreduce is disabled due to an unsupported "
+                "world size: %d.", world_size)
 
         if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
@@ -234,7 +235,7 @@ class CustomAllreduce:
             self._QR_SHOULD_INIT = False
         if self.qr_level not in [1, 2, 3, 4, 5] and self._QR_SHOULD_INIT:
             logger.warning(
-                "Quick AllReduce is not initialized because the quant "
+                "Custom quick allreduce is not initialized because the quant "
                 "level %s is invalid. It must be one of "
                 "[0, 1, 2, 3, 4, 5]. You can change this via "
                 "`envs.VLLM_ROCM_QR_LEVEL`.", self.qr_level)
@@ -243,16 +244,26 @@ class CustomAllreduce:
         if self._QR_SHOULD_INIT:
             if self.qr_level != 5 and world_size == 8:
                 logger.warning(
-                    "When world_size=8, only VLLM_ROCM_QR_LEVEL=5 "
-                    "for quick allreduce is effective for performance "
-                    "improvement. set `envs.VLLM_ROCM_QR_LEVEL = 5`"
-                    " for speedup.")
+                    "Custom quick allreduce: if you are using mi308 instead of "
+                    "mi300, there will be fewer acceleration scenarios for qr."
+                    "In particular, when mi308 and world_size=8, "
+                    "only VLLM_ROCM_QR_LEVEL=5  for custom quick allreduce "
+                    "is effective for performance improvement. "
+                    "set `envs.VLLM_ROCM_QR_LEVEL = 5` for "
+                    "speedup for this case.")
             # These numbers are based on kernel tests.
-            if world_size == 4:
-                qr_min_size = 8 * 1024 * 1024
-            elif world_size == 8:
-                qr_max_size = 64 * 1024 * 1024
-                qr_min_size = 4 * 1024 * 1024
+            mi308 = False  # TODO: how to determine. rocminfo | grep ?
+            if mi308:
+                if world_size == 4:
+                    qr_min_size = 8 * 1024 * 1024
+                elif world_size == 8:
+                    qr_max_size = 64 * 1024 * 1024
+                    qr_min_size = 4 * 1024 * 1024
+            else:
+                if world_size == 2:
+                    qr_min_size = 1 * 1024 * 1024
+                else:
+                    qr_min_size = 2 * 1024 * 1024
             self.qr_max_size = qr_max_size
             self.qr_min_size = qr_min_size
             self._qr_ptr = ops.init_quick_ar(world_size, rank)
@@ -267,7 +278,7 @@ class CustomAllreduce:
             ops.qr_set_comm_handles(self._qr_ptr, comm_handles)
             if dtype == torch.bfloat16 and self.cast_bf162half:
                 logger.info(
-                    "quick allreduce: due to the lack of bf16 assembly "
+                    "Custom quick allreduce: due to the lack of bf16 assembly "
                     "instruction set, the performance gain of bf16 is "
                     "limited. We convert bfloat16 to float16 to speed "
                     "up quick allreduce. You can set "
@@ -318,13 +329,13 @@ class CustomAllreduce:
         if self.disabled and not self._QR_SHOULD_INIT:
             return False
         inp_size = inp.numel() * inp.element_size()
-        # custom or quick allreduce requires input byte size to be
+        # custom quick allreduce requires input byte size to be
         # multiples of 16
         if inp_size % 16 != 0:
             return False
         if not is_weak_contiguous(inp):
             return False
-        # quick allreduce requires input byte size to be multiples of 16
+        # custom quick allreduce requires input byte size to be multiples of 16
         if inp.dtype == torch.float16:
             return inp_size <= self.qr_max_size and inp_size >= self.qr_min_size
         elif inp.dtype == torch.bfloat16:
@@ -333,6 +344,7 @@ class CustomAllreduce:
                 return inp_size <= self.qr_max_size and \
                     inp_size >= self.qr_min_size
             else:
+                # TODO: check bf16 condition for mi300
                 return (inp_size <= self.qr_max_size
                         and inp_size > 1024 * 1024 * 16
                         and self.world_size == 2)
@@ -379,7 +391,7 @@ class CustomAllreduce:
         return out
 
     def qr_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
-        """Performs an out-of-place quick all reduce."""
+        """Performs an out-of-place custom quick all reduce."""
         if out is None:
             out = torch.empty_like(inp)
         ops.qr_all_reduce(self._qr_ptr, self.qr_level, inp, out,
@@ -390,7 +402,7 @@ class CustomAllreduce:
         """The main allreduce API that provides support for cuda graph."""
         if self.disabled:
             return None
-        # try quick allreduce first, then custom allreduce
+        # try custom quick allreduce first, then custom allreduce
         if self.should_quick_allreduce(input):
             # We don't need the context of quick allreduce to do graph capture
             # because the ipc access is already collected in init() and
