@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
 GET_META_MSG = b"get_meta_msg"
+PUT_META_MSG = b"put_meta_msg"
 
 logger = init_logger(__name__)
 
@@ -54,12 +55,18 @@ class NixlAgentMetadata(
         # required for @cached_property.
         dict=True):
     engine_id: str
-    agent_metadata: bytes
-    kv_caches_base_addr: list[int]
-    num_blocks: int
-    tp_size: int
-    block_len: int
-    attn_backend_name: str
+    agent_metadata: Optional[bytes] = None
+    kv_caches_base_addr: Optional[list[int]] = None
+    num_blocks: Optional[int] = None
+    tp_size: Optional[int] = None
+    block_len: Optional[int] = None
+    attn_backend_name: Optional[str] = None
+
+    # Control metadata for NIXL connector.
+    empty: bool = False
+    tp_rank: Optional[int] = None
+    global_rank: Optional[int] = None
+    global_world_size: Optional[int] = None
 
 
 @dataclass
@@ -190,6 +197,68 @@ class NixlConnectorScheduler:
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+
+        # Start the metadata change proxy thread.
+        self._metadata_change_proxy_thread: Optional[threading.Thread] = None
+        self._metadata_change_proxy_thread = threading.Thread(
+            target=self._metadata_change_proxy,
+            name="nixl_metadata_change_proxy",
+            daemon=True)
+        self._metadata_change_proxy_thread.start()
+
+    def _metadata_change_proxy(self):
+        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT
+        path = make_zmq_path("tcp", host, port)
+        cache = dict[int, NixlAgentMetadata]()
+        encoder = msgspec.msgpack.Encoder()
+        decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+        with zmq_ctx(zmq.ROUTER, path) as sock:
+            logger.debug("Starting metadata proxy on path: %s", path)
+            while True:
+                ident, _, op_type, payload = sock.recv_multipart()
+                if op_type == GET_META_MSG:
+                    query_payload = decoder.decode(payload)
+                    if not cache:
+                        # If cache is empty, send an empty message.
+                        encoded_data = encoder.encode(
+                            NixlAgentMetadata(
+                                engine_id=query_payload.engine_id,
+                                tp_rank=query_payload.tp_rank,
+                                empty=True))
+                        sock.send_multipart((ident, b"", encoded_data))
+                        logger.debug("Sent empty metadata cache")
+                    else:
+                        meta = next(iter(cache.values()))
+                        remote_tp_rank = query_payload.global_rank % \
+                            meta.global_world_size
+                        query_metada = cache.get(remote_tp_rank, None)
+                        if query_metada is None:
+                            # If no metadata for the requested engine_id and
+                            # tp_rank, send an empty message.
+                            query_metada = NixlAgentMetadata(
+                                engine_id=query_payload.engine_id,
+                                tp_rank=query_payload.tp_rank,
+                                empty=True)
+                        # Encode the cache and send it.
+                        encoded_data = encoder.encode(query_metada)
+                        # Send the cache as a multipart message.
+                        # The first part is the message type, second is empty,
+                        # third is the encoded data.
+                        sock.send_multipart((ident, b"", encoded_data))
+                        logger.debug("Sent metadata cache global_rank: %s",
+                                     query_metada.global_rank)
+                if op_type == PUT_META_MSG:
+                    # Update the cache with the new metadata.
+                    worker_meta = decoder.decode(payload)
+                    global_rank = worker_meta.global_rank
+                    cache[global_rank] = worker_meta
+                    # Send an empty response to acknowledge the update.
+                    encoded_data = encoder.encode(
+                        NixlAgentMetadata(engine_id=worker_meta.engine_id,
+                                          tp_rank=worker_meta.tp_rank,
+                                          empty=True))
+                    sock.send_multipart((ident, b"", encoded_data))
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -348,6 +417,9 @@ class NixlConnectorWorker:
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
 
+        self.global_rank = torch.distributed.get_rank()
+        self.global_world_size = torch.distributed.get_world_size()
+
         # KV Caches and nixl tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
 
@@ -383,7 +455,7 @@ class NixlConnectorWorker:
                                               int] = defaultdict(lambda: 0)
 
         # Background thread for establishing new connections.
-        self._nixl_handshake_listener_t: Optional[threading.Thread] = None
+        self._nixl_handshake_sender_t: Optional[threading.Thread] = None
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -413,74 +485,62 @@ class NixlConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[str, int](int)
 
     @staticmethod
-    def _nixl_handshake_listener(metadata: NixlAgentMetadata,
-                                 ready_event: threading.Event, base_port: int,
-                                 tp_rank: int):
+    def _nixl_handshake_sender(metadata: NixlAgentMetadata):
         """Background thread for getting new NIXL handshakes."""
         # NOTE(rob): this is a simple implementation. We will move
         # to a better approach via HTTP endpoint soon.
-
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(metadata)
         size_in_bytes = len(encoded_data)
         logger.debug("Size of encoded NixlAgentMetadata: %s bytes",
                      str(size_in_bytes))
-
-        # Listen for new requests for metadata.
         host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        path = make_zmq_path("tcp", host, base_port + tp_rank)
-        logger.debug("Starting listening on path: %s", path)
-        with zmq_ctx(zmq.ROUTER, path) as sock:
-            ready_event.set()
-            while True:
-                identity, _, msg = sock.recv_multipart()
-                if msg != GET_META_MSG:
-                    logger.warning(
-                        "Connection listener got unexpected message %s", msg)
-                sock.send_multipart((identity, b"", encoded_data))
+        port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT
+        path = make_zmq_path("tcp", host, port)
+        logger.debug("Starting put on path: %s global_rank %s", path,
+                     metadata.global_rank)
+        with zmq_ctx(zmq.REQ, path) as sock:
+            sock.send_multipart([PUT_META_MSG, encoded_data])
+            _ = sock.recv()
+            logger.debug("Sent NIXL handshake metadata for global_rank %s",
+                         metadata.global_rank)
 
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
 
-        # NOTE(rob): we need each rank to have a unique port. This is
-        # a hack to keep us moving. We will switch when moving to etcd
-        # or where we have a single ZMQ socket in the scheduler.
-
-        def handshake(path: str, rank: int) -> NixlAgentMetadata:
-            # Send query for the request.
-            with zmq_ctx(zmq.REQ, path) as sock:
-                sock.send(GET_META_MSG)
-                metadata_bytes = sock.recv()
-                decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-                metadata = decoder.decode(metadata_bytes)
+        path = make_zmq_path("tcp", host, port)
+        logger.debug("Starting get metadata on path: %s", path)
+        encoder = msgspec.msgpack.Encoder()
+        decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+        with zmq_ctx(zmq.REQ, path) as sock:
+            while True:
                 got_metadata_time = time.perf_counter()
-
+                metadata = NixlAgentMetadata(
+                    engine_id=self.engine_id,
+                    global_rank=self.global_rank,
+                )
+                sock.send_multipart([GET_META_MSG, encoder.encode(metadata)])
+                metadata_bytes = sock.recv()
+                metadata = decoder.decode(metadata_bytes)
+                if metadata.empty:
+                    # If the metadata is empty, it means that the remote agent
+                    # is not ready yet. We will retry.
+                    logger.debug("Received empty metadata, retrying...")
+                    time.sleep(0.1)
+                    continue
+                assert metadata.agent_metadata is not None
                 # Register Remote agent.
-                self.add_remote_agent(metadata, rank)
                 setup_agent_time = time.perf_counter()
-
                 logger.debug("NIXL handshake: get metadata took: %s",
                              got_metadata_time - start_time)
                 logger.debug("NIXL handshake: add agent took: %s",
                              setup_agent_time - got_metadata_time)
-                return metadata
-
-        # Handshake with remote agent-rank0 first to get the tp_size of remote
-        path = make_zmq_path("tcp", host, port)
-        logger.debug("Querying master rank metadata on path: %s", path)
-        metadata = handshake(path, 0)
-
-        # Handshake only with the other TP remote the current local rank will
-        # pull from. With homogeneous TP it happens to be the same rank_i.
-        tp_ratio = self._tp_size[self.engine_id] // metadata.tp_size
-        p_remote_rank = self.tp_rank // tp_ratio
-        if p_remote_rank > 0:
-            path = make_zmq_path("tcp", host, port + p_remote_rank)
-            logger.debug("Querying metadata on path: %s at remote rank %s",
-                         path, p_remote_rank)
-            _ = handshake(path, p_remote_rank)
+                logger.debug("metadata.num_blocks: %s, rank: %s",
+                             metadata.num_blocks, self.tp_rank)
+                self.add_remote_agent(metadata, metadata.global_rank)
+                break
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -608,16 +668,16 @@ class NixlConnectorWorker:
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
             num_blocks=self.num_blocks,
             tp_size=self.world_size,
+            global_rank=self.global_rank,
+            global_world_size=self.global_world_size,
             block_len=self.block_len,
             attn_backend_name=self.backend_name)
-        ready_event = threading.Event()
-        self._nixl_handshake_listener_t = threading.Thread(
-            target=self._nixl_handshake_listener,
-            args=(metadata, ready_event, self.side_channel_port, self.tp_rank),
+        self._nixl_handshake_sender_t = threading.Thread(
+            target=self._nixl_handshake_sender,
+            args=(metadata, self.tp_rank),
             daemon=True,
             name="nixl_handshake_listener")
         self._nixl_handshake_listener_t.start()
-        ready_event.wait()
 
     def add_remote_agent(self,
                          nixl_agent_meta: NixlAgentMetadata,
@@ -714,7 +774,7 @@ class NixlConnectorWorker:
         # rank. With heterogeneous TP, prepare the descriptors by splitting the
         # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
-        p_remote_tp_rank = self.tp_rank // tp_ratio
+        p_remote_tp_rank = self.global_rank // tp_ratio
         # Only register the remote's descriptors if current rank pulls from it.
         if p_remote_tp_rank == remote_tp_rank:
             self.kv_caches_base_addr[
@@ -730,7 +790,7 @@ class NixlConnectorWorker:
                     # self.block_len == remote_block_len//tp_ratio bytes.
                     addr = base_addr + block_offset + rank_offset
                     # (addr, len, device id)
-                    blocks_data.append((addr, self.block_len, remote_tp_rank))
+                    blocks_data.append((addr, self.block_len, self.tp_rank))
             logger.debug(
                 "Created %s blocks for dst engine %s with remote rank %s and "
                 "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
@@ -902,7 +962,7 @@ class NixlConnectorWorker:
         # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
-            remote_rank = self.tp_rank // tp_ratio
+            remote_rank = self.global_rank // tp_ratio
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
             self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             return
