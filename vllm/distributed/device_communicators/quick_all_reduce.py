@@ -24,8 +24,9 @@ except Exception:
 class QuickReduceRegime(Enum):
     FP = 0
     INT8 = 1
-    INT4 = 2
-    NONE = 3
+    INT6 = 2
+    INT4 = 3
+    NONE = 4
 
 
 class QuickAllReduce:
@@ -50,8 +51,8 @@ class QuickAllReduce:
             "Supported levels: "
             f"{list(QuickReduceRegime.__members__.keys())}")
         if regime_str == "NONE":
-            logger.debug("Custom quickreduce is disabled based on "
-                         "env variable VLLM_ROCM_CA_QUANT_REGIME")
+            logger.debug("Custom quick allreduce is disabled based "
+                         "on env variable VLLM_ROCM_CA_QUANT_REGIME")
             return
         self.quant_level = QuickReduceRegime[regime_str]
         # On RocM bfloat16 kernels are slower than fp16

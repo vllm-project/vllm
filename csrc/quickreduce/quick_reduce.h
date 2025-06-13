@@ -94,8 +94,9 @@ allreduce_prototype_twoshot(T const* A, T* B, uint32_t N, int num_blocks,
 
 enum QuickReduceQuantLevel {
   FP16 = 0,
-  INT8,
-  INT4,
+  INT8 = 1,
+  int6 = 2,
+  INT4 = 3,
 };
 
 struct DeviceComms {
@@ -219,6 +220,9 @@ struct DeviceComms {
       switch (quant_level_) {
         case QuickReduceQuantLevel::INT8:
           TWOSHOT_DISPATCH(CodecQ8)
+          break;
+        case QuickReduceQuantLevel::INT6:
+          TWOSHOT_DISPATCH(CodecQ6)
           break;
         case QuickReduceQuantLevel::INT4:
           TWOSHOT_DISPATCH(CodecQ4)
