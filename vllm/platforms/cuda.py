@@ -76,7 +76,7 @@ class CudaPlatformBase(Platform):
         """
         Set the device for the current platform.
         """
-        torch.cuda.set_device(device)
+        super().set_device(device)
         # With this trick we can force the device to be set eagerly
         _ = torch.zeros(1, device=device)
 
