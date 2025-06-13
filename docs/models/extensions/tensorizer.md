@@ -20,8 +20,8 @@ takes care of this process.
 The `TensorizerConfig` class is used to customize Tensorizer's behaviour,
 defined in [vllm/model_executor/model_loader/tensorizer.py](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/model_loader/tensorizer.py).
 It is passed to any serialization or deserialization operation.
-When loading with Tensorizer using the vLLM 
-library rather than through a model-serving entrypoint, it gets passed to 
+When loading with Tensorizer using the vLLM
+library rather than through a model-serving entrypoint, it gets passed to
 the `LLM` entrypoint class directly. Here's an example of loading a model
 saved at `"s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors"`:
 
@@ -64,13 +64,13 @@ python examples/others/tensorize_vllm_model.py \
    --suffix v1
 ```
 
-This saves the model tensors at 
-`s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors`, as well as all other 
+This saves the model tensors at
+`s3://my-bucket/vllm/facebook/opt-125m/v1/model.tensors`, as well as all other
 artifacts needed to load the model at that same directory.
 
 ## Serving the model using Tensorizer
-Once the model is serialized where you want it, all that is needed is to 
-pass that directory with the model artifacts to `vllm serve` in the case above, 
+Once the model is serialized where you want it, all that is needed is to
+pass that directory with the model artifacts to `vllm serve` in the case above,
 one can simply do:
 
 ```bash
@@ -105,7 +105,7 @@ vllm serve facebook/opt-125m \
 ```
 
 Note in this case, if the directory to the model artifacts at
-`s3://my-bucket/vllm/facebook/opt-125m/v1/` doesn't have all necessary model 
+`s3://my-bucket/vllm/facebook/opt-125m/v1/` doesn't have all necessary model
 artifacts to load, you'll want to pass `facebook/opt-125m` as the model tag like
 it was done in the example script above. In this case, vLLM will take care of
 resolving the other model artifacts by pulling them from HuggingFace Hub.

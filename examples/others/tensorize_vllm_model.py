@@ -234,8 +234,8 @@ def merge_extra_config_with_tensorizer_config(extra_cfg: dict,
         if hasattr(cfg, k):
             setattr(cfg, k, v)
             logger.info(
-                f"Updating TensorizerConfig with {k} from "
-                f"--model-loader-extra-config provided"
+                "Updating TensorizerConfig with %s from "
+                "--model-loader-extra-config provided", k
             )
 
 def deserialize():
@@ -309,14 +309,18 @@ if __name__ == '__main__':
         extra_config = json.loads(args.model_loader_extra_config)
 
 
-    tensorizer_dir = args.serialized_directory or extra_config.get("tensorizer_dir")
-    tensorizer_uri = getattr(args, "path_to_tensors", None) or extra_config.get("tensorizer_uri")
+    tensorizer_dir = (args.serialized_directory or
+                      extra_config.get("tensorizer_dir"))
+    tensorizer_uri = (getattr(args, "path_to_tensors", None)
+                      or extra_config.get("tensorizer_uri"))
 
     if tensorizer_dir and tensorizer_uri:
-        parser.error("--serialized-directory and --path-to-tensors cannot both be provided")
+        parser.error("--serialized-directory and --path-to-tensors "
+                     "cannot both be provided")
 
     if not tensorizer_dir and not tensorizer_uri:
-        parser.error("Either --serialized-directory or --path-to-tensors must be provided")
+        parser.error("Either --serialized-directory or --path-to-tensors "
+                     "must be provided")
 
 
     if args.command == "serialize":
@@ -346,7 +350,8 @@ if __name__ == '__main__':
             tensorizer_config.lora_dir = tensorizer_config.tensorizer_dir
             tensorize_lora_adapter(args.lora_path, tensorizer_config)
 
-        merge_extra_config_with_tensorizer_config(extra_config, tensorizer_config)
+        merge_extra_config_with_tensorizer_config(extra_config,
+                                                  tensorizer_config)
         tensorize_vllm_model(engine_args, tensorizer_config)
 
     elif args.command == "deserialize":
@@ -357,5 +362,6 @@ if __name__ == '__main__':
             **credentials
         )
 
-        merge_extra_config_with_tensorizer_config(extra_config, tensorizer_config)
+        merge_extra_config_with_tensorizer_config(extra_config,
+                                                  tensorizer_config)
         deserialize()

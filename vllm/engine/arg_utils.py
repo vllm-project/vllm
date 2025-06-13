@@ -931,8 +931,8 @@ class EngineArgs:
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
 
-        if self.load_format == "tensorizer" and self.no_valid_tensorizer_args_in_model_loader_extra_config(
-        ):
+        if (self.load_format == "tensorizer" and
+                self.no_valid_tensorizer_args_in_model_loader_extra_config()):
             logger.info("Inferring Tensorizer args from %s", self.model)
             self.model_loader_extra_config = {"tensorizer_dir": self.model}
         else:

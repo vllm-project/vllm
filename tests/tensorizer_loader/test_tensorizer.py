@@ -6,7 +6,7 @@ import os
 import pathlib
 import subprocess
 import sys
-from typing import Any, Type
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -57,7 +57,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 
 
 def patch_init_and_catch_error(self, obj, method_name,
-                               expected_error: Type[Exception]):
+                               expected_error: type[Exception]):
     original = getattr(obj, method_name, None)
     if original is None:
         raise ValueError("Method '{}' not found.".format(method_name))
@@ -65,8 +65,8 @@ def patch_init_and_catch_error(self, obj, method_name,
     def wrapper(*args, **kwargs):
         try:
             return original(*args, **kwargs)
-        except expected_error:
-            raise TensorizerCaughtError
+        except expected_error as err:
+            raise TensorizerCaughtError from err
 
     setattr(obj, method_name, wrapper)
 
@@ -77,7 +77,7 @@ def assert_specific_tensorizer_error_is_raised(
     executor,
     obj: Any,
     method_name: str,
-    expected_error: Type[Exception],
+    expected_error: type[Exception],
 ):
     with pytest.raises(TensorizerCaughtError):
         executor.collective_rpc(patch_init_and_catch_error,
@@ -372,7 +372,8 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
             to_compare = kwargs.copy()
             return original(self, *args, **kwargs)
 
-        tensorizer.serialization.TensorSerializer.__init__ = tensorizer_serializer_wrapper
+        tensorizer.serialization.TensorSerializer.__init__ = (
+            tensorizer_serializer_wrapper)
 
         tensorizer_config = TensorizerConfig(**kwargs["tensorizer_config"])
         self.save_tensorized_model(tensorizer_config=tensorizer_config, )
@@ -385,8 +386,6 @@ def test_assert_serialization_kwargs_passed_to_tensor_serializer(tmp_path):
 
 def test_assert_deserialization_kwargs_passed_to_tensor_deserializer(
         tmp_path, capfd):
-
-    expected_error = TypeError
 
     deserialization_kwargs = {
         "num_readers": "bar",  # illegal value

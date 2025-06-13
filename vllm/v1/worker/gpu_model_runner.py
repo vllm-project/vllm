@@ -1555,11 +1555,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         tensorizer_config: "TensorizerConfig",
     ) -> None:
-        TensorizerLoader.save_model(
-            self.model,
-            tensorizer_config=tensorizer_config,
-            model_config=self.model_config
-        )
+        TensorizerLoader.save_model(self.model,
+                                    tensorizer_config=tensorizer_config,
+                                    model_config=self.model_config)
 
     def _get_prompt_logprobs_dict(
         self,
