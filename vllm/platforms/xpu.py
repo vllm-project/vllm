@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import TYPE_CHECKING, Optional
 
 import torch
@@ -75,12 +76,11 @@ class XPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
         # in V1(or with ipex chunked prefill) block_size is 64
-        if cache_config and \
-            cache_config.block_size is None and \
-            envs.VLLM_USE_V1:
-            cache_config.block_size = 64
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            if envs.VLLM_USE_V1:
+                cache_config.block_size = 64
+            else:
+                cache_config.block_size = 16
 
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
@@ -122,6 +122,7 @@ class XPUPlatform(Platform):
             # spawn needs calling `if __name__ == '__main__':``
             # fork is not supported for xpu start new process.
             if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
+                os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
                 logger.warning(
                     "Please use spawn as start method if you want to use mp.")
         elif parallel_config.distributed_executor_backend != "ray" and \
