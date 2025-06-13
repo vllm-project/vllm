@@ -14,7 +14,7 @@ import time
 from typing import TYPE_CHECKING
 from collections.abc import Generator, MutableMapping
 from dataclasses import asdict, dataclass, field, fields
-from typing import Any, Optional, Union, ClassVar
+from typing import Any, ClassVar, Optional, Union
 
 import regex as re
 import torch
@@ -336,8 +336,10 @@ class TensorizerConfig(MutableMapping):
             raise KeyError(key)
         delattr(self, key)
 
+
 TensorizerConfig._fields = tuple(f.name for f in fields(TensorizerConfig))
 TensorizerConfig._keys = frozenset(TensorizerConfig._fields)
+
 
 @dataclass
 class TensorizerArgs:
@@ -495,23 +497,22 @@ def init_tensorizer_model(tensorizer_config: TensorizerConfig,
 def deserialize_tensorizer_model(model: nn.Module,
                                  tensorizer_config: TensorizerConfig) -> None:
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
-    if not is_valid_deserialization_uri(
-                tensorizer_config.tensorizer_uri):
-            raise ValueError(
-                f"{tensorizer_config.tensorizer_uri} is not a valid "
-                f"tensorizer URI. Please check that the URI is correct. "
-                f"It must either point to a local existing file, or have a "
-                f"S3, HTTP or HTTPS scheme.")
+    if not is_valid_deserialization_uri(tensorizer_config.tensorizer_uri):
+        raise ValueError(
+            f"{tensorizer_config.tensorizer_uri} is not a valid "
+            f"tensorizer URI. Please check that the URI is correct. "
+            f"It must either point to a local existing file, or have a "
+            f"S3, HTTP or HTTPS scheme.")
     before_mem = get_mem_usage()
     start = time.perf_counter()
     with open_stream(
-        tensorizer_config.tensorizer_uri,
-        mode="rb",
+            tensorizer_config.tensorizer_uri,
+            mode="rb",
             **tensorizer_args.stream_kwargs) as stream, TensorDeserializer(
-            stream,
-            dtype=tensorizer_config._model_cls_dtype,
-            device=torch.device("cuda", torch.cuda.current_device()),
-            **tensorizer_args.deserialization_kwargs) as deserializer:
+                stream,
+                dtype=tensorizer_config._model_cls_dtype,
+                device=torch.device("cuda", torch.cuda.current_device()),
+                **tensorizer_args.deserialization_kwargs) as deserializer:
         deserializer.load_into_module(model)
         end = time.perf_counter()
 
