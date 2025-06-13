@@ -1298,8 +1298,12 @@ class LLMEngine:
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
 
-            finished_requests_ids = self.scheduler[
-                virtual_engine].get_and_reset_finished_requests_ids()
+            if scheduler_outputs.is_empty():
+                finished_requests_ids = []
+            else:
+                finished_requests_ids = self.scheduler[
+                    virtual_engine].get_and_reset_finished_requests_ids()
+
             # When n>1, elements in self.seq_id_to_seq_group should be deleted
             # here, otherwise memory leaks.
             for finished_request_id in finished_requests_ids:
