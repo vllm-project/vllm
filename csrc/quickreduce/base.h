@@ -13,6 +13,8 @@ namespace quickreduce {
 
 typedef __hip_bfloat16 nv_bfloat16;
 typedef __hip_bfloat162 nv_bfloat162;
+
+using int32x2_t = __attribute__((__vector_size__(2 * sizeof(int)))) int;
 using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 
 // Setup acquire-release semantics for vector memory reads (mubuf instruction)
@@ -86,6 +88,22 @@ __quickreduce_device_inline__ static int32x4_t buffer_load_dwordx4(
 __quickreduce_device_inline__ static void buffer_store_dwordx4(
     int32x4_t data, int32x4_t srsrc, int32_t voffset, int32_t soffset,
     int32_t aux) __asm("llvm.amdgcn.raw.buffer.store.v4i32");
+
+__quickreduce_device_inline__ static void set_fp16_ovfl(bool const value) {
+  // short size = 0b00001;    // Specifies the bit size to modify
+  // const short offset = 0b10111;  // Corrected offset to 23, which is the bit
+  // position of FP16_OVFL const short hwRegId = 0b000001; // HW register ID for
+  // MODE const short simm16 = (size << 11) | (offset << 6) | hwRegId; simm16 =
+  // 0xdc1
+
+#if defined(__gfx942__)
+  if (value) {
+    asm volatile("s_setreg_imm32_b32 0xdc1, 1;" ::);
+  } else {
+    asm volatile("s_setreg_imm32_b32 0xdc1, 0;" ::);
+  }
+#endif
+}
 
 template <typename T>
 __quickreduce_device_inline__ void packed_assign_add(int32x4_t* A,

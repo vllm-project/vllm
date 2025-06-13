@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
+from enum import Enum
 from typing import Union
 
 import torch
@@ -20,6 +21,12 @@ except Exception:
     ops_available = False
 
 
+class QuickReduceQuantLevel(Enum):
+    FP = 0
+    INT8 = 1
+    INT4 = 2
+
+
 class QuickAllReduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
@@ -36,8 +43,12 @@ class QuickAllReduce:
 
         self.max_size = ops.qr_max_size()
         self.group = group
-        self.quantized = envs.VLLM_ROCM_CA_QUANTIZED
-
+        quant_level_str = envs.VLLM_ROCM_CA_QUANT_LEVEL
+        assert quant_level_str in QuickReduceQuantLevel.__members__, (
+            f"Invalid quantization level: {quant_level_str}. "
+            "Supported levels: "
+            f"{list(QuickReduceQuantLevel.__members__.keys())}")
+        self.quant_level = QuickReduceQuantLevel[quant_level_str]
         # On RocM bfloat16 kernels are slower than fp16
         # due to slower match operations
         # If environment is not set to 1 we convert input to fp16
@@ -99,7 +110,7 @@ class QuickAllReduce:
         if out is None:
             out = torch.empty_like(inp)
 
-        ops.qr_all_reduce(self._ptr, inp, out, self.quantized)
+        ops.qr_all_reduce(self._ptr, inp, out, self.quant_level.value)
         return out.to(inp_dtype)
 
     def close(self):

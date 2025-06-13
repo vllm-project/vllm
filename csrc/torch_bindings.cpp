@@ -728,7 +728,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
 #ifdef USE_ROCM
   // Quick Reduce all-reduce kernels
   custom_ar.def(
-      "qr_all_reduce(int fa, Tensor inp, Tensor out, bool quantized) -> ()");
+      "qr_all_reduce(int fa, Tensor inp, Tensor out, int quant_level) -> ()");
   custom_ar.impl("qr_all_reduce", torch::kCUDA, &qr_all_reduce);
 
   custom_ar.def("init_custom_qr", &init_custom_qr);
