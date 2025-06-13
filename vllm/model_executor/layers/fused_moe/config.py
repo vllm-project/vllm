@@ -239,7 +239,12 @@ class FusedMoEConfig:
 
     quant_config: Optional[FusedMoEQuantConfig] = None
 
-    max_num_tokens: int = MOE_DP_CHUNK_SIZE
+    max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
+
+    def __post_init__(self):
+        if self.dp_size > 1:
+            logger.debug("Using FusedMoEConfig::max_num_tokens=%d",
+                         self.max_num_tokens)
 
     @property
     def quant_dtype(self) -> Optional[torch.dtype]:
@@ -317,7 +322,7 @@ class FusedMoEConfig:
         num_local_experts: int,
         moe_parallel_config: FusedMoEParallelConfig,
         in_dtype: torch.dtype,
-        max_num_tokens: int = MOE_DP_CHUNK_SIZE,
+        max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE,
         quant_config: Optional[Union[FusedMoEQuantConfig,
                                      QuantizationConfig]] = None
     ) -> "FusedMoEConfig":

@@ -471,9 +471,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             block_shape=self.quant_config.weight_block_size,
             allow_deep_gemm=self.allow_deep_gemm)
 
-        self.use_pplx_kernels = False
-        self.rocm_aiter_moe_enabled = False
-
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):

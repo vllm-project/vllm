@@ -170,8 +170,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             )
 
     def select_gemm_impl(
-            self, prepare_finalize: FusedMoEPrepareAndFinalize,
-            moe: Optional[FusedMoEConfig]) -> FusedMoEPermuteExpertsUnpermute:
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+    ) -> FusedMoEPermuteExpertsUnpermute:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
         raise NotImplementedError(
@@ -217,8 +219,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             self.rocm_aiter_fused_experts = None  # type: ignore
 
-    def select_gemm_impl(self, prepare_finalize: FusedMoEPrepareAndFinalize,
-                         moe: Optional[FusedMoEConfig]):
+    def select_gemm_impl(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig
+    ):
         assert self.fused_experts == fused_experts
 
         all2all_manager = get_ep_group().device_communicator.all2all_manager

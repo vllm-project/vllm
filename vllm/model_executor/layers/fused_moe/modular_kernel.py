@@ -195,19 +195,19 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
             self.quant_config = FusedMoEQuantConfig()
 
     @property
-    def quant_dtype(self):
+    def quant_dtype(self) -> Optional[torch.dtype]:
         return self.quant_config.quant_dtype
 
     @property
-    def block_shape(self):
+    def block_shape(self) -> Optional[list[int]]:
         return self.quant_config.block_shape
 
     @property
-    def per_act_token_quant(self):
+    def per_act_token_quant(self) -> bool:
         return self.quant_config.per_act_token_quant
 
     @property
-    def per_out_ch_quant(self):
+    def per_out_ch_quant(self) -> bool:
         return self.quant_config.per_out_ch_quant
 
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?

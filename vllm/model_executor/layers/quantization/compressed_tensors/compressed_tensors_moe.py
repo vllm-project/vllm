@@ -315,7 +315,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             from vllm.model_executor.layers.fused_moe import fused_experts
             self.fused_experts_func = fused_experts
 
-    def select_gemm_impl(self, prepare_finalize):
+    def select_gemm_impl(self, prepare_finalize, moe):
         from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
             BatchedTritonExperts)
 
