@@ -386,7 +386,7 @@ class Qwen3MoeModel(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale", ".weight_scale", "_weight_scale", ".input_scale", "_input_scale")
+        ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale", ".v_scale", "_v_scale", ".weight_scale", "_weight_scale", ".input_scale", "_input_scale")
                                                      
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
