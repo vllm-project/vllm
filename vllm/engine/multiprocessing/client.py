@@ -451,6 +451,39 @@ class MQLLMEngineClient(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
+        ...
+
+    @overload
+    @deprecated("'inputs' will be renamed to 'prompt")
+    def generate(
+        self,
+        *,
+        inputs: PromptType,
+        sampling_params: SamplingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        ...
+
+    @deprecate_kwargs(
+        "inputs",
+        additional_message="Please use the 'prompt' parameter instead.",
+    )
+    def generate(
+        self,
+        prompt: Optional[PromptType] = None,
+        sampling_params: Optional[SamplingParams] = None,
+        request_id: Optional[str] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+        *,
+        inputs: Optional[PromptType] = None  # DEPRECATED
+    ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -597,6 +630,7 @@ class MQLLMEngineClient(EngineClient):
 
                     finished = request_output.finished
                     yield request_output
+
             finally:
                 # Request was canceled by the client.
                 if not finished and not self.errored:
