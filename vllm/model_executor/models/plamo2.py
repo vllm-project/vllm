@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only PLaMo2 model."""
-import math
 from collections.abc import Iterable
 from typing import Optional
 
@@ -77,17 +76,6 @@ class Plamo2PreTrainedModel(PreTrainedModel):  # type: ignore
                 module.weight.data[module.padding_idx].zero_()
 
 
-def get_initial_dt_bias(num_heads: int) -> torch.Tensor:
-    dt_min = 0.001
-    dt_max = 0.1
-    dt = torch.exp(
-        torch.rand(num_heads) * (math.log(dt_max) - math.log(dt_min)) +
-        math.log(dt_min))
-    dt = torch.clamp(dt, 1e-4)
-    inv_dt = dt + torch.log(-torch.expm1(-dt))
-    return inv_dt
-
-
 def is_mamba(config: Plamo2Config, i: int) -> bool:
     assert config.mamba_step > 1
 
@@ -158,7 +146,6 @@ class Plamo2MambaMixer(nn.Module):
             bias=False,
             prefix=f"{prefix}.dt_proj",
         )
-        self.dt_bias = torch.nn.Parameter(get_initial_dt_bias(self.num_heads))
 
         tp_size = get_tensor_model_parallel_world_size()
         self.A = nn.Parameter(
@@ -168,11 +155,14 @@ class Plamo2MambaMixer(nn.Module):
                 dtype=torch.float32,
             ))
         self.D = nn.Parameter(torch.ones(self.intermediate_size // tp_size))
+        self.dt_bias = nn.Parameter(torch.ones(self.num_heads))
 
         set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
         a_weight_loader = composed_weight_loader(
             sharded_weight_loader(0), lambda x: -torch.exp(x.float()))
         set_weight_attrs(self.A, {"weight_loader": a_weight_loader})
+        set_weight_attrs(self.dt_bias,
+                         {"weight_loader": sharded_weight_loader(0)})
 
         self.out_proj = RowParallelLinear(
             self.intermediate_size,
