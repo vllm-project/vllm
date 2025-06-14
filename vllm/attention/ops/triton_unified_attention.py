@@ -86,7 +86,6 @@ def kernel_unified_attention_2d(
         num_seqs: tl.int32,
         BLOCK_M: tl.constexpr,  # int
 ):
-
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
 
