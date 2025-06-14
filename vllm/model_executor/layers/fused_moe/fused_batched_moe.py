@@ -318,8 +318,8 @@ def invoke_moe_batched_triton_kernel(
         expert_num_tokens: torch.Tensor,  # [E]
         compute_type: tl.dtype,
         # Quantization data
-        A_scale: Optional[torch.Tensor],
-        B_scale: Optional[torch.Tensor],
+        A_scale: torch.Tensor, # Optional
+        B_scale: torch.Tensor, # Optional
         B_zp: torch.Tensor,
         # Quantization schemes
         use_fp8_w8a8: bool,
