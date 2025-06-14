@@ -90,13 +90,8 @@ def kernel_unified_attention_2d(
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
 
-    seq_idx = find_seq_idx(
-        query_start_len_ptr,
-        q_block_global_idx,
-        num_seqs,
-        BLOCK_Q,
-        True
-    )
+    seq_idx = find_seq_idx(query_start_len_ptr, q_block_global_idx, num_seqs,
+                           BLOCK_Q, True)
 
     q_block_start_idx = tl.load(query_start_len_ptr +
                                 seq_idx) // BLOCK_Q + seq_idx
@@ -303,13 +298,8 @@ def kernel_unified_attention_3d(
     kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2)
 
-    seq_idx = find_seq_idx(
-        query_start_len_ptr,
-        q_block_global_idx,
-        num_seqs,
-        BLOCK_Q,
-        True
-    )
+    seq_idx = find_seq_idx(query_start_len_ptr, q_block_global_idx, num_seqs,
+                           BLOCK_Q, True)
 
     q_block_start_idx = tl.load(query_start_len_ptr +
                                 seq_idx) // BLOCK_Q + seq_idx
@@ -478,11 +468,9 @@ def kernel_unified_attention_3d(
         acc,
         mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
     )
-    segm_offset = (
-        query_offset_0.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
-        + query_offset_1 * NUM_SEGMENTS_PER_SEQ
-        + segm_idx
-    )
+    segm_offset = (query_offset_0.to(tl.int64) *
+                   (num_query_heads * NUM_SEGMENTS_PER_SEQ) +
+                   query_offset_1 * NUM_SEGMENTS_PER_SEQ + segm_idx)
     tl.store(segm_max_ptr + segm_offset, M, mask=query_mask_0 & query_mask_1)
     tl.store(segm_expsum_ptr + segm_offset,
              L,
@@ -512,13 +500,8 @@ def reduce_segments(
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
 
-    seq_idx = find_seq_idx(
-        query_start_len_ptr,
-        query_token_idx,
-        num_seqs,
-        BLOCK_Q,
-        False
-    )
+    seq_idx = find_seq_idx(query_start_len_ptr, query_token_idx, num_seqs,
+                           BLOCK_Q, False)
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -535,11 +518,10 @@ def reduce_segments(
                         0).to(tl.int1)
 
     # load segment maxima
-    segm_offset = (
-        query_token_idx.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
-        + query_head_idx * NUM_SEGMENTS_PER_SEQ
-        + tl.arange(0, NUM_SEGMENTS_PER_SEQ)
-    )
+    segm_offset = (query_token_idx.to(tl.int64) *
+                   (num_query_heads * NUM_SEGMENTS_PER_SEQ) +
+                   query_head_idx * NUM_SEGMENTS_PER_SEQ +
+                   tl.arange(0, NUM_SEGMENTS_PER_SEQ))
     segm_max = tl.load(segm_max_ptr + segm_offset,
                        mask=segm_mask,
                        other=float("-inf"))
