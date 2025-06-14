@@ -58,7 +58,6 @@ repos:
     language: python
     entry: python tools/generate_nightly_torch_test.py
     files: ^requirements/test\.(in|txt)$
-    types: [python]
   - id: mypy-local
     name: Run mypy for local Python installation
     entry: tools/mypy.sh 0 "local"

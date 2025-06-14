@@ -8,39 +8,30 @@ and splits its content into two files:
 1.  `requirements/nightly_torch_test.txt`: Contains dependencies except PyTorch-related.
 2.  `torch_nightly_test.txt`: Contains only PyTorch-related packages.
 """
+
 input_file = "requirements/test.in"
-cleaned_output = "requirements/nightly_torch_test.txt"
+output_file = "requirements/nightly_torch_test.txt"
 
 keywords = ["torch", "torchaudio", "torchvision", "mamba_ssm"]
 
 with open(input_file) as f:
     lines = f.readlines()
 
-cleaned_lines = []
-torch_lines = []
+cleaned = []
+# clean all immediately following indented or empty lines to
 skip_next = False
 
 for line in lines:
-    line_lower = line.lower()
-
-    if not skip_next:
-        if any(keyword in line_lower for keyword in keywords):
-            torch_lines.append(line)
-            print(f"  Removed: {line.strip()}")
-            skip_next = True
+    if skip_next:
+        if line.startswith((" ", "\t")) or line.strip() == "":
             continue
-    else:
-        if line.startswith(" ") or line.startswith("\t") or line.strip() == "":
-            torch_lines.append(line)
-            print(f"  Removed (context): {line.strip()}")
-            continue
-        else:
-            skip_next = False
+        skip_next = False
 
-    if not skip_next:
-        cleaned_lines.append(line)
+    if any(k in line.lower() for k in keywords):
+        skip_next = True
+        continue
 
-# Write cleaned lines to new file
-with open(cleaned_output, "w") as f:
-    f.writelines(cleaned_lines)
-print(f">>> Cleaned file written to {cleaned_output}")
+    cleaned.append(line)
+
+with open(output_file, "w") as f:
+    f.writelines(cleaned)
