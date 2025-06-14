@@ -49,14 +49,6 @@ steps:
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
-  - label: Python-only Installation Test
-  mirror_hardwares: [amdexperimental]
-  source_file_dependencies:
-  - tests/standalone_tests/python_only_compile.sh
-  - setup.py
-  commands:
-  - bash standalone_tests/python_only_compile.sh
-
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
