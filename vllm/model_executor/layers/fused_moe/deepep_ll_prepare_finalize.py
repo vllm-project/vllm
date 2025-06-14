@@ -94,12 +94,14 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 ]) and quant_dtype is not None:
             # Quantization required despite none of the inputs suggesting
             # quantization. Fallback to per_token_dynamic quant.
+            #print(f"DYNAMIC")
             _per_act_token_quant = True
         else:
             _per_act_token_quant = ((block_shape is not None) or
                                    (a1_scale is not None and a1_scale.numel() != 1)
                                    or (a2_scale is not None
                                        and a2_scale.numel() != 1))
+            #print(f"{block_shape} {a1_scale} {a2_scale}")
 
         # assert per_act_token_quant == (
         #     (block_shape is not None)
@@ -108,7 +110,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
 
         # TODO(bnell)
-        #assert per_act_token_quant == _per_act_token_quant
+        assert per_act_token_quant == _per_act_token_quant, f"{per_act_token_quant} == {_per_act_token_quant}"
 
         num_experts, max_tokens, hidden_dim = x.size()
 

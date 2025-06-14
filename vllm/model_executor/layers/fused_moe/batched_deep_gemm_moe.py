@@ -21,7 +21,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
     def __init__(self, max_num_tokens: int, world_size: int, dp_size: int,
-                 block_shape: list[int]):
+                 block_shape: list[int],
+                 per_act_token_quant=False):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
         world_size: Number of EP ranks
@@ -31,7 +32,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         super().__init__(
             FusedMoEQuantConfig(
                 quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=False,
+                per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
         assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
