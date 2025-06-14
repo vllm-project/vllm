@@ -10,7 +10,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -91,21 +91,21 @@ class Plamo2MambaMixer(nn.Module):
     # TODO(Shinichi): Rebase on Mamba2 implementation.
 
     def __init__(self,
-                 config: Plamo2Config,
-                 cache_config: CacheConfig,
-                 quant_config: QuantizationConfig,
-                 max_model_len: int,
+                 vllm_config: VllmConfig,
+                 *,
                  prefix: str = "",
                  **kwargs) -> None:
         super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size
-        self.ssm_state_size = config.mamba_d_state
-        self.conv_kernel_size = config.mamba_d_conv
-        self.intermediate_size = (config.mamba_num_heads *
-                                  config.hidden_size_per_head)
-        self.hidden_size_per_head = config.hidden_size_per_head
-        self.num_heads = config.mamba_num_heads
+        self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
+        self.hidden_size = self.config.hidden_size
+        self.ssm_state_size = self.config.mamba_d_state
+        self.conv_kernel_size = self.config.mamba_d_conv
+        self.intermediate_size = (self.config.mamba_num_heads *
+                                  self.config.hidden_size_per_head)
+        self.head_dim = self.config.hidden_size_per_head
+        self.hidden_size_per_head = self.config.hidden_size_per_head
+        self.num_heads = self.config.mamba_num_heads
         self.time_step_rank = max(64, self.hidden_size // 16)
         self.use_conv_bias = False
         self.use_bias = False
@@ -170,9 +170,12 @@ class Plamo2MambaMixer(nn.Module):
         # The activation function is fixed to SiLU.
         self.activation = "silu"
 
-        self.dt_norm = RMSNorm(self.time_step_rank, eps=config.rms_norm_eps)
-        self.B_norm = RMSNorm(self.ssm_state_size, eps=config.rms_norm_eps)
-        self.C_norm = RMSNorm(self.ssm_state_size, eps=config.rms_norm_eps)
+        self.dt_norm = RMSNorm(self.time_step_rank,
+                               eps=self.config.rms_norm_eps)
+        self.B_norm = RMSNorm(self.ssm_state_size,
+                              eps=self.config.rms_norm_eps)
+        self.C_norm = RMSNorm(self.ssm_state_size,
+                              eps=self.config.rms_norm_eps)
 
     def forward(
         self,
@@ -325,13 +328,14 @@ class DenseMLP(nn.Module):
 class Plamo2AttentionMixer(nn.Module):
 
     def __init__(self,
-                 config: Plamo2Config,
-                 cache_config: CacheConfig,
-                 quant_config: QuantizationConfig,
-                 max_model_len: int | None = None,
+                 *,
+                 vllm_config: VllmConfig,
                  prefix: str = "",
                  **kwargs) -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
@@ -369,12 +373,16 @@ class Plamo2AttentionMixer(nn.Module):
                                                        "rope_theta") else 10000
         self.rope_scaling = config.rope_scaling if hasattr(
             config, "rope_scaling") else None
+        max_position = config.max_position_embeddings
+        if hasattr(vllm_config.model_config, "max_model_len") and isinstance(
+                vllm_config.model_config.max_model_len, int):
+            max_position = min(max_position,
+                               vllm_config.model_config.max_model_len)
 
-        assert max_model_len is not None, "max_model_len must be provided"
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
-            max_position=max_model_len,
+            max_position=max_position,
             base=self.rope_theta,
             rope_scaling=self.rope_scaling,
         )
@@ -428,27 +436,18 @@ class Plamo2DecoderLayer(nn.Module):
     def __init__(self,
                  vllm_config: VllmConfig,
                  layer_idx: int,
-                 max_model_len: int | None = None,
                  prefix: str = "",
                  **kwargs) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        max_model_len = vllm_config.scheduler_config.max_model_len
 
         self.is_mamba = is_mamba(config, layer_idx)
         if self.is_mamba:
-            self.mixer = Plamo2MambaMixer(config=config,
-                                          cache_config=cache_config,
-                                          quant_config=quant_config,
-                                          max_model_len=max_model_len,
+            self.mixer = Plamo2MambaMixer(vllm_config=vllm_config,
                                           prefix=f"{prefix}.mixer")
         else:
-            self.mixer = Plamo2AttentionMixer(config=config,
-                                              cache_config=cache_config,
-                                              quant_config=quant_config,
-                                              max_model_len=max_model_len,
+            self.mixer = Plamo2AttentionMixer(vllm_config=vllm_config,
                                               prefix=f"{prefix}.mixer")
 
         self.mlp = DenseMLP(config=config,
