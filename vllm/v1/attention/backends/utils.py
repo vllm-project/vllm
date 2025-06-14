@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import abc
-from abc import abstractmethod
 import functools
+from abc import abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
 
@@ -12,6 +12,7 @@ import torch
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
+
 import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
@@ -135,7 +136,7 @@ def get_kv_cache_layout():
     if cache_layout is None:
         cache_layout = get_kv_connector_cache_layout()
     else:
-        logger.info("`FLASHINFER_KV_CACHE_LAYOUT` environment variable " \
+        logger.info_once("`FLASHINFER_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
 
     return cache_layout
