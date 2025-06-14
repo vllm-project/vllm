@@ -716,6 +716,7 @@ def main(args: argparse.Namespace):
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
             dataset_split=args.hf_split,
+            dataset_stream=args.hf_stream,
             random_seed=args.seed,
         ).sample(
             num_requests=args.num_prompts,
@@ -1165,6 +1166,14 @@ def create_argument_parser():
         default=None,
         help="Output length for each request. Overrides the output lengths "
         "from the sampled HF dataset.",
+    )
+    hf_group.add_argument(
+        "--hf-stream",
+        action="store_true",
+        help="Whether to stream the HF dataset. "
+        "If set, the dataset will be streamed "
+        "instead of loaded into memory. "
+        "This is useful for large datasets that do not fit into memory.",
     )
 
     sampling_group = parser.add_argument_group("sampling parameters")
