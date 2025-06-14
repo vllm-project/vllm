@@ -40,6 +40,9 @@ from .conftest import run_equality_correctness_test
 
         # Print spec metrics.
         "disable_log_stats": False,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -97,6 +100,9 @@ def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 
         # Print spec metrics.
         "disable_log_stats": False,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -160,6 +166,9 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -221,6 +230,9 @@ def test_ngram_e2e_greedy_correctness_with_preemption(
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -281,6 +293,9 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -337,6 +352,9 @@ def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # The original model is float32, keep it for numerical stability.
+        "dtype": "float32",
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
