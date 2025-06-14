@@ -627,12 +627,12 @@ class BaseMultiModalContentParser(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def parse_direct_image(self, image: object) -> None:
+    def parse_image_embeds(self,
+                           image_embeds: Union[str, dict[str, str]]) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def parse_image_embeds(self,
-                           image_embeds: Union[str, dict[str, str]]) -> None:
+    def parse_image_object(self, image: object) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -666,10 +666,6 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("image", image)
         self._add_placeholder(placeholder)
 
-    def parse_direct_image(self, image: object) -> None:  
-        placeholder = self._tracker.add("image", image)  
-        self._add_placeholder(placeholder)  
-
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
         if isinstance(image_embeds, dict):
@@ -684,6 +680,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             placeholder = self._tracker.add("image_embeds", embedding)
 
         self._add_placeholder(placeholder)
+
+    def parse_image_object(self, image: object) -> None:  
+        placeholder = self._tracker.add("image", image)  
+        self._add_placeholder(placeholder)  
 
     def parse_audio(self, audio_url: str) -> None:
         audio = self._connector.fetch_audio(audio_url)
@@ -722,13 +722,6 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("image", image_coro)
         self._add_placeholder(placeholder)
 
-    def parse_direct_image(self, image: object) -> None:  
-        future: asyncio.Future[object] = asyncio.Future()  
-        future.set_result(image)  
-        
-        placeholder = self._tracker.add("image", future) 
-        self._add_placeholder(placeholder)  
-
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
         future: asyncio.Future[Union[str, dict[str, str]]] = asyncio.Future()
@@ -747,6 +740,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         placeholder = self._tracker.add("image_embeds", future)
         self._add_placeholder(placeholder)
+
+    def parse_image_object(self, image: object) -> None:  
+        future: asyncio.Future[object] = asyncio.Future()  
+        future.set_result(image)  
+        
+        placeholder = self._tracker.add("image", future) 
+        self._add_placeholder(placeholder)  
 
     def parse_audio(self, audio_url: str) -> None:
         audio_coro = self._connector.fetch_audio_async(audio_url)
@@ -1035,7 +1035,7 @@ def _parse_chat_message_content_part(
         return {'type': 'image'} if wrap_dicts else None
     if part_type == "image":
         image_content = cast(object, content)  # PIL image or similar  
-        mm_parser.parse_direct_image(image_content)  
+        mm_parser.parse_image_object(image_content)  
         return {'type': 'image'} if wrap_dicts else None  
     if part_type == "audio_url":
         str_content = cast(str, content)

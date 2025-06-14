@@ -136,8 +136,10 @@ def test_parse_chat_messages_single_image(
             "role":
             "user",
             "content": [{
-                "type": "image",
-                "image_url": image_url
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
             }, {
                 "type": "text",
                 "text": "What's in the image?"
@@ -152,6 +154,7 @@ def test_parse_chat_messages_single_image(
         "role": "user",
         "content": "<|image_1|>\nWhat's in the image?"
     }]
+    print('mm data', mm_data)
     _assert_mm_data_is_image_input(mm_data, 1)
 
 
@@ -226,8 +229,10 @@ async def test_parse_chat_messages_single_image_async(
             "role":
             "user",
             "content": [{
-                "type": "image",
-                "image": ImageAsset('cherry_blossom').pil_image
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
             }, {
                 "type": "text",
                 "text": "What's in the image?"
