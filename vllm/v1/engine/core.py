@@ -84,6 +84,8 @@ class EngineCore:
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.collective_rpc("initialize_cache",
+                            args=(num_gpu_blocks, num_cpu_blocks))
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
