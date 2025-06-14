@@ -235,7 +235,8 @@ class OpenAISpeechToText(OpenAIServing):
         audio_data: bytes,
         request: Union[TranscriptionRequest, TranslationRequest],
         raw_request: Request,
-        response_class: Union[TranscriptionResponse, TranslationResponse],
+        response_class: Union[type[TranscriptionResponse],
+                              type[TranslationResponse]],
         stream_generator_method: Callable,
     ) -> Union[Union[TranscriptionResponse, TranslationResponse],
                AsyncGenerator[str, None], ErrorResponse]:
@@ -334,10 +335,11 @@ class OpenAISpeechToText(OpenAIServing):
         request_metadata: RequestResponseMetadata,
         audio_duration_s: float,
         chunk_object_type: str,
-        response_stream_choice_class: Union[TranscriptionResponseStreamChoice,
-                                            TranslationResponseStreamChoice],
-        stream_response_class: Union[TranscriptionStreamResponse,
-                                     TranslationStreamResponse],
+        response_stream_choice_class: Union[
+            type[TranscriptionResponseStreamChoice],
+            type[TranslationResponseStreamChoice]],
+        stream_response_class: Union[type[TranscriptionStreamResponse],
+                                     type[TranslationStreamResponse]],
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
