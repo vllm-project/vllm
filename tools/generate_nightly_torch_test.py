@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 input_file = "requirements/test.in"
 cleaned_output = "requirements/nightly_torch_test.txt"
-torch_output = "torch_nightly_test.txt"
 
 keywords = ["torch", "torchaudio", "torchvision", "mamba_ssm"]
 
@@ -37,11 +36,3 @@ for line in lines:
 with open(cleaned_output, "w") as f:
     f.writelines(cleaned_lines)
 print(f">>> Cleaned file written to {cleaned_output}")
-
-# Write removed torch-related lines
-if torch_lines:
-    with open(torch_output, "w") as f:
-        f.writelines(torch_lines)
-    print(f">>> Removed lines written to {torch_output}")
-else:
-    print("No matching lines found.")

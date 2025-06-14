@@ -1,2 +1,0 @@
-torchaudio==2.7.0
-mamba_ssm # required for plamo2 test
