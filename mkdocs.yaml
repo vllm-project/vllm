@@ -126,7 +126,7 @@ extra_css:
 extra_javascript:
   - mkdocs/javascript/run_llm_widget.js
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
-  - mkdocs/javascript/feedback.js
+  - mkdocs/javascript/edit.js
 
 # Makes the url format end in .html rather than act as a dir
 # So index.md generates as index.html and is available under URL /index.html

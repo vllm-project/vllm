@@ -79,7 +79,7 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
 
 /* Replace the icon with custom label text and emoji */
 .md-content__button[href*="edit"]::after {
-  content: " ✏️ Suggest edit on GitHub";
+  content: "✎ Edit";
   color: var(--md-default-fg-color);
   font-size: 0.6rem;
   margin-left: 0.25em;
@@ -88,8 +88,9 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
   transition: opacity 0.2s ease-in-out;
 }
 
-/* Make label fully visible on hover */
+/* Highlight on hover */
 .md-content__button[href*="edit"]:hover::after {
+  color: var(--md-accent-fg-color);
   opacity: 1;
 }
 
@@ -98,36 +99,4 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
   .md-content__button[href*="docs/examples/"] {
     display: none !important;
   }
-}
-
-/* Container for edit and feedback buttons */
-.doc-feedback-wrapper {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 0.1rem;
-}
-
-.doc-feedback-wrapper > * {
-  margin: 0 !important;
-  padding: 0;
-}
-
-/* Style for the feedback button/link */
-.doc-feedback-link {
-  font-size: 0.6rem;
-  color: var(--md-default-fg-color) !important;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.2rem;
-  padding: 2px 6px;
-  border-radius: 4px;
-  text-decoration: none;
-}
-
-/* Suppress external link icon from appearing */
-.doc-feedback-link::after {
-  background-image: none !important;
-  content: none !important;
-  display: none !important;
 }
