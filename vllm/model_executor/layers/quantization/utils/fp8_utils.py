@@ -295,6 +295,7 @@ def _do_per_token_group_quant_fp8(
     tl.store(y_s_ptr, y_s)
 
 
+@triton.jit
 def _per_token_group_quant_fp8(
         # Pointers to inputs and output
         y_ptr,
@@ -395,6 +396,7 @@ def _do_per_token_group_quant_fp8_colmajor(
     tl.store(y_s_ptr, y_s)
 
 
+@triton.jit
 def _per_token_group_quant_fp8_colmajor(
         # Pointers to inputs and output
         y_ptr,

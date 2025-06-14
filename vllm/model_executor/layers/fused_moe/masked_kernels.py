@@ -110,9 +110,9 @@ def _masked_per_token_group_quant_fp8_colmajor(
         # early exit
         return
 
+    group_id = tl.program_id(axis=1)
     groups_per_row = y_num_columns // group_size
     valid_num_groups = num_tokens * groups_per_row
-    group_id = tl.program_id(axis=1)
     if group_id >= valid_num_groups:
         # early exit
         return
@@ -150,6 +150,7 @@ def masked_per_token_group_quant_fp8(
         column_major_scales: bool,
         eps: float = 1e-10) -> tuple[torch.Tensor, torch.Tensor]:
 
+    assert x.ndim == 3
     assert (x.size(-1) % group_size == 0), (
         f"the last dimension of `x` {x.size(-1)} must be divisible "
         f"by `group_size` {group_size}")
@@ -166,9 +167,12 @@ def masked_per_token_group_quant_fp8(
 
     B, MAX_TOKENS, HIDDEN_SIZE = x.shape
     shape = (B, MAX_TOKENS, HIDDEN_SIZE // group_size)
-    x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
     if column_major_scales:
-        x_s = x_s.permute(-1, -2)
+        cms_shape = (shape[0], shape[2], shape[1])
+        x_s = torch.empty(cms_shape, device=x.device, dtype=torch.float32)
+        x_s = x_s.permute(0, 2, 1)
+    else:
+        x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
     M = (MAX_TOKENS * HIDDEN_SIZE) // group_size
     N = group_size
@@ -189,9 +193,9 @@ def masked_per_token_group_quant_fp8(
             x_q,
             x_s,
             group_size,
-            x.shape[1],
-            x.stride(0),
-            x_s.stride(1),
+            x.size(2),  # num_columns
+            x.stride(1),  # row_stride
+            x_s.stride(2),  # col_stride
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
@@ -209,8 +213,8 @@ def masked_per_token_group_quant_fp8(
             x_q,
             x_s,
             group_size,
-            x.shape[1],
-            x.stride(0),
+            x.size(2),  # num_columns
+            x.stride(1),  # row_stride
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
@@ -314,7 +318,7 @@ def invoke_masked_silu_and_mul(
         output: torch.Tensor,  #[B, MAX_TOKENS, D]
         input: torch.Tensor,  #[B, MAX_TOKENS, D * 2]
         valid_tokens_array: torch.Tensor):
-
+    assert input.ndim == 3
     batch_size, max_num_tokens, D = output.size()
 
     BLOCK_D = 1024
