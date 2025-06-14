@@ -395,10 +395,7 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                                                        dispatch_core_axis)
         return dispatch_core_config
 
-    # Set fabric config to passed in value
-    # Do nothing if not set
-    # Must be called before creating the mesh device
-    def _set_fabric(self):
+    def _get_fabric_config(self):
         override_tt_config = self.model_config.override_tt_config
         if override_tt_config is not None and "fabric_config" in override_tt_config:
             fabric_config_str = override_tt_config["fabric_config"]
@@ -410,7 +407,26 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             }
             fabric_config = fabric_config_map.get(fabric_config_str)
             assert fabric_config is not None, f"Invalid fabric_config: {fabric_config_str}. Expected one of {list(fabric_config_map.keys())}."
-            ttnn.initialize_fabric_config(fabric_config)
+            return fabric_config
+        return None
+
+    # From tt-metal/conftest.py:
+    # Set fabric config to passed in value
+    # Do nothing if not set
+    # Must be called before creating the mesh device
+    def _set_fabric(self):
+        fabric_config = self._get_fabric_config()
+        if fabric_config:        
+            ttnn.set_fabric_config(fabric_config)
+
+    # From tt-metal/conftest.py:
+    # Reset fabric config to DISABLED if not None, and do nothing otherwise
+    # Temporarily require previous state to be passed in as even setting it to DISABLED might be unstable
+    # This is to ensure that we don't propagate the instability to the rest of CI
+    def _reset_fabric(self):
+        fabric_config = self._get_fabric_config()
+        if fabric_config:        
+            ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
 
     def _device_params_from_override_tt_config(self):
         override_tt_config = self.model_config.override_tt_config
@@ -453,6 +469,7 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         device_params = self._device_params_from_override_tt_config()
 
+        # Set fabric before opening the device
         self._set_fabric()
 
         mesh_device = ttnn.open_mesh_device(
@@ -483,6 +500,10 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
             # Close devices
             ttnn.close_mesh_device(self.mesh_device)
+
+            # Reset fabric
+            self._reset_fabric()
+
             del self.mesh_device
 
         if hasattr(super(), '__del__'):
