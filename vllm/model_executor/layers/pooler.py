@@ -222,6 +222,14 @@ class PoolerHead(nn.Module):
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
+
+        # Using float32 in PoolerHead
+        if isinstance(pooled_data, list):
+            for i in range(len(pooled_data)):
+                pooled_data[i] = pooled_data[i].to(torch.float32)
+        else:
+            pooled_data = pooled_data.to(torch.float32)
+
         dimensions_list = [
             pooling_param.dimensions
             for _, pooling_param in pooling_metadata.seq_groups

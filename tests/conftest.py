@@ -1037,8 +1037,13 @@ class VllmRunner:
         req_outputs = self.model.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
-    def score(self, text_1: Union[str, list[str]],
-              text_2: Union[str, list[str]], *args, **kwargs) -> list[float]:
+    def score(
+        self,
+        text_1: Union[str, list[str]],
+        text_2: Union[str, list[str]],
+        *args,
+        **kwargs,
+    ) -> list[float]:
         req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
 

@@ -219,10 +219,6 @@ def run_mteb_rerank(cross_encoder, tasks, languages):
             encode_kwargs={"show_progress_bar": False},
         )
 
-        print("run_mteb_rerank tasks metadata:")
-        for task in tasks:
-            print(task.metadata)
-
         results = evaluation.run(
             cross_encoder,
             verbosity=0,
