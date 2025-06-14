@@ -45,7 +45,7 @@ async def stream_openai_response():
     data = {
         "language": "en",
         "stream": True,
-        "model": "openai/whisper-large-v3-turbo",
+        "model": "openai/whisper-large-v3",
     }
     url = openai_api_base + "/audio/transcriptions"
     headers = {"Authorization": f"Bearer {openai_api_key}"}
