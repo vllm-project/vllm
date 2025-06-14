@@ -8,6 +8,10 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+## Batched Per Token Quant kernel ####
+
+## Batched Silu and Mul Kernel ####
+
 
 @triton.jit
 def silu(x_tile):
