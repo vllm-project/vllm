@@ -49,7 +49,7 @@ class SwiGLUActivation(nn.Module):
         return x1 * nn.functional.silu(x2)
     
 
-class SambaMLP(nn.Module):
+class SambaYMLP(nn.Module):
     """Gated Linear Unit.
 
     Reference:
@@ -78,7 +78,7 @@ def get_virtual_engine():
     forward_context: ForwardContext = get_forward_context()
     return forward_context.virtual_engine
 
-class SambaAttention(nn.Module):
+class SambaYAttention(nn.Module):
     def __init__(self, 
                  config, 
                  layer_idx: Optional[int] = None, 
@@ -391,7 +391,7 @@ class Phi3Mamba(nn.Module):
         return contextualized_states, yoco_key_values
 
 
-class SambaDecoderLayer(nn.Module):
+class SambaYDecoderLayer(nn.Module):
     
     def __init__(self, 
                  config, 
@@ -403,13 +403,13 @@ class SambaDecoderLayer(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
 
-        self.mlp = SambaMLP(config)
+        self.mlp = SambaYMLP(config)
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         
         self.yoco_mb = False
         self.yoco_kv = False
         self.yoco_cross = False
-        assert config.num_hidden_layers % 4 == 0, 'n_layer should be divisible by 4 for samba + yoco'
+        assert config.num_hidden_layers % 4 == 0, 'n_layer should be divisible by 4 for SambaY + yoco'
         if layer_idx >= config.num_hidden_layers//2:
             self.yoco_mb = True
             self.yoco_kv = (layer_idx >= (config.num_hidden_layers//2 +1))
@@ -420,7 +420,7 @@ class SambaDecoderLayer(nn.Module):
             self.attn = Phi3Mamba(config.hidden_size, layer_idx=layer_idx, 
                                   yoco_cross=self.yoco_cross, yoco_kv=self.yoco_mb, **factory_kwargs)
         else:
-            self.attn = SambaAttention(config, layer_idx=layer_idx, yoco_cross=self.yoco_cross, cache_config=cache_config, prefix=f"{prefix}.self_attn")
+            self.attn = SambaYAttention(config, layer_idx=layer_idx, yoco_cross=self.yoco_cross, cache_config=cache_config, prefix=f"{prefix}.self_attn")
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
@@ -469,7 +469,7 @@ def get_kv_cache(layer_name):
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     return kv_cache
 
-class SambaModel(nn.Module):
+class SambaYModel(nn.Module):
 
     def __init__(
         self,
@@ -494,7 +494,7 @@ class SambaModel(nn.Module):
         
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: SambaDecoderLayer(config,
+            lambda prefix: SambaYDecoderLayer(config,
                                              int(prefix.split('.')[-1]),
                                              cache_config,
                                              prefix=prefix),
@@ -590,7 +590,7 @@ class SambaModel(nn.Module):
         return hidden_states
 
 
-class SambaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
+class Phi4MiniFlashForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
@@ -603,13 +603,13 @@ class SambaForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         # Prefix caching is not supported since there are mamba layers in this 
         # mode.
         assert not cache_config.enable_prefix_caching, \
-            "Samba currently does not support prefix caching"
+            "SambaY currently does not support prefix caching"
 
         super().__init__()
         self.config = config
         self.model_config = vllm_config.model_config
         self.scheduler_config = scheduler_config
-        self.model = SambaModel(
+        self.model = SambaYModel(
             config, 
             cache_config=cache_config,
             prefix=maybe_prefix(prefix, "model")
