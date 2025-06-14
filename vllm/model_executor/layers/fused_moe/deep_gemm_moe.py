@@ -8,6 +8,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
@@ -67,8 +68,13 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(self):
-        super().__init__()
-        self.block_shape = deep_gemm_block_shape()
+        super().__init__(
+            FusedMoEQuantConfig(
+                quant_dtype=torch.float8_e4m3fn,
+                per_act_token_quant=False,
+                block_shape=deep_gemm_block_shape(),
+            )
+        )
 
     @property
     def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
@@ -220,8 +226,7 @@ def deep_gemm_moe_fp8(
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(quant_dtype=torch.float8_e4m3fn,
-                                  block_shape=deep_gemm_block_shape()),
+        MoEPrepareAndFinalizeNoEP(),
         DeepGemmExperts(),
     )
     return fn(

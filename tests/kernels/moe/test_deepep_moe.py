@@ -154,6 +154,7 @@ def make_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
                         deepep_ll_args = ll_args)
 
     if low_latency_mode:
+        # TODO(bnell): block_shape?
         fused_experts = BatchedTritonExperts(
             max_num_tokens=MAX_TOKENS_PER_RANK,
             world_size=pgi.world_size,
@@ -161,13 +162,15 @@ def make_modular_kernel(pg: ProcessGroup, pgi: ProcessGroupInfo,
             use_fp8_w8a8=is_quantized,
             use_int8_w8a8=False,
             use_int8_w8a16=False,
-            use_int4_w4a16=False)
+            use_int4_w4a16=False,
+            per_act_token_quant=False)
     else:
+        # TODO(bnell): block_shape?
         fused_experts = TritonExperts(use_fp8_w8a8=is_quantized,
                                       use_int8_w8a8=False,
                                       use_int8_w8a16=False,
                                       use_int4_w4a16=False,
-                                      per_channel_quant=False)
+                                      per_act_token_quant=False)
 
     mk = FusedMoEModularKernel(prepare_finalize=a2a,
                                fused_experts=fused_experts)

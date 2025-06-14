@@ -168,7 +168,7 @@ def test_fused_moe(
                                               use_int8_w8a8=False,
                                               use_int8_w8a16=False,
                                               use_int4_w4a16=False,
-                                              per_channel_quant=False,
+                                              per_act_token_quant=False,
                                               block_shape=None)
 
     def m_fused_moe(
@@ -365,45 +365,49 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
             pytest.skip("AITER ROCm test skip for float32")
 
     # Instantiate our and huggingface's MoE blocks
-    config = MixtralConfig()
-    hf_moe = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
-    vllm_moe = MixtralMoE(
-        num_experts=config.num_local_experts,
-        top_k=config.num_experts_per_tok,
-        hidden_size=config.hidden_size,
-        intermediate_size=config.intermediate_size,
-        params_dtype=dtype,
-        tp_size=1,
-        dp_size=1,
-    ).cuda()
+    with set_current_vllm_config(vllm_config):
+        config = MixtralConfig()
+        hf_moe = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
+        vllm_moe = MixtralMoE(
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            params_dtype=dtype,
+            tp_size=1,
+            dp_size=1,
+        ).cuda()
 
-    # Load the weights
-    vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
-    for i in range(config.num_local_experts):
-        weights = (hf_moe.experts[i].w1.weight.data,
-                   hf_moe.experts[i].w3.weight.data)
-        vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
-        vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
+        # Load the weights
+        vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
+        for i in range(config.num_local_experts):
+            weights = (hf_moe.experts[i].w1.weight.data,
+                       hf_moe.experts[i].w3.weight.data)
+            vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
+            vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
 
-    # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
-    hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
-    # vLLM uses 1D query [num_tokens, hidden_dim]
-    vllm_inputs = hf_inputs.flatten(0, 1)
+        # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
+        hf_inputs = torch.randn(
+            (1, 64, config.hidden_size)).to(dtype).to("cuda")
+        # vLLM uses 1D query [num_tokens, hidden_dim]
+        vllm_inputs = hf_inputs.flatten(0, 1)
 
-    # Pad the weight if moe padding is enabled
-    if padding:
-        vllm_moe.experts.w13_weight = Parameter(F.pad(
-            vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[..., 0:-128],
-                                                requires_grad=False)
-        torch.cuda.empty_cache()
-        vllm_moe.experts.w2_weight = Parameter(F.pad(
-            vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
-                                               requires_grad=False)
-        torch.cuda.empty_cache()
+        # Pad the weight if moe padding is enabled
+        if padding:
+            vllm_moe.experts.w13_weight = Parameter(F.pad(
+                vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[...,
+                                                                      0:-128],
+                                                    requires_grad=False)
+            torch.cuda.empty_cache()
+            vllm_moe.experts.w2_weight = Parameter(F.pad(
+                vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[...,
+                                                                     0:-128],
+                                                   requires_grad=False)
+            torch.cuda.empty_cache()
 
-    # Run forward passes for both MoE blocks
-    hf_states, _ = hf_moe.forward(hf_inputs)
-    vllm_states = vllm_moe.forward(vllm_inputs)
+        # Run forward passes for both MoE blocks
+        hf_states, _ = hf_moe.forward(hf_inputs)
+        vllm_states = vllm_moe.forward(vllm_inputs)
 
     mixtral_moe_tol = {
         torch.float32: 1e-3,

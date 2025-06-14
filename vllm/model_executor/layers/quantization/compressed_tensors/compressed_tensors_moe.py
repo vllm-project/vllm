@@ -15,13 +15,14 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
+    fused_experts,
     FusedMoE,
+    FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
     FusedMoEActivationFormat,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
-    MoEConfig,
     CutlassExpertsFp8)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
@@ -311,15 +312,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                                                  requires_grad=False)
 
             self.rocm_aiter_fused_experts_func = rocm_aiter_fused_experts
-        else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
-            self.fused_experts_func = fused_experts
-
-        if self.use_marlin:
+        elif self.use_marlin:
             prepare_moe_fp8_layer_for_marlin(layer, False)
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
+            self.fused_experts_func = None
+        else:
+            self.fused_experts_func = fused_experts
 
     def apply(
         self,
@@ -562,7 +562,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: MoEConfig,
+        moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
 
         if prepare_finalize.activation_format == FusedMoEActivationFormat.BatchedExperts:
@@ -620,7 +620,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            indices_type=torch.uint32)
+            indices_type=self.topk_indices_dtype,
+        )
 
         return self.fused_experts(
             x,
