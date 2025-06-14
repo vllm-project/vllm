@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Batched utility kernels used in the fused_moe operation.
+Masked kernels used in the fused_moe operation. In the batched versions
+of ModularKernel.FusedMoEPermuteExpertsUnpermute, where batch_size
+is the number-of-experts, only some tokens in each batch are valid.
+The kernels in this file, account for that and only operate on the
+valid tokens.
 """
 
 from typing import Optional
@@ -18,10 +22,11 @@ from vllm.triton_utils import tl, triton
 
 @triton.jit
 def _batched_per_token_group_quant_fp8(
-        expert_num_tokens,
-        stride_ye,
-        stride_yqe,
-        stride_yse,
+        valid_tokens_array,
+        # Batch dimension strides
+        stride_yb,
+        stride_yqb,
+        stride_ysb,
         # Pointers to inputs and output
         y_ptr,
         y_q_ptr,
@@ -38,22 +43,22 @@ def _batched_per_token_group_quant_fp8(
         # Meta-parameters
         BLOCK: tl.constexpr):
 
-    expert_id = tl.program_id(axis=0)
-    e_num_tokens = tl.load(expert_num_tokens + expert_id)
-    if e_num_tokens == 0:
+    batch_id = tl.program_id(axis=0)
+    num_tokens = tl.load(valid_tokens_array + batch_id)
+    if num_tokens == 0:
         # early exit
         return
 
     groups_per_row = y_num_columns // group_size
-    valid_groups_in_experts = e_num_tokens * groups_per_row
+    valid_num_groups = num_tokens * groups_per_row
     group_id = tl.program_id(axis=1)
-    if group_id >= valid_groups_in_experts:
+    if group_id >= valid_num_groups:
         # early exit
         return
 
-    y_ptr = y_ptr + expert_id * stride_ye
-    y_q_ptr = y_q_ptr + expert_id * stride_yqe
-    y_s_ptr = y_s_ptr + expert_id * stride_yse
+    y_ptr = y_ptr + batch_id * stride_yb
+    y_q_ptr = y_q_ptr + batch_id * stride_yqb
+    y_s_ptr = y_s_ptr + batch_id * stride_ysb
 
     _do_per_token_group_quant_fp8(
         group_id,  # group id
@@ -76,10 +81,11 @@ def _batched_per_token_group_quant_fp8(
 
 @triton.jit
 def _batched_per_token_group_quant_fp8_colmajor(
-    expert_num_tokens,
-    stride_ye,
-    stride_yqe,
-    stride_yse,
+    valid_tokens_array,
+    # Batch strides
+    stride_yb,
+    stride_yqb,
+    stride_ysb,
     # Pointers to inputs and output
     y_ptr,
     y_q_ptr,
@@ -98,22 +104,22 @@ def _batched_per_token_group_quant_fp8_colmajor(
     # Meta-parameters
     BLOCK: tl.constexpr,
 ):
-    expert_id = tl.program_id(axis=0)
-    e_num_tokens = tl.load(expert_num_tokens + expert_id)
-    if e_num_tokens == 0:
+    batch_id = tl.program_id(axis=0)
+    num_tokens = tl.load(valid_tokens_array + batch_id)
+    if num_tokens == 0:
         # early exit
         return
 
     groups_per_row = y_num_columns // group_size
-    valid_groups_in_experts = e_num_tokens * groups_per_row
+    valid_num_groups = num_tokens * groups_per_row
     group_id = tl.program_id(axis=1)
-    if group_id >= valid_groups_in_experts:
+    if group_id >= valid_num_groups:
         # early exit
         return
 
-    y_ptr = y_ptr + expert_id * stride_ye
-    y_q_ptr = y_q_ptr + expert_id * stride_yqe
-    y_s_ptr = y_s_ptr + expert_id * stride_yse
+    y_ptr = y_ptr + batch_id * stride_yb
+    y_q_ptr = y_q_ptr + batch_id * stride_yqb
+    y_s_ptr = y_s_ptr + batch_id * stride_ysb
 
     _do_per_token_group_quant_fp8_colmajor(
         group_id,
@@ -137,9 +143,9 @@ def _batched_per_token_group_quant_fp8_colmajor(
 
 
 def batched_per_token_group_quant_fp8(
-        x: torch.Tensor,
-        x_q: Optional[torch.Tensor],
-        expert_num_tokens: torch.Tensor,
+        x: torch.Tensor,  # [B, MAX_TOKENS, HIDDEN_SIZE]
+        x_q: Optional[torch.Tensor],  # [B, MAX_TOKENS, HIDDEN_SIZE]
+        valid_tokens_array: torch.Tensor,  # [B]
         group_size: int,
         column_major_scales: bool,
         eps: float = 1e-10) -> tuple[torch.Tensor, torch.Tensor]:
@@ -158,8 +164,8 @@ def batched_per_token_group_quant_fp8(
     if x_q is None:
         x_q = torch.empty_like(x, device=x.device, dtype=dtype)
 
-    E, MAX_TOKENS, HIDDEN_SIZE = x.shape
-    shape = (E, MAX_TOKENS, HIDDEN_SIZE // group_size)
+    B, MAX_TOKENS, HIDDEN_SIZE = x.shape
+    shape = (B, MAX_TOKENS, HIDDEN_SIZE // group_size)
     x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
     if column_major_scales:
         x_s = x_s.permute(-1, -2)
@@ -171,11 +177,11 @@ def batched_per_token_group_quant_fp8(
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
 
-    grid = (E, M)
+    grid = (B, M)
 
     if column_major_scales:
         _batched_per_token_group_quant_fp8_colmajor[grid](
-            expert_num_tokens,
+            valid_tokens_array,
             x.stride(0),
             x_q.stride(0),
             x_s.stride(0),
@@ -195,7 +201,7 @@ def batched_per_token_group_quant_fp8(
         )
     else:
         _batched_per_token_group_quant_fp8[grid](
-            expert_num_tokens,
+            valid_tokens_array,
             x.stride(0),
             x_q.stride(0),
             x_s.stride(0),
@@ -261,9 +267,9 @@ def silu_and_mul(
 
 @triton.jit
 def batched_silu_and_mul_kernel(
-        output,  # [E, MAX_NUM_TOKENS, D]
-        input,  # [E, MAX_NUM_TOKENS, D * 2]
-        expert_num_tokens,  # [E]
+        output,  # [B, MAX_NUM_TOKENS, D]
+        input,  # [B, MAX_NUM_TOKENS, D * 2]
+        valid_tokens_array,  # [B]
         stride_oe,
         stride_om,
         stride_ie,
@@ -273,22 +279,22 @@ def batched_silu_and_mul_kernel(
         BLOCK_M: tl.constexpr,
         BLOCK_D: tl.constexpr):
 
-    expert_id = tl.program_id(axis=0)
-    e_num_tokens = tl.load(expert_num_tokens + expert_id)
-    if e_num_tokens == 0:
+    batch_id = tl.program_id(axis=0)
+    num_tokens = tl.load(valid_tokens_array + batch_id)
+    if num_tokens == 0:
         # early exit
         return
 
     pid_m = tl.program_id(axis=1)
     cta_m_start = pid_m * BLOCK_M
-    if cta_m_start >= e_num_tokens:
+    if cta_m_start >= num_tokens:
         # early exit
         return
 
-    cta_input_ptr = input + expert_id * stride_ie + cta_m_start * stride_im
-    cta_output_ptr = output + expert_id * stride_oe + cta_m_start * stride_om
+    cta_input_ptr = input + batch_id * stride_ie + cta_m_start * stride_im
+    cta_output_ptr = output + batch_id * stride_oe + cta_m_start * stride_om
 
-    cta_m_size = min(BLOCK_M, e_num_tokens - cta_m_start)
+    cta_m_size = min(BLOCK_M, num_tokens - cta_m_start)
 
     pid_d = tl.program_id(axis=2)
     silu_and_mul(
@@ -305,13 +311,11 @@ def batched_silu_and_mul_kernel(
 
 
 def invoke_batched_silu_and_mul(
-        output: torch.Tensor,  #[E, MAX_TOKENS, D]
-        input: torch.Tensor,  #[E, MAX_TOKENS, D * 2]
-        expert_num_tokens: torch.Tensor):
+        output: torch.Tensor,  #[B, MAX_TOKENS, D]
+        input: torch.Tensor,  #[B, MAX_TOKENS, D * 2]
+        valid_tokens_array: torch.Tensor):
 
-    num_experts = output.size(0)
-    max_num_tokens = output.size(1)
-    D = output.size(2)
+    batch_size, max_num_tokens, D = output.size()
 
     BLOCK_D = 1024
     BLOCK_M = 1
@@ -322,9 +326,9 @@ def invoke_batched_silu_and_mul(
         torch.bfloat16: tl.bfloat16
     }[output.dtype]
 
-    grid = (num_experts, triton.cdiv(max_num_tokens,
-                                     BLOCK_M), triton.cdiv(D, BLOCK_D))
-    batched_silu_and_mul_kernel[grid](output, input, expert_num_tokens,
+    grid = (batch_size, triton.cdiv(max_num_tokens,
+                                    BLOCK_M), triton.cdiv(D, BLOCK_D))
+    batched_silu_and_mul_kernel[grid](output, input, valid_tokens_array,
                                       output.stride(0), output.stride(1),
                                       input.stride(0), input.stride(1),
                                       compute_tl_dtype, D, BLOCK_M, BLOCK_D)
