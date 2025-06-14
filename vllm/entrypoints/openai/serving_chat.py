@@ -109,7 +109,8 @@ class OpenAIServingChat(OpenAIServing):
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 f"tool_parser:'{tool_parser}' which has not "
                                 "been registered") from e
-        self.expand_tools_even_if_tool_choice_none = expand_tools_even_if_tool_choice_none
+        self.expand_tools_even_if_tool_choice_none = (
+            expand_tools_even_if_tool_choice_none)
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = (
