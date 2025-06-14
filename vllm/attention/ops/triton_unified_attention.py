@@ -483,8 +483,11 @@ def kernel_unified_attention_3d(
         acc,
         mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
     )
-    segm_offset = (query_offset_0.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ) +
-                   query_offset_1 * NUM_SEGMENTS_PER_SEQ + segm_idx)
+    segm_offset = (
+        query_offset_0.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
+        + query_offset_1 * NUM_SEGMENTS_PER_SEQ
+        + segm_idx
+    )
     tl.store(segm_max_ptr + segm_offset, M, mask=query_mask_0 & query_mask_1)
     tl.store(segm_expsum_ptr + segm_offset,
              L,
@@ -537,9 +540,11 @@ def reduce_segments(
                         0).to(tl.int1)
 
     # load segment maxima
-    segm_offset = (query_token_idx.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ) +
-                   query_head_idx * NUM_SEGMENTS_PER_SEQ +
-                   tl.arange(0, NUM_SEGMENTS_PER_SEQ))
+    segm_offset = (
+        query_token_idx.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
+        + query_head_idx * NUM_SEGMENTS_PER_SEQ
+        + tl.arange(0, NUM_SEGMENTS_PER_SEQ)
+    )
     segm_max = tl.load(segm_max_ptr + segm_offset,
                        mask=segm_mask,
                        other=float("-inf"))
