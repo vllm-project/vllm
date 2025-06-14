@@ -30,13 +30,8 @@ def apply_softcap(S, x):
 
 
 @triton.jit
-def find_seq_idx(
-    query_start_len_ptr,
-    target_idx,
-    num_seqs,
-    BLOCK_Q: tl.constexpr,
-    use_q_block_mode: tl.constexpr
-):
+def find_seq_idx(query_start_len_ptr, target_idx, num_seqs,
+                 BLOCK_Q: tl.constexpr, use_q_block_mode: tl.constexpr):
     left: tl.int32 = 0
     right = num_seqs
     while left < right:
