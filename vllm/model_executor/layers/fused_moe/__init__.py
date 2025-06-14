@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from typing import Any, Optional
 
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported, MoEConfig)
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
     FusedMoEPermuteExpertsUnpermute,

@@ -93,7 +93,7 @@ def pplx_cutlass_moe(
         num_experts=num_experts,
         experts_per_token=topk,
         rank=rank,
-        world_size=pgi.world_size,
+        world_size=world_size,
         dp_size=dp_size,
         hidden_dim=hidden_dim,
         hidden_dim_bytes=hidden_dim,  # because a.dtype.itemsize == 1
@@ -118,8 +118,6 @@ def pplx_cutlass_moe(
         pgi.world_size,
         rank,
         dp_size,
-        quant_dtype=torch.float8_e4m3fn,
-        per_act_token=per_act_token,
     )
 
     experts = CutlassExpertsFp8((num_experts + world_size - 1) // world_size,

@@ -16,6 +16,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
     FusedMoEActivationFormat,
@@ -23,7 +24,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEPrepareAndFinalize,
     TritonOrDeepGemmExperts,
     BatchedTritonOrDeepGemmExperts,
-    MoEConfig
 )
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
@@ -782,7 +782,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: MoEConfig,
+        moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
@@ -790,19 +790,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if prepare_finalize.activation_format == FusedMoEActivationFormat.BatchedExperts:
             max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
             assert max_num_tokens_per_rank is not None
+            logger.debug(
+                "BatchedTritonOrDeepGemmExperts(%s): "
+                "max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
+                self.__class__.__name__, max_num_tokens_per_rank,
+                self.quant_config.weight_block_size, False)
             return BatchedTritonOrDeepGemmExperts(
-                max_num_tokens=max_num_tokens_per_rank,
-                world_size=prepare_finalize.world_size,
-                dp_size=prepare_finalize.dp_size,
+                max_num_tokens=max_num_tokens_per_rank, # get from prepare_finalize?
+                world_size=prepare_finalize.world_size, # TODO sketchy
+                dp_size=prepare_finalize.dp_size,       # TODO sketchy
                 use_fp8_w8a8=True,
-                use_int8_w8a8=False,
-                use_int8_w8a16=False,
-                use_int4_w4a16=False,
-                per_channel_quant=False,
                 block_shape=self.quant_config.weight_block_size,
+                per_act_token_quant=False,  #?
                 allow_deep_gemm=self.allow_deep_gemm,
             )
         else:
+            logger.debug(
+                "TritonOrDeepGemmExperts(%s): block_size=%s, per_act_token=%s",
+                self.__class__.__name__, self.quant_config.weight_block_size,
+                False)
             return TritonOrDeepGemmExperts(
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
