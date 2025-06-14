@@ -6,8 +6,8 @@ set -x
 echo ">>> uninstall everything from requirements/test.txt"
 grep -vE '^\s*#' requirements.txt | cut -d '=' -f 1 | xargs -n 1 pip uninstall -y
 
-echo ">>> Uninstalling previous PyTorch packages (if any)"
-pip uninstall -y torch torchvision torchaudio vllm|| true
+# check the environment
+pip freeze
 
 echo ">>> Installing nightly torch packages"
 pip install --quiet torch torchvision torchaudio --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu128
