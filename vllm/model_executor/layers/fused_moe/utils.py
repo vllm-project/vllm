@@ -75,14 +75,14 @@ def _int8_quantize(
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
-    qtype: Optional[torch.dtype],
-    per_channel_quant: bool,
+    quant_dtype: Optional[torch.dtype],
+    per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    if qtype == torch.float8_e4m3fn:
-        return _fp8_quantize(A, A_scale, per_channel_quant, block_shape)
-    elif qtype == torch.int8:
-        return _int8_quantize(A, A_scale, per_channel_quant, block_shape)
+    if quant_dtype == torch.float8_e4m3fn:
+        return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == torch.int8:
+        return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         assert A_scale is None
         return A, A_scale

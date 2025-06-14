@@ -173,7 +173,7 @@ def test_fused_moe(
                                               use_int8_w8a8=False,
                                               use_int8_w8a16=False,
                                               use_int4_w4a16=False,
-                                              per_channel_quant=False,
+                                              per_act_token_quant=False,
                                               block_shape=None)
 
     def m_fused_moe(

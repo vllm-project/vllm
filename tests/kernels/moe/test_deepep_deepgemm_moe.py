@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Test DeepEP + DeepGEMM integration 
+Test DeepEP + DeepGEMM integration
 DeepGEMM are gemm kernels specialized for the
 fp8 block-quantized case.
 """
@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_ep, has_deep_gemm
+from vllm.utils import cdiv, has_deep_ep, has_deep_gemm
 
 from .utils import ProcessGroupInfo, parallel_launch
 
@@ -66,8 +66,8 @@ def per_block_cast_to_fp8(
     assert x.dim() == 2
     m, n = x.shape
     x_padded = torch.zeros(
-        (deep_gemm.ceil_div(m, 128) * 128,
-         deep_gemm.ceil_div(n, block_size_n) * block_size_n),
+        (cdiv(m, 128) * 128,
+         cdiv(n, block_size_n) * block_size_n),
         dtype=x.dtype,
         device=x.device)
     x_padded[:m, :n] = x
@@ -426,6 +426,7 @@ def test_ht_deepep_deepgemm_moe(mnk: tuple[int, int, int], num_experts: int,
     """
     Tests for High-Throughput DeepEP + DeepGemm integration.
     """
+    import deep_gemm
 
     m, n, k = mnk
     current_platform.seed_everything(7)

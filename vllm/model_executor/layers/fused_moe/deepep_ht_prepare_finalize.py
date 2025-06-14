@@ -6,6 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
@@ -15,22 +16,14 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     Prepare/Finalize using DeepEP High-Throughput kernels.
     """
 
-    def __init__(self,
-                 buffer: deep_ep.Buffer,
-                 world_size: int,
-                 rank: int,
-                 dp_size: int,
-                 rank_expert_offset: int,
-                 quant_dtype: Optional[torch.dtype] = None,
-                 block_shape: Optional[list[int]] = None):
+    def __init__(self, buffer: deep_ep.Buffer, world_size: int, rank: int,
+                 dp_size: int, rank_expert_offset: int):
         super().__init__()
         self.buffer = buffer
         self.world_size = world_size
         self.rank = rank
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
-        self.quant_dtype = quant_dtype
-        self.block_shape = block_shape
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
@@ -64,6 +57,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         tokens, token_scales = moe_kernel_quantize_input(
             tokens, token_scales, self.quant_dtype, per_act_token,
             self.block_shape)
+
         return tokens, token_scales
 
     def _do_dispatch(self, tokens: torch.Tensor,
@@ -139,6 +133,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
@@ -152,19 +147,27 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # Check if there is a block_shape / or if we can infer the quantization
         # schemes from the scales.
         per_token_quant = None
-        if all([x is None for x in [self.block_shape, a1_scale, a2_scale]
-                ]) and self.quant_dtype is not None:
+        if all([
+                x is None
+                for x in [quant_config.block_shape, a1_scale, a2_scale]
+        ]) and quant_config.quant_dtype is not None:
             # Quantization required despite none of the inputs suggesting
             # quantization. Fallback to per_token_dynamic quant.
             per_token_quant = True
         else:
-            per_token_quant = ((self.block_shape is not None) or
+            per_token_quant = ((quant_config.block_shape is not None) or
                                (a1_scale is not None and a1_scale.numel() != 1)
                                or (a2_scale is not None
                                    and a2_scale.numel() != 1))
 
         if per_token_quant:
-            a1q, a1q_scale = self._do_quant(a1, a1_scale, per_act_token=True)
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                a1_scale,
+                quant_dtype=quant_config.quant_dtype,
+                per_act_token_quant=False,
+                block_shape=quant_config.block_shape,
+            )
             (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1q,
@@ -185,9 +188,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # quantize now
             expert_x_scale = None
             if expert_x.numel() != 0:
-                expert_x, expert_x_scale = self._do_quant(expert_x,
-                                                          a1_scale,
-                                                          per_act_token=False)
+                expert_x, expert_x_scale = moe_kernel_quantize_input(
+                    expert_x,
+                    a1_scale,
+                    quant_dtype=quant_config.quant_dtype,
+                    per_act_token_quant=False,
+                    block_shape=quant_config.block_shape)
 
         return (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
                 expert_topk_weights)
