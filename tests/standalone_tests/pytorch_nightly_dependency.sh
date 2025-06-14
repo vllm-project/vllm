@@ -3,8 +3,8 @@
 set -e
 set -x
 
-echo ">>> Current torch-related packages (before uninstall):"
-pip freeze | grep -E '^torch|^torchvision|^torchaudio' || echo "None found"
+echo ">>> uninstall everything from requirements/test.txt"
+pip uninstall -y $(grep -vE '^\s*#' requirements/test.txt | cut -d '=' -f 1)
 
 echo ">>> Uninstalling previous PyTorch packages (if any)"
 pip uninstall -y torch torchvision torchaudio vllm|| true
