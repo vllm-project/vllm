@@ -8,7 +8,6 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Iterable
 from functools import cached_property, lru_cache, partial
 from pathlib import Path
-from PIL import Image
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
                     cast)
 
@@ -29,7 +28,8 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
-from pydantic import TypeAdapter, ConfigDict, BaseModel
+from PIL import Image
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 # yapf: enable
 from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
                           ProcessorMixin)
@@ -95,9 +95,9 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
 class PILImage(BaseModel):
     """
     A PIL.Image.Image object.
-    """       
+    """
     image: Image.Image
-    model_config = ConfigDict(arbitrary_types_allowed=True) 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
@@ -702,9 +702,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
         self._add_placeholder(placeholder)
 
-    def parse_pil_image(self, image: Image.Image) -> None:  
-        placeholder = self._tracker.add("image", image)  
-        self._add_placeholder(placeholder)  
+    def parse_pil_image(self, image: Image.Image) -> None:
+        placeholder = self._tracker.add("image", image)
+        self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
         audio = self._connector.fetch_audio(audio_url)
@@ -762,12 +762,12 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("image_embeds", future)
         self._add_placeholder(placeholder)
 
-    def parse_pil_image(self, image: Image.Image) -> None:  
-        future: asyncio.Future[Image.Image] = asyncio.Future()  
-        future.set_result(image)  
-        
-        placeholder = self._tracker.add("image", future) 
-        self._add_placeholder(placeholder)  
+    def parse_pil_image(self, image: Image.Image) -> None:
+        future: asyncio.Future[Image.Image] = asyncio.Future()
+        future.set_result(image)
+
+        placeholder = self._tracker.add("image", future)
+        self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
         audio_coro = self._connector.fetch_audio_async(audio_url)
@@ -906,7 +906,7 @@ MM_PARSER_MAP: dict[
     lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
     lambda part: _ImageEmbedsParser(part).get("image_embeds", None),
-    "image": lambda part: _PILImageParser(part).get("image", None),  
+    "image": lambda part: _PILImageParser(part).get("image", None),
     "audio_url":
     lambda part: _AudioParser(part).get("audio_url", {}).get("url", None),
     "input_audio":
@@ -1048,9 +1048,9 @@ def _parse_chat_message_content_part(
             return str_content
 
     if part_type == "image":
-        image_content = cast(Image.Image, content)  
-        mm_parser.parse_pil_image(image_content)  
-        return {'type': 'image'} if wrap_dicts else None  
+        image_content = cast(Image.Image, content)
+        mm_parser.parse_pil_image(image_content)
+        return {'type': 'image'} if wrap_dicts else None
     if part_type == "image_url":
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
