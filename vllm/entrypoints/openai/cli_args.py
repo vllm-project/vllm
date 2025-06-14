@@ -115,6 +115,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument("--api-key",
                         type=optional_type(str),
                         default=None,
+                        nargs='+',
                         help="If provided, the server will require this key "
                         "to be presented in the header.")
     parser.add_argument(
