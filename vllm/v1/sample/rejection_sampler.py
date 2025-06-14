@@ -6,8 +6,10 @@ import torch
 import torch.nn as nn
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.utils import apply_penalties
 from vllm.triton_utils import tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.penalties import _convert_to_tensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
@@ -289,25 +291,71 @@ def compute_probs(
     # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
     # which is slow for large vocab sizes. This may cause performance issues.
     logits = apply_top_k_top_p(logits, top_k, top_p)
+
+    if not sampling_metadata.no_penalties:
+        assert sampling_metadata.prompt_token_ids is not None
+
+        _, vocab_size = logits.shape
+
+        # Expand tensors from [batch_size] to [num_tokens].
+        prompt_token_ids = expand_batch_to_tokens(
+            sampling_metadata.prompt_token_ids,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
+        output_tokens_t = _convert_to_tensors(
+            sampling_metadata.output_token_ids, vocab_size, logits.device)
+        output_tokens_t = expand_batch_to_tokens(
+            output_tokens_t,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
+        presence_penalties = expand_batch_to_tokens(
+            sampling_metadata.presence_penalties,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
+        frequency_penalties = expand_batch_to_tokens(
+            sampling_metadata.frequency_penalties,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
+        repetition_penalties = expand_batch_to_tokens(
+            sampling_metadata.repetition_penalties,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
+
+        # Apply penalties to logits.
+        logits = apply_penalties(
+            logits,
+            prompt_token_ids,
+            output_tokens_t,
+            presence_penalties,
+            frequency_penalties,
+            repetition_penalties,
+        )
+
     output_prob = logits.softmax(dim=-1, dtype=torch.float32)
     return output_prob
 
 
 def expand_batch_to_tokens(
-    x: torch.Tensor,  # [batch_size]
-    cu_num_tokens: torch.Tensor,  # [batch_size]
+    x: torch.Tensor,
+    cu_num_tokens: torch.Tensor,
     num_tokens: int,
     replace_from: int = 0,
     replace_to: int = 0,
 ) -> torch.Tensor:
-    """Expand [batch_size] tensor to [num_tokens] tensor based on the number of
-    tokens per batch in cu_num_tokens.
+    """Expand [batch_size] tensor to [num_tokens] tensor
+    (or [batch_size, vocab_size] to [num_tokens, vocab_size]) based on
+    the number of tokens per batch in cu_num_tokens.
 
     For example, if x = [a, b, c] and cu_num_tokens = [2, 5, 6], then
     num_tokens = 6, and expanded_x = [a, a, b, b, b, c].
 
     Args:
-        x: [batch_size] tensor to expand.
+        x: [batch_size] or [batch_size, vocab_size] tensor to be expanded.
         cu_num_tokens: [batch_size] tensor containing the cumulative number of
             tokens per batch. Each element represents the total number of
             tokens up to and including that batch.
@@ -319,18 +367,39 @@ def expand_batch_to_tokens(
     Returns:
         expanded_x: [num_tokens] tensor.
     """
-    batch_size = x.shape[0]
-    assert cu_num_tokens.shape[0] == batch_size
-    expanded_x = x.new_empty(num_tokens)
-    expand_kernel[(batch_size, )](
-        expanded_x,
-        x,
-        cu_num_tokens,
-        replace_from,
-        replace_to,
-        MAX_NUM_TOKENS=MAX_SPEC_LEN,  # To avoid recompilation.
-        num_warps=1,
-    )
+    if x.ndim == 1:
+        batch_size = x.shape[0]
+        assert cu_num_tokens.shape[0] == batch_size
+        expanded_x = x.new_empty(num_tokens)
+
+        expand_kernel[(batch_size, )](
+            expanded_x,
+            x,
+            cu_num_tokens,
+            replace_from,
+            replace_to,
+            MAX_NUM_TOKENS=MAX_SPEC_LEN,  # To avoid recompilation.
+            num_warps=1,
+        )
+    elif x.ndim == 2:
+        batch_size, vocab_size = x.shape
+        assert cu_num_tokens.shape[0] == batch_size
+        expanded_x = x.new_empty((num_tokens, vocab_size))
+
+        expand_kernel_2d[(batch_size, vocab_size)](
+            expanded_x,
+            x,
+            cu_num_tokens,
+            replace_from,
+            replace_to,
+            MAX_NUM_TOKENS=MAX_SPEC_LEN,
+            VOCAB_SIZE=vocab_size,
+            num_warps=4 if vocab_size > 512 else 1,
+        )
+    else:
+        raise ValueError(
+            f"Invalid input tensor shape: {x.shape}. Expected 1D or 2D tensor."
+        )
     return expanded_x
 
 
@@ -563,6 +632,43 @@ def expand_kernel(
     tl.store(output_ptr + start_idx + offset,
              src_val,
              mask=offset < num_tokens)
+
+
+@triton.jit(do_not_specialize=["replace_from", "replace_to"])
+def expand_kernel_2d(
+    output_ptr,  # [num_tokens, vocab_size]
+    input_ptr,  # [batch_size, vocab_size]
+    cu_num_tokens_ptr,  # [batch_size]
+    replace_from,
+    replace_to,
+    MAX_NUM_TOKENS: tl.constexpr,
+    VOCAB_SIZE: tl.constexpr,
+):
+    # 2D launch grid: batch x vocab
+    req_idx = tl.program_id(0)
+    vocab_idx = tl.program_id(1)
+
+    # Calculate sequence boundaries
+    if req_idx == 0:  # noqa: SIM108
+        start_idx = 0
+    else:
+        start_idx = tl.load(cu_num_tokens_ptr + req_idx - 1)
+    end_idx = tl.load(cu_num_tokens_ptr + req_idx)
+    num_tokens = end_idx - start_idx
+
+    # Load a single value.
+    input_offset = req_idx * VOCAB_SIZE + vocab_idx
+    src_val = tl.load(input_ptr + input_offset)
+    src_val = tl.where(src_val == replace_from, replace_to, src_val)
+
+    # Calculate output positions
+    token_offsets = tl.arange(0, MAX_NUM_TOKENS)
+    output_offsets = (start_idx + token_offsets) * VOCAB_SIZE + vocab_idx
+
+    # Vectorized store with mask.
+    tl.store(output_ptr + output_offsets,
+             src_val,
+             mask=token_offsets < num_tokens)
 
 
 @triton.jit

@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.v1.sample.utils import create_weighted_output_token_list
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
                                               RejectionSampler)
@@ -21,7 +22,7 @@ def rejection_sampler():
 
 def create_logits_tensor(output_token_ids: list[list[int]],
                          vocab_size: int = 100) -> torch.Tensor:
-    """Helper function to create logits tensor that 
+    """Helper function to create logits tensor that
        will produce desired token ids on argmax"""
     token_ids = [tokens[:-1] for tokens in output_token_ids]
     num_total_tokens = sum(len(tokens) for tokens in token_ids)
@@ -39,10 +40,16 @@ def create_sampling_metadata(
     temperature: Optional[torch.Tensor] = None,
     top_k: Optional[torch.Tensor] = None,
     top_p: Optional[torch.Tensor] = None,
+    presence_penalties: Optional[torch.Tensor] = None,
+    frequency_penalties: Optional[torch.Tensor] = None,
+    repetition_penalties: Optional[torch.Tensor] = None,
     generators: Optional[dict[int, Any]] = None,
+    prompt_token_ids: Optional[torch.Tensor] = None,
+    output_token_ids: Optional[list[list[int]]] = None,
+    batch_size: Optional[int] = None,
 ) -> SamplingMetadata:
-    """Create a v1 sampling metadata object with all_greedy set 
-        to the given value. Either all greedy or all random sampling 
+    """Create a v1 sampling metadata object with all_greedy set
+        to the given value. Either all greedy or all random sampling
         is used.
     """
     generators = generators or {}
@@ -50,6 +57,21 @@ def create_sampling_metadata(
         temperature = None
     else:
         assert temperature is not None
+
+    no_penalties = ((presence_penalties is None)
+                    and (frequency_penalties is None)
+                    and (repetition_penalties is None))
+
+    if not no_penalties:
+        presence_penalties = (torch.zeros(batch_size, device=DEVICE)
+                              if presence_penalties is None else
+                              presence_penalties)
+        frequency_penalties = (torch.zeros(batch_size, device=DEVICE)
+                               if frequency_penalties is None else
+                               frequency_penalties)
+        repetition_penalties = (torch.ones(batch_size, device=DEVICE)
+                                if repetition_penalties is None else
+                                repetition_penalties)
 
     return SamplingMetadata(
         temperature=temperature,
@@ -60,12 +82,12 @@ def create_sampling_metadata(
         min_p=torch.empty(1, ),
         generators=generators,
         max_num_logprobs=0,
-        no_penalties=False,
-        prompt_token_ids=None,
-        frequency_penalties=torch.tensor([]),
-        presence_penalties=torch.tensor([]),
-        repetition_penalties=torch.tensor([]),
-        output_token_ids=[],
+        no_penalties=no_penalties,
+        prompt_token_ids=prompt_token_ids,
+        frequency_penalties=frequency_penalties,
+        presence_penalties=presence_penalties,
+        repetition_penalties=repetition_penalties,
+        output_token_ids=output_token_ids,
         min_tokens={},
         logit_bias=[None],
         allowed_token_ids_mask=None,
@@ -609,3 +631,102 @@ def test_top_p(rejection_sampler, top_p):
         unmasked_indices=top_p_indices,
         sampling_metadata=sampling_metadata,
     )
+
+
+def _test_penalties(
+    penalty_arg: str,
+    penalty_val: float,
+    penalty_threshold: float,
+    rejection_sampler,
+):
+    vocab_size = 100
+    batch_size = 8
+    num_draft_tokens = 3
+    num_tokens = batch_size * num_draft_tokens
+
+    assert penalty_arg in [
+        "presence_penalties",
+        "frequency_penalties",
+        "repetition_penalties",
+    ]
+
+    # Scaling of logits in repetition penalty benefits from adding a
+    # large value to logits.
+    target_logits = torch.ones((num_tokens, vocab_size), device=DEVICE) + 100.0
+
+    # Frequency penalty test relies on having high frequencies.
+    output_token_ids, sorted_token_ids_in_output = (
+        create_weighted_output_token_list(batch_size, vocab_size, min_freq=10))
+
+    # Store name of the penalty tensor (e.g. frequency_penalties) in a dict
+    # for dict unpacking purposes.
+    penalties = {
+        penalty_arg:
+        torch.tensor(
+            [penalty_val] * batch_size,
+            device=DEVICE,
+            dtype=torch.float32,
+        )
+    }
+
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(batch_size, dtype=torch.float32, device=DEVICE),
+        prompt_token_ids=torch.zeros(
+            (batch_size, 0),
+            device=DEVICE,
+            dtype=torch.int64,
+        ),
+        output_token_ids=output_token_ids,
+        batch_size=batch_size,
+        **penalties,
+    )
+
+    # Unmasked indices are the token ids that are not masked
+    # by the penalty and expected to be sampled.
+    unmasked_indices = []
+    if penalty_val > penalty_threshold:
+        for i in range(batch_size):
+            for _ in range(num_draft_tokens):
+                unmasked_indices.append([
+                    id for id in range(vocab_size)
+                    if id not in sorted_token_ids_in_output[i]
+                ])
+    elif penalty_val < penalty_threshold:
+        for i in range(batch_size):
+            for _ in range(num_draft_tokens):
+                unmasked_indices.append(sorted_token_ids_in_output[i])
+
+    _test_masked_logits(
+        rejection_sampler,
+        batch_size=batch_size,
+        num_draft_tokens=num_draft_tokens,
+        vocab_size=vocab_size,
+        target_logits=target_logits,
+        unmasked_indices=unmasked_indices,
+        sampling_metadata=sampling_metadata,
+    )
+
+
+@pytest.mark.parametrize("frequency_penalty", [-1.0, 1.0])
+def test_frequency_penalty(rejection_sampler, frequency_penalty):
+    """Test rejection sampling with frequency_penalty sampling"""
+
+    _test_penalties("frequency_penalties", frequency_penalty, 0.0,
+                    rejection_sampler)
+
+
+@pytest.mark.parametrize("presence_penalty", [-10.0, 10.0])
+def test_presence_penalty(rejection_sampler, presence_penalty):
+    """Test rejection sampling with presence_penalty sampling"""
+
+    _test_penalties("presence_penalties", presence_penalty, 0.0,
+                    rejection_sampler)
+
+
+@pytest.mark.parametrize("repetition_penalty", [0.1, 10.0])
+def test_repetition_penalty(rejection_sampler, repetition_penalty):
+    """Test rejection sampling with repetition_penalty sampling"""
+
+    _test_penalties("repetition_penalties", repetition_penalty, 1.0,
+                    rejection_sampler)

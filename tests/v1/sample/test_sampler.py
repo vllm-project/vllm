@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.sample.utils import create_weighted_output_token_list
 from vllm.platforms import current_platform
 from vllm.utils import make_tensor_with_pad
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -192,41 +193,6 @@ def _generate_min_token_penalties_and_stop_tokens(
     return min_tokens
 
 
-def _create_weighted_output_token_list(
-        batch_size: int,
-        vocab_size: int) -> tuple[list[list[int]], list[list[int]]]:
-    """
-    Creates an output token list where each token occurs a distinct
-    number of times.
-
-    For each batch, a random subset of token IDs is selected from the
-    vocabulary. The selected tokens are then added to the output token
-    list, each with a different frequency.
-
-    Returns:
-        tuple[list[list[int]], list[list[int]]]:
-            - The first element is the output token list, where each sublist
-              corresponds to a batch and contains tokens with weighted
-              frequencies.
-            - The second element is a list of distinct token IDs for each
-              batch, ordered by their frequency in the corresponding output
-              list.
-    """
-    output_token_ids: list[list[int]] = []
-    sorted_token_ids_in_output: list[list[int]] = []
-    for _ in range(batch_size):
-        distinct_token_ids = np.random.choice(vocab_size,
-                                              size=np.random.randint(1, 10),
-                                              replace=False).tolist()
-        sorted_token_ids_in_output.append(distinct_token_ids)
-        output_token_ids_for_batch = []
-        for index, token_id in enumerate(distinct_token_ids):
-            output_token_ids_for_batch.extend(
-                [token_id for _ in range(index + 1)])
-        output_token_ids.append(output_token_ids_for_batch)
-    return output_token_ids, sorted_token_ids_in_output
-
-
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("batch_size", [1, 2, 32])
 def test_sampler_min_tokens_penalty(device: str, batch_size: int):
@@ -320,7 +286,7 @@ def test_sampler_frequency_penalty(device: str, batch_size: int,
     sampling_metadata.frequency_penalties = _create_penalty_tensor(
         batch_size, frequency_penalty, torch.device(device))
     output_token_ids, sorted_token_ids_in_output = \
-        _create_weighted_output_token_list(
+        create_weighted_output_token_list(
             batch_size,
             VOCAB_SIZE,
         )
@@ -406,7 +372,7 @@ def test_sampler_repetition_penalty(device: str, batch_size: int,
 @pytest.mark.parametrize("min_p", [0.0, 0.1])
 def test_sampler_min_p(device: str, batch_size: int, min_p: float):
     """
-    Tests that when min_p is applied, tokens with probability below 
+    Tests that when min_p is applied, tokens with probability below
     min_p * max_prob are masked with -inf.
     """
     torch.set_default_device(device)
