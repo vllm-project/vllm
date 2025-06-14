@@ -923,9 +923,11 @@ def init_distributed_environment(
     config = get_current_vllm_config()
     if config is not None and config.parallel_config.data_parallel_size > 1:
         parallel_config = config.parallel_config
-        # adjust to take into account data parallelism
-        # offset the rank by the data parallel rank
-        rank = parallel_config.data_parallel_rank * world_size + rank
+        # If external_launcher, rank is from 0 to world_size_across_dp,
+        # no need to adjust. Otherwise, adjust to take into account data
+        # parallelism offset the rank by the data parallel rank.
+        if parallel_config.distributed_executor_backend != "external_launcher":
+            rank = parallel_config.data_parallel_rank * world_size + rank
         # adjust the world size to take into account data parallelism
         world_size = parallel_config.world_size_across_dp
         ip = parallel_config.data_parallel_master_ip
