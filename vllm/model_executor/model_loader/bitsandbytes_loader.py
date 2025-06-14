@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: SIM117
 import fnmatch
 import glob
@@ -391,7 +392,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def _get_bnb_target_modules(self, model: nn.Module) -> None:
 
         for name, module in model.named_modules():
-            if isinstance(module, (LinearBase, )):
+            if (isinstance(module, LinearBase) and
+                    hasattr(module.quant_method, "quant_config")):
                 if modules_info := self.modules_mapping.get_sub_modules(name):
                     # Map vllm's names to transformers's names.
                     rep_name, sub_modules = modules_info
@@ -399,7 +401,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         self.target_modules.append(
                             name.replace(rep_name, sub_name))
                 # Add original module name even if the module has stacked map,
-                # in case model has a mixture of disk-merged and disk-splitted
+                # in case model has a mixture of disk-merged and disk-split
                 # weights with same last name.
                 self.target_modules.append(name)
 

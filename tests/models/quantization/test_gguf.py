@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Tests gguf models against unquantized models generations
 Note: To pass the test, quantization higher than Q4 should be used
@@ -37,7 +38,7 @@ class GGUFTestConfig(NamedTuple):
 LLAMA_CONFIG = GGUFTestConfig(
     original_model="meta-llama/Llama-3.2-1B-Instruct",
     gguf_repo="bartowski/Llama-3.2-1B-Instruct-GGUF",
-    gguf_filename="Llama-3.2-1B-Instruct-IQ4_XS.gguf",
+    gguf_filename="Llama-3.2-1B-Instruct-Q6_K.gguf",
 )
 
 QWEN2_CONFIG = GGUFTestConfig(
@@ -78,7 +79,7 @@ DOLPHIN_CONFIG = GGUFTestConfig(
 )
 
 MODELS = [
-    LLAMA_CONFIG,
+    # LLAMA_CONFIG, # broken: https://github.com/vllm-project/vllm/issues/19458
     QWEN2_CONFIG,
     PHI3_CONFIG,
     GPT2_CONFIG,

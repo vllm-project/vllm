@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file demonstrates the example usage of cpu offloading
 with LMCache in vLLM v1 or v0.
@@ -27,8 +28,8 @@ import os
 import time
 from dataclasses import asdict
 
-from lmcache.experimental.cache_engine import LMCacheEngineBuilder
 from lmcache.integration.vllm.utils import ENGINE_NAME
+from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig

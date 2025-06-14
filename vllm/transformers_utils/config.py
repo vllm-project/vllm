@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
 import json
@@ -22,6 +23,7 @@ from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
+from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
@@ -141,7 +143,9 @@ def list_repo_files(
                     modelscope_list_repo_files)
                 return modelscope_list_repo_files(repo_id,
                                                   revision=revision,
-                                                  token=token)
+                                                  token=os.getenv(
+                                                      "MODELSCOPE_API_TOKEN",
+                                                      None))
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
@@ -864,5 +868,20 @@ def try_get_safetensors_metadata(
     try:
         return with_retry(get_safetensors_metadata_partial,
                           "Error retrieving safetensors")
+    except Exception:
+        return None
+
+
+def try_get_tokenizer_config(
+    pretrained_model_name_or_path: Union[str, os.PathLike],
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    try:
+        return get_tokenizer_config(
+            pretrained_model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+        )
     except Exception:
         return None

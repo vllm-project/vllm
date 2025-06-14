@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -898,6 +899,7 @@ class DeviceMemoryProfiler:
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
         from vllm.platforms import current_platform
+        gc.collect()
         return current_platform.get_current_memory_usage(self.device)
 
     def __enter__(self):
@@ -1464,7 +1466,7 @@ class FlexibleArgumentParser(ArgumentParser):
         pattern = re.compile(r"(?<=--)[^\.]*")
 
         # Convert underscores to dashes and vice versa in argument names
-        processed_args = []
+        processed_args = list[str]()
         for arg in args:
             if arg.startswith('--'):
                 if '=' in arg:
@@ -1481,7 +1483,7 @@ class FlexibleArgumentParser(ArgumentParser):
             else:
                 processed_args.append(arg)
 
-        def create_nested_dict(keys: list[str], value: str):
+        def create_nested_dict(keys: list[str], value: str) -> dict[str, Any]:
             """Creates a nested dictionary from a list of keys and a value.
 
             For example, `keys = ["a", "b", "c"]` and `value = 1` will create:
@@ -1492,7 +1494,10 @@ class FlexibleArgumentParser(ArgumentParser):
                 nested_dict = {key: nested_dict}
             return nested_dict
 
-        def recursive_dict_update(original: dict, update: dict):
+        def recursive_dict_update(
+            original: dict[str, Any],
+            update: dict[str, Any],
+        ):
             """Recursively updates a dictionary with another dictionary."""
             for k, v in update.items():
                 if isinstance(v, dict) and isinstance(original.get(k), dict):
@@ -1500,19 +1505,25 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     original[k] = v
 
-        delete = set()
-        dict_args: dict[str, dict] = defaultdict(dict)
+        delete = set[int]()
+        dict_args = defaultdict[str, dict[str, Any]](dict)
         for i, processed_arg in enumerate(processed_args):
             if processed_arg.startswith("--") and "." in processed_arg:
                 if "=" in processed_arg:
-                    processed_arg, value = processed_arg.split("=", 1)
+                    processed_arg, value_str = processed_arg.split("=", 1)
                     if "." not in processed_arg:
                         # False positive, . was only in the value
                         continue
                 else:
-                    value = processed_args[i + 1]
+                    value_str = processed_args[i + 1]
                     delete.add(i + 1)
+
                 key, *keys = processed_arg.split(".")
+                try:
+                    value = json.loads(value_str)
+                except json.decoder.JSONDecodeError:
+                    value = value_str
+
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
                 recursive_dict_update(dict_args[key], arg_dict)
@@ -2267,6 +2278,8 @@ def kill_process_tree(pid: int):
 class MemorySnapshot:
     """Memory snapshot."""
     torch_peak: int = 0
+    free_memory: int = 0
+    total_memory: int = 0
     cuda_memory: int = 0
     torch_memory: int = 0
     non_torch_memory: int = 0
@@ -2286,8 +2299,8 @@ class MemorySnapshot:
         self.torch_peak = torch.cuda.memory_stats().get(
             "allocated_bytes.all.peak", 0)
 
-        self.cuda_memory = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+        self.free_memory, self.total_memory = torch.cuda.mem_get_info()
+        self.cuda_memory = self.total_memory - self.free_memory
 
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
@@ -2300,6 +2313,8 @@ class MemorySnapshot:
     def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
+            free_memory=self.free_memory - other.free_memory,
+            total_memory=self.total_memory - other.total_memory,
             cuda_memory=self.cuda_memory - other.cuda_memory,
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
@@ -2320,6 +2335,16 @@ class MemoryProfilingResult:
     before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
+
+    def __repr__(self) -> str:
+        return (f"Memory profiling takes {self.profile_time:.2f} seconds. "
+                f"Total non KV cache memory: "
+                f"{(self.non_kv_cache_memory / GiB_bytes):.2f}GiB; "
+                f"torch peak memory increase: "
+                f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB; "
+                f"non-torch forward increase memory: "
+                f"{(self.non_torch_increase / GiB_bytes):.2f}GiB; "
+                f"weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB.")
 
 
 @contextlib.contextmanager
@@ -2460,7 +2485,7 @@ def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
     Returns:
         A properly formatted ZMQ path string.
     """
-    if not port:
+    if port is None:
         return f"{scheme}://{host}"
     if is_valid_ipv6_address(host):
         return f"{scheme}://[{host}]:{port}"

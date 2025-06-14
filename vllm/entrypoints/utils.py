@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import functools
@@ -13,8 +14,9 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-VLLM_SERVE_PARSER_EPILOG = (
-    "Tip: Use `vllm serve --help=<keyword>` to explore arguments from help.\n"
+VLLM_SUBCMD_PARSER_EPILOG = (
+    "Tip: Use `vllm [serve|run-batch] --help=<keyword>` "
+    "to explore arguments from help.\n"
     "   - To view a argument group:     --help=ModelConfig\n"
     "   - To view a single argument:    --help=max-num-seqs\n"
     "   - To search by keyword:         --help=max\n"
@@ -172,8 +174,15 @@ def _validate_truncation_size(
     return truncate_prompt_tokens
 
 
-def show_filtered_argument_or_group_from_help(parser):
+def show_filtered_argument_or_group_from_help(parser, subcommand_name):
     import sys
+
+    # Only handle --help=<keyword> for the current subcommand.
+    # Since subparser_init() runs for all subcommands during CLI setup,
+    # we skip processing if the subcommand name is not in sys.argv.
+    if subcommand_name not in sys.argv:
+        return
+
     for arg in sys.argv:
         if arg.startswith('--help='):
             search_keyword = arg.split('=', 1)[1]

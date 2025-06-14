@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
@@ -343,7 +344,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             self.image_newline = nn.Parameter(
                 torch.randn(self.projector_config.n_embed) * embed_std)
             # This is a typo in original implementation
-            self.view_seperator = nn.Parameter(
+            self.view_separator = nn.Parameter(
                 torch.randn(self.projector_config.n_embed) * embed_std)
         else:
             raise ValueError(
@@ -548,13 +549,13 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             if self.global_view_pos == "head":
                 global_local_features = torch.cat([
                     global_features,
-                    self.view_seperator[None, :],
+                    self.view_separator[None, :],
                     local_features,
                 ])
             else:
                 global_local_features = torch.cat([
                     local_features,
-                    self.view_seperator[None, :],
+                    self.view_separator[None, :],
                     global_features,
                 ])
 

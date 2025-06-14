@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -75,11 +76,16 @@ class Scheduler(SchedulerInterface):
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
         if self.vllm_config.kv_transfer_config is not None:
+            assert len(self.kv_cache_config.kv_cache_groups) == 1, (
+                "Multiple KV cache groups are not currently supported "
+                "with KV connectors")
             self.connector = KVConnectorFactory.create_connector_v1(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
         self.kv_event_publisher = EventPublisherFactory.create(
-            self.kv_events_config)
+            self.kv_events_config,
+            vllm_config.parallel_config.data_parallel_rank,
+        )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -98,7 +104,7 @@ class Scheduler(SchedulerInterface):
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
 
-        # P/D: requests in process of recving KV transfers
+        # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
@@ -174,7 +180,7 @@ class Scheduler(SchedulerInterface):
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
 
-        req_to_new_block_ids: dict[str, list[list[int]]] = {}
+        req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -374,7 +380,8 @@ class Scheduler(SchedulerInterface):
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
                 else:
-                    new_computed_blocks = KVCacheBlocks.create_empty()
+                    new_computed_blocks = (
+                        self.kv_cache_manager.create_empty_block_list())
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
@@ -421,11 +428,11 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     break
 
-                # KVConnector: update internal state after allocation.
+                # KVTransfer: the connector uses this info to determine
+                # if a load is needed. Note that
                 # This information is used to determine if a load is
                 # needed for this request.
-                if num_external_computed_tokens:
-                    assert self.connector is not None
+                if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
@@ -464,7 +471,7 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                # Count the number of prifix cached tokens.
+                # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
                 # Encoder-related.
@@ -581,7 +588,7 @@ class Scheduler(SchedulerInterface):
         request: Request,
         num_scheduled_tokens: int,
         num_scheduled_spec_tokens: int,
-        new_block_ids: list[list[int]],
+        new_block_ids: tuple[list[int], ...],
         resumed_from_preemption: bool,
     ) -> CachedRequestData:
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
@@ -818,7 +825,7 @@ class Scheduler(SchedulerInterface):
             if not stopped:
                 new_running.append(request)
 
-        # P/D: update state for finished KV Transfers.
+        # KV Connector: update state for finished KV Transfers.
         self._update_from_kv_xfer_finished(model_runner_output)
 
         # Return the cached request data to the queue so they can be reused.
@@ -838,7 +845,7 @@ class Scheduler(SchedulerInterface):
         }
 
         finished_req_ids = self.finished_req_ids_dict
-        if finished_req_ids is not None:
+        if finished_req_ids:
             # Include ids of requests that finished since last outputs
             # were sent.
             for client_index, finished_set in finished_req_ids.items():
@@ -940,7 +947,7 @@ class Scheduler(SchedulerInterface):
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
-            gpu_cache_usage=self.kv_cache_manager.usage,
+            kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
         )
@@ -965,7 +972,7 @@ class Scheduler(SchedulerInterface):
             self.kv_event_publisher.shutdown()
 
     ########################################################################
-    # P/D Related Methods
+    # KV Connector Related Methods
     ########################################################################
 
     def get_kv_connector(self) -> Optional[KVConnectorBase_V1]:
@@ -981,14 +988,13 @@ class Scheduler(SchedulerInterface):
         """
         if self.connector is None:
             return False, None
-        assert len(self.kv_cache_config.kv_cache_groups
-                   ) == 1, "KV connector only supports one KV cache group now"
-        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
+
+        (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
         return self.connector.request_finished(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
-        P/D: check if the request_id is finished_recving.
+        KV Connector: check if the request_id is finished_recving.
 
         The finished_recving_kv_req_ids list is populated
         on the previous steps()'s update_from_output based
@@ -998,20 +1004,19 @@ class Scheduler(SchedulerInterface):
         and the request state will be moved back to WAITING from
         WAITING_FOR_REMOTE_KV.
         """
+        assert self.connector is not None
         if request.request_id not in self.finished_recving_kv_req_ids:
             return False
-        assert len(self.kv_cache_config.kv_cache_groups
-                   ) == 1, "KV connector only supports one KV cache group now"
+
         # Now that the blocks are ready, actually cache them.
-        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
+        (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
         num_computed_tokens = len(block_ids) * self.block_size
+        # Handle the case where num request tokens less then one block.
+        num_computed_tokens = min(num_computed_tokens, request.num_tokens)
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1
-        self.kv_cache_manager.single_type_manager.cache_blocks(
-            request,
-            self.kv_cache_manager.req_to_block_hashes[request.request_id],
-            num_computed_tokens,
-        )
+        # This will cache the blocks iff caching is enabled.
+        self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
 
         # Update the request state for scheduling.
         request.num_computed_tokens = num_computed_tokens
@@ -1023,7 +1028,7 @@ class Scheduler(SchedulerInterface):
     def _update_from_kv_xfer_finished(self,
                                       model_runner_output: ModelRunnerOutput):
         """
-        P/D: update the scheduler state based on the output.
+        KV Connector: update the scheduler state based on the output.
 
         The Worker side connectors add finished_recving and
         finished_sending reqs to the output.
@@ -1031,7 +1036,7 @@ class Scheduler(SchedulerInterface):
         # if finished_recving: add to state so we can
             scheduler the request during the next step.
         """
-        # P/D: update recv and send status from last step.
+        # KV Connector:: update recv and send status from last step.
         for req_id in (model_runner_output.finished_recving or ()):
             logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_kv_req_ids.add(req_id)
