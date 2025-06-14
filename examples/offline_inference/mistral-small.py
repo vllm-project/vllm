@@ -6,7 +6,6 @@ import argparse
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
-from vllm.assets.image import ImageAsset
 
 # This script is an offline demo for running Mistral-Small-3.1
 #
@@ -56,7 +55,7 @@ from vllm.assets.image import ImageAsset
 
 
 def run_simple_demo(args: argparse.Namespace):
-    model_name = "mistral-community/pixtral-12b"
+    model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
     sampling_params = SamplingParams(max_tokens=8192)
 
     llm = LLM(
@@ -67,7 +66,7 @@ def run_simple_demo(args: argparse.Namespace):
         limit_mm_per_prompt={"image": 1},
         max_model_len=4096,
         max_num_seqs=2,
-        tensor_parallel_size=1,
+        tensor_parallel_size=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
@@ -79,7 +78,7 @@ def run_simple_demo(args: argparse.Namespace):
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                {"type": "image", "image": ImageAsset('cherry_blossom').pil_image},
+                {"type": "image_url", "image_url": {"url": image_url}},
             ],
         },
     ]
@@ -90,7 +89,7 @@ def run_simple_demo(args: argparse.Namespace):
 
 
 def run_advanced_demo(args: argparse.Namespace):
-    model_name = "mistral-community/pixtral-12b"
+    model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
     max_img_per_msg = 3
     max_tokens_per_img = 4096
 
