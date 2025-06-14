@@ -11,6 +11,7 @@ initialized randomly with a fixed seed.
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import pytest
 import torch
 from torch import nn
 from torch.library import Library
@@ -19,6 +20,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
                          set_current_vllm_config)
+from vllm.forward_context import set_forward_context
 from vllm.utils import direct_register_custom_op
 
 # create a library to hold the custom op
@@ -285,29 +287,32 @@ def run_model(llama_config,
                            vllm_config=vllm_config,
                            prefix="").eval().cuda()
 
-    B = 16  # max batch size
-    input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
-    positions = torch.arange(B).cuda()
+    with set_forward_context({}, vllm_config=vllm_config):
+        B = 16  # max batch size
+        input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
+        positions = torch.arange(B).cuda()
 
-    model(input_ids, positions)
-    model(input_ids[:2], positions[:2])
-    model(input_ids[:1], positions[:1])
+        model(input_ids, positions)
+        model(input_ids[:2], positions[:2])
+        model(input_ids[:1], positions[:1])
 
-    input_ids[:2].zero_()
-    output = model(input_ids[:2], positions[:2])
+        input_ids[:2].zero_()
+        output = model(input_ids[:2], positions[:2])
 
-    output = output.cpu()
+        output = output.cpu()
 
-    if llama_config.tractable_init:
-        expected_output = tractable_computation(input_ids[:2], positions[:2],
-                                                llama_config).cpu()
+        if llama_config.tractable_init:
+            expected_output = tractable_computation(input_ids[:2],
+                                                    positions[:2],
+                                                    llama_config).cpu()
 
-        assert torch.allclose(output, expected_output)
-    else:
-        return output.cpu()
+            assert torch.allclose(output, expected_output)
+        else:
+            return output.cpu()
 
 
-def _test_toy_llama(*, use_inductor):
+@pytest.mark.parametrize("use_inductor", [True, False])
+def test_toy_llama(use_inductor: bool):
     # compare output with and without piecewise compilation
 
     llama_config = LlamaConfig(hidden_size=128,
@@ -377,14 +382,6 @@ def _test_toy_llama(*, use_inductor):
 
     for i in range(1, len(outputs)):
         assert torch.allclose(outputs[0], outputs[i])
-
-
-def test_toy_llama_inductor():
-    _test_toy_llama(use_inductor=True)
-
-
-def test_toy_no_inductor():
-    _test_toy_llama(use_inductor=False)
 
 
 @torch.inference_mode
