@@ -43,7 +43,6 @@ steps:
 
 - label: Pytorch Nightly Dependency Override Check # 2min
   fast_check: true
-  torch_nightly: true
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
   commands:
