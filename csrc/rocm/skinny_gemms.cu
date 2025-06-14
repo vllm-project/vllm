@@ -320,7 +320,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Goal is to bring the activation matrix A to the LDS
   // and use it across the lifetime of the work group
   // TODO: When activation matrix is larger than 64 KB
-  //	     then this is not goint to work!
+  //	     then this is not going to work!
   //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 
@@ -581,7 +581,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Goal is to bring the activation matrix A to the LDS
   // and use it across the lifetime of the work group
   // TODO: When activation matrix is larger than 64 KB
-  //	     then this is not goint to work!
+  //	     then this is not going to work!
   //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 
@@ -601,7 +601,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // int _WvPrGrp = mindiv(N, CuCount * YTILE, WvPrGrp);
   uint32_t m = (blockIdx.x * _WvPrGrp + threadIdx.y) * YTILE;
 
-  // Check whether there will be fragmenation!
+  // Check whether there will be fragmentation!
   // This will happen only for the last wave!
   if (m < M && (m + YTILE) >= M) {
     uint32_t startColumn = M - YTILE;
@@ -827,7 +827,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
     m += CuCount * _WvPrGrp * YTILE;
 
-    // Check whether there will be fragmenation!
+    // Check whether there will be fragmentation!
     // This will happen only for the last wave!
     if (m < M && (m + YTILE) >= M) {
       uint32_t startColumn = M - YTILE;
@@ -882,7 +882,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Goal is to bring the activation matrix A to the LDS
   // and use it across the lifetime of the work group
   // TODO: When activation matrix is larger than 64 KB
-  //	     then this is not goint to work!
+  //	     then this is not going to work!
   //----------------------------------------------------
   __shared__ scalar_t s[max_lds_len];
 
@@ -904,7 +904,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   //----------------------------------------------------
   uint32_t m = (blockIdx.x * _WvPrGrp + threadIdx.y) * YTILE;
 
-  // Check whether there will be fragmenation!
+  // Check whether there will be fragmentation!
   // This will happen only for the last wave!
   if (m < M && (m + YTILE) >= M) {
     uint32_t startColumn = M - YTILE;
@@ -1176,7 +1176,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m += CuCount * _WvPrGrp * YTILE;
     kBase = 0;
 
-    // Check whether there will be fragmenation!
+    // Check whether there will be fragmentation!
     // This will happen only for the last wave!
     if (m < M && (m + YTILE) >= M) {
       uint32_t startColumn = M - YTILE;
