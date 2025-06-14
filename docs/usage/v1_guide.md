@@ -66,38 +66,44 @@ For each item, our progress towards V1 support falls into one of the following s
 
 ### Models
 
-| Model Type | Status |
-|-----------------|-----------------------------------------------------------------------------------|
-| **Decoder-only Models**                     | <nobr>🚀 Optimized</nobr>                                                          |
-| **Encoder-Decoder Models**                  | <nobr>🟠 Delayed</nobr>                                                            |
-| **Embedding Models**                        | <nobr>🚧 WIP ([PR #16188](https://github.com/vllm-project/vllm/pull/16188))</nobr> |
-| **Mamba Models**                            | <nobr>🚧 WIP ([PR #19327](https://github.com/vllm-project/vllm/pull/19327))</nobr> |
-| **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                                                         |
+| Model Type                  | Status                                                                             |
+|-----------------------------|------------------------------------------------------------------------------------|
+| **Decoder-only Models**     | <nobr>🚀 Optimized</nobr>                                                          |
+| **Encoder-Decoder Models**  | <nobr>🟠 Delayed</nobr>                                                            |
+| **Embedding Models**        | <nobr>🚧 WIP ([PR #16188](https://github.com/vllm-project/vllm/pull/16188))</nobr> |
+| **Mamba Models**            | <nobr>🚧 WIP ([PR #19327](https://github.com/vllm-project/vllm/pull/19327))</nobr> |
+| **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
 
-vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol,
-and the majority fall into the following categories:
+vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol.
 
-**Embedding Models**  
+!!! tip
+
+    This corresponds to the V1 column in our [list of supported models][supported-models].
+
+See below for the status of models that are still not yet supported in V1.
+
+#### Embedding Models
+
 The initial support will be provided by [PR #16188](https://github.com/vllm-project/vllm/pull/16188).
 
 Later, we will consider using [hidden states processor](https://github.com/vllm-project/vllm/issues/12249),
 which is based on [global logits processor](https://github.com/vllm-project/vllm/pull/13360)
 to enable simultaneous generation and embedding using the same engine instance in V1.
 
-**Mamba Models**  
+#### Mamba Models
+
 Models using selective state-space mechanisms instead of standard transformer attention (e.g., `MambaForCausalLM`, `JambaForCausalLM`)
 will be supported via [PR #19327](https://github.com/vllm-project/vllm/pull/19327).
 
-**Encoder-Decoder Models**  
-vLLM V1 is currently optimized for decoder-only transformers.
-Models requiring cross-attention between separate encoder and decoder are not yet supported (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`).
+#### Encoder-Decoder Models
 
-For a complete list of supported models, see the [list of supported models](https://docs.vllm.ai/en/latest/models/supported_models.html).
+Models requiring cross-attention between separate encoder and decoder (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`)
+are not yet supported.
 
 ### Features
 
-| Feature | Status |
-|-----------------|-----------------------------------------------------------------------------------|
+| Feature                                     | Status                                                                            |
+|---------------------------------------------|-----------------------------------------------------------------------------------|
 | **Prefix Caching**                          | <nobr>🚀 Optimized</nobr>                                                         |
 | **Chunked Prefill**                         | <nobr>🚀 Optimized</nobr>                                                         |
 | **LoRA**                                    | <nobr>🚀 Optimized</nobr>                                                         |

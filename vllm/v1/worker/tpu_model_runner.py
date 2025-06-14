@@ -413,10 +413,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             req_state.num_computed_tokens = req_data.num_computed_tokens
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                for block_ids, new_block_ids in zip(  # type: ignore[call-overload]
-                        req_state.block_ids,
-                        req_data.new_block_ids,
-                        strict=True):
+                for block_ids, new_block_ids in zip(req_state.block_ids,
+                                                    req_data.new_block_ids):
                     block_ids.extend(new_block_ids)
             else:
                 # The request is resumed from preemption.
