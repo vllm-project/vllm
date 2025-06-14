@@ -30,6 +30,29 @@ def apply_softcap(S, x):
 
 
 @triton.jit
+def find_seq_idx(
+    query_start_len_ptr,
+    target_idx,
+    num_seqs,
+    BLOCK_Q: tl.constexpr,
+    use_q_block_mode: tl.constexpr
+):
+    left: tl.int32 = 0
+    right = num_seqs
+    while left < right:
+        mid = (left + right) // 2
+        val = tl.load(query_start_len_ptr + mid)
+        mid_val = val // BLOCK_Q + mid if use_q_block_mode else val
+
+        if mid_val <= target_idx:
+            left = mid + 1
+        else:
+            right = mid
+
+    return left - 1
+
+
+@triton.jit
 def kernel_unified_attention_2d(
         output_ptr,  # [num_tokens, num_query_heads, head_size]
         query_ptr,  # [num_tokens, num_query_heads, head_size]
@@ -72,17 +95,14 @@ def kernel_unified_attention_2d(
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
 
-    left: tl.int32 = 0
-    right = num_seqs
-    while left < right:
-        mid = (left + right) // 2
-        mid_val = tl.load(query_start_len_ptr + mid) // BLOCK_Q + mid
-        if mid_val <= q_block_global_idx:
-            left = mid + 1
-        else:
-            right = mid
+    seq_idx = find_seq_idx(
+        query_start_len_ptr,
+        q_block_global_idx,
+        num_seqs,
+        BLOCK_Q,
+        True
+    )
 
-    seq_idx = left - 1
     q_block_start_idx = tl.load(query_start_len_ptr +
                                 seq_idx) // BLOCK_Q + seq_idx
 
@@ -288,17 +308,13 @@ def kernel_unified_attention_3d(
     kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2)
 
-    left: tl.int32 = 0
-    right = num_seqs
-    while left < right:
-        mid = (left + right) // 2
-        mid_val = tl.load(query_start_len_ptr + mid) // BLOCK_Q + mid
-        if mid_val <= q_block_global_idx:
-            left = mid + 1
-        else:
-            right = mid
-
-    seq_idx = left - 1
+    seq_idx = find_seq_idx(
+        query_start_len_ptr,
+        q_block_global_idx,
+        num_seqs,
+        BLOCK_Q,
+        True
+    )
 
     q_block_start_idx = tl.load(query_start_len_ptr +
                                 seq_idx) // BLOCK_Q + seq_idx
@@ -458,7 +474,7 @@ def kernel_unified_attention_3d(
         acc += tl.dot(P.to(V.dtype), V)
 
     segm_output_offset = (
-        query_offset_0[:, None] *
+        query_offset_0[:, None].to(tl.int64) *
         (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED) +
         query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED) +
         segm_idx * HEAD_SIZE_PADDED + tl.arange(0, HEAD_SIZE_PADDED)[None, :])
@@ -467,7 +483,7 @@ def kernel_unified_attention_3d(
         acc,
         mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
     )
-    segm_offset = (query_offset_0 * (num_query_heads * NUM_SEGMENTS_PER_SEQ) +
+    segm_offset = (query_offset_0.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ) +
                    query_offset_1 * NUM_SEGMENTS_PER_SEQ + segm_idx)
     tl.store(segm_max_ptr + segm_offset, M, mask=query_mask_0 & query_mask_1)
     tl.store(segm_expsum_ptr + segm_offset,
@@ -492,22 +508,19 @@ def reduce_segments(
         HEAD_SIZE: tl.constexpr,  # int, must be power of 2
         HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
         query_start_len_ptr,  # [num_seqs+1]
+        BLOCK_Q: tl.constexpr,  # int
         NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
 ):
-    token_idx = tl.program_id(0)
+    query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
 
-    left: tl.int32 = 0
-    right = num_seqs
-    while left < right:
-        mid = (left + right) // 2
-        mid_val = tl.load(query_start_len_ptr + mid)
-        if mid_val <= token_idx:
-            left = mid + 1
-        else:
-            right = mid
-
-    seq_idx = left - 1
+    seq_idx = find_seq_idx(
+        query_start_len_ptr,
+        query_token_idx,
+        num_seqs,
+        BLOCK_Q,
+        False
+    )
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -524,7 +537,7 @@ def reduce_segments(
                         0).to(tl.int1)
 
     # load segment maxima
-    segm_offset = (token_idx * (num_query_heads * NUM_SEGMENTS_PER_SEQ) +
+    segm_offset = (query_token_idx.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ) +
                    query_head_idx * NUM_SEGMENTS_PER_SEQ +
                    tl.arange(0, NUM_SEGMENTS_PER_SEQ))
     segm_max = tl.load(segm_max_ptr + segm_offset,
@@ -541,7 +554,7 @@ def reduce_segments(
 
     # load, rescale, and add segment attention outputs
     segm_output_offset = (
-        token_idx *
+        query_token_idx.to(tl.int64) *
         (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED) +
         query_head_idx * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED) +
         tl.arange(0, NUM_SEGMENTS_PER_SEQ)[:, None] * HEAD_SIZE_PADDED +
@@ -557,7 +570,7 @@ def reduce_segments(
     acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
 
     # write result
-    output_offset = (token_idx * output_stride_0 +
+    output_offset = (query_token_idx * output_stride_0 +
                      query_head_idx * output_stride_1 +
                      tl.arange(0, HEAD_SIZE_PADDED))
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
@@ -739,5 +752,6 @@ def unified_attention(
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             query_start_len_ptr=cu_seqlens_q,
+            BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
         )
