@@ -627,6 +627,10 @@ class BaseMultiModalContentParser(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def parse_direct_image(self, image: object) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
         raise NotImplementedError
@@ -663,7 +667,6 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder(placeholder)
 
     def parse_direct_image(self, image: object) -> None:  
-        # Directly add the PIL image without URL processing  
         placeholder = self._tracker.add("image", image)  
         self._add_placeholder(placeholder)  
 
@@ -718,6 +721,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         placeholder = self._tracker.add("image", image_coro)
         self._add_placeholder(placeholder)
+
+    def parse_direct_image(self, image: object) -> None:  
+        future: asyncio.Future[object] = asyncio.Future()  
+        future.set_result(image)  
+        
+        placeholder = self._tracker.add("image", future) 
+        self._add_placeholder(placeholder)  
 
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
