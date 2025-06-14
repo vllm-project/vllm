@@ -662,6 +662,11 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         placeholder = self._tracker.add("image", image)
         self._add_placeholder(placeholder)
 
+    def parse_direct_image(self, image: object) -> None:  
+        # Directly add the PIL image without URL processing  
+        placeholder = self._tracker.add("image", image)  
+        self._add_placeholder(placeholder)  
+
     def parse_image_embeds(self,
                            image_embeds: Union[str, dict[str, str]]) -> None:
         if isinstance(image_embeds, dict):
@@ -869,6 +874,7 @@ MM_PARSER_MAP: dict[
     lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
     lambda part: _ImageEmbedsParser(part).get("image_embeds", None),
+    "image": lambda part: part.get("image", None),  
     "audio_url":
     lambda part: _AudioParser(part).get("audio_url", {}).get("url", None),
     "input_audio":
@@ -938,7 +944,7 @@ def _parse_chat_message_content_mm_part(
 
 
 VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
-                                       "image_embeds",
+                                       "image_embeds", "image",
                                        "audio_url", "input_audio", "video_url")
 
 
@@ -1017,6 +1023,10 @@ def _parse_chat_message_content_part(
         content = cast(Union[str, dict[str, str]], content)
         mm_parser.parse_image_embeds(content)
         return {'type': 'image'} if wrap_dicts else None
+    if part_type == "image":
+        image_content = cast(object, content)  # PIL image or similar  
+        mm_parser.parse_direct_image(image_content)  
+        return {'type': 'image'} if wrap_dicts else None  
     if part_type == "audio_url":
         str_content = cast(str, content)
         mm_parser.parse_audio(str_content)
