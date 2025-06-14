@@ -215,6 +215,25 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
+    def masked_activation(self, activation: str, output: torch.Tensor,
+                          input: torch.Tensor,
+                          expert_num_tokens: torch.Tensor) -> None:
+        """
+        Given inputs and outputs of shape 
+        [num_experts, max_tokens, hidden_size], and expert_num_tokens/mask
+        of shape [E], perform act_and_mul only on the inputs that are
+        actually valid.
+        Note that expert_num_tokens[i] is the number of tokens that are
+        actually valid for expert i.
+        """
+        assert output.shape == input.shape
+        E, _, _ = input.shape
+        assert expert_num_tokens.size(0) == E, (
+            f"expert_num_tokens.size(0)({expert_num_tokens.size(0)}) != E({E})"
+        )
+        assert activation == "silu", "Only silu_and_mul is supported for now."
+        pass
+
     def activation(self, activation: str, output: torch.Tensor,
                    input: torch.Tensor) -> None:
         assert output.size(-1) * 2 == input.size(-1)
