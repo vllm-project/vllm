@@ -794,7 +794,6 @@ class AsyncMPClient(MPClient):
                     request_type: EngineCoreRequestType,
                     request: Any,
                     engine: Optional[CoreEngine] = None) -> Awaitable[Any]:
-        self.ensure_alive()
         if engine is None:
             engine = self.core_engine
 
