@@ -27,8 +27,9 @@ cat after.txt
 
 echo ">>> Comparing versions"
 if diff before.txt after.txt; then
-  echo "✅ torch version not overridden."
+  echo "torch version not overridden."
 else
-  echo "torch version overridden by nightly_torch_test.txt"
+  echo "torch version overridden by nightly_torch_test.txt, if the dependency is not triggered by the pytroch nightly test,
+  please add the dependency to the list 'keywords'  in tools/generate_nightly_torch_test.py"
   exit 1
 fi
