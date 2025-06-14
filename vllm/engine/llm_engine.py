@@ -1306,6 +1306,9 @@ class LLMEngine:
                 if finished_request_id in self.seq_id_to_seq_group:
                     del self.seq_id_to_seq_group[finished_request_id]
 
+            finished_requests_ids += self.scheduler[
+                virtual_engine].get_async_stopped_request_ids()
+
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
