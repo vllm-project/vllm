@@ -17,11 +17,11 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-## Batched Per Token Quant ####
+## Masked Per Token Quant ####
 
 
 @triton.jit
-def _batched_per_token_group_quant_fp8(
+def _masked_per_token_group_quant_fp8(
         valid_tokens_array,
         # Batch dimension strides
         stride_yb,
@@ -80,7 +80,7 @@ def _batched_per_token_group_quant_fp8(
 
 
 @triton.jit
-def _batched_per_token_group_quant_fp8_colmajor(
+def _masked_per_token_group_quant_fp8_colmajor(
     valid_tokens_array,
     # Batch strides
     stride_yb,
@@ -142,7 +142,7 @@ def _batched_per_token_group_quant_fp8_colmajor(
         BLOCK)
 
 
-def batched_per_token_group_quant_fp8(
+def masked_per_token_group_quant_fp8(
         x: torch.Tensor,  # [B, MAX_TOKENS, HIDDEN_SIZE]
         x_q: Optional[torch.Tensor],  # [B, MAX_TOKENS, HIDDEN_SIZE]
         valid_tokens_array: torch.Tensor,  # [B]
@@ -180,7 +180,7 @@ def batched_per_token_group_quant_fp8(
     grid = (B, M)
 
     if column_major_scales:
-        _batched_per_token_group_quant_fp8_colmajor[grid](
+        _masked_per_token_group_quant_fp8_colmajor[grid](
             valid_tokens_array,
             x.stride(0),
             x_q.stride(0),
@@ -200,7 +200,7 @@ def batched_per_token_group_quant_fp8(
             num_stages=num_stages,
         )
     else:
-        _batched_per_token_group_quant_fp8[grid](
+        _masked_per_token_group_quant_fp8[grid](
             valid_tokens_array,
             x.stride(0),
             x_q.stride(0),
@@ -266,7 +266,7 @@ def silu_and_mul(
 
 
 @triton.jit
-def batched_silu_and_mul_kernel(
+def masked_silu_and_mul_kernel(
         output,  # [B, MAX_NUM_TOKENS, D]
         input,  # [B, MAX_NUM_TOKENS, D * 2]
         valid_tokens_array,  # [B]
@@ -310,7 +310,7 @@ def batched_silu_and_mul_kernel(
         compute_type)
 
 
-def invoke_batched_silu_and_mul(
+def invoke_masked_silu_and_mul(
         output: torch.Tensor,  #[B, MAX_TOKENS, D]
         input: torch.Tensor,  #[B, MAX_TOKENS, D * 2]
         valid_tokens_array: torch.Tensor):
@@ -328,7 +328,7 @@ def invoke_batched_silu_and_mul(
 
     grid = (batch_size, triton.cdiv(max_num_tokens,
                                     BLOCK_M), triton.cdiv(D, BLOCK_D))
-    batched_silu_and_mul_kernel[grid](output, input, valid_tokens_array,
-                                      output.stride(0), output.stride(1),
-                                      input.stride(0), input.stride(1),
-                                      compute_tl_dtype, D, BLOCK_M, BLOCK_D)
+    masked_silu_and_mul_kernel[grid](output, input, valid_tokens_array,
+                                     output.stride(0), output.stride(1),
+                                     input.stride(0), input.stride(1),
+                                     compute_tl_dtype, D, BLOCK_M, BLOCK_D)
