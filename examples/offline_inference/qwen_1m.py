@@ -63,6 +63,7 @@ def initialize_engine() -> LLM:
 
 def main():
     llm = initialize_engine()
+    process_requests(llm, ["Hello, world!"])
     prompt = load_prompt()
     process_requests(llm, [prompt])
 
