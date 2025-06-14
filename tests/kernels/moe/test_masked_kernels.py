@@ -148,4 +148,4 @@ def test_masked_silu_mul(batch_size: int, num_tokens: int, hidden_size: int,
     # impl
     invoke_masked_silu_and_mul(out, input, valid_num_tokens)
 
-    torch.testing.assert_close(ref_out, out, atol=1e-3, rtol=1e-2)
+    torch.testing.assert_close(ref_out, out)
