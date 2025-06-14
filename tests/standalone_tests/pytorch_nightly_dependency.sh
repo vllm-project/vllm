@@ -4,7 +4,7 @@ set -e
 set -x
 
 echo ">>> uninstall everything from requirements/test.txt"
-pip uninstall -y $(grep -vE '^\s*#' requirements/test.txt | cut -d '=' -f 1)
+grep -vE '^\s*#' requirements.txt | cut -d '=' -f 1 | xargs -n 1 pip uninstall -y
 
 echo ">>> Uninstalling previous PyTorch packages (if any)"
 pip uninstall -y torch torchvision torchaudio vllm|| true
