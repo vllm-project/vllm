@@ -1527,10 +1527,18 @@ class EngineArgs:
             if self.enable_prefix_caching is None:
                 self.enable_prefix_caching = True
         else:
+
+            pooling_type = model_config.pooler_config.pooling_type
+
+            # TODO: when encoder models are supported we'll have to
+            # check for causal attention here.
+            incremental_prefill_supported = (pooling_type is not None and \
+                                           pooling_type.lower() == "last")
+
             if self.enable_chunked_prefill is None:
-                self.enable_chunked_prefill = False
+                self.enable_chunked_prefill = incremental_prefill_supported
             if self.enable_prefix_caching is None:
-                self.enable_prefix_caching = False
+                self.enable_prefix_caching = incremental_prefill_supported
 
         if not self.enable_chunked_prefill:
             self.max_num_batched_tokens = model_config.max_model_len
