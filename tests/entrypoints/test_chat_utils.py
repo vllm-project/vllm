@@ -154,7 +154,6 @@ def test_parse_chat_messages_single_image(
         "role": "user",
         "content": "<|image_1|>\nWhat's in the image?"
     }]
-    print('mm data', mm_data)
     _assert_mm_data_is_image_input(mm_data, 1)
 
 
