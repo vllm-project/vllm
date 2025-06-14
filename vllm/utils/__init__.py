@@ -528,11 +528,13 @@ class AsyncMicrobatchTokenizer:
         self.max_batch_size = max_batch_size
         self.batch_wait_timeout_s = batch_wait_timeout_s
 
-        self._queue: asyncio.Queue[tuple[str, object, dict,
-                                         asyncio.Future]] = (asyncio.Queue())
+        self._queue: Optional[asyncio.Queue[tuple[str, object, dict,
+                                                  asyncio.Future]]] = None
 
         # Single worker that owns the blocking tokenizer.
         self._executor = ThreadPoolExecutor(max_workers=1)
+
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Handle to the currently running batcher task (if any).
         self._batcher_task: Optional[asyncio.Task] = None
@@ -543,21 +545,28 @@ class AsyncMicrobatchTokenizer:
     async def __call__(self, prompt, **kwargs):
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
+        self._ensure_queue_and_batcher(loop)
+        assert self._queue is not None
         await self._queue.put(("encode", prompt, kwargs, fut))
-        self._ensure_batcher(loop)
         return await fut
 
     async def decode(self, token_ids, **kwargs):
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
+        self._ensure_queue_and_batcher(loop)
+        assert self._queue is not None
         await self._queue.put(("decode", token_ids, kwargs, fut))
-        self._ensure_batcher(loop)
         return await fut
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _ensure_batcher(self, loop: asyncio.AbstractEventLoop):
+    def _ensure_queue_and_batcher(self, loop: asyncio.AbstractEventLoop):
+        if self._loop is not loop:
+            self._queue = asyncio.Queue()
+            self._loop = loop
+            self._batcher_task = None
+
         if self._batcher_task is None or self._batcher_task.done():
             self._batcher_task = loop.create_task(self._batch_loop())
 
@@ -567,6 +576,7 @@ class AsyncMicrobatchTokenizer:
 
         while True:
             try:
+                assert self._queue is not None
                 first_item = await self._queue.get()
             except asyncio.CancelledError:
                 return
@@ -579,6 +589,7 @@ class AsyncMicrobatchTokenizer:
                 if timeout <= 0:
                     break
                 try:
+                    assert self._queue is not None
                     item = await asyncio.wait_for(self._queue.get(), timeout)
                     batch.append(item)
                 except asyncio.TimeoutError:
@@ -623,10 +634,12 @@ class AsyncMicrobatchTokenizer:
                     results = await loop.run_in_executor(
                         self._executor, encode_fn)
                     for (_, _, _, fut), res in zip(encode_items, results):
-                        fut.set_result(res)
+                        if not fut.done():
+                            fut.set_result(res)
                 except Exception as e:  # pragma: no cover – exception path
                     for (_, _, _, fut) in encode_items:
-                        fut.set_exception(e)
+                        if not fut.done():
+                            fut.set_exception(e)
 
             # ---------------- Decode ----------------
             if decode_items:
@@ -642,20 +655,28 @@ class AsyncMicrobatchTokenizer:
                     results = await loop.run_in_executor(
                         self._executor, _decode_batch)
                     for (_, _, _, fut), res in zip(decode_items, results):
-                        fut.set_result(res)
+                        if not fut.done():
+                            fut.set_result(res)
                 except Exception as e:
                     for (_, _, _, fut) in decode_items:
-                        fut.set_exception(e)
+                        if not fut.done():
+                            fut.set_exception(e)
 
             # If queue is empty, exit and let new requests spawn a fresh task
-            if self._queue.empty():
+            if self._queue is not None and self._queue.empty():
                 return
 
     def __del__(self):
-        if (self._batcher_task is None
-                or not asyncio.get_running_loop().is_running()):
+        if self._batcher_task is None:
             return
-        self._batcher_task.cancel()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        if loop.is_running():
+            self._batcher_task.cancel()
 
 
 def make_async(
