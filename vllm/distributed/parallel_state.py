@@ -938,6 +938,11 @@ def init_distributed_environment(
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
             "distributed environment")
+        if not torch.distributed.is_backend_available(backend):
+            logger.warning(
+                "Distributed backend %s is not available; "
+                "falling back to gloo.", backend)
+            backend = "gloo"
         # this backend is used for WORLD
         torch.distributed.init_process_group(
             backend=backend,
