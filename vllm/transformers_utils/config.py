@@ -800,7 +800,7 @@ def get_hf_text_config(config: PretrainedConfig):
         #  thinker_config.text_config.
         return config.thinker_config.text_config
 
-    text_config = config.get_text_config()
+    text_config = config.get_text_config().get_text_config()
 
     if text_config is not config:
         # The code operates under the assumption that text_config should have
