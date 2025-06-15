@@ -1165,6 +1165,15 @@ class AsyncLLMEngine(EngineClient):
     async def reset_mm_cache(self) -> None:
         self.engine.reset_mm_cache()
 
+    async def start_expert_distribution_record(self):
+        self.engine.start_expert_distribution_record()
+
+    async def stop_expert_distribution_record(self) -> None:
+        self.engine.stop_expert_distribution_record()
+
+    async def dump_expert_distribution_record(self):
+        self.engine.dump_expert_distribution_record()
+
     async def reset_prefix_cache(self,
                                  device: Optional[Device] = None) -> None:
         self.engine.reset_prefix_cache(device)

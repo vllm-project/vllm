@@ -27,6 +27,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
+                                         RPCExpertDistributionRecordRequest,
                                          RPCIsSleepingRequest,
                                          RPCIsSleepingResponse,
                                          RPCLoadAdapterRequest,
@@ -621,6 +622,27 @@ class MQLLMEngineClient(EngineClient):
 
         await self._send_one_way_rpc_request(
             request=RPCResetMultiModalCacheRequest.RESET,
+            socket=self.input_socket)
+
+    async def start_expert_distribution_record(self) -> None:
+        """Start recording expert distribution"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCExpertDistributionRecordRequest.START,
+            socket=self.input_socket)
+
+    async def stop_expert_distribution_record(self) -> None:
+        """Stop recording expert distribution"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCExpertDistributionRecordRequest.STOP,
+            socket=self.input_socket)
+
+    async def dump_expert_distribution_record(self) -> None:
+        """Dump the expert distribution record to a file"""
+
+        await self._send_one_way_rpc_request(
+            request=RPCExpertDistributionRecordRequest.DUMP,
             socket=self.input_socket)
 
     async def reset_prefix_cache(self,

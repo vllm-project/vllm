@@ -95,12 +95,6 @@ class Executor(ExecutorBase):
     def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start, ))
 
-    def expert_distribution_record(self, is_start: bool) -> None:
-        self.collective_rpc("expert_distribution_record", args=(is_start, ))
-
-    def dump_expert_distribution_record(self) -> None:
-        self.collective_rpc("dump_expert_distribution_record")
-
 
 class UniProcExecutor(UniProcExecutorV0, Executor):
     pass

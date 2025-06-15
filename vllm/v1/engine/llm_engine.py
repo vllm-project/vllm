@@ -261,6 +261,15 @@ class LLMEngine:
     def stop_profile(self):
         self.engine_core.profile(False)
 
+    def start_expert_distribution_record(self):
+        self.engine_core.expert_distribution_record(True)
+
+    def stop_expert_distribution_record(self) -> None:
+        self.engine_core.expert_distribution_record(False)
+
+    def dump_expert_distribution_record(self):
+        self.engine_core.dump_expert_distribution_record()
+
     def reset_mm_cache(self):
         self.processor.mm_registry.reset_processor_cache()
         self.processor.mm_input_cache_client.reset()
