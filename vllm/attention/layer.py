@@ -80,6 +80,9 @@ class Attention(nn.Module):
             calculate_kv_scales = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
+        assert num_heads % num_kv_heads == 0, \
+            f"num_heads ({num_heads}) is not " \
+            f"divisible by num_kv_heads ({num_kv_heads})"
 
         # The default k/v_scale is set to 1.0. This is ignored
         # when kv-cache is not fp8, and should be used with
@@ -291,7 +294,9 @@ class MultiHeadAttention(nn.Module):
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
-        assert self.num_heads % self.num_kv_heads == 0
+        assert self.num_heads % self.num_kv_heads == 0, \
+            f"num_heads ({self.num_heads}) is not " \
+            f"divisible by num_kv_heads ({self.num_kv_heads})"
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         dtype = torch.get_default_dtype()

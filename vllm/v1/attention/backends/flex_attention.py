@@ -376,7 +376,6 @@ class FlexAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "FlexAttention does not support logits soft cap yet.")
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         if kv_sharing_target_layer_name is not None:
