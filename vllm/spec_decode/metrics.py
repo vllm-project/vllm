@@ -81,10 +81,6 @@ class AsyncMetricsCollector:
         self._rejsample_metrics_collect_interval_s = collect_interval_s
         self._last_metrics_collect_time = self._timer()
 
-    def init_gpu_tensors(self, rank: int) -> None:
-        self._rank = rank
-        self._copy_stream = torch.cuda.Stream()
-
     def init_tensors(self,
                      rank: int,
                      device_type: Union[torch.device, str] = 'cuda') -> None:

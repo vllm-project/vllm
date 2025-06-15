@@ -357,7 +357,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         if self._enable_lm_head_weight_load:
             # NOTE(Shangming): gather lm_head weight when tp enabled
             target_lm_head_weight: torch.Tensor = tensor_model_parallel_gather(
-                self.scorer_worker.model_runner.model_runner.model.lm_head.\
+                self.scorer_worker.model_runner.model.lm_head.\
                     weight.data,
                     dim=0,
             )

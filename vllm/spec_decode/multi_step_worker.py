@@ -415,9 +415,7 @@ class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
         self,
         lm_head_weight: torch.Tensor,
     ) -> None:
-        weight_loader = getattr(
-            self.worker.model_runner.model_runner.model.lm_head.weight,
-            "weight_loader", default_weight_loader)
-        weight_loader(
-            self.worker.model_runner.model_runner.model.lm_head.weight,
-            lm_head_weight)
+        weight_loader = getattr(self.worker.model_runner.model.lm_head.weight,
+                                "weight_loader", default_weight_loader)
+        weight_loader(self.worker.model_runner.model.lm_head.weight,
+                      lm_head_weight)
