@@ -143,12 +143,13 @@ def _masked_per_token_group_quant_fp8_colmajor(
 
 
 def masked_per_token_group_quant_fp8(
-        x: torch.Tensor,  # [B, MAX_TOKENS, HIDDEN_SIZE]
-        x_q: Optional[torch.Tensor],  # [B, MAX_TOKENS, HIDDEN_SIZE]
-        valid_tokens_array: torch.Tensor,  # [B]
-        group_size: int,
-        column_major_scales: bool,
-        eps: float = 1e-10) -> tuple[torch.Tensor, torch.Tensor]:
+    x: torch.Tensor,  # [B, MAX_TOKENS, HIDDEN_SIZE]
+    valid_tokens_array: torch.Tensor,  # [B]
+    group_size: int,
+    column_major_scales: bool,
+    x_q: Optional[torch.Tensor] = None,  # [B, MAX_TOKENS, HIDDEN_SIZE]
+    eps: float = 1e-10
+) -> tuple[torch.Tensor, torch.Tensor]:
 
     assert x.ndim == 3
     assert (x.size(-1) % group_size == 0), (
