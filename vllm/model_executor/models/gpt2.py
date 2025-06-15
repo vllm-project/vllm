@@ -341,7 +341,7 @@ class GPT2ForSequenceClassification(nn.Module):
             prefix=maybe_prefix(prefix, "gpt2")
         )
         self.score = nn.Linear(config.n_embd, config.num_labels, bias=False)
-        self.activation = nn.Softmax()
+        self.activation = nn.Softmax(dim=-1)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
