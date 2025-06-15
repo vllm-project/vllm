@@ -1321,7 +1321,7 @@ class LLM:
     def stop_expert_distribution_record(self) -> None:
         self.llm_engine.stop_expert_distribution_record()
 
-    def dump_expert_distribution_record(self):
+    def dump_expert_distribution_record(self) -> None:
         self.llm_engine.dump_expert_distribution_record()
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
