@@ -306,7 +306,7 @@ def log_non_default_args(args: argparse.Namespace):
     for arg, default in vars(parser.parse_args([])).items():
         if default != getattr(args, arg):
             non_default_args[arg] = getattr(args, arg)
-    logger.info("non-default args: %s", non_default_args)
+    logger.debug("non-default args: %s", non_default_args)
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
