@@ -111,13 +111,13 @@ class Plamo2MambaMixer(nn.Module):
         self.hidden_size_per_head = self.config.hidden_size_per_head
         self.num_heads = self.config.mamba_num_heads
         self.time_step_rank = max(64, self.hidden_size // 16)
-        self.use_conv_bias = False
         self.use_bias = False
         self.conv1d = ColumnParallelLinear(
             input_size=self.conv_kernel_size,
             output_size=self.intermediate_size,
-            bias=self.use_conv_bias,
+            bias=False,
             prefix=f"{prefix}.conv1d",
+            return_bias=False,
         )
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
@@ -139,6 +139,7 @@ class Plamo2MambaMixer(nn.Module):
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.bcdt_proj",
+            return_bias=False,
         )
         # time step projection (discretization) -
         # In the forward we need to apply dt_proj without the bias,
@@ -149,6 +150,7 @@ class Plamo2MambaMixer(nn.Module):
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.dt_proj",
+            return_bias=False,
         )
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -240,7 +242,7 @@ class Plamo2MambaMixer(nn.Module):
 
         # 3. State Space Model sequence transformation
         # 3.a. input varying initialization of time_step, B and C
-        ssm_parameters = self.bcdt_proj(hidden_states.transpose(-2, -1))[0]
+        ssm_parameters = self.bcdt_proj(hidden_states.transpose(-2, -1))
 
         # Splitting the ssm_parameters as in modeling_plamo.py.
         B, C, time_step = torch.split(
@@ -252,7 +254,7 @@ class Plamo2MambaMixer(nn.Module):
         B = self.B_norm(B.contiguous())
         C = self.C_norm(C.contiguous())
 
-        discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
+        discrete_time_step = self.dt_proj(time_step).transpose(-2, -1)
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
         time_proj_bias = (self.dt_bias.float() if hasattr(
             self.dt_proj, "bias") else None)
@@ -319,19 +321,21 @@ class DenseMLP(nn.Module):
             self.hidden_size, [self.intermediate_size] * 2,
             bias=False,
             prefix=f"{prefix}.gate_up_proj",
-            quant_config=quant_config)
+            quant_config=quant_config,
+            return_bias=False,
+            )
         self.act = SiluAndMul()
         self.down_proj = RowParallelLinear(self.intermediate_size,
                                            self.hidden_size,
                                            bias=False,
                                            prefix=f"{prefix}.down_proj",
-                                           quant_config=quant_config)
+                                           quant_config=quant_config,
+                                           return_bias=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        h = self.gate_up_proj(hidden_states)[0]
+        h = self.gate_up_proj(hidden_states)
         h = self.act(h)
-        output, _ = self.down_proj(h)
-        return output  # type: ignore
+        return self.down_proj(h)
 
 
 class Plamo2AttentionMixer(nn.Module):
