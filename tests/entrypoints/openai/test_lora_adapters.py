@@ -15,10 +15,8 @@ from huggingface_hub import snapshot_download
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
-# technically this needs Mistral-7B-v0.1 as base, but we're not testing
-# generation quality here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
+MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+LORA_NAME = "jashing/tinyllama-colorist-lora"
 
 BADREQUEST_CASES = [
     (
@@ -49,7 +47,7 @@ BADREQUEST_CASES = [
 
 
 @pytest.fixture(scope="module")
-def zephyr_lora_files():
+def lora_files():
     return snapshot_download(repo_id=LORA_NAME)
 
 
@@ -62,22 +60,21 @@ def monkeypatch_module():
 
 
 @pytest.fixture(scope="module", params=[False, True])
-def server_with_lora_modules_json(request, monkeypatch_module,
-                                  zephyr_lora_files):
+def server_with_lora_modules_json(request, monkeypatch_module, lora_files):
 
     use_v1 = request.param
     monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
 
     # Define the json format LoRA module configurations
     lora_module_1 = {
-        "name": "zephyr-lora",
-        "path": zephyr_lora_files,
+        "name": "lora",
+        "path": lora_files,
         "base_model_name": MODEL_NAME
     }
 
     lora_module_2 = {
-        "name": "zephyr-lora2",
-        "path": zephyr_lora_files,
+        "name": "lora2",
+        "path": lora_files,
         "base_model_name": MODEL_NAME
     }
 
@@ -116,8 +113,7 @@ async def client(server_with_lora_modules_json):
 
 
 @pytest.mark.asyncio
-async def test_static_lora_lineage(client: openai.AsyncOpenAI,
-                                   zephyr_lora_files):
+async def test_static_lora_lineage(client: openai.AsyncOpenAI, lora_files):
     models = await client.models.list()
     models = models.data
     served_model = models[0]
@@ -125,22 +121,20 @@ async def test_static_lora_lineage(client: openai.AsyncOpenAI,
     assert served_model.id == MODEL_NAME
     assert served_model.root == MODEL_NAME
     assert served_model.parent is None
-    assert all(lora_model.root == zephyr_lora_files
-               for lora_model in lora_models)
+    assert all(lora_model.root == lora_files for lora_model in lora_models)
     assert all(lora_model.parent == MODEL_NAME for lora_model in lora_models)
-    assert lora_models[0].id == "zephyr-lora"
-    assert lora_models[1].id == "zephyr-lora2"
+    assert lora_models[0].id == "lora"
+    assert lora_models[1].id == "lora2"
 
 
 @pytest.mark.asyncio
-async def test_dynamic_lora_lineage(client: openai.AsyncOpenAI,
-                                    zephyr_lora_files):
+async def test_dynamic_lora_lineage(client: openai.AsyncOpenAI, lora_files):
 
     response = await client.post("load_lora_adapter",
                                  cast_to=str,
                                  body={
-                                     "lora_name": "zephyr-lora-3",
-                                     "lora_path": zephyr_lora_files
+                                     "lora_name": "lora-3",
+                                     "lora_path": lora_files
                                  })
     # Ensure adapter loads before querying /models
     assert "success" in response
@@ -148,9 +142,9 @@ async def test_dynamic_lora_lineage(client: openai.AsyncOpenAI,
     models = await client.models.list()
     models = models.data
     dynamic_lora_model = models[-1]
-    assert dynamic_lora_model.root == zephyr_lora_files
+    assert dynamic_lora_model.root == lora_files
     assert dynamic_lora_model.parent == MODEL_NAME
-    assert dynamic_lora_model.id == "zephyr-lora-3"
+    assert dynamic_lora_model.id == "lora-3"
 
 
 @pytest.mark.asyncio
@@ -184,14 +178,14 @@ async def test_dynamic_lora_invalid_files(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("test_name,config_change,expected_error",
                          BADREQUEST_CASES)
 async def test_dynamic_lora_badrequests(client: openai.AsyncOpenAI, tmp_path,
-                                        zephyr_lora_files, test_name: str,
+                                        lora_files, test_name: str,
                                         config_change: dict,
                                         expected_error: str):
     # Create test directory
     test_dir = tmp_path / test_name
 
     # Copy adapter files
-    shutil.copytree(zephyr_lora_files, test_dir)
+    shutil.copytree(lora_files, test_dir)
 
     # Load and modify configuration
     config_path = test_dir / "adapter_config.json"
@@ -216,7 +210,7 @@ async def test_dynamic_lora_badrequests(client: openai.AsyncOpenAI, tmp_path,
 
 @pytest.mark.asyncio
 async def test_multiple_lora_adapters(client: openai.AsyncOpenAI, tmp_path,
-                                      zephyr_lora_files):
+                                      lora_files):
     """Validate that many loras can be dynamically registered and inferenced 
     with concurrently"""
 
@@ -227,7 +221,7 @@ async def test_multiple_lora_adapters(client: openai.AsyncOpenAI, tmp_path,
                           cast_to=str,
                           body={
                               "lora_name": adapter_name,
-                              "lora_path": str(zephyr_lora_files)
+                              "lora_path": str(lora_files)
                           })
         for _ in range(3):
             await client.completions.create(
@@ -249,7 +243,7 @@ async def test_multiple_lora_adapters(client: openai.AsyncOpenAI, tmp_path,
 
 @pytest.mark.asyncio
 async def test_loading_invalid_adapters_does_not_break_others(
-        client: openai.AsyncOpenAI, tmp_path, zephyr_lora_files):
+        client: openai.AsyncOpenAI, tmp_path, lora_files):
 
     invalid_files = tmp_path / "invalid_files"
     invalid_files.mkdir()
@@ -265,7 +259,7 @@ async def test_loading_invalid_adapters_does_not_break_others(
         while not stop_good_requests_event.is_set():
             try:
                 batch = await client.completions.create(
-                    model="zephyr-lora",
+                    model="lora",
                     prompt=["Hello there", "Foo bar bazz buzz"],
                     max_tokens=5,
                 )
@@ -307,7 +301,7 @@ async def test_loading_invalid_adapters_does_not_break_others(
                       cast_to=str,
                       body={
                           "lora_name": "valid",
-                          "lora_path": zephyr_lora_files
+                          "lora_path": lora_files
                       })
     await client.completions.create(
         model="valid",

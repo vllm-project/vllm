@@ -38,11 +38,10 @@ def zephyr_lora_files():
     return snapshot_download(repo_id=LORA_NAME)
 
 
-@pytest.fixture(scope="module")
-def zephyr_lora_added_tokens_files(zephyr_lora_files):
+def add_tokens(lora_files):
     tmp_dir = TemporaryDirectory()
     tmp_model_dir = f"{tmp_dir.name}/zephyr"
-    shutil.copytree(zephyr_lora_files, tmp_model_dir)
+    shutil.copytree(lora_files, tmp_model_dir)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     # Copy tokenizer to adapter and add some unique tokens
     # 32000, 32001, 32002
@@ -52,6 +51,11 @@ def zephyr_lora_added_tokens_files(zephyr_lora_files):
     tokenizer.save_pretrained(tmp_model_dir)
     yield tmp_model_dir
     tmp_dir.cleanup()
+
+
+@pytest.fixture(scope="module")
+def zephyr_lora_added_tokens_files(zephyr_lora_files):
+    return add_tokens(zephyr_lora_files)
 
 
 @pytest.fixture(scope="module")
