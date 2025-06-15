@@ -72,14 +72,33 @@ is_avx512_disabled(AVX512_DISABLED)
 
 if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     set(APPLE_SILICON_FOUND TRUE)
+    
+    # Check for bf16 support on Apple Silicon
+    try_compile(APPLE_SILICON_BF16_SUPPORT
+        ${CMAKE_BINARY_DIR}
+        ${CMAKE_SOURCE_DIR}/cmake/test_apple_silicon_bf16.c
+        COMPILE_DEFINITIONS "-march=armv8.2-a+bf16"
+        OUTPUT_VARIABLE APPLE_SILICON_BF16_OUTPUT
+    )
+    
+    if(APPLE_SILICON_BF16_SUPPORT)
+        message(STATUS "Apple Silicon bf16 support detected")
+        add_compile_definitions(APPLE_SILICON_BF16_SUPPORT)
+        set(MARCH_FLAGS "-march=armv8.2-a+bf16+dotprod+fp16")
+    else()
+        message(STATUS "Apple Silicon bf16 support not detected")
+        set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")
+    endif()
+    
+    list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})
 else()
     find_isa(${CPUINFO} "avx2" AVX2_FOUND)
     find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
     find_isa(${CPUINFO} "Power11" POWER11_FOUND)
     find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
     find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
-    find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
-    find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
+    find_isa(${CPUINFO} "asimd" ASIMD_FOUND)
+    find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND)
     find_isa(${CPUINFO} "S390" S390_FOUND)
 endif()
 
