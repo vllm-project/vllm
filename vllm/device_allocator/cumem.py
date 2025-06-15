@@ -8,15 +8,66 @@
 # both of them failed because of cuda context mismatch.
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
+import contextlib
+import ctypes
 import dataclasses
 import gc
+import io
+import mmap
 import os
+import struct
+import uuid
 from contextlib import contextmanager
 from typing import Any, Callable, Optional, Union
 
 import torch
 
+import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.utils import is_pin_memory_available
+
+logger = init_logger(__name__)
+
+
+def _copy_from_cuda_to_bytes(scr_ptr: int, size_in_bytes: int) -> bytes:
+    dest_ptr = ctypes.create_string_buffer(size_in_bytes)
+    libcudart.cudaMemcpy(dest_ptr, scr_ptr, size_in_bytes)
+    return bytes(dest_ptr)
+
+
+def _copy_from_bytes_to_cuda(dest_ptr: int, data: bytes) -> None:
+    # reserve space for 0 termination
+    scr_ptr = ctypes.create_string_buffer(data, len(data))
+    libcudart.cudaMemcpy(dest_ptr, scr_ptr, len(data))
+
+
+def _write_bytes(data: bytes, binary_file: io.BufferedWriter) -> None:
+    # Pack the length as a 4-byte unsigned integer (little-endian)
+    data_len = len(data)
+    header = struct.pack("<I", data_len)
+    binary_file.write(header)
+    if data_len > 0:
+        binary_file.write(data)
+
+
+def _read_bytes(mmap_obj: mmap.mmap) -> bytes:
+    header = mmap_obj.read(4)
+    if not header:
+        raise ValueError("Missing header read")
+
+    if len(header) != 4:
+        raise ValueError("Incomplete header read")
+
+    data_len = struct.unpack("<I", header)[0]
+    if data_len == 0:
+        return b''
+
+    data = mmap_obj.read(data_len)
+
+    if len(data) != data_len:
+        raise ValueError("Incomplete data read")
+
+    return data
 
 
 def find_loaded_library(lib_name) -> Optional[str]:
@@ -152,6 +203,7 @@ class CuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
+        self.cache_filepath = ""
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
@@ -171,8 +223,25 @@ class CuMemAllocator:
             data.cpu_backup_tensor = None
         return data.handle
 
+    def _delete_cache_file(self):
+        """
+        Remove sleep cache file if it exists
+        """
+        if self.cache_filepath != "":
+            filepath = self.cache_filepath
+            self.cache_filepath = ""
+            try:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(filepath)
+                    logger.info("cache file %s deleted", filepath)
+            except Exception as e:
+                logger.warning("failed to delete sleep cache file %s.",
+                               filepath,
+                               exc_info=e)
+
     def sleep(
             self,
+            level: Optional[int] = 1,
             offload_tags: Optional[Union[tuple[str, ...],
                                          str]] = None) -> None:
         """
@@ -192,6 +261,29 @@ class CuMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
+        # remove previous file if exists
+        self._delete_cache_file()
+
+        # level 3 write weights to file
+        if level == 3:
+            unique_id = uuid.uuid4().hex
+            self.cache_filepath = os.path.join(envs.VLLM_CACHE_ROOT,
+                                               f"sleep_cache_{unique_id}.bin")
+            logger.info("sleep level %d writing to cache file %s", level,
+                        self.cache_filepath)
+            with open(self.cache_filepath, 'wb') as binary_file:
+                for ptr, data in self.pointer_to_data.items():
+                    handle = data.handle
+                    if data.tag in offload_tags:
+                        size_in_bytes = handle[1]
+                        data = _copy_from_cuda_to_bytes(ptr, size_in_bytes)
+                        _write_bytes(data, binary_file)
+                    else:
+                        _write_bytes(b'', binary_file)
+                    unmap_and_release(handle)
+            return
+
+        # handle other levels
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
             if data.tag in offload_tags:
@@ -212,13 +304,30 @@ class CuMemAllocator:
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """
         Wake up the allocator from sleep mode.
-        All data that is previously offloaded will be loaded back to GPU 
+        All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory.
-        
+
         :param tags: The tags of the memory allocation that will be loaded
             back to GPU memory. If None, all memory allocation will be loaded
             back to GPU memory.
         """
+        if self.cache_filepath != "":
+            logger.info("wake_up reading from cache file %s",
+                        self.cache_filepath)
+            with open(self.cache_filepath, 'rb') as bin_file, \
+                    mmap.mmap(bin_file.fileno(),
+                              length=0, access=mmap.ACCESS_READ) as mmap_obj:
+                for ptr, data in self.pointer_to_data.items():
+                    handle = data.handle
+                    create_and_map(handle)
+                    data = _read_bytes(mmap_obj)
+                    if len(data) > 0:
+                        _copy_from_bytes_to_cuda(ptr, data)
+
+            # remove file
+            self._delete_cache_file()
+            return
+
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
                 handle = data.handle
