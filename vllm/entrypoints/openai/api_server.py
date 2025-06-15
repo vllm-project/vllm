@@ -972,6 +972,41 @@ if envs.VLLM_TORCH_PROFILER_DIR:
         return Response(status_code=200)
 
 
+if envs.VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR:
+    @router.get("/start_expert_distribution_record")
+    async def start_expert_distribution_record(raw_request: Request):
+        """Start recording the expert distribution. Clear the previous record if any."""
+        logger.info("Starting expert distribution record...")
+        await engine_client(raw_request).start_expert_distribution_record()
+        logger.info("Expert distribution record started.")
+        return Response(
+            content="Start recording the expert distribution.\n",
+            status_code=200,
+        )
+
+    @router.get("/stop_expert_distribution_record")
+    async def stop_expert_distribution_record(raw_request: Request):
+        """Stop recording the expert distribution."""
+        logger.info("Stopping expert distribution record...")
+        await engine_client(raw_request).stop_expert_distribution_record()
+        logger.info("Expert distribution record stopped.")
+        return Response(
+            content="Stop recording the expert distribution.\n",
+            status_code=200,
+        )
+
+    @router.get("/dump_expert_distribution_record")
+    async def dump_expert_distribution_record(raw_request: Request):
+        """Dump expert distribution record."""
+        logger.info("Dumping expert distribution record...")
+        await engine_client(raw_request).dump_expert_distribution_record()
+        logger.info("Expert distribution record dumped.")
+        return Response(
+            content="Dump expert distribution record.\n",
+            status_code=200,
+        )
+
+
 if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     logger.warning(
         "LoRA dynamic loading & unloading is enabled in the API server. "

@@ -128,7 +128,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
-
+    VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR: Optional[str] = None
 
 def get_default_cache_root():
     return os.getenv(
@@ -879,6 +879,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB":
     lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
+    # Directory to store expert distribution recorder files.
+
+    "VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR":
+    lambda: os.path.expanduser(
+        os.getenv("VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR", None)),
 }
 
 # --8<-- [end:env-vars-definition]

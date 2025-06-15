@@ -105,6 +105,12 @@ class EngineCoreClient(ABC):
 
     def profile(self, is_start: bool = True) -> None:
         raise NotImplementedError
+    
+    def expert_distribution_record(self, is_start: bool) -> None:
+        raise NotImplementedError
+    
+    def dump_expert_distribution_record(self) -> None:
+        raise NotImplementedError
 
     def reset_mm_cache(self) -> None:
         raise NotImplementedError
@@ -856,6 +862,12 @@ class AsyncMPClient(MPClient):
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
+
+    async def expert_distribution_record_async(self, is_start: bool) -> None:
+        await self.call_utility_async("expert_distribution_record", is_start)
+
+    async def dump_expert_distribution_record_async(self) -> None:
+        await self.call_utility_async("dump_expert_distribution_record")
 
     async def reset_prefix_cache_async(self) -> None:
         await self.call_utility_async("reset_prefix_cache")

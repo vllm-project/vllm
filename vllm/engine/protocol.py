@@ -284,6 +284,21 @@ class EngineClient(ABC):
     async def stop_profile(self) -> None:
         """Start profiling the engine"""
         ...
+        
+    @abstractmethod
+    async def start_expert_distribution_record(self) -> None:
+        """Start recording expert distribution"""
+        ...
+    
+    @abstractmethod
+    async def stop_expert_distribution_record(self) -> None:
+        """Stop recording expert distribution"""
+        ...
+    
+    @abstractmethod
+    async def dump_expert_distribution_record(self) -> None:
+        """Dump expert distribution record"""
+        ...
 
     @abstractmethod
     async def reset_mm_cache(self) -> None:
