@@ -542,6 +542,7 @@ class OpenAIServingCompletion(OpenAIServing):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = tokenizer.decode(token_id)
+                token_text = token
                 if should_return_as_token_id:
                     token = f"token_id:{token_id}"
 
@@ -556,6 +557,12 @@ class OpenAIServingCompletion(OpenAIServing):
                     token_id,
                     tokenizer,
                     return_as_token_id=should_return_as_token_id,
+                )
+                token_text = self._get_decoded_token(
+                    step_token,
+                    token_id,
+                    tokenizer,
+                    return_as_token_id=False,
                 )
                 token_logprob = max(step_token.logprob, -9999.0)
 
@@ -582,7 +589,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 out_text_offset.append(initial_text_offset)
             else:
                 out_text_offset.append(out_text_offset[-1] + last_token_len)
-            last_token_len = len(token)
+            last_token_len = len(token_text)
 
         return CompletionLogProbs(
             text_offset=out_text_offset,
