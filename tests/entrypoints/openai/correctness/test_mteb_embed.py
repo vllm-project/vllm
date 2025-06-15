@@ -7,34 +7,30 @@ import pytest
 from tests.models.language.pooling.mteb_utils import (MTEB_EMBED_TASKS,
                                                       MTEB_EMBED_TOL,
                                                       OpenAIClientMtebEncoder,
-                                                      run_mteb_embed_task,
-                                                      run_mteb_embed_task_st)
+                                                      run_mteb_embed_task)
 from tests.utils import RemoteOpenAIServer
 
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
-MODEL_NAME = "BAAI/bge-m3"
-DTYPE = "float16"
-MAIN_SCORE = 0.7873427091972599
+MODEL_NAME = "intfloat/e5-small"
+MAIN_SCORE = 0.7422994752439667
 
 
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task", "embed", "--dtype", DTYPE, "--enforce-eager",
-        "--max-model-len", "512"
+        "--task", "embed", "--enforce-eager", "--disable-uvicorn-access-log"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
-def test_mteb(server):
+def test_mteb_embed(server):
     client = server.get_client()
     encoder = OpenAIClientMtebEncoder(MODEL_NAME, client)
     vllm_main_score = run_mteb_embed_task(encoder, MTEB_EMBED_TASKS)
-    st_main_score = MAIN_SCORE or run_mteb_embed_task_st(
-        MODEL_NAME, MTEB_EMBED_TASKS)
+    st_main_score = MAIN_SCORE
 
     print("VLLM main score: ", vllm_main_score)
     print("SentenceTransformer main score: ", st_main_score)
