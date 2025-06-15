@@ -11,6 +11,7 @@ import cloudpickle
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import (ObservabilityConfig, VllmConfig,
                          set_current_vllm_config)
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
@@ -541,15 +542,56 @@ class WorkerWrapperBase:
             del os.environ[key]
         update_environment_variables(envs)
 
+    def _init_config(self) -> None:
+        """
+        Resolve configuration that depends on hardware capabilities.
+        """
+        model_config = self.vllm_config.model_config
+        if model_config.dtype == "auto":
+            from vllm.config import (V1_SUPPORTED_DTYPES, _find_dtype,
+                                     _resolve_auto_dtype)
+
+            config_dtype = _find_dtype(model_config.model,
+                                       model_config.hf_config,
+                                       revision=model_config.revision)
+
+            self.vllm_config.model_config.dtype = _resolve_auto_dtype(
+                model_config.hf_config.model_type,
+                config_dtype,
+                is_pooling_model=(model_config.runner_type == "pooling"),
+            )
+
+            if model_config.dtype not in V1_SUPPORTED_DTYPES:
+                raise ValueError(
+                    f"dtype 'auto' resolved to {model_config.dtype}, "
+                    f"which is not supported in V1. "
+                    f"Supported dtypes are {V1_SUPPORTED_DTYPES}.")
+
+        if self.vllm_config.lora_config:
+            self.vllm_config.lora_config.verify_with_model_config(model_config)
+
+        # Configure FlashMLA backend if using MLA
+        if model_config and model_config.use_mla:
+            from vllm.attention.ops.flashmla import is_flashmla_supported
+            use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None
+                            or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
+            if (use_flashmla and is_flashmla_supported()[0]
+                    and self.vllm_config.cache_config.block_size != 64):
+                self.vllm_config.cache_config.block_size = 64
+                logger.info(
+                    "Forcing kv cache block size 64 for FlashMLA backend.")
+
     def init_worker(self, all_kwargs: List[Dict[str, Any]]) -> None:
         """
         Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
         kwargs = all_kwargs[self.rpc_rank]
-        self.vllm_config = kwargs.get("vllm_config", None)
+        self.vllm_config: VllmConfig = kwargs.get("vllm_config")
         assert self.vllm_config is not None, (
             "vllm_config is required to initialize the worker")
+
+        self._init_config()
         enable_trace_function_call_for_thread(self.vllm_config)
 
         from vllm.plugins import load_general_plugins
