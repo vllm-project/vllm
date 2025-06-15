@@ -37,6 +37,25 @@ pynvml = import_pynvml()
 torch.backends.cuda.enable_cudnn_sdp(False)
 
 
+def get_nvml_device_handle(device_identifier: Union[int, str]):
+    """
+    Get NVML device handle from either an integer device ID or MIG UUID.
+
+    Args:
+        device_identifier: Either an integer device ID or MIG UUID string
+
+    Returns:
+        NVML device handle
+    """
+    if isinstance(device_identifier,
+                  str) and device_identifier.startswith("MIG-"):
+        # For MIG devices, use UUID-based lookup
+        return pynvml.nvmlDeviceGetHandleByUUID(device_identifier)
+    else:
+        # For regular devices, use index-based lookup
+        return pynvml.nvmlDeviceGetHandleByIndex(int(device_identifier))
+
+
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
 
     @wraps(fn)
@@ -405,7 +424,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
                               ) -> Optional[DeviceCapability]:
         try:
             physical_device_id = cls.device_id_to_physical_device_id(device_id)
-            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+            handle = get_nvml_device_handle(physical_device_id)
             major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
             return DeviceCapability(major=major, minor=minor)
         except RuntimeError:
@@ -433,14 +452,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        handle = get_nvml_device_handle(physical_device_id)
         return pynvml.nvmlDeviceGetUUID(handle)
 
     @classmethod
     @with_nvml_context
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        handle = get_nvml_device_handle(physical_device_id)
         return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
 
     @classmethod
@@ -449,9 +468,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
         """
         query if the set of gpus are fully connected by nvlink (1 hop)
         """
-        handles = [
-            pynvml.nvmlDeviceGetHandleByIndex(i) for i in physical_device_ids
+        # Convert logical device IDs to physical device identifiers
+        # This handles both regular GPU IDs and MIG UUIDs
+        actual_device_ids = [
+            cls.device_id_to_physical_device_id(device_id)
+            for device_id in physical_device_ids
         ]
+
+        handles = [get_nvml_device_handle(i) for i in actual_device_ids]
         for i, handle in enumerate(handles):
             for j, peer_handle in enumerate(handles):
                 if i < j:
@@ -471,8 +495,10 @@ class NvmlCudaPlatform(CudaPlatformBase):
         return True
 
     @classmethod
-    def _get_physical_device_name(cls, device_id: int = 0) -> str:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+    def _get_physical_device_name(cls,
+                                  device_identifier: Union[int,
+                                                           str] = 0) -> str:
+        handle = get_nvml_device_handle(device_identifier)
         return pynvml.nvmlDeviceGetName(handle)
 
     @classmethod
