@@ -123,6 +123,35 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
     video_url: Required[str]
 
 
+TimeSeriesDataType: TypeAlias = Union[str, list[list[float]], list[float]]
+
+
+class TimeSeriesData(TypedDict, total=False):
+    data: Required[TimeSeriesDataType]
+    """
+    The time series data, which can be:
+    - A URL pointing to CSV, Parquet, or Arrow File data
+    - A data URI with base64 encoded data
+    - A simple array (list) for univariate time series
+    """
+
+
+class ChatCompletionContentPartTimeSeriesParam(TypedDict, total=False):
+    timeseries: Required[TimeSeriesData]
+    type: Required[Literal["timeseries"]]
+    """The type of the content part."""
+
+
+class CustomChatCompletionContentSimpleTimeSeriesParam(TypedDict, total=False):
+    """A simpler version of the param that accepts time series data directly.
+    Example:
+    {
+        "timeseries": [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    }
+    """
+    timeseries: Required[TimeSeriesDataType]
+
+
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartInputAudioParam,
@@ -130,7 +159,9 @@ ChatCompletionContentPartParam: TypeAlias = Union[
     CustomChatCompletionContentSimpleImageParam,
     ChatCompletionContentPartImageEmbedsParam,
     CustomChatCompletionContentSimpleAudioParam,
-    CustomChatCompletionContentSimpleVideoParam, str]
+    CustomChatCompletionContentSimpleVideoParam,
+    ChatCompletionContentPartTimeSeriesParam,
+    CustomChatCompletionContentSimpleTimeSeriesParam, str]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -465,7 +496,7 @@ def resolve_chat_template_content_format(
 
 
 
-ModalityStr = Literal["image", "audio", "video", "image_embeds"]
+ModalityStr = Literal["image", "audio", "video", "image_embeds", "timeseries"]
 _T = TypeVar("_T")
 
 
@@ -569,6 +600,11 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.video_token_index)
             raise TypeError(f"Unknown {modality} model type: {model_type}")
+        elif modality == "timeseries":
+            if model_type == "chatts" or model_type == "qwen3ts":
+                return "<ts><ts/>"
+            else:
+                raise TypeError(f"Unknown {modality} model type: {model_type}")
         else:
             raise TypeError(f"Unknown modality: {modality}")
 
@@ -633,6 +669,9 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
             mm_inputs["audio"] = items_by_modality["audio"] # A list of audios
         if "video" in items_by_modality:
             mm_inputs["video"] = items_by_modality["video"] # A list of videos
+        if "timeseries" in items_by_modality:
+            # A list of timeseries
+            mm_inputs["timeseries"] = items_by_modality["timeseries"]
         return mm_inputs
 
     def create_parser(self) -> "BaseMultiModalContentParser":
@@ -666,6 +705,9 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
             mm_inputs["audio"] = items_by_modality["audio"] # A list of audios
         if "video" in items_by_modality:
             mm_inputs["video"] = items_by_modality["video"] # A list of videos
+        if "timeseries" in items_by_modality:
+            # A list of timeseries
+            mm_inputs["timeseries"] = items_by_modality["timeseries"]
         return mm_inputs
 
     def create_parser(self) -> "BaseMultiModalContentParser":
@@ -706,6 +748,10 @@ class BaseMultiModalContentParser(ABC):
 
     @abstractmethod
     def parse_video(self, video_url: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def parse_timeseries(self, timeseries_data: TimeSeriesDataType) -> None:
         raise NotImplementedError
 
 
@@ -758,6 +804,20 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         video = self._connector.fetch_video(video_url)
 
         placeholder = self._tracker.add("video", video)
+        self._add_placeholder(placeholder)
+
+    def parse_timeseries(self, timeseries_data: TimeSeriesDataType) -> None:
+        # Check if the data is a URL string
+        if isinstance(timeseries_data, str):
+            # Fetch time series data from URL
+            timeseries = self._connector.fetch_timeseries(timeseries_data)
+        elif isinstance(timeseries_data, list):
+            # For non-URL data (lists/arrays), use it directly
+            timeseries = timeseries_data
+        else:
+            raise ValueError("Invalid timeseries data format")
+
+        placeholder = self._tracker.add("timeseries", timeseries)
         self._add_placeholder(placeholder)
 
 
@@ -813,6 +873,22 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         video = self._connector.fetch_video_async(video_url)
 
         placeholder = self._tracker.add("video", video)
+        self._add_placeholder(placeholder)
+
+    def parse_timeseries(self, timeseries: TimeSeriesDataType) -> None:
+        # Check if the data is a URL string
+        if isinstance(timeseries, str):
+            # Fetch time series data from URL asynchronously
+            coroutine = self._connector.fetch_timeseries_async(timeseries)
+            placeholder = self._tracker.add("timeseries", coroutine)
+        elif isinstance(timeseries, list):
+            # For non-URL data (lists/arrays), create a future with the data
+            future: asyncio.Future = asyncio.Future()
+            future.set_result(timeseries)
+            placeholder = self._tracker.add("timeseries", future)
+        else:
+            raise ValueError("Invalid timeseries data format")
+
         self._add_placeholder(placeholder)
 
 
@@ -918,6 +994,7 @@ _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 _ImageParser = TypeAdapter(ChatCompletionContentPartImageParam).validate_python
 _AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam).validate_python
 _VideoParser = TypeAdapter(ChatCompletionContentPartVideoParam).validate_python
+_TimeSeriesParser = TypeAdapter(ChatCompletionContentPartTimeSeriesParam).validate_python # noqa: E501
 
 _ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio]
 
@@ -940,6 +1017,9 @@ MM_PARSER_MAP: dict[
     lambda part: _RefusalParser(part).get("refusal", None),
     "video_url":
     lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
+    "timeseries":
+    lambda part: _TimeSeriesParser(part).get("timeseries", {}).get(
+        "data", None),
 }
 
 
@@ -992,6 +1072,10 @@ def _parse_chat_message_content_mm_part(
             video_params = cast(CustomChatCompletionContentSimpleVideoParam,
                                 part)
             return "video_url", video_params.get("video_url", "")
+        if part.get("timeseries") is not None:
+            timeseries_params = cast(
+                CustomChatCompletionContentSimpleTimeSeriesParam, part)
+            return "timeseries", timeseries_params.get("timeseries", "")
         # Raise an error if no 'type' or direct URL is found.
         raise ValueError("Missing 'type' field in multimodal part.")
 
@@ -1001,8 +1085,8 @@ def _parse_chat_message_content_mm_part(
 
 
 VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
-                                       "image_embeds",
-                                       "audio_url", "input_audio", "video_url")
+                                       "image_embeds", "audio_url",
+                                       "input_audio", "video_url", "timeseries")
 
 
 def _parse_chat_message_content_parts(
@@ -1094,6 +1178,11 @@ def _parse_chat_message_content_part(
         str_content = cast(str, content)
         mm_parser.parse_video(str_content)
         return {'type': 'video'} if wrap_dicts else None
+
+    if part_type == "timeseries":
+        dict_content = cast(TimeSeriesDataType, content)
+        mm_parser.parse_timeseries(dict_content)
+        return {'type': 'timeseries'} if wrap_dicts else None
 
     raise NotImplementedError(f"Unknown part type: {part_type}")
 

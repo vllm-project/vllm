@@ -693,6 +693,7 @@ setup(
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
+        "timeseries": ["pyarrow", "pandas"],  # For time series processing
         "video": []  # Kept for backwards compatibility
     },
     cmdclass=cmdclass,
