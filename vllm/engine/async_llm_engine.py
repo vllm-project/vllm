@@ -1165,7 +1165,7 @@ class AsyncLLMEngine(EngineClient):
     async def reset_mm_cache(self) -> None:
         self.engine.reset_mm_cache()
 
-    async def start_expert_distribution_record(self):
+    async def start_expert_distribution_record(self) -> None:
         self.engine.start_expert_distribution_record()
 
     async def stop_expert_distribution_record(self) -> None:
