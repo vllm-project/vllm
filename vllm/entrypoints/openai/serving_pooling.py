@@ -98,6 +98,7 @@ class OpenAIServingPooling(OpenAIServing):
             ) = self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            self._set_tokenizer(tokenizer)
 
             if prompt_adapter_request is not None:
                 raise NotImplementedError("Prompt adapter is not supported "
@@ -126,7 +127,6 @@ class OpenAIServingPooling(OpenAIServing):
                 (request_prompts,
                  engine_prompts) = await self._preprocess_completion(
                      request,
-                     tokenizer,
                      request.input,
                      truncate_prompt_tokens=truncate_prompt_tokens,
                      add_special_tokens=request.add_special_tokens,
