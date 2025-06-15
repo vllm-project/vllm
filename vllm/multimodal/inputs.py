@@ -815,6 +815,20 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         self._validate_modality("get_items", modality)
         return self._items_by_modality[modality]
 
+    def get_hf_inputs(self, modality: str) -> dict[str, NestedTensors]:
+        modality_items = self._items_by_modality.get(modality, None)
+        hf_inputs = defaultdict[str, list[NestedTensors]](list)
+        if modality_items is not None:
+            for mm_kwargs_item in modality_items:
+                for key, value in mm_kwargs_item.items():
+                    hf_inputs[key].append(value.data)
+
+        hf_inputs_as_tensors = {
+            key: torch.stack(value)
+            for key, value in hf_inputs.items()
+        }
+        return hf_inputs_as_tensors
+
 
 MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
 """
