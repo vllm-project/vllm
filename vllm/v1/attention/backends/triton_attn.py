@@ -114,7 +114,6 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.use_irope = use_irope
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         support_head_sizes = TritonAttentionBackend.get_supported_head_sizes()
@@ -142,6 +141,7 @@ class TritonAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -155,6 +155,11 @@ class TritonAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for TritonAttentionImpl")
 
         if attn_metadata is None:
             # Profiling run.

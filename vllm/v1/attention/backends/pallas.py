@@ -131,7 +131,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if head_size % 128 != 0:
             raise NotImplementedError("Head size must be a multiple of 128.")
@@ -161,6 +160,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: PallasMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
 
@@ -173,6 +173,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for PallasAttentionBackendImpl")
+
         # For determine_available_memory case.
         if kv_cache.numel() == 0:
             if output is None:
