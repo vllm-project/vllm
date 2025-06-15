@@ -256,6 +256,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = check_use_alibi(model_config)
 
+        # Optimization: Cached tensor only used for faster padding
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
@@ -1251,9 +1252,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_ids, mm_embeds)
             else:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
-            # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            # self.inputs_embeds is a temp tensor only used here,
+            # so we can skip the copy if no padding is necessary.
+            if num_scheduled_tokens != num_input_tokens:
+                # Pad inputs_embeds to size num_input_tokens
+                self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+                inputs_embeds = self.inputs_embeds[:num_input_tokens]
             input_ids = None
         else:
             # For text-only models, we use token ids as input.
