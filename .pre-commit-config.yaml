@@ -53,6 +53,11 @@ repos:
       files: ^requirements/test\.(in|txt)$
 - repo: local
   hooks:
+  - id: format-torch-nightly-test
+    name: reformat nightly_torch_test.txt to be in sync with test.in
+    language: python
+    entry: python tools/generate_nightly_torch_test.py
+    files: ^requirements/test\.(in|txt)$
   - id: mypy-local
     name: Run mypy for local Python installation
     entry: tools/mypy.sh 0 "local"
