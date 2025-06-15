@@ -151,9 +151,9 @@ def parse_fine_tuned_lora_name(
 def is_regex_target_modules(load_modules: Union[str, list[str]],
                             expected_lora_modules: list[str]) -> bool:
     """
-    PEFT supports passing `target_modules` in the form of regular expressions, 
-    such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to 
-    determine whether the suffix in the regular expression is present in the 
+    PEFT supports passing `target_modules` in the form of regular expressions,
+    such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to
+    determine whether the suffix in the regular expression is present in the
     `expected_lora_modules`.
     """
 
@@ -226,15 +226,32 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     if os.path.exists(lora_path):
         return os.path.abspath(lora_path)
 
-    # If the path does not exist locally, assume it's a Hugging Face repo.
-    try:
-        local_snapshot_path = huggingface_hub.snapshot_download(
-            repo_id=lora_path)
-    except (HfHubHTTPError, RepositoryNotFoundError, EntryNotFoundError,
-            HFValidationError):
-        # Handle errors that may occur during the download
-        # Return original path instead instead of throwing error here
-        logger.exception("Error downloading the HuggingFace model")
-        return lora_path
+    # Otherwise, download the model from model hub.
+    if VLLM_USE_MODELSCOPE:
+        try:
+            # download model from ModelScope hub,
+            # lazy import so that modelscope is not required for normal use.
+            # pylint: disable=C.
+            from modelscope.hub.snapshot_download import snapshot_download
+
+            local_snapshot_path = snapshot_download(model_id=lora_path)
+        except:
+            # Handle errors that may occur during the download
+            # Return original path instead instead of throwing error here
+            logger.exception("Error downloading the ModelScope model")
+            return lora_path
+    else:
+        try:
+            local_snapshot_path = huggingface_hub.snapshot_download(repo_id=lora_path)
+        except (
+            HfHubHTTPError,
+            RepositoryNotFoundError,
+            EntryNotFoundError,
+            HFValidationError,
+        ):
+            # Handle errors that may occur during the download
+            # Return original path instead instead of throwing error here
+            logger.exception("Error downloading the HuggingFace model")
+            return lora_path
 
     return local_snapshot_path
