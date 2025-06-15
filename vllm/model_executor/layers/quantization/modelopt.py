@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any, Callable, Optional, Union
-
+import functools
 import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.logger import init_logger
@@ -27,8 +28,18 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+
+from typing import TYPE_CHECKING
+try:
+    from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
+    from flashinfer import fp4_quantize as fp4_quantize
+except ImportError:
+    if not TYPE_CHECKING:
+        flashinfer_cutlass_fused_moe = None
 
 logger = init_logger(__name__)
 
@@ -461,6 +472,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.cutlass_nvfp4_supported = cutlass_fp4_supported()
         self.use_marlin = False
+        self.allow_flashinfer_cutlass = False
+
+        if envs.VLLM_USE_FLASHINFER_MOE:
+            if not self.cutlass_nvfp4_supported:
+                logger.warning_once("Failed to import Flashinfer CUTLASS Fused MoE kernels.")
+            elif (current_platform.is_cuda()
+                    and current_platform.has_device_capability(100)):
+                logger.info_once("Using FlashInfer kernels for ModelOptNvFp4FusedMoE.")
+                self.allow_flashinfer_cutlass = True
+            else:
+                logger.warning_once(
+                    "Flashinfer CUTLASS Fused MoE not supported on the current platform.")
 
         if not self.cutlass_nvfp4_supported:
             if is_fp4_marlin_supported():
@@ -469,6 +492,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 raise ValueError("Current platform does not support NVFP4"
                                  " quantization. Please use Blackwell and"
                                  " above.")
+        self.fused_experts = functools.partial(
+            fused_experts,
+            # block_shape=self.quant_config.weight_block_size,
+            allow_flashinfer_cutlass=self.allow_flashinfer_cutlass)
+    
+    @property
+    def load_up_proj_weight_first(self) -> bool:
+        # FlashInfer CUTLASS kernel assumes [Up, Gate] Proj as W13
+        if self.allow_flashinfer_cutlass:
+            return True
+        return False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -664,6 +698,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        ep_rank: Optional[int] = None,
+        ep_size: Optional[int] = None,
+        tp_rank: Optional[int] = None,
+        tp_size: Optional[int] = None,        
     ):
         if self.use_marlin:
             topk_weights, topk_ids = FusedMoE.select_experts(
@@ -714,6 +752,30 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
+        if self.allow_flashinfer_cutlass:
+            # print("xxx"*100)
+            # return x
+            return self.fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True, # TODO(shuw): fix later, now output is high prec
+                activation=activation,
+                global_num_experts=global_num_experts,
+                w1_scale=layer.w13_blockscale_swizzled,
+                w2_scale=layer.w2_blockscale_swizzled,
+                a1_scale=layer.w13_input_scale_quant,
+                a2_scale=layer.w2_input_scale_quant,
+                g1_alphas=layer.w13_input_scale_quant,
+                g2_alphas=layer.w2_input_scale_quant,
+                use_nvfp4_w4a4=True,
+                ep_rank=ep_rank,
+                ep_size=ep_size,
+                tp_rank=tp_rank,
+                tp_size=tp_size,
+            )
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp4)
 

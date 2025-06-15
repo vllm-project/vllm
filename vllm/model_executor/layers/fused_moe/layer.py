@@ -35,6 +35,15 @@ from vllm.utils import direct_register_custom_op
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 has_deepep = importlib.util.find_spec("deep_ep") is not None
 
+from typing import TYPE_CHECKING
+try:
+    from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
+    from flashinfer import fp4_quantize as fp4_quantize
+except ImportError:
+    if not TYPE_CHECKING:
+        flashinfer_cutlass_fused_moe = None
+has_flashinfer = flashinfer_cutlass_fused_moe is not None
+
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import TritonExperts, fused_experts
@@ -91,6 +100,11 @@ class FusedMoEParallelConfig:
     def use_deepep_ll_kernels(self):
         return (self.use_all2all_kernels
                 and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
+
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        # TODO(shuw): fix me
+        return True
 
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
@@ -261,6 +275,9 @@ class MoEConfig:
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        return self.moe_parallel_config.use_flashinfer_cutlass_kernels
 
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
@@ -1072,12 +1089,15 @@ class FusedMoE(torch.nn.Module):
                                              shard_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
-        if shard_id == "w1":
-            expert_data = expert_data.narrow(shard_dim, 0, shard_size)
         # w3, up_proj: Load into second logical weight of w13.
+        # trtllm cutlass kernel assumes differently
+        assert shard_id in ("w1", "w3")
+        switch_w13 = getattr(self.quant_method, 'load_up_proj_weight_first', False)
+        if (switch_w13 and shard_id == "w1") or (not switch_w13 and shard_id == "w3"):
+            start = shard_size
         else:
-            assert shard_id == "w3"
-            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+            start = 0
+        expert_data = expert_data.narrow(shard_dim, start, shard_size)
         expert_data.copy_(loaded_weight)
 
     def _load_w2(self,
@@ -1405,6 +1425,10 @@ class FusedMoE(torch.nn.Module):
                 scoring_func=self.scoring_func,
                 e_score_correction_bias=self.e_score_correction_bias,
                 activation=self.activation,
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                tp_size=self.tp_size,
+                tp_rank=self.tp_rank,  
             )
 
             if not skip_result_store:
@@ -1412,7 +1436,12 @@ class FusedMoE(torch.nn.Module):
                     final_hidden_states, non_blocking=True)
 
         ctx = get_forward_context()
-        max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
+        #TODO(shuw):where is it?
+        # flashinfer_cutlass_kernels can handle TP+EP without DP
+        max_tokens_across_dp = (
+            MOE_DP_CHUNK_SIZE if self.dp_size == 1 
+            else ctx.dp_metadata.max_tokens_across_dp_cpu
+        )
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
 
         num_tokens = full_hidden_states.size(0)
