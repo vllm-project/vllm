@@ -6,6 +6,8 @@ from typing import Optional
 
 import torch
 
+from vllm.v1.worker.utils import LogitsProcessorObjects
+
 
 @dataclass
 class SamplingMetadata:
@@ -16,7 +18,6 @@ class SamplingMetadata:
 
     top_p: Optional[torch.Tensor]
     top_k: Optional[torch.Tensor]
-    min_p: Optional[torch.Tensor]
 
     generators: dict[int, torch.Generator]
 
@@ -31,14 +32,18 @@ class SamplingMetadata:
 
     output_token_ids: list[list[int]]
 
-    # req_index -> (min_tokens, stop_token_ids)
-    min_tokens: dict[int, tuple[int, set[int]]]
-
-    logit_bias: list[Optional[dict[int, float]]]
-
     # `allowed_token_ids_mask` is a 2D bool tensor of shape (max batch size,
     # vocab size).
     allowed_token_ids_mask: Optional[torch.Tensor]
 
     # req_index -> bad_words_token_ids
     bad_words_token_ids: dict[int, list[list[int]]]
+
+    # Some logits processors don't affect greedy decoding (or if they do,
+    # only due to precision errors); "non-greedy" processors are
+    # only applied to random-sampled requests in the batch.
+    logitsprocs: LogitsProcessorObjects
+
+    # TODO(andy): Because newest logits processors implementation
+    # does not support TPU yet, the old min_p field is still required
+    min_p: Optional[torch.Tensor] = None

@@ -60,7 +60,8 @@ from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
+from .utils import (LogitsProcessorObjects, gather_mm_placeholders,
+                    initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
@@ -352,11 +353,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # then resubmitted with the same ID. In this case, we treat them as two
         # distinct requests - clearing the cached states for the first request
         # and handling the second as a new request.
-        removed_req_indices: list[int] = []
         for req_id in scheduler_output.finished_req_ids:
-            req_index = self.input_batch.remove_request(req_id)
-            if req_index is not None:
-                removed_req_indices.append(req_index)
+            self.input_batch.remove_request(req_id)
 
         # Free the cached encoder outputs.
         for req_id, input_id in scheduler_output.free_encoder_input_ids:
@@ -379,9 +377,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # have low request overlap (e.g., alternating between two distinct
         # sets of requests), this optimization becomes very inefficient.
         for req_id in unscheduled_req_ids:
-            req_index = self.input_batch.remove_request(req_id)
-            assert req_index is not None
-            removed_req_indices.append(req_index)
+            assert self.input_batch.remove_request(req_id)
 
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
@@ -509,29 +505,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
-        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
+        has_removed_requests = self.input_batch.has_step_removed_requests()
+        batch_changed = has_removed_requests or len(req_ids_to_add) > 0
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
-        removed_req_indices.sort(reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
-            if removed_req_indices:
-                # Fill the empty index.
-                req_index = removed_req_indices.pop()
-            else:
-                # Append to the end.
-                req_index = None
-            self.input_batch.add_request(req_state, req_index)
+            self.input_batch.add_request(req_state)
 
         # Condense the batched states if there are empty indices.
-        if removed_req_indices:
-            self.input_batch.condense(removed_req_indices)
+        if self.input_batch.has_step_removed_requests():
+            self.input_batch.condense()
 
         batch_reordered = self._may_reorder_batch(scheduler_output)
 
         if batch_changed or batch_reordered:
-            self.input_batch.refresh_sampling_metadata()
+            self.input_batch.refresh()
 
     def _get_cumsum_and_arange(
         self,
@@ -1197,7 +1187,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
-
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
@@ -1917,7 +1906,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             all_random=False,
             top_p=dummy_tensors(0.9),
             top_k=dummy_tensors(logits.size(1) - 1),
-            min_p=None,
             generators={},
             max_num_logprobs=None,
             no_penalties=True,
@@ -1926,10 +1914,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             presence_penalties=dummy_tensors(0.1),
             repetition_penalties=dummy_tensors(0.1),
             output_token_ids=[[] for _ in range(num_reqs)],
-            min_tokens={},
-            logit_bias=[None for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
+            logitsprocs=LogitsProcessorObjects(),
         )
         try:
             sampler_output = self.sampler(logits=logits,
