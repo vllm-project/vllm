@@ -403,8 +403,12 @@ def test_engine_core_tp(monkeypatch: pytest.MonkeyPatch):
                                      executor_class=executor_class,
                                      log_stats=True)
 
-        def get_worker_num_gpu_blocks(worker):
-            return worker.cache_config.num_gpu_blocks
+        def get_worker_cache_config_field(worker, key: str):
+            return getattr(worker.cache_config, key)
 
-        num_gpu_blocks = engine_core.collective_rpc(get_worker_num_gpu_blocks)
+        num_gpu_blocks = engine_core.collective_rpc(
+            get_worker_cache_config_field, args=("num_gpu_blocks", ))
+        num_cpu_blocks = engine_core.collective_rpc(
+            get_worker_cache_config_field, args=("num_cpu_blocks", ))
         assert all(x is not None for x in num_gpu_blocks)
+        assert all(x is not None for x in num_cpu_blocks)
