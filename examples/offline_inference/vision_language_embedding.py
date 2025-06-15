@@ -94,6 +94,7 @@ def run_vlm2vec(query: Query) -> ModelRequestData:
     engine_args = EngineArgs(
         model="TIGER-Lab/VLM2Vec-Full",
         task="embed",
+        max_model_len=4096,
         trust_remote_code=True,
         mm_processor_kwargs={"num_crops": 4},
         limit_mm_per_prompt={"image": 1},
