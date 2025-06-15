@@ -130,6 +130,7 @@ if TYPE_CHECKING:
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR: Optional[str] = None
 
+
 def get_default_cache_root():
     return os.getenv(
         "XDG_CACHE_HOME",
@@ -880,7 +881,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MQ_MAX_CHUNK_BYTES_MB":
     lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
     # Directory to store expert distribution recorder files.
-
     "VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR":
     lambda: os.getenv("VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR", None),
 }
