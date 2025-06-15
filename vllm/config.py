@@ -3567,6 +3567,11 @@ class ObservabilityConfig:
     you migrate to new metrics. The metric is likely to be removed completely
     in an upcoming release."""
 
+    prefix_cache_metrics_max_requests: int = 1000
+    """Maximum number of recent requests to track for prefix cache hit rate
+    metrics. Higher values provide more stable metrics but use more memory.
+    Must be a positive integer."""
+
     @cached_property
     def show_hidden_metrics(self) -> bool:
         """Check if the hidden metrics should be shown."""
@@ -3631,6 +3636,11 @@ class ObservabilityConfig:
                 "OpenTelemetry is not available. Unable to configure "
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
+
+        if not (1 <= self.prefix_cache_metrics_max_requests <= 100000):
+            raise ValueError(
+                f"prefix_cache_metrics_max_requests must be between 1 and "
+                f"100000, got: {self.prefix_cache_metrics_max_requests}")
 
     def _parse_collect_detailed_traces(self):
         assert isinstance(self.collect_detailed_traces, list)
