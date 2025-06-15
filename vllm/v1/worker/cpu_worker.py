@@ -119,30 +119,35 @@ class CPUWorker(Worker):
             cpu_count = psutil.cpu_count(logical=False)
             cpus_allow_list = psutil.Process().cpu_affinity()
             numa_size = info.get_num_configured_nodes()
-            cpu_count_per_numa = cpu_count // numa_size
-            num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU,
-                                      cpu_count_per_numa // 2)
+            if numa_size == 0:
+                logger.warning(
+                    "libnuma found but numa size was 0"
+                    "set VLLM_CPU_OMP_THREADS_BIND manually.")
+            else:   
+                cpu_count_per_numa = cpu_count // numa_size
+                num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU,
+                                          cpu_count_per_numa // 2)
 
-            # check allow node_to_cpus list
-            node_to_cpus = []
-            for i in range(numa_size):
-                node_intersect = set(
-                    info.node_to_cpus(i)).intersection(cpus_allow_list)
-                if bool(node_intersect):
-                    node_to_cpus.append(list(node_intersect))
+                # check allow node_to_cpus list
+                node_to_cpus = []
+                for i in range(numa_size):
+                    node_intersect = set(
+                        info.node_to_cpus(i)).intersection(cpus_allow_list)
+                    if bool(node_intersect):
+                        node_to_cpus.append(list(node_intersect))
 
-            if world_size > len(node_to_cpus):
-                logger.error(
-                    "Auto thread-binding failed due to "
-                    "world size: %d is larger than "
-                    "allowed NUMA nodes number: %d."
-                    "Please try to bind threads manually.", world_size,
-                    len(node_to_cpus))
-            else:
-                end = cpu_count_per_numa - num_of_reserved_cpu
-                rank_to_cpus_list = node_to_cpus[self.rank][:end]
-                rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
-                logger.info("auto thread-binding list: %s", rank_to_cpus)
+                if world_size > len(node_to_cpus):
+                    logger.error(
+                        "Auto thread-binding failed due to "
+                        "world size: %d is larger than "
+                        "allowed NUMA nodes number: %d."
+                        "Please try to bind threads manually.", world_size,
+                        len(node_to_cpus))
+                else:
+                    end = cpu_count_per_numa - num_of_reserved_cpu
+                    rank_to_cpus_list = node_to_cpus[self.rank][:end]
+                    rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
+                    logger.info("auto thread-binding list: %s", rank_to_cpus)
         else:
             logger.warning(
                 "Auto thread-binding is not supported due to "
