@@ -329,7 +329,7 @@ def test_kv_cache_events(
         subscriber = MockSubscriber(endpoint,
                                     topic=publisher_config.topic,
                                     decode_type=KVEventBatch)
-
+        time.sleep(1)  # Wait for subscriber to connect
         try:
             custom_tokens = list(range(num_blocks * block_size))
             sampling_params = SamplingParams(max_tokens=1)
