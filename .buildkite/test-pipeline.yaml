@@ -473,6 +473,21 @@ steps:
     - pytest -v -s tool_use
     - pytest -v -s mistral_tool_use
 
+- label: Performance Regression Check
+  fast_check: true
+  working_dir: "/vllm-workspace/.buildkite"
+  gpu: a100
+  source_file_dependencies:
+    - vllm/
+    - csrc/
+  if: build.pull_request != "" # Only run on PRs to check regressions
+  # Additional params to "vllm.entrypoints.openai.api_server" can be provided 
+  # here by PR authors, just remember to delete changes afterwards. 
+  commands:
+    - chmod +x check-performance.sh
+    - bash check-performance.sh --max-model-len 4096
+    - VLLM_USE_V1=1 bash check-performance.sh --max-model-len 4096
+
 #####  models test  #####
 
 - label: Basic Models Test # 24min
