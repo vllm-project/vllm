@@ -267,7 +267,7 @@ class LLMEngine:
     def stop_expert_distribution_record(self) -> None:
         self.engine_core.expert_distribution_record(False)
 
-    def dump_expert_distribution_record(self):
+    def dump_expert_distribution_record(self) -> None:
         self.engine_core.dump_expert_distribution_record()
 
     def reset_mm_cache(self):
