@@ -4,9 +4,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
-import nvtx
 import torch
-from lmcache.utils import _lmcache_nvtx_annotate
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
@@ -52,6 +50,38 @@ def d2h_page_copy(src_layer: torch.Tensor, dst_buffer: torch.Tensor,
     ops.swap_blocks(src_layer[1], dst_buffer[1], block_mapping)
 
 
+def h2d_copy_part_block(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
+                        src_block_id: int, dst_block_id: int,
+                        start_position_in_block: int,
+                        end_position_in_block: Optional[int]) -> None:
+    """Copy the part of a block from host buffer to device layer.
+
+    Args:
+        src_buffer (torch.Tensor): The source buffer on host, shape is 
+            (2, len(block_ids), page_size, ...remaining dims...) 
+        dst_layer (torch.Tensor): The destination layer on device, shape is
+            (2, num_vllm_blocks, page_size, ...remaining dims...)
+        src_block_id (int): The source block id to copy.
+        dst_block_id (int): The destination block id to copy.
+        start_position_in_block (int): The start position in the block to copy.
+        end_position_in_block (int): The end position in the block to copy.
+    """
+    if end_position_in_block is None:
+        # If end_position_in_block is None, copy until the end of the block
+        end_position_in_block = src_buffer[0][0].shape[0]
+
+    dst_k = dst_layer[0][dst_block_id][
+        start_position_in_block:end_position_in_block]
+    src_k = src_buffer[0][src_block_id][
+        start_position_in_block:end_position_in_block]
+    dst_v = dst_layer[1][dst_block_id][
+        start_position_in_block:end_position_in_block]
+    src_v = src_buffer[1][src_block_id][
+        start_position_in_block:end_position_in_block]
+    dst_k.copy_(src_k, non_blocking=True)
+    dst_v.copy_(src_v, non_blocking=True)
+
+
 def h2d_copy_leading_tokens(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
                             src_block_id: int, dst_block_id: int,
                             end_position_in_block: int) -> None:
@@ -66,12 +96,8 @@ def h2d_copy_leading_tokens(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
         dst_block_id (int): The destination block id to copy.
         end_position_in_block (int): The end position in the block to copy.
     """
-    dst_k = dst_layer[0][dst_block_id][:end_position_in_block]
-    src_k = src_buffer[0][src_block_id][:end_position_in_block]
-    dst_v = dst_layer[1][dst_block_id][:end_position_in_block]
-    src_v = src_buffer[1][src_block_id][:end_position_in_block]
-    dst_k.copy_(src_k, non_blocking=True)
-    dst_v.copy_(src_v, non_blocking=True)
+    h2d_copy_part_block(src_buffer, dst_layer, src_block_id, dst_block_id, 0,
+                        end_position_in_block)
 
 
 def h2d_copy_trailing_tokens(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
@@ -88,40 +114,8 @@ def h2d_copy_trailing_tokens(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
         dst_block_id (int): The destination block id to copy.
         start_position_in_block (int): The start position in the block to copy.
     """
-    dst_k = dst_layer[0][dst_block_id][start_position_in_block:]
-    src_k = src_buffer[0][src_block_id][start_position_in_block:]
-    dst_v = dst_layer[1][dst_block_id][start_position_in_block:]
-    src_v = src_buffer[1][src_block_id][start_position_in_block:]
-    dst_k.copy_(src_k, non_blocking=True)
-    dst_v.copy_(src_v, non_blocking=True)
-
-
-def h2d_copy_part_block(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
-                        src_block_id: int, dst_block_id: int,
-                        start_position_in_block: int,
-                        end_position_in_block: int) -> None:
-    """Copy the part of a block from host buffer to device layer.
-
-    Args:
-        src_buffer (torch.Tensor): The source buffer on host, shape is 
-            (2, len(block_ids), page_size, ...remaining dims...) 
-        dst_layer (torch.Tensor): The destination layer on device, shape is
-            (2, num_vllm_blocks, page_size, ...remaining dims...)
-        src_block_id (int): The source block id to copy.
-        dst_block_id (int): The destination block id to copy.
-        start_position_in_block (int): The start position in the block to copy.
-        end_position_in_block (int): The end position in the block to copy.
-    """
-    dst_k = dst_layer[0][dst_block_id][
-        start_position_in_block:end_position_in_block]
-    src_k = src_buffer[0][src_block_id][
-        start_position_in_block:end_position_in_block]
-    dst_v = dst_layer[1][dst_block_id][
-        start_position_in_block:end_position_in_block]
-    src_v = src_buffer[1][src_block_id][
-        start_position_in_block:end_position_in_block]
-    dst_k.copy_(src_k, non_blocking=True)
-    dst_v.copy_(src_v, non_blocking=True)
+    h2d_copy_part_block(src_buffer, dst_layer, src_block_id, dst_block_id,
+                        start_position_in_block, None)
 
 
 def h2d_page_copy(src_buffer: torch.Tensor, dst_layer: torch.Tensor,
@@ -429,7 +423,6 @@ class CPUConnector(KVConnectorBase_V1):
 
         if role == KVConnectorRole.SCHEDULER:
             self._should_be_ready_reqs: set[str] = set()
-            pass
         elif role == KVConnectorRole.WORKER:
             # Prefiller side sender
             if self.kv_role == "kv_producer":
@@ -532,7 +525,7 @@ class CPUConnector(KVConnectorBase_V1):
                 updated_decode_req_metas[req_meta.req_id] = req_meta
             # NOTE (ApostaC): Even if the request is not ready, we still
             # want the worker connector to know about it, so that it can
-            # connector the decode request id to the prefill request id
+            # connect the decode request id to the prefill request id
             output_meta.add_decode(req_meta)
         self._decode_req_metas = updated_decode_req_metas
 
@@ -681,7 +674,6 @@ class CPUConnector(KVConnectorBase_V1):
 
         self._kv_page_shape = kv_caches[list(kv_caches.keys())[0]].shape[2:]
 
-    @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         """
@@ -739,10 +731,8 @@ class CPUConnector(KVConnectorBase_V1):
                     block_ids = decode_meta.block_ids
 
                     with torch.cuda.stream(self._cuda_stream):
-                        rng = nvtx.start_range("h2d_page_copy")
                         h2d_page_copy(src_buffer, dst_layer, block_ids, start,
                                       stop, self._block_size)
-                        nvtx.end_range(rng)
 
             # Record the cuda event for this layer
             event = torch.cuda.Event()
@@ -754,7 +744,6 @@ class CPUConnector(KVConnectorBase_V1):
         # 2. Don't launch all the layers, but just first 2 layers
         # 2.1 launch the rest of the layers during the `wait_for_layer_load`
 
-    @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
         Block until the KV for a specific layer is loaded into vLLM's
@@ -785,7 +774,6 @@ class CPUConnector(KVConnectorBase_V1):
                 self._kv_receiver.free_request(p_req_id)
             self._inflight_h2d_requests.clear()
 
-    @_lmcache_nvtx_annotate
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
                       attn_metadata: "AttentionMetadata", **kwargs) -> None:
         """
@@ -844,11 +832,9 @@ class CPUConnector(KVConnectorBase_V1):
             self._cuda_stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self._cuda_stream):
                 # Copy the data from the GPU to the CPU buffer page by page
-                rng = nvtx.start_range("d2h_page_copy")
                 d2h_page_copy(src_layer=kv_layer,
                               dst_buffer=buffer,
                               block_ids=prefill_req.blocks_to_save)
-                nvtx.end_range(rng)
 
             # record the cuda stream
             task.cuda_event = torch.cuda.Event()
@@ -861,7 +847,6 @@ class CPUConnector(KVConnectorBase_V1):
         # 2. use a single cuda event instead of a list of cuda events
         # 3. use a cuda event pool to prevent the creation overhead
 
-    @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """
         Block until all the save operations is done. This is called
@@ -894,28 +879,29 @@ class CPUConnector(KVConnectorBase_V1):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        if self.kv_role == "kv_consumer":
-            # decoder side
-            self._kv_receiver.progress()
-            p_ready_reqs = self._kv_receiver.get_finished(
-                len(self._gpu_kv_caches))
-            ret = set()
-            for p_req_id in p_ready_reqs:
-                if p_req_id in self._prefill_req_id_to_decode_req_id:
-                    ret.add(self._prefill_req_id_to_decode_req_id[p_req_id])
-                else:
-                    # We haven't seen the corresponding decode request
-                    # before. Therefore, we should make the receiver
-                    # to return the request id again in the next
-                    # call to get_finished.
-                    self._kv_receiver.remove_ready_request(p_req_id)
-
-            if ret:
-                logger.info("Got finished requests: %s", ret)
-
-            return None, ret
-        else:
+        if self.kv_role != "kv_consumer":
             return None, None
+
+        # decoder (kv_consumer) side
+        self._kv_receiver.progress()
+        p_ready_reqs = self._kv_receiver.get_finished(len(self._gpu_kv_caches))
+        ret = set()
+        for p_req_id in p_ready_reqs:
+            if d_req_id := self._decode_req_id_to_prefill_req_id.get(p_req_id):
+                # We have seen the corresponding decode request before.
+                # Therefore, we can return the request id.
+                ret.add(d_req_id)
+            else:
+                # We haven't seen the corresponding decode request
+                # before. Therefore, we should make the receiver
+                # to return the request id again in the next
+                # call to get_finished.
+                self._kv_receiver.remove_ready_request(p_req_id)
+
+        if ret:
+            logger.info("Got finished requests: %s", ret)
+
+        return None, ret
 
     def close(self):
         """

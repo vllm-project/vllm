@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, Optional
 import msgspec
 import torch
 import zmq
-from lmcache.utils import _lmcache_nvtx_annotate
 
 from vllm.distributed.kv_transfer.kv_connector.v1.cpu_connector_utils import (
     DecoderKVSpec, DestinationSpec, KVSenderInterface, SendTask, SendTaskState,
@@ -831,7 +830,6 @@ class NixlSendTask(SendTask):
     def __post_init__(self) -> None:
         self.creation_time = time.time()
 
-    @_lmcache_nvtx_annotate
     def update_states(self) -> None:
         """Update the states of the send task.
         """

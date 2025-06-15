@@ -97,7 +97,7 @@ class Scheduler(SchedulerInterface):
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
 
-        # P/D: requests in process of sending/recving KV transfers
+        # P/D: requests in process of loading/recving KV transfers
         self.finished_recving_kv_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import torch
-from lmcache.utils import _lmcache_nvtx_annotate
 
 from vllm.logger import init_logger
 
@@ -215,7 +214,6 @@ class KVSenderInterface(ABC):
         """
         return self._send_tasks
 
-    @_lmcache_nvtx_annotate
     def progress(self) -> None:
         """A fast, non-blocking function to check and update the states of all
         send tasks. This function should be called periodically to ensure that
