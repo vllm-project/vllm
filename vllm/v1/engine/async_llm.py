@@ -498,13 +498,13 @@ class AsyncLLM(EngineClient):
         self.processor.mm_input_cache_client.reset()
         await self.engine_core.reset_mm_cache_async()
 
-    async def start_expert_distribution_record(self):
+    async def start_expert_distribution_record(self) -> None:
         await self.engine_core.expert_distribution_record_async(is_start=True)
 
-    async def stop_expert_distribution_record(self):
+    async def stop_expert_distribution_record(self) -> None:
         await self.engine_core.expert_distribution_record_async(is_start=False)
 
-    async def dump_expert_distribution_record(self):
+    async def dump_expert_distribution_record(self) -> None:
         await self.engine_core.dump_expert_distribution_record_async()
 
     async def reset_prefix_cache(self,
