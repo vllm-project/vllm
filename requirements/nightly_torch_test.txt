@@ -41,6 +41,7 @@ matplotlib # required for qwen-vl test
 num2words # required for smolvlm test
 pqdm
 timm # required for internvl test
+mistral-common==1.6.2
 
 schemathesis==3.39.15  # Required for openai schema test.
 mteb>=1.38.11, <2 # required for mteb test
