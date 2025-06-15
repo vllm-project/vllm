@@ -128,6 +128,8 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_ROCM_QR_LEVEL: int = 4,
+    VLLM_ROCM_QR_CAST_BF16_TO_FP16: bool = False
 
 
 def get_default_cache_root():
@@ -668,6 +670,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # custom paged attention kernel for MI3* cards
     "VLLM_ROCM_CUSTOM_PAGED_ATTN":
     lambda: (os.getenv("VLLM_ROCM_CUSTOM_PAGED_ATTN", "True").lower() in
+             ("true", "1")),
+
+    # Custom quick allreduce kernel for MI3* cards.
+    # 0 means closed, 1 for 2stage f16, 2 for 2stage fp8,
+    # 3 for 2stage Q8, 4 for 2stage Q6, 5 for 2stage Q4.
+    # Recommended for large models to get doubled allreduce
+    # speedup with less precision loss.
+    "VLLM_ROCM_QR_LEVEL":
+    lambda: int(os.getenv("VLLM_ROCM_QR_LEVEL", "4")),
+
+    # Custom quick allreduce kernel for MI3* cards
+    # Due to the lack of the bfloat16 asm instruction, bfloat16
+    # kernels are slower than fp16,
+    # If environment is not set to 1, we convert inp from bf to fp16
+    "VLLM_ROCM_QR_CAST_BF16_TO_FP16":
+    lambda: (os.getenv("VLLM_ROCM_QR_CAST_BF16_TO_FP16", "True").lower() in
              ("true", "1")),
 
     # If set, when running in Quark emulation mode, do not dequantize the

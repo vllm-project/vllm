@@ -638,6 +638,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 # if CUDA endif
 endif()
 
+if (VLLM_GPU_LANG STREQUAL "HIP")
+  # must be rocm
+  list(APPEND VLLM_EXT_SRC
+    "csrc/quick_all_reduce.cu"
+  )
+endif()
+
+
 message(STATUS "Enabling C extension.")
 define_gpu_extension_target(
   _C
