@@ -50,6 +50,7 @@ if current_platform.is_rocm():
             amdsmi_shut_down()
 elif current_platform.is_cuda():
     from vllm.third_party.pynvml import (nvmlDeviceGetHandleByIndex,
+                                         nvmlDeviceGetHandleByUUID,
                                          nvmlDeviceGetMemoryInfo, nvmlInit,
                                          nvmlShutdown)
 
@@ -661,9 +662,30 @@ def get_physical_device_indices(devices):
     if visible_devices is None:
         return devices
 
-    visible_indices = [int(x) for x in visible_devices.split(",")]
+    visible_device_ids = visible_devices.split(",")
+    # Handle both integer device IDs and MIG UUIDs
+    visible_indices: list[Union[int, str]] = []
+    for device_id in visible_device_ids:
+        if device_id.startswith("MIG-"):
+            # For MIG devices, keep the UUID as-is
+            visible_indices.append(device_id)
+        else:
+            # For regular devices, convert to int
+            visible_indices.append(int(device_id))
+
     index_mapping = {i: physical for i, physical in enumerate(visible_indices)}
     return [index_mapping[i] for i in devices if i in index_mapping]
+
+
+def _get_nvml_device_handle(device_identifier):
+    """Get NVML device handle from either an integer device ID or MIG UUID."""
+    if isinstance(device_identifier,
+                  str) and device_identifier.startswith("MIG-"):
+        # For MIG devices, use UUID-based lookup
+        return nvmlDeviceGetHandleByUUID(device_identifier)
+    else:
+        # For regular devices, use index-based lookup
+        return nvmlDeviceGetHandleByIndex(int(device_identifier))
 
 
 @_nvml()
@@ -687,7 +709,7 @@ def wait_for_gpu_memory_to_clear(*,
                 gb_used = mem_info["vram_used"] / 2**10
                 gb_total = mem_info["vram_total"] / 2**10
             else:
-                dev_handle = nvmlDeviceGetHandleByIndex(device)
+                dev_handle = _get_nvml_device_handle(device)
                 mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
                 gb_used = mem_info.used / 2**30
                 gb_total = mem_info.total / 2**30
