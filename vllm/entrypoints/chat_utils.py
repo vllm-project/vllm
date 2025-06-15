@@ -40,8 +40,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 # yapf: disable
-from vllm.transformers_utils.chat_templates import (
-    get_chat_template_fallback_path)
+from vllm.transformers_utils.chat_templates import get_chat_template_fallback
 # yapf: enable
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -358,25 +357,33 @@ def resolve_hf_chat_template(
             if isinstance(processor, ProcessorMixin) and \
                 hasattr(processor, 'chat_template') and \
                 processor.chat_template is not None:
-                return processor.chat_template
+                chat_template = processor.chat_template
         except Exception:
             logger.debug("Failed to load AutoProcessor chat template for %s", tokenizer.name_or_path, exc_info=True)  # noqa: E501
 
     # 3rd priority: AutoTokenizer chat template
-    try:
-        return tokenizer.get_chat_template(chat_template, tools=tools)
-    except Exception:
-        logger.debug("Failed to load AutoTokenizer chat template for %s",
-                     tokenizer.name_or_path, exc_info=True)
+    if chat_template is None:
+        try:
+            chat_template = tokenizer.get_chat_template(chat_template,
+                                                        tools=tools)
+        except Exception:
+            logger.debug("Failed to load AutoTokenizer chat template for %s",
+                        tokenizer.name_or_path, exc_info=True)
 
     # 4th priority: Predefined fallbacks
-    path = get_chat_template_fallback_path(
+    fallback_info = get_chat_template_fallback(
         model_type=model_config.hf_config.model_type,
-        tokenizer_name_or_path=model_config.tokenizer,
     )
-    if path is not None:
+    path = (fallback_info.get_path(model_config.tokenizer)
+            if fallback_info is not None else None)
+    if path is not None and chat_template is None:
         logger.info("Loading chat template fallback for %s as there isn't one "
                     "defined on HF Hub.", tokenizer.name_or_path)
+        chat_template = load_chat_template(path)
+    elif fallback_info is not None and fallback_info.override_exists:
+        logger.warning("Override existing template for %s as its defined ones "
+                       "on HF Hub is not compatible with OpenAI server.",
+                       tokenizer.name_or_path)
         chat_template = load_chat_template(path)
     else:
         logger.debug("There is no chat template fallback for %s",
