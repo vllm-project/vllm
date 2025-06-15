@@ -28,7 +28,8 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
-from pydantic import TypeAdapter
+from PIL import Image
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 # yapf: enable
 from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
                           ProcessorMixin)
@@ -89,6 +90,25 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
     """The type of the content part."""
 
 
+class PILImage(BaseModel):
+    """
+    A PIL.Image.Image object.
+    """
+    image: Image.Image
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
+    """A simpler version of the param that only accepts a PIL image.
+
+    Example:
+    {
+        "image": ImageAsset('cherry_blossom').pil_image
+    }
+    """
+    image: Required[PILImage]
+
+
 class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain image_url.
     This is supported by OpenAI API, although it is not documented.
@@ -127,6 +147,7 @@ ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartVideoParam, ChatCompletionContentPartRefusalParam,
+    CustomChatCompletionContentPILImageParam,
     CustomChatCompletionContentSimpleImageParam,
     ChatCompletionContentPartImageEmbedsParam,
     CustomChatCompletionContentSimpleAudioParam,
@@ -697,6 +718,10 @@ class BaseMultiModalContentParser(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def parse_pil_image(self, image: Image.Image) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def parse_audio(self, audio_url: str) -> None:
         raise NotImplementedError
 
@@ -739,6 +764,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             embedding = self._connector.fetch_image_embedding(image_embeds)
             placeholder = self._tracker.add("image_embeds", embedding)
 
+        self._add_placeholder(placeholder)
+
+    def parse_pil_image(self, image: Image.Image) -> None:
+        placeholder = self._tracker.add("image", image)
         self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
@@ -794,6 +823,13 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             future.set_result(embedding)
 
         placeholder = self._tracker.add("image_embeds", future)
+        self._add_placeholder(placeholder)
+
+    def parse_pil_image(self, image: Image.Image) -> None:
+        future: asyncio.Future[Image.Image] = asyncio.Future()
+        future.set_result(image)
+
+        placeholder = self._tracker.add("image", future)
         self._add_placeholder(placeholder)
 
     def parse_audio(self, audio_url: str) -> None:
@@ -914,12 +950,13 @@ _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageEmbedsParser = partial(cast, ChatCompletionContentPartImageEmbedsParam)
 _InputAudioParser = partial(cast, ChatCompletionContentPartInputAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
+_PILImageParser = partial(cast, CustomChatCompletionContentPILImageParam)
 # Need to validate url objects
 _ImageParser = TypeAdapter(ChatCompletionContentPartImageParam).validate_python
 _AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam).validate_python
 _VideoParser = TypeAdapter(ChatCompletionContentPartVideoParam).validate_python
 
-_ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio]
+_ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio, PILImage]
 
 # Define a mapping from part types to their corresponding parsing functions.
 MM_PARSER_MAP: dict[
@@ -932,6 +969,7 @@ MM_PARSER_MAP: dict[
     lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
     lambda part: _ImageEmbedsParser(part).get("image_embeds", None),
+    "image": lambda part: _PILImageParser(part).get("image", None),
     "audio_url":
     lambda part: _AudioParser(part).get("audio_url", {}).get("url", None),
     "input_audio":
@@ -1001,7 +1039,7 @@ def _parse_chat_message_content_mm_part(
 
 
 VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
-                                       "image_embeds",
+                                       "image_embeds", "image",
                                        "audio_url", "input_audio", "video_url")
 
 
@@ -1072,6 +1110,10 @@ def _parse_chat_message_content_part(
         else:
             return str_content
 
+    if part_type == "image":
+        image_content = cast(Image.Image, content)
+        mm_parser.parse_pil_image(image_content)
+        return {'type': 'image'} if wrap_dicts else None
     if part_type == "image_url":
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
