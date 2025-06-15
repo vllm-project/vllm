@@ -55,10 +55,11 @@ def ref_per_token_group_quant(
 
 
 BATCH_SIZES = [1, 13, 26, 32]
-NUM_TOKENS = [32, 64, 4096]
-HIDDEN_SIZES = [1024]
+NUM_TOKENS = [7, 37, 64, 4096]
 
 ## Tests for masked per_token_group_quant_fp8  ####
+
+HIDDEN_SIZES = [128, 256, 384, 512, 1024]
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
@@ -115,6 +116,8 @@ def test_masked_per_token_group_quant_fp8(batch_size: int, num_tokens: int,
 
 
 ## Tests for masked silu_and_mul ####
+
+HIDDEN_SIZES = [124, 1024, 2176, 2816]
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)

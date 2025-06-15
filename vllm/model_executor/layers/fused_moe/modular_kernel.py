@@ -228,7 +228,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         Note that expert_num_tokens[i] is the number of tokens that are
         actually valid for expert i.
         """
-        assert output.shape == input.shape
+        assert output.ndim == 3 and input.ndim == 3
+        assert output.size(-1) * 2 == input.size(-1)
         E, _, _ = input.shape
         assert expert_num_tokens.size(0) == E, (
             f"expert_num_tokens.size(0)({expert_num_tokens.size(0)}) != E({E})"
