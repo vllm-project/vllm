@@ -40,7 +40,7 @@ class StatLoggerBase(ABC):
         ...
 
     @abstractmethod
-    def log_engine_initialized(self):
+    def log_engine_initialized(self, elapsed_time: Optional[float] = None):
         ...
 
     def log(self):  # noqa
@@ -132,12 +132,16 @@ class LoggingStatLogger(StatLoggerBase):
         )
         self.spec_decoding_logging.log(log_fn=log_fn)
 
-    def log_engine_initialized(self):
+    def log_engine_initialized(self, elapsed_time: Optional[float] = None):
         if self.vllm_config.cache_config.num_gpu_blocks:
             logger.info(
                 "Engine %03d: vllm cache_config_info with initialization "
                 "after num_gpu_blocks is: %d", self.engine_index,
                 self.vllm_config.cache_config.num_gpu_blocks)
+        if elapsed_time is not None:
+            logger.info(
+                "vllm engine total engine startup time in %.2f seconds.",
+                elapsed_time)
 
 
 class PrometheusStatLogger(StatLoggerBase):
@@ -497,7 +501,7 @@ class PrometheusStatLogger(StatLoggerBase):
             self.gauge_lora_info.labels(**lora_info_labels)\
                                 .set_to_current_time()
 
-    def log_engine_initialized(self):
+    def log_engine_initialized(self, elapsed_time: Optional[float] = None):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
 
