@@ -21,7 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    get_tp_group)
+    get_tp_group, get_pp_group)
 from vllm.logger import init_logger
 from vllm.platforms import _Backend
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down
@@ -55,18 +55,16 @@ class NixlAgentMetadata(
         # required for @cached_property.
         dict=True):
     engine_id: str
+    tp_rank: int
+    tp_size: int
+    global_rank: int
+    global_world_size: int
+    empty: bool = False
     agent_metadata: Optional[bytes] = None
     kv_caches_base_addr: Optional[list[int]] = None
     num_blocks: Optional[int] = None
-    tp_size: Optional[int] = None
     block_len: Optional[int] = None
     attn_backend_name: Optional[str] = None
-
-    # Control metadata for NIXL connector.
-    empty: bool = False
-    tp_rank: Optional[int] = None
-    global_rank: Optional[int] = None
-    global_world_size: Optional[int] = None
 
 
 @dataclass
@@ -225,6 +223,10 @@ class NixlConnectorScheduler:
                             NixlAgentMetadata(
                                 engine_id=query_payload.engine_id,
                                 tp_rank=query_payload.tp_rank,
+                                tp_size=query_payload.tp_size,
+                                global_rank=query_payload.global_rank,
+                                global_world_size=query_payload.
+                                global_world_size,
                                 empty=True))
                         sock.send_multipart((ident, b"", encoded_data))
                         logger.debug("Sent empty metadata cache")
@@ -239,6 +241,10 @@ class NixlConnectorScheduler:
                             query_metada = NixlAgentMetadata(
                                 engine_id=query_payload.engine_id,
                                 tp_rank=query_payload.tp_rank,
+                                tp_size=meta.tp_size,
+                                global_rank=query_payload.global_rank,
+                                global_world_size=query_payload.
+                                global_world_size,
                                 empty=True)
                         # Encode the cache and send it.
                         encoded_data = encoder.encode(query_metada)
@@ -255,9 +261,13 @@ class NixlConnectorScheduler:
                     cache[global_rank] = worker_meta
                     # Send an empty response to acknowledge the update.
                     encoded_data = encoder.encode(
-                        NixlAgentMetadata(engine_id=worker_meta.engine_id,
-                                          tp_rank=worker_meta.tp_rank,
-                                          empty=True))
+                        NixlAgentMetadata(
+                            engine_id=worker_meta.engine_id,
+                            tp_rank=worker_meta.tp_rank,
+                            tp_size=worker_meta.tp_size,
+                            global_rank=worker_meta.global_rank,
+                            global_world_size=worker_meta.global_world_size,
+                            empty=True))
                     sock.send_multipart((ident, b"", encoded_data))
 
     def get_num_new_matched_tokens(
@@ -416,7 +426,7 @@ class NixlConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
-
+        self.pp_group = get_pp_group()
         self.global_rank = torch.distributed.get_rank()
         self.global_world_size = torch.distributed.get_world_size()
 
@@ -519,7 +529,10 @@ class NixlConnectorWorker:
                 got_metadata_time = time.perf_counter()
                 metadata = NixlAgentMetadata(
                     engine_id=self.engine_id,
+                    tp_rank=self.tp_rank,
+                    tp_size=self.world_size,
                     global_rank=self.global_rank,
+                    global_world_size=self.global_world_size,
                 )
                 sock.send_multipart([GET_META_MSG, encoder.encode(metadata)])
                 metadata_bytes = sock.recv()
@@ -668,16 +681,17 @@ class NixlConnectorWorker:
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
             num_blocks=self.num_blocks,
             tp_size=self.world_size,
+            tp_rank=self.tp_rank,
             global_rank=self.global_rank,
             global_world_size=self.global_world_size,
             block_len=self.block_len,
             attn_backend_name=self.backend_name)
         self._nixl_handshake_sender_t = threading.Thread(
             target=self._nixl_handshake_sender,
-            args=(metadata, self.tp_rank),
+            args=(metadata, ),
             daemon=True,
-            name="nixl_handshake_listener")
-        self._nixl_handshake_listener_t.start()
+            name="_nixl_handshake_sender")
+        self._nixl_handshake_sender_t.start()
 
     def add_remote_agent(self,
                          nixl_agent_meta: NixlAgentMetadata,
@@ -827,16 +841,29 @@ class NixlConnectorWorker:
 
         # Rank 0: get finished from all other ranks.
         if self.tp_rank == 0:
-            for req_id in done_sending:
-                self._done_sending_count[req_id] += 1
-            for req_id in done_recving:
-                self._done_recving_count[req_id] += 1
-
             # Keep track of how many other ranks have finished.
             other_ranks_finished_ids: list[str] = []
             for i in range(1, self.world_size):
                 other_ranks_finished_ids.extend(
                     self.tp_group.recv_object(src=i))
+            if self.global_rank != 0:
+                logger.debug(
+                    "Global Rank %s, get_finished: sending finished req_ids to "
+                    "Rank 0: %s", self.global_rank,
+                    done_sending.union(done_recving))
+                self.pp_group.send_object(other_ranks_finished_ids, dst=0)
+                # Unused as only Rank 0 results are sent to scheduler.
+                return done_sending, done_recving
+            # Keep track of how many other ranks have finished.
+            other_ranks_finished_ids: list[str] = []
+            for i in range(1, self.pp_group.world_size):
+                other_ranks_finished_ids.extend(
+                    self.pp_group.recv_object(src=i))
+            for req_id in done_sending:
+                self._done_sending_count[req_id] += 1
+            for req_id in done_recving:
+                self._done_recving_count[req_id] += 1
+
             for req_id in other_ranks_finished_ids:
                 if (req_id in self._done_recving_count
                         or req_id in self._recving_transfers):
