@@ -776,7 +776,9 @@ class NixlConnectorWorker:
 
         assert self.block_size == remote_block_size, "Remote P worker with " \
         "different block size is not supported"
-
+        assert nixl_agent_meta.num_blocks is not None
+        assert nixl_agent_meta.kv_caches_base_addr is not None
+        
         # Create dst descs and xfer side handles. TP workers have same #blocks.
         if engine_id in self.dst_num_blocks:
             assert self.dst_num_blocks[engine_id] == nixl_agent_meta.num_blocks
@@ -836,6 +838,9 @@ class NixlConnectorWorker:
                 "Rank %s, get_finished: %s requests done sending "
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
+
+        if self.world_size == 1:
+            return done_sending, done_recving
 
         # Rank 0: get finished from all other ranks.
         if self.tp_rank == 0:
