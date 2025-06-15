@@ -4495,7 +4495,6 @@ class VllmConfig:
                 "full_cuda_graph is not supported with "
                 "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
-            self.cache_config.enable_prefix_caching = False
 
         if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events
