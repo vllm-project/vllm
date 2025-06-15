@@ -11,7 +11,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -107,11 +107,11 @@ class Plamo2MambaMixer(nn.Module):
         self.conv_kernel_size = self.config.mamba_d_conv
         self.intermediate_size = (self.config.mamba_num_heads *
                                   self.config.hidden_size_per_head)
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.head_dim = self.config.hidden_size_per_head
         self.hidden_size_per_head = self.config.hidden_size_per_head
         self.num_heads = self.config.mamba_num_heads
         self.time_step_rank = max(64, self.hidden_size // 16)
-        self.use_bias = False
         self.conv1d = ColumnParallelLinear(
             input_size=self.conv_kernel_size,
             output_size=self.intermediate_size,
@@ -128,9 +128,10 @@ class Plamo2MambaMixer(nn.Module):
         self.in_proj = MergedColumnParallelLinear(
             self.hidden_size,
             [self.intermediate_size] * 2,
-            bias=self.use_bias,
+            bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj",
+            return_bias=False,
         )
         # selective projection used to make dt, B and C input dependent
         self.bcdt_proj = RowParallelLinear(
@@ -161,7 +162,8 @@ class Plamo2MambaMixer(nn.Module):
                 dtype=torch.float32,
             ))
         self.D = nn.Parameter(torch.ones(self.intermediate_size // tp_size))
-        self.dt_bias = nn.Parameter(torch.ones(self.num_heads))
+        self.dt_bias = nn.Parameter(
+            torch.ones(divide(self.num_heads, self.tp_size)))
 
         set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader(0)})
         a_weight_loader = composed_weight_loader(
@@ -173,10 +175,11 @@ class Plamo2MambaMixer(nn.Module):
         self.out_proj = RowParallelLinear(
             self.intermediate_size,
             self.hidden_size,
-            bias=self.use_bias,
+            bias=False,
             input_is_parallel=True,
             quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
+            return_bias=False,
         )
         # The activation function is fixed to SiLU.
         self.activation = "silu"
@@ -198,16 +201,8 @@ class Plamo2MambaMixer(nn.Module):
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
         # 1. Gated MLP's linear projection
-        projected_states = self.in_proj(hidden_states)[0]
-        # Reshaping the projected states as in modeling_plamo.py.
-        length = len(hidden_states)
-        projected_states = projected_states.reshape(length, self.num_heads, -1)
-        gate, hidden_states = torch.split(
-            projected_states,
-            [self.hidden_size_per_head, self.hidden_size_per_head],
-            dim=-1)
-        hidden_states = hidden_states.reshape(length, -1).transpose(0, 1)
-        gate = gate.reshape(length, -1).transpose(0, 1)
+        projected_states = self.in_proj(hidden_states)
+        gate, hidden_states = projected_states.transpose(0, 1).chunk(2, dim=-2)
 
         # 2. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
@@ -263,11 +258,11 @@ class Plamo2MambaMixer(nn.Module):
         discrete_time_step = discrete_time_step.transpose(
             0, 1)[..., None].expand(-1, -1, self.hidden_size_per_head)
         discrete_time_step = discrete_time_step.reshape(
-            -1, self.intermediate_size).transpose(0, 1)
+            -1, self.intermediate_size // self.tp_size).transpose(0, 1)
         time_proj_bias = time_proj_bias[...,
                                         None].expand(-1,
                                                      self.hidden_size_per_head)
-        time_proj_bias = time_proj_bias.reshape(self.intermediate_size)
+        time_proj_bias = time_proj_bias.reshape(-1)
 
         if attn_metadata.query_start_loc is not None \
             and attn_metadata.context_lens_tensor is not None:
@@ -301,8 +296,7 @@ class Plamo2MambaMixer(nn.Module):
             scan_outputs = scan_outputs.transpose(0, 1)
 
         # 4. Final linear projection
-        contextualized_states = self.out_proj(scan_outputs.transpose(-2,
-                                                                     -1))[0]
+        contextualized_states = self.out_proj(scan_outputs.transpose(-2, -1))
         return contextualized_states
 
 
@@ -409,8 +403,12 @@ class Plamo2AttentionMixer(nn.Module):
                               eps=config.rms_norm_eps)
         self.k_norm.weight = torch.nn.Parameter(
             torch.ones((self.num_kv_heads, config.hidden_size_per_head)))
-        set_weight_attrs(self.k_norm.weight,
-                         {"weight_loader": sharded_weight_loader(0)})
+        # Tensor-parallelism shards the K norm weights to the tp ranks
+        # in a head-wise manner. This approach does not work if there is only
+        # a single KV head, as is the case for PLaMo 2-1B.
+        if self.total_num_kv_heads != 1:
+            set_weight_attrs(self.k_norm.weight,
+                             {"weight_loader": sharded_weight_loader(0)})
 
         self.attn = Attention(
             self.num_heads,
@@ -756,6 +754,38 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, SupportsPP,
                 loaded_weight = loaded_weight[:, None].expand(
                     -1, self.config.hidden_size_per_head)
                 loaded_weight = loaded_weight.reshape(-1)
+            # Reshape the in_proj weights to match the shape expected
+            # by MergedColumnParallelLinear.
+            # This works both for unquantized weights and
+            # for quantized weights.
+            # In the quantized case, the weights are already transposed.
+            # Also, in addition to the quantized weights,
+            # the zero points and scales have to be reshaped as well.
+            # Packing should not be affected by this.
+            if ".mixer.in_proj.weight" in name \
+                or "mixer.in_proj.qweight" in name \
+                or "mixer.in_proj.scales" in name \
+                or "mixer.in_proj.qzeros" in name:
+                if "mixer.in_proj.weight" in name:
+                    loaded_weight = loaded_weight.transpose(0, 1)
+                # for weight:
+                # loaded_weight.shape[0] == self.config.hidden_size
+                # for qweight:
+                # loaded_weight.shape[0] == self.config.hidden_size // param.pack_factor  # noqa
+                # for scales and qzeros:
+                # loaded_weight.shape[0] == self.config.hidden_size // self.vllm_config.quant_config.group_size  # noqa
+                loaded_weight = loaded_weight.reshape(
+                    loaded_weight.shape[0], self.config.mamba_num_heads, -1)
+                gate_weight, hidden_states_weight = loaded_weight.chunk(2,
+                                                                        dim=-1)
+                gate_weight = gate_weight.reshape(loaded_weight.shape[0], -1)
+                hidden_states_weight = hidden_states_weight.reshape(
+                    loaded_weight.shape[0], -1)
+                loaded_weight = torch.cat([gate_weight, hidden_states_weight],
+                                          dim=-1)
+                if "mixer.in_proj.weight" in name:
+                    loaded_weight = loaded_weight.transpose(0, 1)
+
             # Offset parameter with vllm's RMSNorm haven't been supported yet.
             if ".pre_mixer_norm" in name:
                 loaded_weight += 1.0
