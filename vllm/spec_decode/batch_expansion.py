@@ -43,6 +43,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         self,
         execute_model_req: ExecuteModelRequest,
         proposals: SpeculativeProposals,
+        return_output=False,
+        keep_index=None,
     ) -> SpeculativeScores:
         """Score the proposed tokens via the scorer model.
 
@@ -78,11 +80,18 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
              proposal_lens_list=proposal_lens_list,
          )
 
+        if keep_index is not None:
+            target_seq_group_metadata_list = [
+                target_seq_group_metadata_list[i] for i in keep_index
+            ]
         target_sampler_output = self._scorer_worker.execute_model(
             execute_model_req=execute_model_req.clone(
                 seq_group_metadata_list=target_seq_group_metadata_list))
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
+
+        if return_output:
+            return target_sampler_output
 
         if not non_spec_indices:
             # All sequence groups in batch have spec decoding enabled
