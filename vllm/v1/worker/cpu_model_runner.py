@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from contextlib import contextmanager
-from typing import Any
+from typing import  Any, Optional, Union
 
 import torch
 
@@ -8,6 +8,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.sequence import IntermediateTensors
+from vllm.v1.outputs import  ModelRunnerOutput
 
 logger = init_logger(__name__)
 
@@ -70,6 +72,13 @@ class CPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         pass
 
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> Union[ModelRunnerOutput, IntermediateTensors]:
+        raise NotImplementedError
 
 @contextmanager
 def _set_global_compilation_settings(config: VllmConfig):
