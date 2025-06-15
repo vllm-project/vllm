@@ -1904,6 +1904,7 @@ class LLMEngine:
             metrics = seq_group.metrics
             ttft = metrics.first_token_time - metrics.arrival_time
             e2e_time = metrics.finished_time - metrics.arrival_time
+            seq_span.set_attribute(SpanAttributes.GEN_AI_SYSTEM, "vLLM")
             seq_span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL,
                                    self.model_config.model)
             seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID,
