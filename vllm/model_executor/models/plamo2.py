@@ -117,6 +117,7 @@ class Plamo2MambaMixer(nn.Module):
             input_size=self.conv_kernel_size,
             output_size=self.intermediate_size,
             bias=self.use_conv_bias,
+            prefix=f"{prefix}.conv1d",
         )
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
@@ -128,6 +129,7 @@ class Plamo2MambaMixer(nn.Module):
             self.hidden_size,
             [self.intermediate_size] * 2,
             bias=self.use_bias,
+            quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj",
         )
         # selective projection used to make dt, B and C input dependent
@@ -135,6 +137,7 @@ class Plamo2MambaMixer(nn.Module):
             self.intermediate_size,
             self.time_step_rank + self.ssm_state_size * 2,
             bias=False,
+            quant_config=self.quant_config,
             prefix=f"{prefix}.bcdt_proj",
         )
         # time step projection (discretization) -
@@ -144,6 +147,7 @@ class Plamo2MambaMixer(nn.Module):
             self.time_step_rank,
             self.num_heads,
             bias=False,
+            quant_config=self.quant_config,
             prefix=f"{prefix}.dt_proj",
         )
 
@@ -169,6 +173,7 @@ class Plamo2MambaMixer(nn.Module):
             self.hidden_size,
             bias=self.use_bias,
             input_is_parallel=True,
+            quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
         )
         # The activation function is fixed to SiLU.
