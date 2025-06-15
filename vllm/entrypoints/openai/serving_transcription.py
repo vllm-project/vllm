@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import io
+import tempfile
 import time
 from collections.abc import AsyncGenerator
 from math import ceil
@@ -25,8 +26,10 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import PlaceholderModule
 
 try:
+    import audioread
     import librosa
 except ImportError:
+    audioread = PlaceholderModule("audioread")  # type: ignore[assignment]
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
 logger = init_logger(__name__)
@@ -202,8 +205,18 @@ class OpenAIServingTranscription(OpenAIServing):
         if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")
 
-        with io.BytesIO(audio_data) as bytes_:
-            y, sr = librosa.load(bytes_)
+        def load_audio(audio_data: bytes):
+            try:
+                with io.BytesIO(audio_data) as bytes_:
+                    out = librosa.load(bytes_, sr=None)
+            except Exception:
+                with tempfile.NamedTemporaryFile() as temp:
+                    temp.write(audio_data)
+                    audio_read_obj = audioread.audio_open(temp.name)
+                    out = librosa.load(audio_read_obj, sr=None)
+            return out
+
+        y, sr = load_audio(audio_data)
 
         duration = librosa.get_duration(y=y, sr=sr)
         if duration > self.max_audio_clip_s:
