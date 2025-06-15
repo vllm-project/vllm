@@ -797,6 +797,7 @@ class NixlConnectorWorker:
                 if not self.use_mla else 0
             # Register all remote blocks, but only the corresponding kv heads.
             for base_addr in nixl_agent_meta.kv_caches_base_addr:
+                assert nixl_agent_meta.num_blocks is not None
                 for block_id in range(nixl_agent_meta.num_blocks):
                     block_offset = block_id * nixl_agent_meta.block_len
                     # For each block, grab the heads chunk belonging to rank_i
@@ -836,34 +837,18 @@ class NixlConnectorWorker:
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
 
-        if self.world_size == 1:
-            return done_sending, done_recving
-
         # Rank 0: get finished from all other ranks.
         if self.tp_rank == 0:
-            # Keep track of how many other ranks have finished.
-            other_ranks_finished_ids: list[str] = []
-            for i in range(1, self.world_size):
-                other_ranks_finished_ids.extend(
-                    self.tp_group.recv_object(src=i))
-            if self.global_rank != 0:
-                logger.debug(
-                    "Global Rank %s, get_finished: sending finished req_ids to "
-                    "Rank 0: %s", self.global_rank,
-                    done_sending.union(done_recving))
-                self.pp_group.send_object(other_ranks_finished_ids, dst=0)
-                # Unused as only Rank 0 results are sent to scheduler.
-                return done_sending, done_recving
-            # Keep track of how many other ranks have finished.
-            other_ranks_finished_ids: list[str] = []
-            for i in range(1, self.pp_group.world_size):
-                other_ranks_finished_ids.extend(
-                    self.pp_group.recv_object(src=i))
             for req_id in done_sending:
                 self._done_sending_count[req_id] += 1
             for req_id in done_recving:
                 self._done_recving_count[req_id] += 1
 
+            # Keep track of how many other ranks have finished.
+            other_ranks_finished_ids: list[str] = []
+            for i in range(1, self.world_size):
+                other_ranks_finished_ids.extend(
+                    self.tp_group.recv_object(src=i))
             for req_id in other_ranks_finished_ids:
                 if (req_id in self._done_recving_count
                         or req_id in self._recving_transfers):
