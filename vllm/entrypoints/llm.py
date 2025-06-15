@@ -1315,7 +1315,7 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def start_expert_distribution_record(self):
+    def start_expert_distribution_record(self) -> None:
         self.llm_engine.start_expert_distribution_record()
 
     def stop_expert_distribution_record(self) -> None:
