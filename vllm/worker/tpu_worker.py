@@ -15,6 +15,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
+from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, bind_kv_cache, get_dtype_size
 from vllm.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
@@ -73,7 +74,7 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             rank=self.rank,
             local_rank=self.local_rank,
             distributed_init_method=self.distributed_init_method,
-            backend="gloo",
+            backend=current_platform.dist_backend,
         )
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
