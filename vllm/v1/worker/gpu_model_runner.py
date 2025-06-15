@@ -21,7 +21,8 @@ from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
+                                          has_kv_transfer_group,
+                                          is_v1_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture,
@@ -1524,9 +1525,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             spec_token_ids = draft_token_ids.tolist()
 
-        # Clear KVConnector state after all KVs are generated.
-        if has_kv_transfer_group():
-            get_kv_transfer_group().clear_connector_metadata()
+        invalid_block_ids = None
+        if is_v1_kv_transfer_group():
+            connector = get_kv_transfer_group()
+            # Check for KV load errors
+            invalid_block_ids = connector.get_block_ids_with_load_errors()
+            # Clear KVConnector state after all KVs are generated.
+            connector.clear_connector_metadata()
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1537,6 +1542,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,
             finished_sending=finished_sending,
             finished_recving=finished_recving,
+            invalid_block_ids=invalid_block_ids,
         )
 
     def kv_connector_no_forward(

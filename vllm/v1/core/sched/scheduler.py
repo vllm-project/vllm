@@ -707,10 +707,13 @@ class Scheduler(SchedulerInterface):
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        invalid_block_ids = model_runner_output.invalid_block_ids
 
         new_running: list[Request] = []
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
+        num_requests_to_reschedule = 0
+        num_tokens_to_reschedule = 0
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -722,6 +725,27 @@ class Scheduler(SchedulerInterface):
                 # The request was not scheduled in this step.
                 new_running.append(request)
                 continue
+
+            # loop through running requests blocks and mark those with
+            # invalid blocks for rescheduling
+            if invalid_block_ids:
+                reschedule_request = False
+                req_block_ids = self.kv_cache_manager.get_block_ids(req_id)[0]
+                req_num_computed_blocks = \
+                    request.num_computed_tokens // self.block_size
+                for idx, block_id in enumerate(req_block_ids):
+                    if idx >= req_num_computed_blocks:
+                        break
+                    if block_id in invalid_block_ids:
+                        num_requests_to_reschedule += 1
+                        num_tokens_to_reschedule += request.num_computed_tokens
+                        request.num_computed_tokens = idx * self.block_size
+                        num_tokens_to_reschedule -= request.num_computed_tokens
+                        new_running.append(request)
+                        reschedule_request = True
+                        break
+                if reschedule_request:
+                    continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
@@ -824,6 +848,12 @@ class Scheduler(SchedulerInterface):
 
             if not stopped:
                 new_running.append(request)
+
+        if num_requests_to_reschedule:
+            logger.info(
+                "Recovered from KV load failure: "
+                "%d request(s) rescheduled (%d tokens affected).",
+                num_requests_to_reschedule, num_tokens_to_reschedule)
 
         # KV Connector: update state for finished KV Transfers.
         self._update_from_kv_xfer_finished(model_runner_output)

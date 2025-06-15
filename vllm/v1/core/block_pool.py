@@ -124,7 +124,7 @@ class BlockPool:
             kv_cache_group_id: The id of the KV cache group.
             hash_fn: The hash function to use for block hashes.
         """
-        if num_cached_blocks == num_full_blocks:
+        if num_cached_blocks >= num_full_blocks:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(block_hashes) >= num_cached_blocks
