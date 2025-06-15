@@ -1368,6 +1368,12 @@ class LLM:
         assert isinstance(self.llm_engine, V1LLMEngine)
         return self.llm_engine.get_metrics()
 
+    @property
+    def metadata(self):
+        from .metadata import get_metadata
+        vllm_config = self.llm_engine.vllm_config
+        return get_metadata(vllm_config)
+
     # LEGACY
     def _convert_v1_inputs(
         self,
