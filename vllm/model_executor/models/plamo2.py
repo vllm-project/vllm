@@ -21,10 +21,14 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.mamba2_metadata import (
+    Mamba2Metadata, prepare_mamba2_metadata)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
-    selective_scan_fn, selective_state_update)
+    selective_state_update)
+from vllm.model_executor.layers.mamba.ops.ssd_combined import (
+    mamba_chunk_scan_combined)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -90,9 +94,10 @@ def is_mamba(config: Plamo2Config, i: int) -> bool:
     return (i % config.mamba_step) != (config.mamba_step // 2)
 
 
-# Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
+# Adapted from:
+# vllm.model_executor.layers.mamba.mamba_mixer2.MambaMixer2
+# transformers.models.mamba.modeling_mamba.MambaMixer
 class Plamo2MambaMixer(nn.Module):
-    # TODO(Shinichi): Rebase on Mamba2 implementation.
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -108,8 +113,9 @@ class Plamo2MambaMixer(nn.Module):
         self.intermediate_size = (self.config.mamba_num_heads *
                                   self.config.hidden_size_per_head)
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.intermediate_size_per_tp_worker = \
+            self.intermediate_size // self.tp_size
         self.head_dim = self.config.hidden_size_per_head
-        self.hidden_size_per_head = self.config.hidden_size_per_head
         self.num_heads = self.config.mamba_num_heads
         self.time_step_rank = max(64, self.hidden_size // 16)
         self.conv1d = ColumnParallelLinear(
@@ -154,14 +160,12 @@ class Plamo2MambaMixer(nn.Module):
             return_bias=False,
         )
 
-        tp_size = get_tensor_model_parallel_world_size()
         self.A = nn.Parameter(
             torch.empty(
-                self.intermediate_size // tp_size,
-                self.ssm_state_size,
+                divide(self.num_heads, self.tp_size),
                 dtype=torch.float32,
             ))
-        self.D = nn.Parameter(torch.ones(self.intermediate_size // tp_size))
+        self.D = nn.Parameter(torch.ones(divide(self.num_heads, self.tp_size)))
         self.dt_bias = nn.Parameter(
             torch.ones(divide(self.num_heads, self.tp_size)))
 
@@ -191,113 +195,184 @@ class Plamo2MambaMixer(nn.Module):
         self.C_norm = RMSNorm(self.ssm_state_size,
                               eps=self.config.rms_norm_eps)
 
+    def _project_ssm_parameters(self, hidden_states):
+        ssm_parameters = self.bcdt_proj(hidden_states)
+        B, C, time_step = torch.split(
+            ssm_parameters,
+            [self.ssm_state_size, self.ssm_state_size, self.time_step_rank],
+            dim=-1,
+        )
+
+        # vllm._custom_ops.rms_norm requires contiguous input tensors.
+        time_step = self.dt_norm(time_step.contiguous())
+        B = self.B_norm(B.contiguous())
+        C = self.C_norm(C.contiguous())
+        dt = self.dt_proj(time_step)
+        return B, C, dt
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         mamba_cache_params: MambaCacheParams,
+        mamba2_metadata: Mamba2Metadata,
         **kwargs,
     ) -> torch.Tensor:
 
+        # mamba2_metadata contains metadata necessary for the mamba2 triton
+        # kernels to operate in continuous batching and in chunked prefill
+        # modes; they are computed at top-level model forward since they
+        # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
+
+        num_prefills = attn_metadata.num_prefills  # request count
+        num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
+        num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
+        has_prefill = num_prefills > 0
+        has_decode = num_decodes > 0
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)
-        gate, hidden_states = projected_states.transpose(0, 1).chunk(2, dim=-2)
+        gate, hidden_states = projected_states.chunk(2, dim=-1)
 
         # 2. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
-        if attn_metadata.query_start_loc is not None \
-            and attn_metadata.context_lens_tensor is not None:
+        # Separate prefill and decode by splitting varlen input
+        # Split along token dimension
+        hidden_states_p, hidden_states_d = torch.split(
+            hidden_states,
+            [num_prefill_tokens, num_decodes],
+            dim=0,
+        )
+        gate_p, gate_d = torch.split(gate, [num_prefill_tokens, num_decodes],
+                                     dim=0)
+        # Split along batch dimension
+        state_indices_tensor_p, state_indices_tensor_d = torch.split(
+            mamba_cache_params.state_indices_tensor,
+            [num_prefills, num_decodes],
+            dim=0,
+        )
+        query_start_loc_p = (attn_metadata.query_start_loc[:num_prefills + 1]
+                             if has_prefill else None)
+
+        ssd_output_list = []
+
+        if has_prefill:
             # |---------- N-1 iteration --------|
             # |---------------- N iteration ---------------------|
             # |- tokenA -|......................|-- newTokens ---|
             # |---------- context_len ----------|
             # |-------------------- seq_len ---------------------|
             #                                   |-- query_len ---|
-            hidden_states = causal_conv1d_fn(
-                hidden_states,
+            hidden_states_p = causal_conv1d_fn(
+                hidden_states_p.transpose(0, 1),
                 conv_weights,
                 self.conv1d.bias,
                 activation=self.activation,
                 conv_states=mamba_cache_params.conv_state,
-                has_initial_state=attn_metadata.context_lens_tensor > 0,
-                cache_indices=mamba_cache_params.state_indices_tensor,
-                query_start_loc=attn_metadata.query_start_loc)
-        else:
-            hidden_states = causal_conv1d_update(
-                hidden_states.transpose(0, 1),
+                has_initial_state=mamba2_metadata.has_initial_states,
+                cache_indices=state_indices_tensor_p,
+                query_start_loc=query_start_loc_p)
+            hidden_states_p = hidden_states_p.transpose(0, 1)
+            hidden_states_p = hidden_states_p[:num_prefill_tokens]
+            # In some instances, the following `bcdt_proj` op
+            # requires contiguous inputs
+            # (e.g. if the Marlin kernel is used).
+            hidden_states_p = hidden_states_p.contiguous()
+
+            B, C, dt = self._project_ssm_parameters(hidden_states_p)
+
+            # 3.c perform the recurrence y ← SSM(A, B, C)(x)
+            initial_states = None
+            if (mamba2_metadata.has_initial_states is not None
+                    and mamba2_metadata.prep_initial_states):
+                # making a copy of the states
+                initial_states = torch.where(
+                    mamba2_metadata.has_initial_states[:, None, None, None],
+                    mamba_cache_params.ssm_state[state_indices_tensor_p], 0)
+            scan_output, varlen_state = mamba_chunk_scan_combined(
+                hidden_states_p.view(1, num_prefill_tokens,
+                                     self.num_heads // self.tp_size,
+                                     self.head_dim),
+                dt.unsqueeze(0),
+                self.A,
+                B.view(1, num_prefill_tokens, 1, -1),
+                C.view(1, num_prefill_tokens, 1, -1),
+                chunk_size=mamba2_metadata.chunk_size,
+                D=self.D,
+                z=gate_p.view(1, num_prefill_tokens,
+                              self.num_heads // self.tp_size, self.head_dim),
+                dt_bias=self.dt_bias,
+                seq_idx=mamba2_metadata.seq_idx,
+                chunk_indices=mamba2_metadata.chunk_indices,
+                chunk_offsets=mamba2_metadata.chunk_offsets,
+                cu_seqlens=attn_metadata.query_start_loc[:num_prefills + 1],
+                initial_states=initial_states,
+                return_varlen_states=True,
+                return_final_states=False,
+                dt_softplus=True,
+                dt_limit=(0.0, float("inf")),
+            )
+
+            # update ssm states
+            # - varlen state is a (batch, nheads, headdim, dstate) tensor
+            mamba_cache_params.ssm_state[state_indices_tensor_p] = varlen_state
+
+            # - reshape
+            ssd_output_list.append(scan_output.view(num_prefill_tokens, -1))
+
+        # Process decode requests
+        if has_decode:
+            hidden_states_d = causal_conv1d_update(
+                hidden_states_d,
                 mamba_cache_params.conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=mamba_cache_params.state_indices_tensor)
-            hidden_states = hidden_states.transpose(0, 1)
+                conv_state_indices=state_indices_tensor_d)
 
-        # 3. State Space Model sequence transformation
-        # 3.a. input varying initialization of time_step, B and C
-        ssm_parameters = self.bcdt_proj(hidden_states.transpose(-2, -1))
+            B, C, dt = self._project_ssm_parameters(hidden_states_d)
 
-        # Splitting the ssm_parameters as in modeling_plamo.py.
-        B, C, time_step = torch.split(
-            ssm_parameters,
-            [self.ssm_state_size, self.ssm_state_size, self.time_step_rank],
-            dim=-1,
-        )
-        time_step = self.dt_norm(time_step.contiguous())
-        B = self.B_norm(B.contiguous())
-        C = self.C_norm(C.contiguous())
+            # 3.c perform the recurrence y ← SSM(A, B, C)(x)
+            A = self.A[:, None, ...][:, :,
+                                     None].expand(-1, self.head_dim,
+                                                  self.config.mamba_d_state)
+            dt = dt[:, :, None].expand(-1, -1, self.head_dim)
+            dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
+            D = self.D[:, None, ...].expand(-1, self.head_dim)
+            B = B.unsqueeze(1)
+            C = C.unsqueeze(1)
+            hidden_states_d = hidden_states_d.view(
+                -1, self.num_heads // self.tp_size, self.head_dim)
 
-        discrete_time_step = self.dt_proj(time_step).transpose(-2, -1)
-        # 3.c perform the recurrence y ← SSM(A, B, C)(x)
-        time_proj_bias = (self.dt_bias.float() if hasattr(
-            self.dt_proj, "bias") else None)
+            # - the hidden is reshaped into (bs, num_heads, head_dim)
+            # - mamba_cache_params.ssm_state's slots will be selected
+            #   using state_indices_tensor_d
 
-        # Broadcasting as in modeling_plamo.py.
-        discrete_time_step = discrete_time_step.transpose(
-            0, 1)[..., None].expand(-1, -1, self.hidden_size_per_head)
-        discrete_time_step = discrete_time_step.reshape(
-            -1, self.intermediate_size // self.tp_size).transpose(0, 1)
-        time_proj_bias = time_proj_bias[...,
-                                        None].expand(-1,
-                                                     self.hidden_size_per_head)
-        time_proj_bias = time_proj_bias.reshape(-1)
-
-        if attn_metadata.query_start_loc is not None \
-            and attn_metadata.context_lens_tensor is not None:
-            scan_outputs = selective_scan_fn(
-                hidden_states,
+            hidden_states_d = selective_state_update(
                 mamba_cache_params.ssm_state,
-                discrete_time_step,
-                self.A,
-                B.transpose(-2, -1),
-                C.transpose(-2, -1),
-                self.D.float(),
-                gate,
-                time_proj_bias,
-                delta_softplus=True,
-                cache_indices=mamba_cache_params.state_indices_tensor,
-                has_initial_state=attn_metadata.context_lens_tensor > 0,
-                query_start_loc=attn_metadata.query_start_loc)
-        else:
-            scan_outputs = selective_state_update(
-                mamba_cache_params.ssm_state,
-                hidden_states.transpose(0, 1),
-                discrete_time_step.transpose(0, 1),
-                self.A,
+                hidden_states_d,
+                dt,
+                A,
                 B,
                 C,
-                self.D,
-                gate.transpose(0, 1),
-                time_proj_bias,
+                D,
+                z=gate_d.reshape(num_decodes, -1, self.head_dim),
+                dt_bias=dt_bias,
                 dt_softplus=True,
-                state_batch_indices=mamba_cache_params.state_indices_tensor)
-            scan_outputs = scan_outputs.transpose(0, 1)
+                state_batch_indices=state_indices_tensor_d,
+            )
+            ssd_output_list.append(
+                hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
+                                     self.head_dim))
+
+        # Merge prefill and decode outputs before passing to MLP
+        hidden_states = torch.vstack(ssd_output_list)
 
         # 4. Final linear projection
-        contextualized_states = self.out_proj(scan_outputs.transpose(-2, -1))
-        return contextualized_states
+        out = self.out_proj(hidden_states)
+        return out
 
 
 class DenseMLP(nn.Module):
@@ -312,12 +387,13 @@ class DenseMLP(nn.Module):
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.gate_up_proj = MergedColumnParallelLinear(
-            self.hidden_size, [self.intermediate_size] * 2,
+            self.hidden_size,
+            [self.intermediate_size] * 2,
             bias=False,
             prefix=f"{prefix}.gate_up_proj",
             quant_config=quant_config,
             return_bias=False,
-            )
+        )
         self.act = SiluAndMul()
         self.down_proj = RowParallelLinear(self.intermediate_size,
                                            self.hidden_size,
@@ -423,7 +499,6 @@ class Plamo2AttentionMixer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
         **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
@@ -479,6 +554,7 @@ class Plamo2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
+        mamba2_metadata: Mamba2Metadata,
         **kwargs,
     ):
         if residual is None:
@@ -488,10 +564,12 @@ class Plamo2DecoderLayer(nn.Module):
             hidden_states, residual = self.pre_mixer_norm(
                 hidden_states, residual)
 
-        hidden_states = self.mixer(positions=positions,
-                                   hidden_states=hidden_states,
-                                   residual=residual,
-                                   mamba_cache_params=mamba_cache_params)
+        hidden_states = self.mixer(
+            positions=positions,
+            hidden_states=hidden_states,
+            mamba_cache_params=mamba_cache_params,
+            mamba2_metadata=mamba2_metadata,
+        )
         hidden_states = self.post_mixer_norm(hidden_states)
         # Fully Connected
         hidden_states, residual = self.pre_mlp_norm(hidden_states, residual)
@@ -523,6 +601,7 @@ class Plamo2Decoder(torch.nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
+        mamba2_metadata: Mamba2Metadata,
     ) -> torch.Tensor:
         mamba_cache_index = 0
         for layer in self.layers[self.start_layer:self.end_layer]:
@@ -536,7 +615,9 @@ class Plamo2Decoder(torch.nn.Module):
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
-                mamba_cache_params=layer_mamba_cache_params)
+                mamba_cache_params=layer_mamba_cache_params,
+                mamba2_metadata=mamba2_metadata,
+            )
         return hidden_states, residual
 
 
@@ -587,11 +668,19 @@ class Plamo2Model(Plamo2PreTrainedModel):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
+        mamba2_metadata = prepare_mamba2_metadata(
+            chunk_size=self.config.mamba_chunk_size,
+            attn_metadata=attn_metadata,
+        )
+
         hidden_states, residual = self.layers(
             positions=positions,
             hidden_states=hidden_states,
             residual=residual,
-            mamba_cache_params=mamba_cache_params)
+            mamba_cache_params=mamba_cache_params,
+            mamba2_metadata=mamba2_metadata,
+        )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -685,7 +774,7 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, SupportsPP,
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
     def _get_mamba_cache_shape(
-            self) -> tuple[tuple[int, int], tuple[int, int]]:
+            self) -> tuple[tuple[int, int], tuple[int, int, int]]:
         world_size = get_tensor_model_parallel_world_size()
         hidden_size = (self.config.mamba_num_heads *
                        self.config.hidden_size_per_head)
@@ -694,7 +783,8 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, SupportsPP,
             self.config.mamba_d_conv - 1,
         )
         temporal_state_shape = (
-            hidden_size // world_size,
+            divide(self.config.mamba_num_heads, world_size),
+            self.config.hidden_size_per_head,
             self.config.mamba_d_state,
         )
         return conv_state_shape, temporal_state_shape
@@ -743,17 +833,6 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, SupportsPP,
                 if old in name:
                     name = name.replace(old, new)
 
-            # Broadcast the loaded weight to match the model's parameter shape.
-            if ".A" in name:
-                loaded_weight = loaded_weight[:, None, None].expand(
-                    -1, self.config.hidden_size_per_head,
-                    self.config.mamba_d_state)
-                loaded_weight = loaded_weight.reshape(
-                    -1, self.config.mamba_d_state)
-            elif ".D" in name:
-                loaded_weight = loaded_weight[:, None].expand(
-                    -1, self.config.hidden_size_per_head)
-                loaded_weight = loaded_weight.reshape(-1)
             # Reshape the in_proj weights to match the shape expected
             # by MergedColumnParallelLinear.
             # This works both for unquantized weights and
