@@ -1171,7 +1171,7 @@ class AsyncLLMEngine(EngineClient):
     async def stop_expert_distribution_record(self) -> None:
         self.engine.stop_expert_distribution_record()
 
-    async def dump_expert_distribution_record(self):
+    async def dump_expert_distribution_record(self) -> None:
         self.engine.dump_expert_distribution_record()
 
     async def reset_prefix_cache(self,
