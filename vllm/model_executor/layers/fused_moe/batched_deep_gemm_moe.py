@@ -117,6 +117,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # as a memory optimization.
         a2q, a2q_scale = masked_per_token_group_quant_fp8(
             x=workspace2,
+            valid_tokens_array=expert_num_tokens,
             group_size=self.block_shape[1],
             column_major_scales=False)
 
