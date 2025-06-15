@@ -1,0 +1,35 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 307878f7e..595b2741d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -13,7 +13,7 @@ requires = [
+ build-backend = "setuptools.build_meta"
+ 
+ [project]
+-name = "vllm"
++name = "vllm-tpu"
+ authors = [{name = "vLLM Team"}]
+ license = "Apache-2.0"
+ license-files = ["LICENSE"]
+diff --git a/setup.py b/setup.py
+index ea7cd0169..eabb1d71a 100644
+--- a/setup.py
++++ b/setup.py
+@@ -546,7 +546,7 @@ def get_gaudi_sw_version():
+ 
+ 
+ def get_vllm_version() -> str:
+-    version = get_version(write_to="vllm/_version.py")
++    version = "PUT_VERSION_HERE"
+     sep = "+" if "+" not in version else "."  # dev versions might contain +
+ 
+     if _no_device():
+@@ -580,7 +580,7 @@ def get_vllm_version() -> str:
+             gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
+             version += f"{sep}gaudi{gaudi_sw_version}"
+     elif _is_tpu():
+-        version += f"{sep}tpu"
++        pass
+     elif _is_cpu():
+         if envs.VLLM_TARGET_DEVICE == "cpu":
+             version += f"{sep}cpu"
