@@ -14,6 +14,8 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorMetadata)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -329,9 +331,6 @@ class Scheduler(SchedulerInterface):
                     if is_ready:
                         request.status = RequestStatus.WAITING
                     else:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request.request_id)
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
