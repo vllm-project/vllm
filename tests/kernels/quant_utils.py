@@ -6,6 +6,7 @@ from typing import Optional, Union
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils import cdiv
 
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for rocm.
@@ -94,9 +95,15 @@ def ref_dynamic_per_tensor_fp8_quant(x: torch.tensor) \
     return ref_out, ref_scale.view((1, ))
 
 
-def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor,
-                             As: torch.Tensor, Bs: torch.Tensor, block_size,
-                             output_dtype):
+def native_w8a8_block_matmul(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+    compute_type: torch.dtype = torch.float32,
+) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise
     quantization using native torch.
     It is agnostic to the input data type and can be used for both int8 and
@@ -106,8 +113,8 @@ def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor,
     `Bs` (float32).
     The output is returned in the specified `output_dtype`.
     """
-    A = A.to(torch.float32)
-    B = B.to(torch.float32)
+    A = A.to(compute_type)
+    B = B.to(compute_type)
     assert A.shape[-1] == B.shape[-1]
     assert B.ndim == 2 and B.is_contiguous() and Bs.ndim == 2
     assert len(block_size) == 2
@@ -122,11 +129,11 @@ def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor,
     As = As.reshape(M, As.shape[-1])
     n_tiles = (N + block_n - 1) // block_n
     k_tiles = (K + block_k - 1) // block_k
-    assert n_tiles == Bs.shape[0]
-    assert k_tiles == Bs.shape[1]
+    assert n_tiles == Bs.shape[0], f"{n_tiles} == {Bs.shape[0]}"
+    assert k_tiles == Bs.shape[1], f"{k_tiles} == {Bs.shape[1]}"
 
     C_shape = (M, N)
-    C = torch.zeros(C_shape, dtype=torch.float32, device=A.device)
+    C = torch.zeros(C_shape, dtype=compute_type, device=A.device)
 
     A_tiles = [
         A[:, i * block_k:min((i + 1) * block_k, K)] for i in range(k_tiles)
@@ -152,3 +159,78 @@ def native_w8a8_block_matmul(A: torch.Tensor, B: torch.Tensor,
 
     C = C.reshape(origin_C_shape).to(output_dtype)
     return C
+
+
+def native_per_token_group_quant_fp8(x,
+                                     group_size,
+                                     eps=1e-10,
+                                     dtype=torch.float8_e4m3fn):
+    """Function to perform per-token-group quantization on an input tensor
+    `x` using native torch."""
+    assert x.shape[-1] % group_size == 0, ("the last dimension of `x` cannot "
+                                           "be divisible by `group_size`")
+    assert x.is_contiguous(), "`x` is not contiguous"
+
+    finfo = torch.finfo(dtype)
+    fp8_min = finfo.min
+    fp8_max = finfo.max
+
+    x_ = x.reshape(x.numel() // group_size, group_size)
+    amax = x_.abs().max(dim=-1,
+                        keepdim=True)[0].clamp(min=eps).to(torch.float32)
+    x_s = amax / fp8_max
+    x_q = (x_ / x_s).clamp(min=fp8_min, max=fp8_max).to(dtype)
+    x_q = x_q.reshape(x.shape)
+    x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size, ))
+
+    return x_q, x_s
+
+
+def native_per_token_group_quant_int8(x,
+                                      group_size,
+                                      eps=1e-10,
+                                      dtype=torch.int8):
+    """Function to perform per-token-group quantization on an input tensor
+    `x` using native torch.
+
+    It converts the tensor values into int8 values and returns the
+    quantized tensor along with the scaling factor used for quantization.
+    """
+    assert (x.shape[-1] % group_size == 0
+            ), "the last dimension of `x` cannot be divisible by `group_size`"
+    assert x.is_contiguous(), "`x` is not contiguous"
+
+    iinfo = torch.iinfo(dtype)
+    int8_min = iinfo.min
+    int8_max = iinfo.max
+
+    x_ = x.reshape(x.numel() // group_size, group_size)
+    # Use float32 for scale calculation for stability
+    amax = x_.abs().max(dim=-1,
+                        keepdim=True)[0].clamp(min=eps).to(torch.float32)
+    x_s = amax / int8_max
+    x_q = (x_.to(torch.float32) / x_s).round().clamp(
+        min=int8_min, max=int8_max).to(dtype)  # Round before clamping
+    x_q = x_q.reshape(x.shape)
+    x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size, ))
+
+    return x_q, x_s
+
+
+def per_block_cast_to_fp8(
+        x: torch.Tensor,
+        block_size_n: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2
+    m, n = x.shape
+    x_padded = torch.zeros(
+        (cdiv(m, 128) * 128,
+         cdiv(n, block_size_n) * block_size_n),
+        dtype=x.dtype,
+        device=x.device)
+    x_padded[:m, :n] = x
+    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, block_size_n)
+    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
+    x_scaled_sub = x_scaled.view_as(x_padded)[:m, :n].contiguous()
+    scales = (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
+    return x_scaled_sub, scales
