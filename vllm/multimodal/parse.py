@@ -224,8 +224,11 @@ class ImageEmbeddingItems(EmbeddingItems):
 
 class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
 
-    def __init__(self, data: Sequence[HfVideoItem]) -> None:
+    def __init__(self,
+                 data: Sequence[HfVideoItem],
+                 metadata: Optional[dict] = None) -> None:
         super().__init__(data, "video")
+        self.metadata = metadata
 
     def get_num_frames(self, item_idx: int) -> int:
         return len(self.get(item_idx))
@@ -423,20 +426,22 @@ class MultiModalDataParser:
     ) -> Optional[ModalityDataItems[Any, Any]]:
         if self._is_empty(data):
             return None
-
         if self._is_embeddings(data):
             return VideoEmbeddingItems(data)
 
-        if (is_list_of(data, PILImage.Image)
-                or isinstance(data,
-                              (np.ndarray, torch.Tensor)) and data.ndim == 4):
-            data_items = [data]
-        elif isinstance(data, (np.ndarray, torch.Tensor)):
-            data_items = [elem for elem in data]
+        if isinstance(data, tuple) and len(data) == 2:
+            frames, metadata = data
         else:
-            data_items = data
+            frames = data
+            metadata = None
+        if isinstance(frames, (np.ndarray, torch.Tensor)) and frames.ndim == 4:
+            data_items = [frames]
+        elif isinstance(frames, (np.ndarray, torch.Tensor)):
+            data_items = [elem for elem in frames]
+        else:
+            data_items = frames
 
-        return VideoProcessorItems(data_items)
+        return VideoProcessorItems(data_items, metadata=metadata)
 
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {
