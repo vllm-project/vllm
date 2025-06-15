@@ -17,7 +17,7 @@ Usage:
             (Without enable_chunked_prefill)
 
 Note that `lmcache` is needed to run this example.
-Requirements: Linux, Python: 3.10 or higher, CUDA: 12.1
+Requirements: Linux, Python: 3.10 or higher, CUDA: 12.4+
 Learn more about LMCache environment setup, please refer to:
 https://docs.lmcache.ai/getting_started/installation.html
 """
