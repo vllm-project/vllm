@@ -114,7 +114,6 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.use_irope = use_irope
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         support_head_sizes = TritonAttentionBackend.get_supported_head_sizes()
