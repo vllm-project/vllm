@@ -945,9 +945,12 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
 
 def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
                        a_scales: torch.Tensor, b_scales: torch.Tensor,
-                       alphas: torch.Tensor, problem_sizes: torch.Tensor,
+                       alphas: torch.Tensor, ab_strides_13: torch.Tensor,
+                       c_strides: torch.Tensor,
+                       problem_sizes: torch.Tensor,
                        expert_offsets: torch.Tensor, sf_offsets: torch.Tensor,
-                       out_dtype: torch.dtype, device: torch.device):
+                       out_dtype: torch.dtype, device: torch.device,
+                       zero_initializer: bool = False):
     """
     An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs 
     the gemms for each combination based on the specified problem sizes.
@@ -967,9 +970,11 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
     m_topk = a_tensors.shape[0]
     n = b_tensors.shape[1]
     c_shape = (m_topk, n)
-    c = torch.empty(c_shape, device=device, dtype=out_dtype)
+    c_initializer = torch.zeros if zero_initializer else torch.empty
+    c = c_initializer(c_shape, device=device, dtype=out_dtype)
     torch.ops._C.cutlass_fp4_group_mm(c, a_tensors, b_tensors, a_scales,
-                                      b_scales, alphas, problem_sizes,
+                                      b_scales, alphas, ab_strides_13,
+                                      c_strides, problem_sizes,
                                       expert_offsets, sf_offsets)
     return c.to(out_dtype)
 
@@ -1212,7 +1217,8 @@ def scaled_fp4_experts_quant(
                                 dtype=torch.int32,
                                 device=input_tensor.device)
     torch.ops._C.scaled_fp4_experts_quant(output, output_scales, input_tensor,
-                                          input_global_scale, expert_offsets,
+                                          input_global_scale,
+                                          expert_offsets,
                                           blockscale_offsets)
     output_scales = output_scales.view(torch.float8_e4m3fn)
     return output, output_scales
