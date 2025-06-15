@@ -1542,7 +1542,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def kv_connector_no_forward(
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         # KV send/recv even if no work to do.
-        with set_forward_context(None, self.vllm_config):
+        # Pass an empty dictionary as `attn_metadata` to ensure that
+        # the KV cache load operation continues to work even when
+        # encountering zero-token batches.
+        with set_forward_context({}, self.vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
             finished_sending, finished_recving = (
                 self.get_finished_kv_transfers(scheduler_output))
