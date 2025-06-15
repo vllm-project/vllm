@@ -261,7 +261,7 @@ class LLMEngine:
     def stop_profile(self):
         self.engine_core.profile(False)
 
-    def start_expert_distribution_record(self):
+    def start_expert_distribution_record(self) -> None:
         self.engine_core.expert_distribution_record(True)
 
     def stop_expert_distribution_record(self) -> None:
