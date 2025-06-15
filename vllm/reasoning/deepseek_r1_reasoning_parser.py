@@ -2,14 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                                  DeltaMessage)
 
 logger = init_logger(__name__)
 
@@ -64,7 +66,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> Union["DeltaMessage", None]:
         """
         Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
@@ -73,6 +75,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         - 'abc' goes to reasoning_content
         - 'xyz' goes to content
         """
+        from vllm.entrypoints.openai.protocol import DeltaMessage
+
         # Skip single special tokens
         if len(delta_token_ids) == 1 and (delta_token_ids[0] in [
                 self.start_token_id, self.end_token_id
@@ -138,7 +142,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 return DeltaMessage(reasoning_content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: "ChatCompletionRequest"
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.
