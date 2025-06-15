@@ -1368,6 +1368,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             sampler_output.sampled_token_ids = output_token_ids
 
+        num_nans_in_logits = {}
+        num_nans_for_index = None
+        if logits is not None:
+            num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
+
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         discard_sampled_tokens_req_indices = []
@@ -1385,6 +1390,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Record the index of the request that should not be sampled,
                 # so that we could clear the sampled tokens before returning.
                 discard_sampled_tokens_req_indices.append(i)
+
+            req_index = self.input_batch.req_id_to_index[req_id]
+            num_nans_in_logits[req_id] = (
+                int(num_nans_for_index[req_index])
+                if logits is not None and num_nans_for_index is not None
+                and req_index < logits.shape[0] else 0)
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -1537,6 +1548,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,
             finished_sending=finished_sending,
             finished_recving=finished_recving,
+            num_nans_in_logits=num_nans_in_logits,
         )
 
     def kv_connector_no_forward(
