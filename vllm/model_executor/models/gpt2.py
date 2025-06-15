@@ -40,11 +40,11 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
-from vllm.sequence import IntermediateTensors, PoolerOutput, \
-    PoolingSequenceGroupOutput
+from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.sequence import (IntermediateTensors, PoolerOutput,
+                           PoolingSequenceGroupOutput)
 
 from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
@@ -332,14 +332,13 @@ class GPT2ForSequenceClassification(nn.Module):
         score: A layer for calculating logits.
         activation: Activation function.
     """
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
 
-        self.gpt2 = GPT2Model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "gpt2")
-        )
+        self.gpt2 = GPT2Model(vllm_config=vllm_config,
+                              prefix=maybe_prefix(prefix, "gpt2"))
         self.score = nn.Linear(config.n_embd, config.num_labels, bias=False)
         self.activation = nn.Softmax(dim=-1)
 
@@ -390,18 +389,16 @@ class GPT2ForSequenceClassification(nn.Module):
         return PoolerOutput(outputs=pooled_outputs)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        output = self.gpt2(
-            input_ids=input_ids,
-            position_ids=positions,
-            inputs_embeds=inputs_embeds,
-            intermediate_tensors=intermediate_tensors
-        )
+        output = self.gpt2(input_ids=input_ids,
+                           position_ids=positions,
+                           inputs_embeds=inputs_embeds,
+                           intermediate_tensors=intermediate_tensors)
 
         return output
 
