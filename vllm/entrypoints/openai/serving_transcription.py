@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import io
+import math
 import time
 from collections.abc import AsyncGenerator
 from math import ceil
@@ -145,6 +146,7 @@ ISO639_1_OTHER_LANGS = {
 # TODO configurable
 MAX_AUDIO_CLIP_FILESIZE_MB = 25
 OVERLAP_CHUNK_SECOND = 1
+MIN_ENERGY_WINDOW_SIZE = 1600  # 1600 ~ 100ms for 16000 Hz audio
 
 
 class OpenAIServingTranscription(OpenAIServing):
@@ -206,10 +208,11 @@ class OpenAIServingTranscription(OpenAIServing):
 
         with io.BytesIO(audio_data) as bytes_:
             y, sr = librosa.load(bytes_)
-        chunks = self._split_audio(y, sr)
+
         duration = librosa.get_duration(y=y, sr=sr)
+        chunks = [y] if duration < 30 else self._split_audio(y, sr)
         prompts = []
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             prompt = {
                 "encoder_prompt": {
                     "prompt": "",
@@ -219,6 +222,7 @@ class OpenAIServingTranscription(OpenAIServing):
                 },
                 "decoder_prompt":
                 f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
+                if i == 0 else ""
             }
             prompts.append(cast(PromptType, prompt))
         return prompts, duration
@@ -447,15 +451,15 @@ class OpenAIServingTranscription(OpenAIServing):
             search_start = i + chunk_size - overlap_size
             search_end = min(i + chunk_size, audio_data.shape[-1])
             split_point = self._find_split_point(audio_data, search_start,
-                                                 search_end, sample_rate)
+                                                 search_end)
 
             # Extract chunk up to the split point
             chunks.append(audio_data[..., i:split_point])
             i = split_point
         return chunks
 
-    def _find_split_point(self, wav: np.ndarray, start_idx: int, end_idx: int,
-                          sample_rate: int) -> int:
+    def _find_split_point(self, wav: np.ndarray, start_idx: int,
+                          end_idx: int) -> int:
         """Find the best point to split audio by looking for silence or low amplitude.
         Args:
             wav: Audio tensor [1, T]
@@ -467,12 +471,14 @@ class OpenAIServingTranscription(OpenAIServing):
         segment = wav[start_idx:end_idx]
 
         # Calculate RMS energy in small windows
-        window_size = sample_rate // 10  # 100ms windows
-        energies = []
-        for i in range(0, len(segment) - window_size, window_size):
-            window = segment[i:i + window_size]
+        min_energy = math.inf
+        quietest_idx = 0
+        for i in range(0,
+                       len(segment) - MIN_ENERGY_WINDOW_SIZE,
+                       MIN_ENERGY_WINDOW_SIZE):
+            window = segment[i:i + MIN_ENERGY_WINDOW_SIZE]
             energy = (window**2).mean()**0.5
-            energies.append((i + start_idx, energy))
-
-        quietest_idx, _ = min(energies, key=lambda x: x[1])
+            if energy < min_energy:
+                quietest_idx = i + start_idx
+                min_energy = energy
         return quietest_idx
