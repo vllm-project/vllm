@@ -34,6 +34,7 @@ from vllm.utils import direct_register_custom_op
 
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 has_deepep = importlib.util.find_spec("deep_ep") is not None
+has_triton_kernels = importlib.util.find_spec("triton_kernels") is not None
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -46,6 +47,8 @@ if current_platform.is_cuda_alike():
     if has_deepep:
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import DeepEPLLPrepareAndFinalize
+    if has_triton_kernels:
+        from .triton_kernels_moe import triton_kernel_moe_forward
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -433,11 +436,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
-    def __init__(self, moe: MoEConfig):
+    def __init__(self, moe: MoEConfig, use_triton_kernels: False):
         super().__init__()
         self.fused_experts = fused_experts  # type: ignore
         self.topk_indices_dtype = None
         self.moe = moe
+        self.use_triton_kernels = use_triton_kernels
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
         if self.rocm_aiter_moe_enabled:
@@ -489,22 +493,24 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
         # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size,
-            dtype=params_dtype),
-                                        requires_grad=False)
+        w13_weight_raw = torch.empty(num_experts,
+                                     2 * intermediate_size_per_partition,
+                                     hidden_size,
+                                     dtype=params_dtype)
+        if self.use_triton_kernels:
+            w13_weight_raw = w13_weight_raw.transpose(-2, -1).contiguous()
+        w13_weight = torch.nn.Parameter(w13_weight_raw, requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition,
-            dtype=params_dtype),
-                                       requires_grad=False)
+        w2_weight_raw = torch.empty(num_experts,
+                                    hidden_size,
+                                    intermediate_size_per_partition,
+                                    dtype=params_dtype)
+        if self.use_triton_kernels:
+            w2_weight_raw = w2_weight_raw.transpose(-2, -1).contiguous()
+        w2_weight = torch.nn.Parameter(w2_weight_raw, requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
@@ -601,42 +607,54 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         activation: str = "silu",
     ) -> torch.Tensor:
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype)
-
-        if self.rocm_aiter_moe_enabled:
-            assert expert_map is None
-            return self.rocm_aiter_fused_experts(
+        if self.use_triton_kernels:
+            return triton_kernel_moe_forward(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input)
-        else:
-            return self.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=activation,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
             )
+        else:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                indices_type=torch.uint32
+                if self.moe.use_pplx_kernels else None)
+
+            if self.rocm_aiter_moe_enabled:
+                assert expert_map is None
+                return self.rocm_aiter_fused_experts(
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    activation=activation,
+                    apply_router_weight_on_input=apply_router_weight_on_input)
+            else:
+                return self.fused_experts(
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    inplace=True,
+                    activation=activation,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                )
 
     def forward_cpu(
         self,
@@ -852,8 +870,34 @@ class FusedMoE(torch.nn.Module):
 
         self.global_num_experts = num_experts
 
+        self.use_triton_kernel = False
+        if envs.VLLM_USE_EXP_TRITON_MOE_KERNEL:
+            if not has_triton_kernels:
+                logger.warning_once(
+                    "Failed to import Triton MoE kernels, use default fused_experts for MoE."
+                )
+            elif quant_config is not None:
+                logger.warning_once(
+                    "Triton kernel doesn't support quantization now.")
+            elif custom_routing_function is not None:
+                logger.warning_once(
+                    "Triton kernel doesn't support custom routing function now."
+                )
+            elif use_grouped_topk:
+                logger.warning_once(
+                    "Triton kernel doesn't support use grouped topk now.")
+            elif scoring_func != "softmax":
+                logger.warning_once(
+                    "Triton kernel only support softmax scoring function.")
+            elif self.use_ep:
+                logger.warning_once(
+                    "Triton kernel doesn't support Experts Parallelism now.")
+            else:
+                logger.info_once("Using Triton MoE kernels.")
+                self.use_triton_kernel = True
+
         # For smuggling this layer into the fused moe custom op
-        self.use_direct_call = self.dp_size == 1
+        self.use_direct_call = self.dp_size == 1 and not self.use_triton_kernel
         if not self.use_direct_call:
             compilation_config = vllm_config.compilation_config
             if prefix in compilation_config.static_forward_context:
@@ -922,8 +966,9 @@ class FusedMoE(torch.nn.Module):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         quant_method: Optional[QuantizeMethodBase] = None
-        quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
-                        else quant_config.get_quant_method(self, prefix))
+        quant_method = (UnquantizedFusedMoEMethod(moe, self.use_triton_kernel)
+                        if quant_config is None else
+                        quant_config.get_quant_method(self, prefix))
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
@@ -1068,6 +1113,8 @@ class FusedMoE(torch.nn.Module):
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
         shard_size = expert_data.shape[shard_dim] // 2
+        if self.use_triton_kernel:
+            loaded_weight = loaded_weight.transpose(-2, -1).contiguous()
         loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
                                              shard_size)
         # Narrow parameter and load.
@@ -1091,6 +1138,8 @@ class FusedMoE(torch.nn.Module):
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Narrow parameter and load.
         shard_size = expert_data.shape[shard_dim]
+        if self.use_triton_kernel:
+            loaded_weight = loaded_weight.transpose(-2, -1).contiguous()
         if not load_full:
             loaded_weight = loaded_weight.narrow(shard_dim,
                                                  shard_size * tp_rank,
@@ -1161,6 +1210,8 @@ class FusedMoE(torch.nn.Module):
         # should be flipped. Required by GPTQ, compressed-tensors
         # should be whatever dimension intermediate_size_per_partition is
         is_transposed = getattr(param, "is_transposed", False)
+        if self.use_triton_kernel:
+            is_transposed = not is_transposed
         shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
         if is_transposed:
             shard_dim = int(not shard_dim)
