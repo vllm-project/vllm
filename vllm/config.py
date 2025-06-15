@@ -674,8 +674,11 @@ class ModelConfig:
 
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
-                s3_model.pull_files(
-                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                s3_model.pull_files(model,
+                                    ignore_pattern=[
+                                        "*.pt", "*.safetensors", "*.bin",
+                                        "*.tensors"
+                                    ])
                 self.tokenizer = s3_model.dir
                 return
 
@@ -683,7 +686,8 @@ class ModelConfig:
         if is_s3(tokenizer):
             s3_tokenizer = S3Model()
             s3_tokenizer.pull_files(
-                model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                model,
+                ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:

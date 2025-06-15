@@ -56,7 +56,8 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
     def _parse_type(val: str) -> T:
         try:
-            if return_type is json.loads and not re.match("^{.*}$", val):
+            if return_type is json.loads and not re.match(
+                    r"(?s)^\s*{.*}\s*$", val):
                 return cast(T, nullable_kvs(val))
             return return_type(val)
         except ValueError as e:
@@ -78,7 +79,7 @@ def optional_type(
 
 
 def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
-    if not re.match("^{.*}$", val):
+    if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
 
@@ -952,10 +953,32 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
         )
 
+    def no_valid_tensorizer_args_in_model_loader_extra_config(self) -> bool:
+
+        if self.model_loader_extra_config:
+            for allowed_to_pass in ["tensorizer_uri", "tensorizer_dir"]:
+                try:
+                    logger.info("Got %s", self.model_loader_extra_config)
+                    self.model_loader_extra_config[allowed_to_pass]
+                    return False
+                except KeyError:
+                    pass
+        return True
+
     def create_load_config(self) -> LoadConfig:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
+
+        if (self.load_format == "tensorizer" and
+                self.no_valid_tensorizer_args_in_model_loader_extra_config()):
+            logger.info("Inferring Tensorizer args from %s", self.model)
+            self.model_loader_extra_config = {"tensorizer_dir": self.model}
+        else:
+            logger.info(
+                "Using Tensorizer args from --model-loader-extra-config. "
+                "Note that you can now simply pass the S3 directory in the "
+                "model tag instead of providing the JSON string.")
 
         return LoadConfig(
             load_format=self.load_format,
