@@ -247,19 +247,21 @@ def silu_and_mul(
         BLOCK_D: tl.constexpr,
         compute_type: tl.constexpr):
 
+    remaining_d = D - (pid_d * BLOCK_D)
+
     offs_m = tl.arange(0, BLOCK_M)[:, None]
     mask_m = offs_m < M
 
     offs_d = tl.arange(0, BLOCK_D)
-    mask_d = offs_d < D
+    mask_d = offs_d < remaining_d
 
     input_ptrs = input + offs_m * stride_im + pid_d * BLOCK_D + offs_d
     output_ptrs = output + offs_m * stride_om + pid_d * BLOCK_D + offs_d
 
     mask_tile = mask_m & mask_d
-
     x_tile = tl.load(input_ptrs, mask=mask_tile,
                      other=0.0).to(dtype=tl.float32)
+
     y_tile = tl.load(input_ptrs + D, mask=mask_tile, other=0.0)
 
     # silu and mul
