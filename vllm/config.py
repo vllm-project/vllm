@@ -231,7 +231,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
     return next(f for f in fields(cls) if f.name == name).init
 
 
-TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
+TokenizerMode = Literal["auto", "slow", "mistral", "bitnet", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
@@ -257,6 +257,7 @@ class ModelConfig:
     - "auto" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
+    - "bitnet" will always use the bitnet tokenizer.\n
     - "custom" will use --tokenizer to select the preregistered tokenizer."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model

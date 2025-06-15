@@ -483,6 +483,9 @@ steps:
   - tests/models
   commands:
     - pytest -v -s models/test_transformers.py
+    - pytest -v -s models/test_bitblas.py
+    - pytest -v -s models/test_bitnet.py
+    - pytest -v -s models/test_gptq_bitblas.py
     - pytest -v -s models/test_registry.py
     - pytest -v -s models/test_utils.py
     - pytest -v -s models/test_vision.py

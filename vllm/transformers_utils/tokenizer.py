@@ -19,7 +19,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
                                                     TokenizerRegistry)
-from vllm.transformers_utils.tokenizers import MistralTokenizer
+from vllm.transformers_utils.tokenizers import (BitnetTokenizer,
+                                                MistralTokenizer)
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
 
@@ -227,6 +228,9 @@ def get_tokenizer(
                                                     revision=revision,
                                                     download_dir=download_dir,
                                                     **kwargs)
+    elif tokenizer_mode == "bitnet":
+        tokenizer = BitnetTokenizer.from_pretrained(str(tokenizer_name),
+                                                    revision=revision)
     else:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
