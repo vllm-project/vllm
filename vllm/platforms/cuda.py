@@ -6,6 +6,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from datetime import timedelta
+from enum import IntEnum
 from functools import cache, wraps
 from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
@@ -31,6 +32,22 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 pynvml = import_pynvml()
+
+
+class CudaComputeCapability(IntEnum):
+    """CUDA compute capability constants for different GPU architectures.
+
+    See https://developer.nvidia.com/cuda-gpus
+    """
+    PASCAL_60 = 60
+    VOLTA_70 = 70
+    TURING_75 = 75
+    AMPERE_80 = 80
+    ADA_LOVELACE_89 = 89
+    HOPPER_90 = 90
+    BLACKWELL_100 = 100
+    BLACKWELL_RTX_120 = 120
+
 
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
@@ -60,11 +77,12 @@ class CudaPlatformBase(Platform):
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
-        if self.has_device_capability(80):
+        if self.has_device_capability(CudaComputeCapability.AMPERE_80):
             # Ampere and Hopper or later NVIDIA GPUs.
             return [torch.bfloat16, torch.float16, torch.float32]
-        elif (not self.has_device_capability(80)
-              ) and self.has_device_capability(60):
+        elif (not self.has_device_capability(CudaComputeCapability.AMPERE_80)
+              ) and self.has_device_capability(
+                  CudaComputeCapability.PASCAL_60):
             # Pascal, Volta and Turing NVIDIA GPUs, BF16 is not supported
             return [torch.float16, torch.float32]
         # Kepler and Maxwell NVIDIA GPUs, only FP32 is supported,
@@ -240,7 +258,7 @@ class CudaPlatformBase(Platform):
 
             # Default backends for V1 engine
             # Prefer FlashInfer for Blackwell GPUs if installed
-            if cls.is_device_capability(100):
+            if cls.has_device_capability(CudaComputeCapability.BLACKWELL_100):
                 try:
                     import flashinfer  # noqa: F401
                     logger.info_once(
@@ -255,7 +273,7 @@ class CudaPlatformBase(Platform):
                         "install FlashInfer for better performance.")
                     pass
             # FlashAttention is the default for SM 8.0+ GPUs
-            elif cls.has_device_capability(80):
+            elif cls.has_device_capability(CudaComputeCapability.AMPERE_80):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "flash_attn.FlashAttentionBackend")
@@ -279,7 +297,7 @@ class CudaPlatformBase(Platform):
                 f"with use_v1: {use_v1} use_mla: {use_mla}")
 
         target_backend = _Backend.FLASH_ATTN
-        if not cls.has_device_capability(80):
+        if not cls.has_device_capability(CudaComputeCapability.AMPERE_80):
             # Volta and Turing NVIDIA GPUs.
             logger.info(
                 "Cannot use FlashAttention-2 backend for Volta and Turing "
@@ -346,7 +364,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return cls.has_device_capability(89)
+        return cls.has_device_capability(CudaComputeCapability.ADA_LOVELACE_89)
 
     @classmethod
     def supports_v1(cls, model_config: "ModelConfig") -> bool:
