@@ -882,8 +882,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Directory to store expert distribution recorder files.
 
     "VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR":
-    lambda: os.path.expanduser(
-        os.getenv("VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR", None)),
+    lambda: os.getenv("VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR", None),
 }
 
 # --8<-- [end:env-vars-definition]
