@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the MOE layers.
 
 Run `pytest tests/kernels/test_pplx_moe.py`.
 """
-import dataclasses
-import os
-import traceback
-from typing import Callable, Optional
+from typing import Optional
 
 import pytest
 import torch
@@ -20,10 +18,6 @@ try:
 except ImportError:
     has_pplx = False
 
-from torch.multiprocessing import (
-    spawn)  # pyright: ignore[reportPrivateImportUsage]
-from typing_extensions import Concatenate, ParamSpec
-
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import override_config
@@ -34,6 +28,13 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
+
+from .deepep_utils import ProcessGroupInfo, parallel_launch
+
+requires_pplx = pytest.mark.skipif(
+    not has_pplx,
+    reason="Requires PPLX kernels",
+)
 
 PPLX_PREPARE_COMBOS = [(4, 128, 128), (32, 1024, 512), (64, 1024, 512),
                        (222, 2048, 1024)]
@@ -55,122 +56,6 @@ TOP_KS = [1, 2, 6]
 vllm_config = VllmConfig()
 vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
-
-P = ParamSpec("P")
-
-requires_pplx = pytest.mark.skipif(
-    not has_pplx,
-    reason="Requires PPLX kernels",
-)
-
-
-@dataclasses.dataclass
-class ProcessGroupInfo:
-    world_size: int
-    world_local_size: int
-    rank: int
-    node_rank: int
-    local_rank: int
-    device: torch.device
-
-
-def _worker_parallel_launch(
-    local_rank: int,
-    world_size: int,
-    world_local_size: int,
-    node_rank: int,
-    init_method: str,
-    worker: Callable[Concatenate[ProcessGroupInfo, P], None],
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> None:
-    rank = node_rank * world_local_size + local_rank
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-    torch.distributed.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
-        init_method=init_method,
-        rank=rank,
-        world_size=world_size,
-        device_id=device,
-    )
-    barrier = torch.tensor([rank], device=device)
-    torch.distributed.all_reduce(barrier)
-
-    try:
-        worker(
-            ProcessGroupInfo(
-                world_size=world_size,
-                world_local_size=world_local_size,
-                rank=rank,
-                node_rank=node_rank,
-                local_rank=local_rank,
-                device=device,
-            ),
-            *args,
-            **kwargs,
-        )
-    except Exception as ex:
-        print(ex)
-        traceback.print_exc()
-        raise
-    finally:
-        torch.distributed.destroy_process_group()
-
-
-def parallel_launch(
-    world_size: int,
-    worker: Callable[Concatenate[ProcessGroupInfo, P], None],
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> None:
-    assert not kwargs
-    spawn(
-        _worker_parallel_launch,
-        args=(
-            world_size,
-            world_size,
-            0,
-            "tcp://localhost:29500",
-            worker,
-        ) + args,
-        nprocs=world_size,
-        join=True,
-    )
-
-
-def parallel_launch_from_env(
-    worker: Callable[Concatenate[ProcessGroupInfo, P], None],
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> None:
-    """
-    Launches a worker function in parallel across all processes in the current
-    environment. The environment must have the following variables set:
-    - WORLD_SIZE: The total number of processes.
-    - WORLD_LOCAL_SIZE: The number of processes on the current node.
-    - NODE_RANK: The rank of the current
-    - MASTER_ADDR: The address of the master process.
-    - MASTER_PORT: The port of the master process.
-    """
-    assert not kwargs
-    world_size = int(os.environ["WORLD_SIZE"])
-    world_local_size = int(os.environ["WORLD_LOCAL_SIZE"])
-    node_rank = int(os.environ["NODE_RANK"])
-    assert "MASTER_ADDR" in os.environ
-    assert "MASTER_PORT" in os.environ
-    spawn(
-        _worker_parallel_launch,
-        args=(
-            world_size,
-            world_local_size,
-            node_rank,
-            "env://",
-            worker,
-        ) + args,
-        nprocs=world_local_size,
-        join=True,
-    )
 
 
 def torch_prepare(
@@ -269,7 +154,10 @@ def batched_moe(
     num_experts = w1.shape[0]
 
     fused_experts = FusedMoEModularKernel(
-        BatchedPrepareAndFinalize(a.shape[0], world_size=1, dp_size=1, rank=0),
+        BatchedPrepareAndFinalize(max_num_tokens=a.shape[0],
+                                  world_size=1,
+                                  dp_size=1,
+                                  rank=0),
         BatchedExperts(max_num_tokens=a.shape[0], dp_size=1, world_size=1))
 
     return fused_experts(a, w1, w2, topk_weight, topk_ids, num_experts)
@@ -345,9 +233,15 @@ def chunk_by_rank(t: torch.Tensor, r: int, w: int) -> torch.Tensor:
     return t[(r * chunk):(r + 1) * chunk]
 
 
-def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
-                          topk_weight: torch.Tensor, topk_ids: torch.Tensor,
-                          num_experts: int) -> torch.Tensor:
+def pplx_prepare_finalize(
+    pgi: ProcessGroupInfo,
+    dp_size: int,
+    a: torch.Tensor,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    group_name: Optional[str],
+) -> torch.Tensor:
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize)
 
@@ -361,7 +255,7 @@ def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
     world_size = pgi.world_size
     max_num_tokens = rank_chunk(num_tokens, 0, world_size)
 
-    ata = AllToAll.internode(
+    args = dict(
         max_num_tokens=max_num_tokens,
         num_experts=num_experts,
         experts_per_token=topk,
@@ -374,6 +268,12 @@ def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
                                 ((hidden_dim + block_size - 1) // block_size *
                                  torch.float32.itemsize)),
     )
+
+    if group_name is None:
+        ata = AllToAll.internode(**args)
+    else:
+        args["group_name"] = group_name
+        ata = AllToAll.intranode(**args)
 
     topk_ids = topk_ids.to(dtype=torch.uint32)
 
@@ -390,7 +290,7 @@ def pplx_prepare_finalize(pgi: ProcessGroupInfo, dp_size: int, a: torch.Tensor,
     chunk_topk_weight = chunk_by_rank(topk_weight, rank, world_size).to(device)
     chunk_topk_ids = chunk_by_rank(topk_ids, rank, world_size).to(device)
 
-    b_a, b_a_scale, expert_num_tokens = prepare_finalize.prepare(
+    b_a, b_a_scale, expert_num_tokens, _, _ = prepare_finalize.prepare(
         a_chunk,
         None,
         None,
@@ -434,11 +334,19 @@ def _pplx_prepare_finalize(
     score: torch.Tensor,
     topk: torch.Tensor,
     num_experts: int,
+    use_internode: bool,
 ):
-    uid = nvshmem_get_unique_id(
-    ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
-    torch.distributed.broadcast(uid, src=0)
-    nvshmem_init(uid, pgi.rank, pgi.world_size)
+    if use_internode:
+        uid = nvshmem_get_unique_id(
+        ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
+        torch.distributed.broadcast(uid, src=0)
+        nvshmem_init(uid, pgi.rank, pgi.world_size)
+        group_name = None
+    else:
+        group_ranks = list(range(pgi.world_size))
+        cpu_group = torch.distributed.new_group(group_ranks, backend="gloo")
+        group_name = cpu_group.group_name
+
     device = pgi.device
 
     topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
@@ -451,14 +359,15 @@ def _pplx_prepare_finalize(
                         a.dtype)
 
     pplx_output = pplx_prepare_finalize(pgi, dp_size, a, topk_weight, topk_ids,
-                                        num_experts)
+                                        num_experts, group_name)
 
     torch_output = chunk_by_rank(torch_output, pgi.rank,
                                  pgi.world_size).to(pplx_output.device)
 
     torch.testing.assert_close(pplx_output, torch_output, atol=2e-2, rtol=0)
 
-    nvshmem_finalize()
+    if use_internode:
+        nvshmem_finalize()
 
 
 # TODO (bnell): this test point does not work for odd M due to how the test is
@@ -469,6 +378,7 @@ def _pplx_prepare_finalize(
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
+@pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
 def test_pplx_prepare_finalize(
     mnk: tuple[int, int, int],
@@ -476,6 +386,7 @@ def test_pplx_prepare_finalize(
     topk: int,
     dtype: torch.dtype,
     world_dp_size: tuple[int, int],
+    use_internode: bool,
 ):
     current_platform.seed_everything(7)
     m, n, k = mnk
@@ -485,10 +396,11 @@ def test_pplx_prepare_finalize(
     score = torch.randn((m, e), device=device, dtype=dtype)
 
     parallel_launch(world_size, _pplx_prepare_finalize, dp_size, a, score,
-                    topk, e)
+                    topk, e, use_internode)
 
 
 def pplx_moe(
+    group_name: Optional[str],
     rank: int,
     world_size: int,
     dp_size: int,
@@ -510,7 +422,7 @@ def pplx_moe(
     topk = topk_ids.shape[1]
     max_num_tokens = rank_chunk(a.shape[0], 0, world_size)
 
-    ata = AllToAll.internode(
+    args = dict(
         max_num_tokens=max_num_tokens,
         num_experts=num_experts,
         experts_per_token=topk,
@@ -523,6 +435,12 @@ def pplx_moe(
                                 ((hidden_dim + block_size - 1) // block_size *
                                  torch.float32.itemsize)),
     )
+
+    if group_name is None:
+        ata = AllToAll.internode(**args)
+    else:
+        args["group_name"] = group_name
+        ata = AllToAll.intranode(**args)
 
     topk_ids = topk_ids.to(dtype=torch.uint32)
 
@@ -638,11 +556,18 @@ def _pplx_moe(
     w2: torch.Tensor,
     score: torch.Tensor,
     topk: int,
+    use_internode: bool,
 ):
-    uid = nvshmem_get_unique_id(
-    ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
-    torch.distributed.broadcast(uid, src=0)
-    nvshmem_init(uid, pgi.rank, pgi.world_size)
+    if use_internode:
+        uid = nvshmem_get_unique_id(
+        ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
+        torch.distributed.broadcast(uid, src=0)
+        nvshmem_init(uid, pgi.rank, pgi.world_size)
+        group_name = None
+    else:
+        group_ranks = list(range(pgi.world_size))
+        cpu_group = torch.distributed.new_group(group_ranks, backend="gloo")
+        group_name = cpu_group.group_name
 
     m, k = a.shape
     e, _, n = w2.shape
@@ -652,8 +577,8 @@ def _pplx_moe(
     with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         torch_output = torch_moe2(a, w1, w2, topk_weight, topk_ids)
-        pplx_output = pplx_moe(pgi.rank, pgi.world_size, dp_size, a, w1, w2,
-                               topk_weight, topk_ids)
+        pplx_output = pplx_moe(group_name, pgi.rank, pgi.world_size, dp_size,
+                               a, w1, w2, topk_weight, topk_ids)
         # TODO (bnell): fix + re-enable
         #batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight,
         #                              topk_ids)
@@ -664,7 +589,8 @@ def _pplx_moe(
     torch.testing.assert_close(pplx_output, torch_output, atol=2e-2, rtol=0)
     #torch.testing.assert_close(batched_output, torch_output, atol=2e-2, rtol=0)
 
-    nvshmem_finalize()
+    if use_internode:
+        nvshmem_finalize()
 
 
 @pytest.mark.parametrize("mnk", PPLX_MOE_COMBOS)
@@ -672,6 +598,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
+@pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
 def test_pplx_moe(
     mnk: tuple[int, int, int],
@@ -679,6 +606,7 @@ def test_pplx_moe(
     topk: int,
     dtype: torch.dtype,
     world_dp_size: tuple[int, int],
+    use_internode: bool,
 ):
     current_platform.seed_everything(7)
     m, n, k = mnk
@@ -688,4 +616,5 @@ def test_pplx_moe(
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
-    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk)
+    parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk,
+                    use_internode)

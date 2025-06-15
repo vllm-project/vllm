@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
 import gc
 import os
@@ -21,7 +22,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import GiB_bytes
+from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -31,6 +32,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 
 
@@ -128,7 +130,22 @@ class Worker(WorkerBase):
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
-            self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+
+            # take current memory snapshot
+            self.init_snapshot = MemorySnapshot()
+            self.requested_memory = (self.init_snapshot.total_memory *
+                                     self.cache_config.gpu_memory_utilization)
+            if self.init_snapshot.free_memory < self.requested_memory:
+                GiB = lambda b: round(b / GiB_bytes, 2)
+                raise ValueError(
+                    f"Free memory on device "
+                    f"({GiB(self.init_snapshot.free_memory)}/"
+                    f"{GiB(self.init_snapshot.total_memory)} GiB) on startup "
+                    f"is less than desired GPU memory utilization "
+                    f"({self.cache_config.gpu_memory_utilization}, "
+                    f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
+                    f"utilization or reduce GPU memory used by other processes."
+                )
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -171,45 +188,45 @@ class Worker(WorkerBase):
         Then, it calculate the free memory that can be used for KV cache in
         bytes.
 
-        :::{tip}
-        You may limit the usage of GPU memory
-        by adjusting the `gpu_memory_utilization` parameter.
-        :::
+        Tip:
+            You may limit the usage of GPU memory
+            by adjusting the `gpu_memory_utilization` parameter.
         """
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
+        GiB = lambda b: b / GiB_bytes
 
-        _, total_gpu_memory = torch.cuda.mem_get_info()
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        self.model_runner.profile_run()
+        with memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(
+                    self.model_runner.model_memory_usage)) as profile_result:
+            self.model_runner.profile_run()
 
-        free_gpu_memory, _ = torch.cuda.mem_get_info()
+        free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        assert self.init_gpu_memory > free_gpu_memory, (
+        assert self.init_snapshot.free_memory > free_gpu_memory, (
             "Error in memory profiling. "
-            f"Initial free memory {self.init_gpu_memory}, current free memory"
-            f" {free_gpu_memory}. This happens when the GPU memory was "
-            "not properly cleaned up before initializing the vLLM instance.")
+            f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
+            f"current free memory {GiB(free_gpu_memory)} GiB. "
+            "This happens when other processes sharing the same container "
+            "release GPU memory while vLLM is profiling during initialization. "
+            "To fix this, ensure consistent GPU memory allocation or "
+            "isolate vLLM in its own container.")
+        available_kv_cache_memory = self.requested_memory \
+            - profile_result.non_kv_cache_memory
 
-        # Get the peak memory allocation recorded by torch
-        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-
-        # Check for any memory left around that may have been allocated on the
-        # gpu outside of `torch`. NCCL operations, for example, can use a few
-        # GB during a forward pass
-        torch.cuda.empty_cache()
-        torch_allocated_bytes = torch.cuda.memory_stats(
-        )["allocated_bytes.all.current"]
-        total_allocated_bytes = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
-        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
-        if non_torch_allocations > 0:
-            peak_memory += non_torch_allocations
-        available_kv_cache_memory = (
-            total_gpu_memory * self.cache_config.gpu_memory_utilization -
-            peak_memory)
+        logger.debug(
+            "Initial free memory: %.2f GiB, free memory: %.2f GiB, "
+            "requested GPU memory: %.2f GiB",
+            GiB(self.init_snapshot.free_memory), GiB(free_gpu_memory),
+            GiB(self.requested_memory))
+        logger.debug(profile_result)
+        logger.info("Available KV cache memory: %.2f GiB",
+                    GiB(available_kv_cache_memory))
+        gc.collect()
 
         return int(available_kv_cache_memory)
 
@@ -292,6 +309,8 @@ class Worker(WorkerBase):
             self.profiler.start()
         else:
             self.profiler.stop()
+            print(self.profiler.key_averages().table(
+                sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1)
@@ -326,23 +345,30 @@ class Worker(WorkerBase):
             max_size=max_size,
         )
 
+    def save_tensorized_model(
+        self,
+        tensorizer_config: "TensorizerConfig",
+    ) -> None:
+        self.model_runner.save_tensorized_model(
+            tensorizer_config=tensorizer_config, )
+
 
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
+    backend: str = "nccl",
 ) -> None:
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
+                                 distributed_init_method, local_rank, backend)
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size,
-                                      parallel_config.enable_expert_parallel)
+                                      parallel_config.pipeline_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
 
