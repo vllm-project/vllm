@@ -504,6 +504,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 end_token_index += len(spec_token_ids)
                 self.input_batch.token_ids_cpu[
                     req_index, start_index:end_token_index] = spec_token_ids
+                self.input_batch.last_spec_token_ids[
+                    req_index] = spec_token_ids
             # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
             self.input_batch.num_tokens[req_index] = end_token_index
 
@@ -1352,6 +1354,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output = self.sampler(
                 logits=bonus_logits,
                 sampling_metadata=sampling_metadata,
+                predict_bonus_token=True,
             )
             bonus_token_ids = sampler_output.sampled_token_ids
 
@@ -1926,6 +1929,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             presence_penalties=dummy_tensors(0.1),
             repetition_penalties=dummy_tensors(0.1),
             output_token_ids=[[] for _ in range(num_reqs)],
+            last_spec_token_ids=[[] for _ in range(num_reqs)],
             min_tokens={},
             logit_bias=[None for _ in range(num_reqs)],
             allowed_token_ids_mask=None,

@@ -223,6 +223,8 @@ class InputBatch:
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
+        self.last_spec_token_ids: list[Optional[list[int]]] = []
+
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
 
@@ -245,9 +247,11 @@ class InputBatch:
         if req_index == len(self._req_ids):
             self._req_ids.append(req_id)
             self.req_output_token_ids.append(request.output_token_ids)
+            self.last_spec_token_ids.append([])
         else:
             self._req_ids[req_index] = req_id
             self.req_output_token_ids[req_index] = request.output_token_ids
+            self.last_spec_token_ids[req_index] = []
 
         self.req_id_to_index[req_id] = req_index
 
@@ -362,6 +366,7 @@ class InputBatch:
             return None
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
+        self.last_spec_token_ids[req_index] = None
 
         self.greedy_reqs.discard(req_id)
         self.random_reqs.discard(req_id)
@@ -401,6 +406,8 @@ class InputBatch:
             self._req_ids[i2], self._req_ids[i1] # noqa
         self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
             self.req_output_token_ids[i2], self.req_output_token_ids[i1]
+        self.last_spec_token_ids[i1], self.last_spec_token_ids[i2] =\
+            self.last_spec_token_ids[i2], self.last_spec_token_ids[i1]
         assert old_id_i1 is not None and old_id_i2 is not None
         self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] =\
             self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
@@ -458,6 +465,7 @@ class InputBatch:
             # The batched states are empty.
             self._req_ids.clear()
             self.req_output_token_ids.clear()
+            self.last_spec_token_ids.clear()
             return
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
@@ -482,6 +490,10 @@ class InputBatch:
             self.req_output_token_ids[empty_index] = output_token_ids
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
+
+            last_spec_token_ids = self.last_spec_token_ids[last_req_index]
+            self.last_spec_token_ids[empty_index] = last_spec_token_ids
+            self.last_spec_token_ids[last_req_index] = None
 
             num_tokens = self.num_tokens[last_req_index]
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
@@ -533,6 +545,7 @@ class InputBatch:
         # Trim lists to the batch size.
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
+        del self.last_spec_token_ids[self.num_reqs:]
 
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self._make_sampling_metadata()
@@ -590,6 +603,8 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(list[list[int]], self.req_output_token_ids),
+            last_spec_token_ids=cast(list[list[int]],
+                                     self.last_spec_token_ids),
             min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
             logit_bias=self.logit_bias[:num_reqs],
