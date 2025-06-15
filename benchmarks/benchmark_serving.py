@@ -28,6 +28,7 @@ import gc
 import json
 import os
 import random
+
 import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable
@@ -994,7 +995,7 @@ def main(args: argparse.Namespace):
         save_to_pytorch_benchmark_format(args, result_json, file_name)
 
 
-if __name__ == "__main__":
+def create_argument_parser():
     parser = FlexibleArgumentParser(
         description="Benchmark the online serving throughput."
     )
@@ -1371,4 +1372,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_argument_parser()
+    args = parser.parse_args()
     main(args)
