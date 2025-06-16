@@ -353,12 +353,14 @@ class OpenAIServingTranscription(OpenAIServing):
                     # On first result.
                     if res.prompt_token_ids is not None:
                         # Do not account the 4-tokens `<|startoftranscript|>..`
-                        # Could be negative when language token is not specified.
+                        # Could be negative when language token
+                        # is not specified.
                         num_prompt_tokens = max(
                             len(res.prompt_token_ids) - 4, 0)
-                        # NOTE(NickLucche) user can't pass encoder prompts directly
-                        # at least not to Whisper. One indicator of the encoder
-                        # amount of processing is the log-mel spectogram length.
+                        # NOTE(NickLucche) user can't pass encoder
+                        # prompts directly at least not to Whisper.
+                        # One indicator of the encoder amount of processing
+                        # is the log-mel spectogram length.
                         num_prompt_tokens += ceil(
                             audio_duration_s * self.model_sr / self.hop_length)
 
@@ -460,7 +462,8 @@ class OpenAIServingTranscription(OpenAIServing):
 
     def _find_split_point(self, wav: np.ndarray, start_idx: int,
                           end_idx: int) -> int:
-        """Find the best point to split audio by looking for silence or low amplitude.
+        """Find the best point to split audio by 
+        looking for silence or low amplitude.
         Args:
             wav: Audio tensor [1, T]
             start_idx: Start index of search region
