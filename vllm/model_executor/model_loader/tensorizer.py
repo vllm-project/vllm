@@ -68,7 +68,6 @@ def is_valid_deserialization_uri(uri: Optional[str]) -> bool:
     return False
 
 
-
 def tensorizer_kwargs_arg(value):
     loaded = json.loads(value)
     if not isinstance(loaded, dict):
@@ -582,13 +581,13 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
     return ".vllm_tensorized_marker" in deserializer
 
 
-def serialize_extra_artifacts(tensorizer_args: TensorizerArgs,
-                              served_model_name: Union[str, list[str], None]) -> None:
+def serialize_extra_artifacts(
+        tensorizer_args: TensorizerArgs,
+        served_model_name: Union[str, list[str], None]) -> None:
     if not isinstance(served_model_name, str):
         raise ValueError(
             f"served_model_name must be a str for serialize_extra_artifacts, "
-            f"not {type(served_model_name)}."
-        )
+            f"not {type(served_model_name)}.")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         snapshot_download(served_model_name,
