@@ -290,6 +290,8 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_llava(question: str, image_urls: list[str]) -> ModelRequestData:
+    # NOTE: CAUTION! Original Llava models wasn't really trained on multi-image inputs,
+    # it will generate poor response for multi-image inputs!
     model_name = "llava-hf/llava-1.5-7b-hf"
     engine_args = EngineArgs(
         model=model_name,
