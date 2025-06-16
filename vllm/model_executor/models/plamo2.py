@@ -10,6 +10,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
@@ -408,6 +409,7 @@ class DenseMLP(nn.Module):
         return self.down_proj(h)
 
 
+@support_torch_compile
 class Plamo2AttentionMixer(nn.Module):
 
     def __init__(self,
