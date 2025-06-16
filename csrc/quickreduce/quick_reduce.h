@@ -20,16 +20,17 @@ static_assert(sizeof(void*) == sizeof(fptr_t));
 
 template <typename AllReduceKernel, typename T>
 __global__ __quickreduce_launch_bounds_two_shot__ static void
-allreduce_prototype_twoshot(T const* A, T* B, uint32_t N, int num_blocks,
+allreduce_prototype_twoshot(T const* A, T* B, uint32_t N, uint32_t num_blocks,
                             int rank, uint8_t** dbuffer_list,
                             uint32_t data_offset, uint32_t flag_color) {
   int block = blockIdx.x;
   int grid = gridDim.x;
 
   while (block < num_blocks) {
-    AllReduceKernel::run(A, B, N, block, num_blocks, rank, dbuffer_list,
-                         data_offset, flag_color);
+    AllReduceKernel::run(A, B, N, block, rank, dbuffer_list, data_offset,
+                         flag_color);
     block += grid;
+    flag_color++;
   }
 }
 
@@ -58,16 +59,13 @@ allreduce_prototype_twoshot(T const* A, T* B, uint32_t N, int num_blocks,
   }
 
 enum QuickReduceQuantLevel {
-  FP16 = 0,
+  F16 = 0,
   INT8 = 1,
   INT6 = 2,
   INT4 = 3,
 };
 
 struct DeviceComms {
-  // Workgroup scope = Tile = (256 threads x 16B x 8 atoms)
-  static long constexpr kTileSize = 256 * 16 * 8;
-
   // Max problem size is 2GB (in bytes) or half of uint32_t max value.
   static int64_t constexpr kMaxProblemSize = 2147483648;
   static int64_t constexpr kMaxTiles = kMaxProblemSize / kTileSize;
@@ -95,8 +93,9 @@ struct DeviceComms {
     this->world_size = world_size;
     this->rank = rank;
 
-    // Allocate buffer size for worst case: Twoshot FP16 2-stage buffer.
-    uint32_t flags_buffer_size = 2 * world_size * kMaxTiles * sizeof(int);
+    // Allocate buffer size for worst case: F16 2-stage buffer.
+    uint32_t flags_buffer_size =
+        2 * world_size * kMaxNumBlocks * sizeof(uint32_t);
     static constexpr int64_t data_buffer_size = 2 * kMaxProblemSize;
     int64_t total_buffer_size = flags_buffer_size + data_buffer_size;
     data_offset = flags_buffer_size;
@@ -136,6 +135,59 @@ struct DeviceComms {
     }
   }
 
+  template <typename T>
+  bool use_fp_kernel(QuickReduceQuantLevel quant_level, uint32_t msg_size) {
+    if constexpr (std::is_same<T, half>::value) {
+      if (world_size == 2) {
+        return (quant_level == QuickReduceQuantLevel::INT8 and
+                msg_size < 1024 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT6 and
+                msg_size < 512 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT4 and
+                msg_size < 512 * 1024);
+      } else if (world_size == 4) {
+        return (quant_level == QuickReduceQuantLevel::INT8 and
+                msg_size < 8 * 1024 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT6 and
+                msg_size < 2 * 1024 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT4 and
+                msg_size < 1024 * 1024);
+      } else if (world_size == 8) {
+        // TODO need to do kernel benchmarking for TP8
+        return (quant_level == QuickReduceQuantLevel::INT8 and
+                msg_size < 1024 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT6 and
+                msg_size < 512 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT4 and
+                msg_size < 512 * 1024);
+      }
+    } else {
+      if (world_size == 2) {
+        return (quant_level == QuickReduceQuantLevel::INT8 and
+                msg_size < 4 * 1024 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT6 and
+                msg_size < 4 * 1024 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT4 and
+                msg_size < 4 * 1024 * 1024);
+      } else if (world_size == 4) {
+        return (quant_level == QuickReduceQuantLevel::INT8 and
+                msg_size < 32 * 1024 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT6 and
+                msg_size < 32 * 1024 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT4 and
+                msg_size < 32 * 1024 * 1024);
+      } else if (world_size == 8) {
+        // TODO need to do kernel benchmarking for TP8
+        return (quant_level == QuickReduceQuantLevel::INT8 and
+                msg_size < 32 * 1024 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT6 and
+                msg_size < 32 * 1024 * 1024) or
+               (quant_level == QuickReduceQuantLevel::INT4 and
+                msg_size < 32 * 1024 * 1024);
+      }
+    }
+  }
+
   void open_ipc_handles(std::vector<hipIpcMemHandle_t> const& ipc_handles) {
     assert(ipc_handles.size() == all_buffer_ipc_handles.size());
     for (int i = 0; i < world_size; i++) {
@@ -168,9 +220,12 @@ struct DeviceComms {
 
     // Configuration.
     uint32_t msg_size = N * sizeof(T);
-    uint64_t num_blocks = divceil(msg_size, kTileSize);
-    uint64_t grid = min(kMaxNumBlocks, num_blocks);
+    uint32_t num_blocks = divceil(msg_size, kTileSize);
+    uint32_t grid = min(kMaxNumBlocks, num_blocks);
     auto quant_level_ = static_cast<QuickReduceQuantLevel>(quant_level);
+    if (use_fp_kernel<T>(quant_level_, msg_size)) {
+      quant_level_ = QuickReduceQuantLevel::F16;
+    }
     switch (quant_level_) {
       case QuickReduceQuantLevel::INT8:
         TWOSHOT_DISPATCH(CodecQ8)
@@ -187,7 +242,7 @@ struct DeviceComms {
     }
     HIP_CHECK(cudaGetLastError());
     // Rotate the flag color.
-    flag_color++;
+    flag_color += divceil(N, grid);
   }
 };
 

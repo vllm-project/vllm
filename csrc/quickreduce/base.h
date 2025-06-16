@@ -40,6 +40,7 @@ static constexpr int kAtomStride = kBlockSize;
 
 // Size and atom stride of source/destination data that the block will
 // process.
+// Workgroup scope = Tile = (256 threads x 8 atoms x 16B)
 static constexpr int kTileSize = kBlockSize * kAtoms * sizeof(int32x4_t);
 
 // Max number of blocks. 304 CUs on MI300
