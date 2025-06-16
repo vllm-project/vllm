@@ -849,6 +849,13 @@ def get_tp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_tensor_model_parallel_group = get_tp_group
 
+_LM_HEAD_TP: Optional[GroupCoordinator] = None
+
+def get_lm_tp_group() -> GroupCoordinator:
+    assert _LM_HEAD_TP is not None, ("lm tensor model parallel group is not initialized")
+    return _LM_HEAD_TP
+get_lm_tensor_model_parallel_group = get_lm_tp_group
+
 _PP: Optional[GroupCoordinator] = None
 
 _DP: Optional[GroupCoordinator] = None
@@ -1068,6 +1075,26 @@ def initialize_model_parallel(
         _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
         _EP.rank_in_group)
 
+    global _LM_HEAD_TP
+    assert _LM_HEAD_TP is None, ("lm head tensor model parallel group is already initialized")
+    lm_tp  = 1
+    all_ranks_lm_head = torch.arange(world_size).reshape(
+        -1, world_size//lm_tp, pipeline_model_parallel_size, lm_tp)  # noqa
+    group_ranks = all_ranks_lm_head.view(-1, lm_tp).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+
+    # message queue broadcaster is only used in tensor model parallel group
+    _LM_HEAD_TP = init_model_parallel_group(group_ranks,
+                                            get_world_group().local_rank,
+                                            backend,
+                                            use_message_queue_broadcaster=True,
+                                            group_name="lm_head_tp")
+
+    logger.info(
+        "rank %s in world size %s is assigned as "
+        "DP rank %s, PP rank %s, TP rank %s, LM_HEAD_TP rank %s", rank, world_size,
+        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group, _LM_HEAD_TP.rank_in_group)
+
 
 def ensure_model_parallel_initialized(
     tensor_model_parallel_size: int,
@@ -1156,6 +1183,13 @@ def get_tensor_model_parallel_rank():
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
 
+def get_lm_tensor_model_parallel_world_size():
+    """Return world size for the tensor model parallel group."""
+    return get_lm_tp_group().world_size
+
+def get_lm_tensor_model_parallel_rank():
+    """Return world size for the tensor model parallel group."""
+    return get_lm_tp_group().rank_in_group
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
