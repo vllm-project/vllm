@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only Mixtral model."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import numpy as np
@@ -346,7 +347,7 @@ class MixtralModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
