@@ -9,7 +9,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
-    _moe_permute)
+    moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -117,15 +117,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             global_num_experts = w1.size(0)
 
         assert w2.size(1) == K
-
-        a1q, a1q_scale, _, expert_ids, inv_perm = _moe_permute(
-            a1q,
-            a1q_scale,
-            topk_ids,
-            global_num_experts,
-            expert_map,
-            self.block_shape[0],
-        )
+        fill_invalid_expert = 0
+        a1q, a1q_scale, _, inv_perm, expert_ids = moe_permute(
+            a1q, a1q_scale, topk_ids, global_num_experts, expert_map,
+            self.block_shape[0], fill_invalid_expert)
 
         if expert_map is not None:
             # DeepGemm (Grouped Contiguous) kernel needs a valid B index

@@ -341,13 +341,13 @@ def _moe_permute(a, a_s, topk_ids, num_groups, topk, block_m):
 
     num_tokens = topk * M
 
-    sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
+    sorted_token_ids_clamp = sorted_token_ids.clamp(max=num_tokens - 1)
     m_indices = torch.repeat_interleave(m_indices, block_m, dim=0)
     inv_perm = torch.argsort(sorted_token_ids)[:M * topk]
 
-    a = fp8_perm(a, sorted_token_ids // topk)
+    a = fp8_perm(a, sorted_token_ids_clamp // topk)
     if a_s is not None:
-        a_s = a_s[sorted_token_ids // topk]
+        a_s = a_s[sorted_token_ids_clamp // topk]
 
     return a, a_s, m_indices, inv_perm
 
@@ -463,7 +463,14 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed):
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             a, score.float(), topk, False)
 
-        out = deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids)
+        out = deep_gemm_moe_fp8(a,
+                                w1,
+                                w2,
+                                w1_s,
+                                w2_s,
+                                topk_weights,
+                                topk_ids,
+                                global_num_experts=E)
 
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
