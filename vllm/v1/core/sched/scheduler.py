@@ -335,8 +335,8 @@ class Scheduler(SchedulerInterface):
                 if req.lora_request and req.lora_request.lora_int_id > 0)
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
-        # Use a temporary WaitingQueue to collect requests that need to be skipped
-        # and put back at the head of the waiting queue later
+        # Use a temporary WaitingQueue to collect requests that need to be
+        # skipped and put back at the head of the waiting queue later
         skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.

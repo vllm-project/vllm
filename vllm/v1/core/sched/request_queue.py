@@ -30,10 +30,7 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
-    def push_request(self,
-                     request: Request,
-                     priority: int = 0,
-                     arrival_time: float = 0.0) -> None:
+    def push_request(self, request: Request) -> None:
         """Push a request back to the queue (used for skipped requests)."""
         pass
 
@@ -83,10 +80,7 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
             raise IndexError("peek from an empty queue")
         return self[0]
 
-    def push_request(self,
-                     request: Request,
-                     priority: int = 0,
-                     arrival_time: float = 0.0) -> None:
+    def push_request(self, request: Request) -> None:
         """Push a request back to the queue (used for skipped requests)."""
         self.appendleft(request)
 
@@ -136,12 +130,10 @@ class PriorityRequestQueue(RequestQueue):
         _, _, request = self._heap[0]
         return request
 
-    def push_request(self,
-                     request: Request,
-                     priority: int = 0,
-                     arrival_time: float = 0.0) -> None:
+    def push_request(self, request: Request) -> None:
         """Push a request back to the queue (used for skipped requests)."""
-        heapq.heappush(self._heap, (priority, arrival_time, request))
+        heapq.heappush(self._heap,
+                       (request.priority, request.arrival_time, request))
 
     def extend_left_requests(self, requests: RequestQueue) -> None:
         """Extend left with requests from another RequestQueue."""
@@ -175,4 +167,4 @@ def create_request_queue(policy: str, ) -> RequestQueue:
     if policy == "priority":
         return PriorityRequestQueue()
     else:
-        return FCFSRequestQueue() 
+        return FCFSRequestQueue()
