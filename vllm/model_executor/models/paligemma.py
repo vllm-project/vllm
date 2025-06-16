@@ -24,8 +24,9 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
 
 logger = init_logger(__name__)
@@ -227,6 +228,15 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         ],
     }
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "lm_head.": "language_model.lm_head.",
+        })
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -395,4 +405,4 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
