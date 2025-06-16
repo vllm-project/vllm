@@ -193,7 +193,8 @@ def neuron_platform_plugin() -> Optional[str]:
 def tt_platform_plugin() -> Optional[str]:
     is_tt = False
     try:
-        import ttnn  # assume ttnn is installed if and only if machine has TT devices
+        # assume ttnn is installed if and only if machine has TT devices
+        import ttnn  # noqa: F401
         is_tt = True
     except Exception:
         pass

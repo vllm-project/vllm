@@ -213,8 +213,8 @@ class LLMEngine:
         vllm_config: VllmConfig,
         executor_class: Type[ExecutorBase],
         log_stats: bool,
-        log_global_stats:
-        bool = False,  # if True and log_stats is True, log with GlobalStatLogger as well
+        log_global_stats: bool = False,  # if True and log_stats is True, 
+        # log with GlobalStatLogger as well
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
@@ -1171,7 +1171,8 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill() and is_last_step:
-                # set time after all steps since _get_stats sets actual_num_batched_tokens based on num steps
+                # set time after all steps since _get_stats sets
+                # actual_num_batched_tokens based on num steps
                 seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,
@@ -1198,12 +1199,12 @@ class LLMEngine:
                 scheduler.free_finished_seq_groups()
 
         # Log and reset global stats if there are no unfinished requests left
-        if not self.has_unfinished_requests():
-            if self.log_stats and 'global' in self.stat_loggers:
-                global_stat_logger = cast(GlobalStatLogger,
-                                          self.stat_loggers['global'])
-                global_stat_logger.log_out()
-                global_stat_logger.reset()
+        if (not self.has_unfinished_requests() and self.log_stats
+                and 'global' in self.stat_loggers):
+            global_stat_logger = cast(GlobalStatLogger,
+                                      self.stat_loggers['global'])
+            global_stat_logger.log_out()
+            global_stat_logger.reset()
 
         # For multi-step without streaming, don't create outputs each iteration
         if not is_last_step and not ctx.multi_step_stream_outputs:
@@ -1224,7 +1225,8 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
             if not seq_group.is_prefill() and is_last_step:
-                # set time after all steps since _get_stats sets actual_num_batched_tokens based on num steps
+                # set time after all steps since _get_stats sets
+                # actual_num_batched_tokens based on num steps
                 seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,

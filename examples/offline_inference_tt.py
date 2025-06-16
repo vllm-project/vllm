@@ -24,15 +24,18 @@ from vllm.utils import merge_async_iterators
 def register_tt_models():
     llama_text_version = os.getenv("TT_LLAMA_TEXT_VER", "tt_transformers")
     if llama_text_version == "tt_transformers":
-        path_llama_text = "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM"
+        path_llama_text = \
+            "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM"
     elif llama_text_version == "llama3_subdevices":
-        path_llama_text = "models.demos.llama3_subdevices.tt.generator_vllm:LlamaForCausalLM"
+        path_llama_text = \
+            "models.demos.llama3_subdevices.tt.generator_vllm:LlamaForCausalLM"
     elif llama_text_version == "llama2_70b":
-        path_llama_text = "models.demos.t3000.llama2_70b.tt.generator_vllm:TtLlamaForCausalLM"
+        path_llama_text = \
+            "models.demos.t3000.llama2_70b.tt.generator_vllm:TtLlamaForCausalLM"
     else:
         raise ValueError(
-            f"Unsupported TT Llama version: {llama_text_version}, pick one of [tt_transformers, llama3_subdevices, llama2_70b]"
-        )
+            f"Unsupported TT Llama version: {llama_text_version}, "
+            "pick one of [tt_transformers, llama3_subdevices, llama2_70b]")
 
     # Llama3.1/3.2 - Text
     ModelRegistry.register_model("TTLlamaForCausalLM", path_llama_text)
@@ -118,7 +121,8 @@ def check_tt_model_supported(model):
 
 def run_seq_len_tests(engine_kw_args, sampling_params):
     '''
-    Test generation of a few simple counting prompts with arbitrary increasing sequence lengths
+    Test generation of a few simple counting prompts 
+    with arbitrary increasing sequence lengths
     '''
 
     model = engine_kw_args["model"]
@@ -131,8 +135,8 @@ def run_seq_len_tests(engine_kw_args, sampling_params):
 
     prompts = []
     for size in count_sizes:
-        prompt = "Continue this counting sequence (with no explanation): " + " ".join(
-            str(i) for i in range(1, size + 1))
+        prompt = "Continue this counting sequence (with no explanation): " + \
+            " ".join(str(i) for i in range(1, size + 1))
         if is_instruct:
             prompt = {"role": "user", "content": prompt}
             prompt = tokenizer.apply_chat_template([prompt],
@@ -155,7 +159,7 @@ def run_inference(
         num_repeat_prompts=2,
         measure_perf=False,
         perf_prompt_len=None,
-        greedy_sampling=False,  # Option to use greedy decoding instead of top-k/p
+        greedy_sampling=False,  # Use greedy decoding instead of top-k/p
         async_engine=False,
         num_scheduler_steps=10,
         disable_async_output_proc=False,
@@ -167,7 +171,8 @@ def run_inference(
     check_tt_model_supported(model)
 
     if multi_modal:
-        assert "Llama-3.2" in model, "The multi-modal inference test currently only supports Llama-3.2 models"
+        assert "Llama-3.2" in model, "The multi-modal inference test " + \
+            "currently only supports Llama-3.2 models"
 
     # LLM args
     engine_kw_args = {
@@ -186,8 +191,9 @@ def run_inference(
         if override_tt_config:
             engine_kw_args["override_tt_config"] = json.loads(
                 override_tt_config)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON string for override_tt_config: {e}")
+    except json.JSONDecodeError as err:
+        raise ValueError(
+            f"Invalid JSON string for override_tt_config: {err}") from err
 
     # Generation args
     ignore_eos = measure_perf
@@ -204,8 +210,10 @@ def run_inference(
                                          temperature=1.0)
 
     if test_increasing_seq_lens:
-        assert not measure_perf, "measure_perf option not supported with test_increasing_seq_lens"
-        assert not async_engine, "async_engine option not supported with test_increasing_seq_lens"
+        assert not measure_perf, (
+            "measure_perf option not supported with test_increasing_seq_lens")
+        assert not async_engine, (
+            "async_engine option not supported with test_increasing_seq_lens")
         print("Ignoring prompts json for sequence length testing")
         run_seq_len_tests(engine_kw_args, sampling_params)
         return
@@ -225,7 +233,8 @@ def run_inference(
             prompts = prompts * num_repeat_prompts
         print("Number of prompts:", len(prompts))
     else:
-        assert perf_prompt_len is not None, "perf_prompt_len is required to generate dummy prompts"
+        assert perf_prompt_len is not None, \
+            "perf_prompt_len is required to generate dummy prompts"
         print("Measuring performance with dummy prompts of length",
               perf_prompt_len)
         print("Generating prompts with output length", max_tokens)
@@ -291,8 +300,11 @@ def run_inference(
 
 def check_valid_perf_prompt_len(max_model_len, perf_prompt_len,
                                 sampling_params):
-    assert_str = f"prompt length ({perf_prompt_len}) + num generated tokens ({sampling_params.max_tokens}) will exceed max_model_len ({max_model_len})"
-    assert perf_prompt_len + sampling_params.max_tokens <= max_model_len, assert_str
+    assert_str = (f"prompt length ({perf_prompt_len}) + num generated tokens "
+                  f"({sampling_params.max_tokens}) will exceed max_model_len "
+                  f"({max_model_len})")
+    assert perf_prompt_len + sampling_params.max_tokens <= max_model_len, (
+        assert_str)
 
 
 def run_inference_perf(
@@ -333,7 +345,8 @@ def generate_tokens(llm: LLM,
                     sampling_params,
                     prompt_token_ids=None,
                     print_output=True):
-    # Generate texts from the prompts. The output is a list of RequestOutput objects
+    # Generate texts from the prompts.
+    # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params, prompt_token_ids)
     # Print the outputs.
@@ -344,9 +357,10 @@ def generate_tokens(llm: LLM,
         num_tokens_prompt = len(output.prompt_token_ids)
         num_tokens_output = len(output.outputs[0].token_ids)
         if print_output:
-            print(
-                f"Prompt #{request_id} ({num_tokens_prompt} tokens): {prompt!r}, Generated text ({num_tokens_output} tokens): {generated_text!r}\n"
-            )
+            print(f"Prompt #{request_id} "
+                  f"({num_tokens_prompt} tokens): {prompt!r}, "
+                  "Generated text "
+                  f"({num_tokens_output} tokens): {generated_text!r}\n")
 
 
 async def generate_tokens_async(llm: MQLLMEngineClient,
@@ -375,9 +389,10 @@ async def generate_tokens_async(llm: MQLLMEngineClient,
         num_tokens_prompt = len(res.prompt_token_ids)
         num_tokens_output = len(res.outputs[0].token_ids)
         if print_output and res.finished:
-            print(
-                f"Prompt ({num_tokens_prompt} tokens): {prompt!r}, Generated text ({num_tokens_output} tokens): {generated_text!r}\n"
-            )
+            print(f"Prompt "
+                  f"({num_tokens_prompt} tokens): {prompt!r}, "
+                  "Generated text "
+                  f"({num_tokens_output} tokens): {generated_text!r}\n")
 
 
 if __name__ == "__main__":

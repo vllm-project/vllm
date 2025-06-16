@@ -460,7 +460,8 @@ class AvgTracker:
 
 
 class GlobalStatLogger(StatLoggerBase):
-    """GlobalStatLogger is used in LLMEngine to track stats across the entire generation (until manually reset)"""
+    """GlobalStatLogger is used in LLMEngine to track stats across the entire 
+    generation (until manually reset)"""
 
     def __init__(self) -> None:
         self.time_to_first_token = AvgTracker()
@@ -483,11 +484,11 @@ class GlobalStatLogger(StatLoggerBase):
         ttft = self.time_to_first_token
         tpot = self.time_per_output_token
         if ttft.count != 0:
-            logger.info(f"Average time to first token (batch): {ttft.avg} s")
+            logger.info("Average time to first token (batch): %f s", ttft.avg)
         if tpot.count != 0:
             decode_throughput = 1 / tpot.avg if tpot.avg != 0 else 0
-            logger.info(
-                f"Average decode throughput: {decode_throughput} t/s/u")
+            logger.info("Average decode throughput: %f t/s/u",
+                        decode_throughput)
 
     def reset(self) -> None:
         self.time_to_first_token = AvgTracker()

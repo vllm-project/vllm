@@ -35,9 +35,11 @@ class TTPlatform(Platform):
             "Chunked prefill is not yet supported for TT backend")
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TT backend")
-        assert vllm_config.parallel_config.tensor_parallel_size == vllm_config.parallel_config.pipeline_parallel_size == 1, (
-            "TT backend does not support distributed execution")
-        assert not vllm_config.lora_config, "LoRA is not supported for TT backend"
+        assert (vllm_config.parallel_config.tensor_parallel_size == 1
+                and vllm_config.parallel_config.pipeline_parallel_size
+                == 1), "TT backend does not support distributed execution"
+        assert not vllm_config.lora_config, (
+            "LoRA is not supported for TT backend")
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
@@ -64,9 +66,9 @@ class TTPlatform(Platform):
                     f"Currently not supporting logprobs on {cls.device_name}")
             if params.prompt_logprobs is not None:
                 raise ValueError(
-                    f"Currently not supporting prompt_logprobs on {cls.device_name}"
-                )
+                    f"Currently not supporting prompt_logprobs on "
+                    f"{cls.device_name}")
             if params.guided_decoding is not None:
                 raise ValueError(
-                    f"Currently not supporting guided decoding on {cls.device_name}"
-                )
+                    f"Currently not supporting guided decoding on "
+                    f"{cls.device_name}")
