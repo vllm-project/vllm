@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv, next_power_of_2
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, next_power_of_2
 
 logger = init_logger(__name__)
 
@@ -136,8 +136,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Head size must be a multiple of 128.")
         if alibi_slopes is not None:
             raise NotImplementedError("Alibi slopes is not supported.")
-        if kv_cache_dtype != "auto":
-            raise NotImplementedError("FP8 KV cache dtype is not supported.")
         if blocksparse_params is not None:
             raise NotImplementedError("Blocksparse is not supported.")
 
@@ -150,6 +148,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
         tpu_version = torch_xla.tpu.version()
         if tpu_version < 4:
             raise NotImplementedError("TPU version must be 4 or higher.")
+        self.kv_cache_quantized_dtype = None
+        if kv_cache_dtype != "auto":
+            if tpu_version < 5:
+                raise NotImplementedError(
+                    "FP8 KV cache dtype is only supported when TPU version"
+                    " is 5 or higher.")
+            self.kv_cache_quantized_dtype = STR_DTYPE_TO_TORCH_DTYPE.get(
+                kv_cache_dtype.lower().strip())
 
     def forward(
         self,
@@ -184,7 +190,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 output = torch.ones_like(query)
             return output
 
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         num_tokens, hidden_size = query.shape
         query = query.view(num_tokens, self.num_heads, self.head_size)
 
@@ -192,8 +197,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # Write input keys and values to the KV cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             slot_mapping = attn_metadata.slot_mapping
-            write_to_kv_cache(key, value, kv_cache, slot_mapping)
-
+            write_to_kv_cache(key, value, kv_cache, slot_mapping,
+                              self.kv_cache_quantized_dtype,
+                              layer._k_scale_float, layer._v_scale_float)
+        if self.kv_cache_quantized_dtype is not None and (
+                layer._k_scale_float == 0.0 or layer._v_scale_float == 0.0):
+            raise ValueError(
+                "k_scale_float and v_scale_float must be non-zero")
         output = torch.ops.xla.ragged_paged_attention(
             query,
             kv_cache,
@@ -211,6 +221,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             sm_scale=self.scale,
             sliding_window=self.sliding_window,
             soft_cap=self.logits_soft_cap,
+            k_scale=1 / layer._k_scale_float,
+            v_scale=1 / layer._v_scale_float,
         )
 
         return output.reshape(num_tokens, hidden_size)
@@ -221,6 +233,9 @@ def write_to_kv_cache(
     value: torch.Tensor,
     kv_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
+    kv_cache_quantized_dtype: Optional[torch.dtype] = None,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> None:
     """ Write the key and values to the KV cache.
 
@@ -235,6 +250,11 @@ def write_to_kv_cache(
 
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
+    if kv_cache_quantized_dtype is not None:
+        key = key * k_scale
+        key = key.to(kv_cache_quantized_dtype)
+        value = value * v_scale
+        value = value.to(kv_cache_quantized_dtype)
 
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)
