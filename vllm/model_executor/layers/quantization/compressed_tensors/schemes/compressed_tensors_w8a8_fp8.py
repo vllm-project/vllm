@@ -76,7 +76,15 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             else:
                 weight_scale = layer.weight_scale.data
 
-            layer.weight = Parameter(weight.t(), requires_grad=False)
+            if self.fp8_linear.is_rocm_aiter_enabled:
+                from aiter.ops.shuffle import shuffle_weight
+
+                # keep the weight as (N, K)
+                layer.weight = Parameter(shuffle_weight(weight),
+                                         requires_grad=False)
+            else:
+                # keep the weight as (K, N)
+                layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
