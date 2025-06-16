@@ -1000,11 +1000,11 @@ class EngineArgs:
     def valid_tensorizer_config_provided(self) -> bool:
         """
         Checks if a parseable TensorizerConfig was passed to
-        model-loader-extra-config. It first checks if the config passed
+        self.model_loader_extra_config. It first checks if the config passed
         is a dict or a TensorizerConfig object directly, and if the latter is
         true (by checking that the object has TensorizerConfig's
         .to_serializable() method), converts it in to a serializable dict
-        format.
+        format
         """
         if self.model_loader_extra_config:
             if hasattr(self.model_loader_extra_config, "to_serializable"):
