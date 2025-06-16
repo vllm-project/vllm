@@ -200,12 +200,20 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     enable_lm_head_weight_load = True
 
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+
                 if draft_model_config.hf_config.model_type == "deepseek_mtp":
                     num_spec_prefill_steps = \
                         draft_model_config.hf_config.n_predict
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
+            pard = draft_model_config.hf_config.__dict__.get('spd_type',
+                                                             None) == 'pard'
+            proposer_worker.pard = pard
+            if pard:
+                pard_token = draft_model_config.hf_config.__dict__[
+                    'pard_token']
+                proposer_worker.pard_token = pard_token
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))
@@ -386,6 +394,12 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self.scorer = scorer_cls(scorer_worker=self.scorer_worker,
                                  device=self.device,
                                  vocab_size=self._vocab_size)
+
+        if self.proposer_worker.pard:
+            self.proposer_worker.pard_scorer = scorer_cls(
+                scorer_worker=self.proposer_worker,
+                device=self.device,
+                vocab_size=self._vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
 
@@ -734,6 +748,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         if not data:
             return False
         num_lookahead_slots = data["num_lookahead_slots"]
+        if self.proposer_worker.pard:
+            num_lookahead_slots = 1
 
         # In case of prefill, scorer_worker has to be run before proposer so
         # that the hidden states can be propagated to proposer when needed.
@@ -1257,7 +1273,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             worker.vocab_size
             for worker in [self.proposer_worker, self.scorer_worker]
         ]
-        assert all(vocab_sizes[0] == vocab_size for vocab_size in vocab_sizes)
+        if not self.proposer_worker.pard:
+            assert all(vocab_sizes[0] == vocab_size
+                       for vocab_size in vocab_sizes)
         return vocab_sizes[0]
 
     @property
