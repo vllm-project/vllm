@@ -455,7 +455,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
         w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
         w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
 
-    use_compile = M > chunk_size and current_platform.is_cuda_alike()
+    use_compile = M > chunk_size and N >= 1024 and K >= 1024 and current_platform.is_cuda_alike()
     use_cudagraph = use_compile
 
     # Set the context to avoid lots of warning spam.

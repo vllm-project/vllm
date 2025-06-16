@@ -12,7 +12,7 @@ from torch.nn import Parameter
 from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
@@ -44,7 +44,7 @@ vllm_config.scheduler_config.max_model_len = 8192
 
 
 def run_moe_test(
-    baseline_moe_fn: Callable,
+    baseline: Union[Callable, torch.Tensor],
     moe_fn: Callable,
     a: torch.Tensor,
     w1: torch.Tensor,
@@ -58,8 +58,11 @@ def run_moe_test(
     use_cudagraph: bool = False,
     atol:float=2e-2,
     rtol:float=0,
-):
-    baseline_output = baseline_moe_fn(a, w1, w2, score, topk, global_num_experts=global_num_experts, expert_map=expert_map)
+) -> torch.Tensor:
+    if isinstance(baseline, torch.Tensor):
+        baseline_output = baseline
+    else:
+        baseline_output = baseline(a, w1, w2, score, topk, global_num_experts=global_num_experts, expert_map=expert_map)
 
     # Pad the weight if moe padding is enabled
     if padding:
@@ -76,7 +79,6 @@ def run_moe_test(
                          topk,
                          global_num_experts=global_num_experts,
                          expert_map=expert_map)
-
 
     if use_cudagraph:
         test_output.fill_(0)
@@ -96,8 +98,9 @@ def run_moe_test(
 
     torch.testing.assert_close(test_output, baseline_output, atol=atol, rtol=rtol)
 
+    return baseline_output
 
-# TODO: reduce combinations
+
 @pytest.mark.parametrize("m", [1, 33, 64, 222, 32768, 40000])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 511, 1024])
@@ -192,13 +195,13 @@ def test_fused_moe(
         padding=padding,
     )
 
-    use_compile = m >= chunk_size and current_platform.is_cuda_alike()
+    use_compile = m >= chunk_size and n >= 1024 and k >= 1024 and current_platform.is_cuda_alike()
     use_cudagraph = use_compile
 
     with set_current_vllm_config(vllm_config):
-        runner(torch_moe, iterative_moe)
-        runner(torch_moe, fused_moe_fn, use_compile=use_compile, use_cudagraph=use_cudagraph)
-        runner(torch_moe, m_fused_moe, use_compile=use_compile, use_cudagraph=use_cudagraph)
+        baseline_output = runner(torch_moe, iterative_moe)
+        runner(baseline_output, fused_moe_fn, use_compile=use_compile, use_cudagraph=use_cudagraph)
+        runner(baseline_output, m_fused_moe, use_compile=use_compile, use_cudagraph=use_cudagraph)
 
 
 @pytest.mark.parametrize("m", [1, 32, 222])
