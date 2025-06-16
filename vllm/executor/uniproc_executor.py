@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
@@ -97,6 +100,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             "please set VLLM_ENABLE_V1_MULTIPROCESSING=0")
         self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
                                                rpc_rank=0)
+        self.excecute_model_thread_pool: Optional[ThreadPoolExecutor] = None
         # engines are launched in torchrun-compatible launchers
         # so we can use the env:// method.
         # required env vars:
@@ -107,6 +111,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         distributed_init_method = "env://"
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
+        self.local_rank = local_rank
         is_driver_worker = True
         kwargs = dict(
             vllm_config=self.vllm_config,
@@ -118,6 +123,55 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
+        self.pp_rank = get_pp_group().rank_in_group
+        self.pp_lock: Optional[threading.Lock] = None
+        if self.max_concurrent_batches > 1:
+            self.pp_lock = threading.Lock()
+            self.excecute_model_thread_pool = ThreadPoolExecutor(
+                max_workers=self.max_concurrent_batches,
+                thread_name_prefix="external_exec_")
+
+    @property
+    def max_concurrent_batches(self) -> int:
+        return self.parallel_config.pipeline_parallel_size
+
+    def execute_model_pp(self,
+                         device: int,
+                         args: Tuple = (),
+                         kwargs: Optional[Dict] = None):
+        assert self.pp_lock is not None, "self.pp_lock is not initialized."
+        with self.pp_lock:
+            device = torch.cuda.set_device(device)
+            answer = run_method(self.driver_worker, "execute_model", args,
+                                kwargs)
+            # transfer the answer from the last PP rank
+            # to first PP rank with async torch.dist P2P
+
+            answer = get_pp_group().broadcast_object_async(
+                answer, src=self.parallel_config.pipeline_parallel_size - 1)
+
+        return answer
+
+    def collective_rpc(self,
+                       method: Union[str, Callable],
+                       timeout: Optional[float] = None,
+                       args: Tuple = (),
+                       kwargs: Optional[Dict] = None) -> List[Any]:
+        if kwargs is None:
+            kwargs = {}
+        assert kwargs is not None
+        if method == "execute_model" \
+                    and self.parallel_config.pipeline_parallel_size > 1:
+            device = torch.cuda.current_device()
+            assert self.excecute_model_thread_pool is not None, \
+                "self.excecute_model_thread_pool is not initialized."
+            answer = self.excecute_model_thread_pool.submit(
+                self.execute_model_pp, device, args, kwargs)
+            answer = TorchFuture(answer)
+        else:
+            answer = run_method(self.driver_worker, method, args, kwargs)
+
+        return [answer]
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """
@@ -137,3 +191,14 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         dist.all_reduce(a_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
         dist.all_reduce(b_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
         return a_tensor.item(), b_tensor.item()
+
+
+class TorchFuture(Future):
+
+    def __init__(self, _future: Future) -> None:
+        self.future = _future
+        super().__init__()
+
+    def result(self, timeout=None):
+        output = self.future.result(timeout)
+        return output.wait()
