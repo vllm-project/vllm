@@ -115,7 +115,8 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
             if self.block_sparse_moe is not None:
                 moe_hidden_states = hidden_states.clone()
                 moe_hidden_states = self.block_sparse_moe(moe_hidden_states)
-                hidden_states = moe_hidden_states + self.shared_mlp(hidden_states)
+                hidden_states = moe_hidden_states + self.shared_mlp(
+                    hidden_states)
                 del moe_hidden_states
             else:
                 hidden_states = self.shared_mlp(hidden_states)
@@ -195,7 +196,8 @@ class GraniteMoeHybridAttentionDecoderLayer(nn.Module):
             if self.block_sparse_moe is not None:
                 moe_hidden_states = hidden_states.clone()
                 moe_hidden_states = self.block_sparse_moe(moe_hidden_states)
-                hidden_states = moe_hidden_states + self.shared_mlp(hidden_states)
+                hidden_states = moe_hidden_states + self.shared_mlp(
+                    hidden_states)
                 del moe_hidden_states
             else:
                 hidden_states = self.shared_mlp(hidden_states)
