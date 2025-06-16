@@ -40,7 +40,7 @@ class TTModelInput(ModelRunnerInputBase):
     input_tokens: torch.Tensor
     input_positions: torch.Tensor
     finished_requests_seq_ids: Optional[List[int]]
-    prompt_lens: torch.Tensor
+    prompt_lens: Optional[List[int]]
     seq_groups: List[int]
     block_tables: torch.Tensor
     unpadded_batch_size: int
@@ -332,9 +332,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                                 device="cpu",
                                                 pad=0)
             input_positions = 0
-            prompt_lens = torch.tensor(prompt_lens_list,
-                                       dtype=torch.int32,
-                                       device="cpu")
+            prompt_lens = prompt_lens_list
         else:
             input_tokens = torch.tensor(input_tokens_list,
                                         dtype=torch.int32,
