@@ -67,6 +67,7 @@ class EngineClient(ABC):
         request_id: str,
         params: BeamSearchParams,
         lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
 
         beam_width = params.beam_width
@@ -132,7 +133,8 @@ class EngineClient(ABC):
                         self.generate(individual_prompt,
                                       beam_search_params,
                                       request_id_item,
-                                      lora_request=lora_req)))
+                                      lora_request=lora_req,
+                                      trace_headers=trace_headers)))
                 tasks.append(task)
 
             output = await asyncio.gather(*tasks)
