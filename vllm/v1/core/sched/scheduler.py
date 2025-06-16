@@ -345,7 +345,7 @@ class Scheduler(SchedulerInterface):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                request = self.waiting.pop_request()
+                request = self.waiting.peek_request()
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -358,7 +358,7 @@ class Scheduler(SchedulerInterface):
                             request.request_id,
                         )
                         skipped_waiting_requests.push_request(
-                            request, request.priority, request.arrival_time)
+                            self.waiting.pop_request())
                         continue
 
                 # Skip request if the structured output request is still waiting
@@ -369,7 +369,7 @@ class Scheduler(SchedulerInterface):
                         request.status = RequestStatus.WAITING
                     else:
                         skipped_waiting_requests.push_request(
-                            request, request.priority, request.arrival_time)
+                            self.waiting.pop_request())
                         continue
 
                 # Check that adding the request still respects the max_loras
@@ -379,7 +379,7 @@ class Scheduler(SchedulerInterface):
                      request.lora_request.lora_int_id not in scheduled_loras)):
                     # Scheduling would exceed max_loras, skip.
                     skipped_waiting_requests.push_request(
-                        request, request.priority, request.arrival_time)
+                        self.waiting.pop_request())
                     continue
 
                 num_external_computed_tokens = 0
@@ -454,14 +454,6 @@ class Scheduler(SchedulerInterface):
                 )
                 if new_blocks is None:
                     # The request cannot be scheduled.
-                    # For FCFS, push back to the front; for priority, add to
-                    # skipped queue
-                    if self.policy == "priority":
-                        skipped_waiting_requests.push_request(
-                            request, request.priority, request.arrival_time)
-                    else:
-                        self.waiting.push_request(request, request.priority,
-                                                  request.arrival_time)
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -477,11 +469,11 @@ class Scheduler(SchedulerInterface):
 
                 # Request was already popped from self.waiting
                 # unless it was re-added above due to new_blocks being None.
+                request = self.waiting.pop_request()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
-                    skipped_waiting_requests.push_request(
-                        request, request.priority, request.arrival_time)
+                    skipped_waiting_requests.push_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 

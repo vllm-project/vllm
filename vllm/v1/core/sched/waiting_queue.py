@@ -25,6 +25,11 @@ class WaitingQueue(ABC):
         pass
 
     @abstractmethod
+    def peek_request(self) -> Request:
+        """Peek at the request at the front of the queue without removing it."""
+        pass
+
+    @abstractmethod
     def push_request(self,
                      request: Request,
                      priority: int = 0,
@@ -72,6 +77,12 @@ class FCFSWaitingQueue(deque[Request], WaitingQueue):
         """Pop a request from the queue according to FCFS policy."""
         return self.popleft()
 
+    def peek_request(self) -> Request:
+        """Peek at the next request in the queue without removing it."""
+        if not self:
+            raise IndexError("peek from an empty queue")
+        return self[0]
+
     def push_request(self,
                      request: Request,
                      priority: int = 0,
@@ -118,6 +129,13 @@ class PriorityWaitingQueue(WaitingQueue):
         _, _, request = heapq.heappop(self._heap)
         return request
 
+    def peek_request(self) -> Request:
+        """Peek at the next request in the queue without removing it."""
+        if not self._heap:
+            raise IndexError("peek from empty heap")
+        _, _, request = self._heap[0]
+        return request
+
     def push_request(self,
                      request: Request,
                      priority: int = 0,
@@ -127,15 +145,9 @@ class PriorityWaitingQueue(WaitingQueue):
 
     def extend_left_requests(self, requests: WaitingQueue) -> None:
         """Extend left with requests from another WaitingQueue."""
-        if isinstance(requests, PriorityWaitingQueue):
-            for item in requests._heap:
-                heapq.heappush(self._heap, item)
-        else:
-            # Handle FCFS queue case
-            for request in requests:
-                heapq.heappush(
-                    self._heap,
-                    (request.priority, request.arrival_time, request))
+        for request in requests:
+            # Set priority to -1 so these requests stay at the front.
+            heapq.heappush(self._heap, (-1, request.arrival_time, request))
 
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
