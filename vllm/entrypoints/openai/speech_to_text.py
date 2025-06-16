@@ -30,6 +30,7 @@ try:
 except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
+SpeechToTextResponse = Union[TranscriptionResponse, TranslationResponse]
 logger = init_logger(__name__)
 
 # From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
@@ -238,8 +239,7 @@ class OpenAISpeechToText(OpenAIServing):
         response_class: Union[type[TranscriptionResponse],
                               type[TranslationResponse]],
         stream_generator_method: Callable,
-    ) -> Union[Union[TranscriptionResponse, TranslationResponse],
-               AsyncGenerator[str, None], ErrorResponse]:
+    ) -> Union[SpeechToTextResponse, AsyncGenerator[str, None], ErrorResponse]:
         """Base method for speech-to-text operations like transcription and 
         translation."""
         error_check_ret = await self._check_model(request)
