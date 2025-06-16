@@ -2473,9 +2473,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     ctx=ctx) for i in range(batch_size)
             ]
         else:
-            # FIXME: seq_len is actually number of blocks
-            blocks = [seq_len // batch_size for _ in range(batch_size)]
-            blocks[0] += seq_len % batch_size
+            blocks = [ctx // batch_size for _ in range(batch_size)]
+            blocks[0] += ctx % batch_size
             seqs = [
                 self.create_dummy_seq_group_metadata(
                     i,
