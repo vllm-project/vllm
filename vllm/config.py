@@ -100,6 +100,8 @@ _TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
     for task in tasks
 }
 
+V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
+
 HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
 
@@ -563,13 +565,16 @@ class ModelConfig:
 
         self.pooler_config = self._init_pooler_config()
 
-        self.dtype = _get_and_verify_dtype(
-            self.model,
-            self.hf_config,
-            self.dtype,
-            is_pooling_model=self.runner_type == "pooling",
-            revision=self.revision,
-        )
+        # Defer "auto" dtype resolution to the worker, since ModelConfig may be
+        # initialized in a process without access to the current platform.
+        if self.dtype != "auto":
+            self.dtype = _get_and_verify_dtype(
+                self.model,
+                self.hf_config,
+                self.dtype,
+                is_pooling_model=self.runner_type == "pooling",
+                revision=self.revision,
+            )
 
         # Workaround for Gemma 2 which uses interleaved sliding window
         # attention, but it's not specified in its config. TODO: remove this
