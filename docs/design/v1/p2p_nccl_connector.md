@@ -56,6 +56,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=0 vllm serve {your model directory} \
     --max-num-seqs 256 \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
+    --disable-log-request \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20005","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
@@ -75,6 +76,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=1 vllm serve {your model directory} \
     --max-num-seqs 256 \
     --trust-remote-code \
     --gpu-memory-utilization 0.7 \
+    --disable-log-request \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20009","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
@@ -94,6 +96,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=2 vllm serve {your model directory} \
     --max-num-seqs 256 \
     --trust-remote-code \
     --gpu-memory-utilization 0.7 \
+    --disable-log-request \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
@@ -113,6 +116,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=3 vllm serve {your model directory} \
     --max-num-seqs 256 \
     --trust-remote-code \
     --gpu-memory-utilization 0.7 \
+    --disable-log-request \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20008","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
@@ -141,6 +145,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=0 vllm serve {your model directory} \
     --max-num-seqs 256 \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
+    --disable-log-request \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20005","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
@@ -160,6 +165,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=1 vllm serve {your model directory} \
     --max-num-seqs 256 \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
+    --disable-log-request \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20009","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
@@ -179,6 +185,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=2 vllm serve {your model directory} \
     --max-num-seqs 256 \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
+    --disable-log-request \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
@@ -198,6 +205,7 @@ VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=3 vllm serve {your model directory} \
     --max-num-seqs 256 \
     --trust-remote-code \
     --gpu-memory-utilization 0.7 \
+    --disable-log-request \
     --kv-transfer-config \
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20008","send_type":"PUT_ASYNC"}}' > /var/vllm.log 2>&1 &
 ```
@@ -221,7 +229,7 @@ curl -X POST -s http://10.0.1.1:10001/v1/completions \
 python3 benchmark_serving.py \
     --backend vllm \
     --model base_model \
-    --tokenizer auto \
+    --tokenizer meta-llama/Llama-3.1-8B-Instruct \
     --dataset-name "random" \
     --host 10.0.1.1 \
     --port 10001 \
