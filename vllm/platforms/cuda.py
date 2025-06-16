@@ -72,6 +72,15 @@ class CudaPlatformBase(Platform):
         return [torch.float32]
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        super().set_device(device)
+        # With this trick we can force the device to be set eagerly
+        _ = torch.zeros(1, device=device)
+
+    @classmethod
     def get_device_capability(cls,
                               device_id: int = 0
                               ) -> Optional[DeviceCapability]:
