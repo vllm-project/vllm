@@ -542,10 +542,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # CUTLASS MoE kernels
 
-  # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and only works
+  # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and ONLY works
   # on Hopper). get_cutlass_(pplx_)moe_mm_data should only be compiled
   # if it's possible to compile MoE kernels that use its output.
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;10.0a" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x.cu"
              "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")

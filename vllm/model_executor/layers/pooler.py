@@ -185,10 +185,14 @@ class MeanPool(SimplePooler):
             for req_state, prompt_len in zip(hidden_states, prompt_lens):
                 assert prompt_len == req_state.shape[0], \
                     "partial prefill not supported with mean pooling"
-                result.append(torch.mean(req_state, dim=0))
+                result.append(torch.mean(req_state, dim=0,
+                                         dtype=torch.float32))
             return result
 
-        cumsum = torch.cumsum(hidden_states, dim=0)
+        # Use float32 for torch.cumsum in MeanPool,
+        # otherwise precision will be lost significantly.
+        cumsum = torch.cumsum(hidden_states, dim=0, dtype=torch.float32)
+
         start_indices = torch.cat([
             torch.tensor([0], device=hidden_states.device),
             torch.cumsum(prompt_lens[:-1], dim=0)
@@ -274,6 +278,13 @@ class PoolerHead(nn.Module):
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
+
+        # Using float32 in PoolerHead
+        if isinstance(pooled_data, list):
+            for i in range(len(pooled_data)):
+                pooled_data[i] = pooled_data[i].to(torch.float32)
+        else:
+            pooled_data = pooled_data.to(torch.float32)
 
         if isinstance(pooling_metadata, V0PoolingMetadata):
             dimensions_list = [

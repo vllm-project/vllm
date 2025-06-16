@@ -730,8 +730,12 @@ class HfRunner:
                **kwargs) -> list[list[torch.Tensor]]:
         return self.model.encode(prompts, *args, **kwargs)
 
-    def predict(self, prompts: list[list[str]]) -> torch.Tensor:
-        return self.model.predict(prompts, convert_to_tensor=True)
+    def predict(self, prompts: list[list[str]], *args,
+                **kwargs) -> torch.Tensor:
+        return self.model.predict(prompts,
+                                  *args,
+                                  convert_to_tensor=True,
+                                  **kwargs)
 
     def __enter__(self):
         return self
@@ -1040,8 +1044,10 @@ class VllmRunner:
         self,
         text_1: Union[str, list[str]],
         text_2: Union[str, list[str]],
+        *args,
+        **kwargs,
     ) -> list[float]:
-        req_outputs = self.model.score(text_1, text_2)
+        req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
