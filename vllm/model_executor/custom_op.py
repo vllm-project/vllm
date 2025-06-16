@@ -16,6 +16,24 @@ class CustomOp(nn.Module):
     Dispatches the forward method to the appropriate backend.
     """
 
+    def __new__(cls, *args, **kwargs):
+        try:
+            op_name = cls.__name__
+        except AttributeError:
+            raise TypeError(
+                f"Cannot instantiate '{cls.__name__}': its 'name' attribute "
+                f"was not set, possibly because it was not decorated with "
+                f"@CustomOp.register, or it's the CustomOp base class itself."
+            ) from None
+
+        if op_name not in cls.op_registry_oot:
+            op_cls_to_instantiate = cls
+        else:
+            op_cls_to_instantiate = cls.op_registry_oot[op_name]
+            logger.debug("Instantiating custom op: %s using %s", op_name,
+                         str(op_cls_to_instantiate))
+        return super().__new__(op_cls_to_instantiate)
+
     def __init__(self):
         super().__init__()
         self._forward_method = self.dispatch_forward()
@@ -138,15 +156,29 @@ class CustomOp(nn.Module):
     # - MyOp.enabled()
     # - op_registry["my_op"].enabled()
     op_registry: dict[str, type['CustomOp']] = {}
+    op_registry_oot: dict[str, type['CustomOp']] = {}
 
     # Decorator to register custom ops.
+    # For OOT custom ops:
+    #   if in-tree layer class is registered with an oot_custom_op layer,
+    #   the oot_custom_op layer will be used instead.
+    #   use `name=<In-Tree Layer class Name>` and `is_oot_custom_op=True`
+    # Examples:
+    # - @CustomOp.register("UnquantizedFusedMoEMethod", is_oot_custom_op=True)
+    # - @CustomOp.register("RMSNorm", is_oot_custom_op=True)
     @classmethod
-    def register(cls, name: str):
+    def register(cls, name: str, is_oot_custom_op=False):
 
         def decorator(op_cls):
-            assert name not in cls.op_registry, f"Duplicate op name: {name}"
-            op_cls.name = name
-            cls.op_registry[name] = op_cls
+            if is_oot_custom_op:
+                assert name not in cls.op_registry_oot, \
+                    f"Duplicate op name: {name}"
+                op_cls.name = name
+                cls.op_registry_oot[name] = op_cls
+            else:
+                assert name not in cls.op_registry, f"Duplicate op name: {name}"
+                op_cls.name = name
+                cls.op_registry[name] = op_cls
             return op_cls
 
         return decorator
