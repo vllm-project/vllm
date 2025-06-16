@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from vllm.v1.request import Request
 
 
-class WaitingQueue(ABC):
+class RequestQueue(ABC):
     """Abstract base class for request queues."""
 
     @abstractmethod
@@ -38,8 +38,8 @@ class WaitingQueue(ABC):
         pass
 
     @abstractmethod
-    def extend_left_requests(self, requests: WaitingQueue) -> None:
-        """Extend left with requests from another WaitingQueue."""
+    def extend_left_requests(self, requests: RequestQueue) -> None:
+        """Extend left with requests from another RequestQueue."""
         pass
 
     @abstractmethod
@@ -63,7 +63,7 @@ class WaitingQueue(ABC):
         pass
 
 
-class FCFSWaitingQueue(deque[Request], WaitingQueue):
+class FCFSRequestQueue(deque[Request], RequestQueue):
     """A first-come-first-served queue that supports deque operations."""
 
     def __init__(self) -> None:
@@ -90,8 +90,8 @@ class FCFSWaitingQueue(deque[Request], WaitingQueue):
         """Push a request back to the queue (used for skipped requests)."""
         self.appendleft(request)
 
-    def extend_left_requests(self, requests: WaitingQueue) -> None:
-        """Extend left with requests from another WaitingQueue."""
+    def extend_left_requests(self, requests: RequestQueue) -> None:
+        """Extend left with requests from another RequestQueue."""
         self.extendleft(reversed(list(requests)))
 
     def remove_request(self, request: Request) -> None:
@@ -111,7 +111,7 @@ class FCFSWaitingQueue(deque[Request], WaitingQueue):
         return super().__iter__()
 
 
-class PriorityWaitingQueue(WaitingQueue):
+class PriorityRequestQueue(RequestQueue):
     """A priority queue that supports heap operations."""
 
     def __init__(self) -> None:
@@ -143,8 +143,8 @@ class PriorityWaitingQueue(WaitingQueue):
         """Push a request back to the queue (used for skipped requests)."""
         heapq.heappush(self._heap, (priority, arrival_time, request))
 
-    def extend_left_requests(self, requests: WaitingQueue) -> None:
-        """Extend left with requests from another WaitingQueue."""
+    def extend_left_requests(self, requests: RequestQueue) -> None:
+        """Extend left with requests from another RequestQueue."""
         for request in requests:
             # Set priority to -1 so these requests stay at the front.
             heapq.heappush(self._heap, (-1, request.arrival_time, request))
@@ -170,9 +170,9 @@ class PriorityWaitingQueue(WaitingQueue):
             yield request
 
 
-def create_waiting_queue(policy: str, ) -> WaitingQueue:
-    """Create waiting queue based on scheduling policy."""
+def create_request_queue(policy: str, ) -> RequestQueue:
+    """Create request queue based on scheduling policy."""
     if policy == "priority":
-        return PriorityWaitingQueue()
+        return PriorityRequestQueue()
     else:
-        return FCFSWaitingQueue()
+        return FCFSRequestQueue() 

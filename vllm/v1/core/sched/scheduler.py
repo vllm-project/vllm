@@ -22,8 +22,8 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
+from vllm.v1.core.sched.request_queue import create_request_queue
 from vllm.v1.core.sched.utils import check_stop
-from vllm.v1.core.sched.waiting_queue import create_waiting_queue
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -98,7 +98,7 @@ class Scheduler(SchedulerInterface):
         # Scheduling policy
         self.policy = self.scheduler_config.policy
         # Priority queues for requests.
-        self.waiting = create_waiting_queue(self.policy)
+        self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -337,7 +337,7 @@ class Scheduler(SchedulerInterface):
 
         # Use a temporary queue to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        skipped_waiting_requests = create_waiting_queue(self.policy)
+        skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
