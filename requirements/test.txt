@@ -51,6 +51,8 @@ black==24.10.0
     # via datamodel-code-generator
 blobfile==3.0.0
     # via -r requirements/test.in
+bm25s==0.2.13
+    # via mteb
 boto3==1.35.57
     # via tensorizer
 botocore==1.35.57
@@ -344,6 +346,7 @@ numpy==1.26.4
     #   -r requirements/test.in
     #   accelerate
     #   bitsandbytes
+    #   bm25s
     #   contourpy
     #   cupy-cuda12x
     #   datasets
@@ -534,6 +537,8 @@ pyparsing==3.2.0
     # via matplotlib
 pyrate-limiter==3.7.0
     # via schemathesis
+pystemmer==3.0.0
+    # via mteb
 pytablewriter==1.2.0
     # via lm-eval
 pytest==8.3.3
@@ -668,6 +673,7 @@ scikit-learn==1.5.2
     #   sentence-transformers
 scipy==1.13.1
     # via
+    #   bm25s
     #   librosa
     #   mteb
     #   scikit-learn
