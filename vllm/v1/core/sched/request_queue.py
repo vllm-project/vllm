@@ -106,7 +106,13 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
 
 
 class PriorityRequestQueue(RequestQueue):
-    """A priority queue that supports heap operations."""
+    """
+    A priority queue that supports heap operations.
+
+    Requests with a smaller value of `priority` are processed first.
+    If multiple requests have the same priority, the one with the earlier
+    `arrival_time` is processed first.
+    """
 
     def __init__(self) -> None:
         self._heap: list[tuple[int, float, Request]] = []
