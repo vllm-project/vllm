@@ -90,10 +90,10 @@ gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
 | RUNTIME_VERSION    | The TPU VM runtime version to use. For example, use `v2-alpha-tpuv6e` for a VM loaded with one or more v6e TPU(s). For more information see [TPU VM images].                                             |
 | SERVICE_ACCOUNT    | The email address for your service account. You can find it in the IAM Cloud Console under *Service Accounts*. For example: `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`              |
 
-Connect to your TPU using SSH:
+Connect to your TPU VM using SSH:
 
 ```bash
-gcloud compute tpus tpu-vm ssh TPU_NAME --zone ZONE
+gcloud compute tpus tpu-vm ssh TPU_NAME --project PROJECT_ID --zone ZONE
 ```
 
 [TPU versions]: https://cloud.google.com/tpu/docs/runtimes
