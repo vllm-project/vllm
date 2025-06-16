@@ -61,9 +61,12 @@ __all__ = [
 logger = init_logger(__name__)
 
 
-def is_valid_deserialization_uri(uri: str) -> bool:
-    scheme = uri.lower().split("://")[0]
-    return scheme in {"s3", "http", "https"} or os.path.exists(uri)
+def is_valid_deserialization_uri(uri: Optional[str]) -> bool:
+    if uri:
+        scheme = uri.lower().split("://")[0]
+        return scheme in {"s3", "http", "https"} or os.path.exists(uri)
+    return False
+
 
 
 def tensorizer_kwargs_arg(value):
@@ -168,7 +171,7 @@ class TensorizerConfig(MutableMapping):
     _hf_config: Optional[PretrainedConfig] = field(init=False, default=None)
     _model_cls_dtype: Optional[Union[str, torch.dtype]] = field(init=False,
                                                                 default=None)
-    _is_sharded: bool = field(init=False, default=None)
+    _is_sharded: bool = field(init=False, default=False)
     _fields: ClassVar[tuple[str, ...]]
     _keys: ClassVar[frozenset[str]]
     """
@@ -343,6 +346,9 @@ TensorizerConfig._keys = frozenset(TensorizerConfig._fields)
 
 @dataclass
 class TensorizerArgs:
+    tensorizer_uri: Optional[str] = None
+    tensorizer_dir: Optional[str] = None
+    encryption_keyfile: Optional[str] = None
 
     def __init__(self, tensorizer_config: TensorizerConfig):
         for k, v in tensorizer_config.items():
@@ -577,7 +583,12 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
 
 
 def serialize_extra_artifacts(tensorizer_args: TensorizerArgs,
-                              served_model_name: str) -> None:
+                              served_model_name: Union[str, list[str], None]) -> None:
+    if not isinstance(served_model_name, str):
+        raise ValueError(
+            f"served_model_name must be a str for serialize_extra_artifacts, "
+            f"not {type(served_model_name)}."
+        )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         snapshot_download(served_model_name,
