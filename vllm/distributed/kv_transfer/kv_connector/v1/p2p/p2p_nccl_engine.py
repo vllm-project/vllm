@@ -403,7 +403,7 @@ class P2pNcclEngine:
                 while self.send_queue:
                     self.send_queue_cv.wait()
             duration = time.time() - start_time
-            logger.info(
+            logger.debug(
                 "🚧[PUT_ASYNC]It took %.3fms to wait for the send_queue"
                 " to be empty, rank:%d", duration * 1000, self.rank)
 
