@@ -86,6 +86,7 @@ class AttentionSpec(KVCacheSpec):
 @dataclass
 class FullAttentionSpec(AttentionSpec):
     sliding_window: Optional[int] = None
+    attention_chunk_size: Optional[int] = None
     """
     When hybrid allocator is disabled and the model contains both full 
     attention layers and sliding window attention layers, sliding 

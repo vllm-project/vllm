@@ -927,6 +927,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     head_size=spec.head_size,
                     dtype=spec.dtype,
                     use_mla=spec.use_mla,
+                    attention_chunk_size=spec.attention_chunk_size,
                 )
 
     if is_hybrid(kv_cache_spec):
