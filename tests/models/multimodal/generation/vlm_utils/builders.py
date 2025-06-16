@@ -203,6 +203,9 @@ def build_embedding_inputs_from_test_info(
 
     images = [asset.pil_image for asset in image_assets]
     embeds = test_info.convert_assets_to_embeddings(image_assets)
+    if test_info.dtype != "auto":
+        dtype = getattr(torch, test_info.dtype)  # type: ignore
+        embeds = [e.to(dtype=dtype) for e in embeds]
     assert len(images) == len(model_prompts)
 
     inputs = build_single_image_inputs(images, model_prompts, size_wrapper)
