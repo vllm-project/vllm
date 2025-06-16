@@ -226,7 +226,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
     def enable_chunking(self):
-        return not envs.VLLM_DISABLE_FUSED_MOE_ACTIVATION_CHUNKING and \
+        return envs.VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING and \
           self.supports_chunking()
 
     @abstractmethod
