@@ -448,6 +448,8 @@ class NixlConnectorWorker:
 
         # Set up callback to handle completion
         def on_handshake_complete(fut: Future):
+            logger.debug("Handshake callback triggered for engine %s",
+                         engine_id)
             try:
                 fut.result()  # This will raise if the handshake failed
                 logger.debug("Handshake succeeded for engine %s", engine_id)
@@ -455,14 +457,16 @@ class NixlConnectorWorker:
                     # Remove from futures dict
                     if engine_id in self._handshake_futures:
                         del self._handshake_futures[engine_id]
-                    # Clear pending requests - they are no longer pending
-                    # handshake and will be processed normally by the scheduler
+                    # The scheduler will retry them on the next cycle and
+                    # they'll be processed normally since the remote agent
+                    # is now registered.
                     if engine_id in self._pending_requests:
                         completed_reqs = self._pending_requests[engine_id]
                         del self._pending_requests[engine_id]
                         logger.debug(
                             "Handshake completed for engine %s. "
-                            "Cleared %d requests from pending state.",
+                            "Cleared %d requests from pending - " \
+                            "scheduler to retry",
                             engine_id, len(completed_reqs))
             except Exception as e:
                 logger.warning("Handshake failed for engine %s: %s", engine_id,
@@ -485,6 +489,7 @@ class NixlConnectorWorker:
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
+        logger.debug("Starting NIXL handshake with %s:%s", host, port)
 
         # TODO: make the scheme dynamic, and/or implement https on both sides.
         url = build_uri("http", host, port, path="get_kv_connector_metadata")
@@ -492,7 +497,9 @@ class NixlConnectorWorker:
 
         try:
             req = Request(url)
+            logger.debug("About to send HTTP request to %s", url)
             with urlopen(req, timeout=5.0) as response:
+                logger.debug("Received HTTP response from %s", url)
                 response_data = response.read().decode('utf-8')
                 res = json.loads(response_data)
                 logger.debug("NIXL handshake response: %s", res)
@@ -540,6 +547,8 @@ class NixlConnectorWorker:
             logger.warning(
                 "Received None metadata from %s:%s, skipping NIXL handshake",
                 host, port)
+
+        logger.debug("NIXL handshake method completed for %s:%s", host, port)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
