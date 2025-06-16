@@ -87,6 +87,12 @@ class RPCResetMultiModalCacheRequest(Enum):
     RESET = 1
 
 
+class RPCExpertDistributionRecordRequest(Enum):
+    START = 1
+    STOP = 2
+    DUMP = 3
+
+
 @dataclass
 class RPCResetPrefixCacheRequest:
     device: Device
@@ -126,7 +132,8 @@ class RPCAdapterLoadedResponse:
     request_id: str
 
 
-RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
+RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest,
+                      RPCExpertDistributionRecordRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
                       RPCResetMultiModalCacheRequest,
                       RPCResetPrefixCacheRequest, RPCSleepRequest,

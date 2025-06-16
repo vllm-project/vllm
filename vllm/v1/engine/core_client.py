@@ -106,6 +106,12 @@ class EngineCoreClient(ABC):
     def profile(self, is_start: bool = True) -> None:
         raise NotImplementedError
 
+    def expert_distribution_record(self, is_start: bool) -> None:
+        raise NotImplementedError
+
+    def dump_expert_distribution_record(self) -> None:
+        raise NotImplementedError
+
     def reset_mm_cache(self) -> None:
         raise NotImplementedError
 
@@ -162,6 +168,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def profile_async(self, is_start: bool = True) -> None:
+        raise NotImplementedError
+
+    async def expert_distribution_record_async(self, is_start: bool) -> None:
+        raise NotImplementedError
+
+    async def dump_expert_distribution_record_async(self) -> None:
         raise NotImplementedError
 
     async def reset_mm_cache_async(self) -> None:
@@ -238,6 +250,12 @@ class InprocClient(EngineCoreClient):
 
     def profile(self, is_start: bool = True) -> None:
         self.engine_core.profile(is_start)
+
+    def expert_distribution_record(self, is_start: bool) -> None:
+        self.engine_core.expert_distribution_record(is_start)
+
+    def dump_expert_distribution_record(self) -> None:
+        self.engine_core.dump_expert_distribution_record()
 
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
@@ -659,6 +677,12 @@ class SyncMPClient(MPClient):
     def profile(self, is_start: bool = True) -> None:
         self.call_utility("profile", is_start)
 
+    def expert_distribution_record(self, is_start: bool) -> None:
+        self.call_utility("expert_distribution_record", is_start)
+
+    def dump_expert_distribution_record(self) -> None:
+        self.call_utility("dump_expert_distribution_record")
+
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
 
@@ -856,6 +880,12 @@ class AsyncMPClient(MPClient):
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
+
+    async def expert_distribution_record_async(self, is_start: bool) -> None:
+        await self.call_utility_async("expert_distribution_record", is_start)
+
+    async def dump_expert_distribution_record_async(self) -> None:
+        await self.call_utility_async("dump_expert_distribution_record")
 
     async def reset_prefix_cache_async(self) -> None:
         await self.call_utility_async("reset_prefix_cache")

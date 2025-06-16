@@ -19,6 +19,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
+                                         RPCExpertDistributionRecordRequest,
                                          RPCIsSleepingRequest,
                                          RPCIsSleepingResponse,
                                          RPCLoadAdapterRequest,
@@ -276,6 +277,17 @@ class MQLLMEngine:
                     self._handle_load_adapter_request(request)
                 elif isinstance(request, RPCResetMultiModalCacheRequest):
                     self.reset_mm_cache()
+                elif isinstance(request, RPCExpertDistributionRecordRequest):
+                    if request == RPCExpertDistributionRecordRequest.START:
+                        self.start_expert_distribution_record()
+                    elif request == RPCExpertDistributionRecordRequest.STOP:
+                        self.stop_expert_distribution_record()
+                    elif request == RPCExpertDistributionRecordRequest.DUMP:
+                        self.dump_expert_distribution_record()
+                    else:
+                        raise ValueError(
+                            "Unknown RPCExpertDistributionRecordRequest Type: "
+                            f"{request}")
                 elif isinstance(request, RPCResetPrefixCacheRequest):
                     self.reset_prefix_cache()
                 elif isinstance(request, RPCSleepRequest):
@@ -418,6 +430,15 @@ class MQLLMEngine:
 
     def reset_mm_cache(self) -> bool:
         return self.engine.reset_mm_cache()
+
+    def start_expert_distribution_record(self) -> None:
+        self.engine.start_expert_distribution_record()
+
+    def stop_expert_distribution_record(self) -> None:
+        self.engine.stop_expert_distribution_record()
+
+    def dump_expert_distribution_record(self) -> None:
+        self.engine.dump_expert_distribution_record()
 
     def reset_prefix_cache(self) -> bool:
         return self.engine.reset_prefix_cache()

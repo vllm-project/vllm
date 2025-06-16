@@ -199,6 +199,12 @@ class ExecutorBase(ABC):
     def stop_profile(self) -> None:
         self.collective_rpc("stop_profile")
 
+    def expert_distribution_record(self, is_start: bool) -> None:
+        self.collective_rpc("expert_distribution_record", args=(is_start, ))
+
+    def dump_expert_distribution_record(self) -> None:
+        self.collective_rpc("dump_expert_distribution_record")
+
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")
