@@ -10,6 +10,7 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -46,7 +47,7 @@ def _compare_objs(obj1, obj2):
             for a_i, b_i in zip(a.block_tables, b.block_tables):
                 _compare_objs(a_i, b_i)
             is_same = True
-        elif isinstance(a, (BlockTable, SamplingMetadata)):
+        elif isinstance(a, (BlockTable, SamplingMetadata, PoolingMetadata)):
             _compare_objs(a, b)
             is_same = True  # if we make it here must be same
         elif a == b:
@@ -201,6 +202,7 @@ def _construct_cached_request_state(req_id_suffix: int):
         req_id=f"req_id_{req_id_suffix}",
         prompt_token_ids=prompt_token_ids,
         sampling_params=_create_sampling_params(),
+        pooling_params=None,
         mm_inputs=[],
         mm_positions=[],
         block_ids=([], ),

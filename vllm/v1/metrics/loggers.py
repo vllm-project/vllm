@@ -481,8 +481,9 @@ class PrometheusStatLogger(StatLoggerBase):
                 finished_request.num_prompt_tokens)
             self.histogram_num_generation_tokens_request.observe(
                 finished_request.num_generation_tokens)
-            self.histogram_max_tokens_request.observe(
-                finished_request.max_tokens_param)
+            if finished_request.max_tokens_param:
+                self.histogram_max_tokens_request.observe(
+                    finished_request.max_tokens_param)
 
         if self.gauge_lora_info is not None:
             running_lora_adapters = \
