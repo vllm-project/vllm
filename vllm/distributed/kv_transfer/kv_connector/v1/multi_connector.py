@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -26,7 +27,11 @@ logger = init_logger(__name__)
 @dataclass
 class MultiKVConnectorMetadata(KVConnectorMetadata):
     metadata: tuple[KVConnectorMetadata, ...]
-    extra_async_saves: Optional[dict[str, int]] = None
+
+
+@dataclass
+class MultiKVWorkerConnectorMetadata(KVConnectorMetadata):
+    metadata: tuple[Optional[KVConnectorMetadata], ...]
 
 
 class MultiConnector(KVConnectorBase_V1):
@@ -58,7 +63,6 @@ class MultiConnector(KVConnectorBase_V1):
         # Keeps track of *additional* remaining async saves (beyond 1) to be
         # finished per request. Not needed for async loads since we only allow
         # a single connector to load.
-        # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -71,9 +75,6 @@ class MultiConnector(KVConnectorBase_V1):
     def bind_connector_metadata(
             self, connector_metadata: KVConnectorMetadata) -> None:
         assert isinstance(connector_metadata, MultiKVConnectorMetadata)
-        if connector_metadata.extra_async_saves:
-            self._extra_async_saves.update(
-                connector_metadata.extra_async_saves)
         for c, cm in zip(self._connectors, connector_metadata.metadata):
             c.bind_connector_metadata(cm)
 
@@ -102,32 +103,14 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.wait_for_save()
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
-        finished_sending: set[str] = set()
-        finished_recving: set[str] = set()
-        for c in self._connectors:
-            sending, recving = c.get_finished(finished_req_ids)
-            if not recving and not sending:
-                continue
-            # Aggregate finished recving request ids.
-            finished_recving.update(recving or ())
-            # Aggregate finished sending request ids - only include
-            # once we've drained the "extra" count (for cases where
-            # more than one connector is async-saving the same request).
-            for req_id in sending or ():
-                extra_pending = self._extra_async_saves.get(req_id)
-                if extra_pending is None:
-                    finished_sending.add(req_id)
-                    continue
-                assert extra_pending > 0
-                if extra_pending == 1:
-                    del self._extra_async_saves[req_id]
-                else:
-                    self._extra_async_saves[req_id] = extra_pending - 1
-
-        return finished_sending or None, finished_recving or None
+    def build_worker_connector_meta(
+        self, scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput
+    ) -> Optional[MultiKVWorkerConnectorMetadata]:
+        return MultiKVWorkerConnectorMetadata(metadata=tuple(
+            c.build_worker_connector_meta(scheduler_output,
+                                          model_runner_output)
+            for c in self._connectors))
 
     # ==============================
     # Scheduler-side methods
@@ -169,9 +152,6 @@ class MultiConnector(KVConnectorBase_V1):
         metadata = MultiKVConnectorMetadata(metadata=tuple(
             c.build_connector_meta(scheduler_output)
             for c in self._connectors))
-        if self._extra_async_saves:
-            metadata.extra_async_saves = self._extra_async_saves
-            self._extra_async_saves = {}
         return metadata
 
     def request_finished(
@@ -199,3 +179,30 @@ class MultiConnector(KVConnectorBase_V1):
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
+
+    def get_finished(
+        self, model_runner_output: ModelRunnerOutput
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        finished_sending: set[str] = set()
+        finished_recving: set[str] = set()
+        for c in self._connectors:
+            sending, recving = c.get_finished(model_runner_output)
+            if not recving and not sending:
+                continue
+            # Aggregate finished recving request ids.
+            finished_recving.update(recving or ())
+            # Aggregate finished sending request ids - only include
+            # once we've drained the "extra" count (for cases where
+            # more than one connector is async-saving the same request).
+            for req_id in sending or ():
+                extra_pending = self._extra_async_saves.get(req_id)
+                if extra_pending is None:
+                    finished_sending.add(req_id)
+                    continue
+                assert extra_pending > 0
+                if extra_pending == 1:
+                    del self._extra_async_saves[req_id]
+                else:
+                    self._extra_async_saves[req_id] = extra_pending - 1
+
+        return finished_sending or None, finished_recving or None
