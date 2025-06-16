@@ -264,7 +264,7 @@ class Scheduler(SchedulerInterface):
                         can_schedule = False
                         break
                     if self.policy == "priority":
-                        preempted_req = min(
+                        preempted_req = max(
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
