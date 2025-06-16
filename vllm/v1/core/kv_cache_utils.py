@@ -846,7 +846,6 @@ def _get_kv_cache_config_uniform_page_size(
     # full.0, sw.0, sw.2: share a Tensor with size=available_memory//2
     # full.1, sw.1: share another Tensor with size=available_memory//2
     page_size = get_uniform_page_size(kv_cache_spec)
-    # print(f"{page_size=}, {group_size=}")
     num_blocks = get_num_blocks(vllm_config, group_size, available_memory,
                                 page_size)
     per_memory_pool_size = page_size * num_blocks

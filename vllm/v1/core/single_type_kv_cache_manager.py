@@ -385,7 +385,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         """
         NOTE(Chen): The prefix blocks are null blocks for sliding window layers.
         So it's not correct to count ref_cnt like FullAttentionManager. Return 
-        0 here for correctness. Need to support cascade attention in the future.
+        0 here for correctness. Need to support cascade attention + sliding
+        window in the future
         """
         return 0
 
@@ -410,22 +411,25 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
             "ChunkedLocalAttentionManager can only be used for " +
-            "chunked local attentiongroups")
+            "chunked local attention groups")
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
-            local_attention_start_idx = \
-                (max_length-1) // kv_cache_spec.attention_chunk_size \
-                * kv_cache_spec.attention_chunk_size
+            local_attention_start_idx = (
+                (max_length-1) // kv_cache_spec.attention_chunk_size
+                * kv_cache_spec.attention_chunk_size)
         else:
             local_attention_start_idx = 0
         # [ block 0, ..., block x(x_start<=first_attention_token),
         # block x+1, ..,  block N (N_end <=max_len), ...]
-        local_attention_start_block_idx = \
-            local_attention_start_idx // kv_cache_spec.block_size
+        local_attention_start_block_idx = (
+            local_attention_start_idx // kv_cache_spec.block_size)
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [block_pool.null_block] * local_attention_start_block_idx
             for _ in range(len(kv_cache_group_ids)))
-
+        # for local chunked attention, we marked blocks out of window as computed
+        # with null blocks, and blocks inside window based on cache lookup result
+        # [null] [null] ... [null] [hit block 1 (1st block contain last window)] 
+        # [hit block 2] ... [hit block x][ 
         for i in range(local_attention_start_block_idx, max_num_blocks):
             block_hash = block_hashes[i]
             if cached_block := block_pool.get_cached_block(
