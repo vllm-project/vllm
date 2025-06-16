@@ -1413,6 +1413,7 @@ def fused_moe(
     renormalize: bool,
     inplace: bool = False,
     activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
     use_grouped_topk: bool = False,
     num_expert_group: Optional[int] = None,
     topk_group: Optional[int] = None,
@@ -1494,27 +1495,29 @@ def fused_moe(
         topk_weights, topk_ids = custom_routing_function(
             hidden_states, gating_output, topk, renormalize)
 
-    return fused_experts(hidden_states,
-                         w1,
-                         w2,
-                         topk_weights,
-                         topk_ids,
-                         inplace=inplace,
-                         activation=activation,
-                         use_fp8_w8a8=use_fp8_w8a8,
-                         use_int8_w8a8=use_int8_w8a8,
-                         use_int8_w8a16=use_int8_w8a16,
-                         use_int4_w4a16=use_int4_w4a16,
-                         per_channel_quant=per_channel_quant,
-                         global_num_experts=global_num_experts,
-                         expert_map=expert_map,
-                         w1_scale=w1_scale,
-                         w2_scale=w2_scale,
-                         w1_zp=w1_zp,
-                         w2_zp=w2_zp,
-                         a1_scale=a1_scale,
-                         a2_scale=a2_scale,
-                         block_shape=block_shape)
+    return fused_experts(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        inplace=inplace,
+        activation=activation,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_int8_w8a8=use_int8_w8a8,
+        use_int8_w8a16=use_int8_w8a16,
+        use_int4_w4a16=use_int4_w4a16,
+        per_channel_quant=per_channel_quant,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_zp=w1_zp,
+        w2_zp=w2_zp,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=block_shape)
 
 
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
