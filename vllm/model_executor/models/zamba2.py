@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """PyTorch Zamba2 model implementation for vLLM.
 
-This module implements the Zamba2 architecture from 
-https://arxiv.org/abs/2411.15242, which combines Mamba and Transformer 
-architectures in a hybrid model optimized for efficient sequence modeling. The 
+This module implements the Zamba2 architecture from
+https://arxiv.org/abs/2411.15242, which combines Mamba and Transformer
+architectures in a hybrid model optimized for efficient sequence modeling. The
 model alternates between state space model layers and attention-based layers.
 """
 from collections.abc import Iterable
@@ -47,7 +47,7 @@ from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 class Zamba2LoRA(nn.Module):
     """LoRA layer for the Zamba2 model.
-    
+
     Implements a LoRA layer that is used in shared attention and gated MLP
     blocks.
     """
@@ -60,7 +60,7 @@ class Zamba2LoRA(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         """Initialize the attention layer.
-        
+
         Args:
             input_dim: input dimension
             rank: LoRA rank
@@ -95,8 +95,8 @@ class Zamba2LoRA(nn.Module):
 
 class Zamba2Attention(nn.Module):
     """Multi-head attention mechanism for the Zamba2 model.
-    
-    Implements attention with parallel computation, QKV projections, optional 
+
+    Implements attention with parallel computation, QKV projections, optional
     adapters and rotary position embeddings. The attention is computed across
     distributed blocks for efficient processing.
     """
@@ -111,7 +111,7 @@ class Zamba2Attention(nn.Module):
         prefix: str = "",
     ) -> None:
         """Initialize the attention layer.
-        
+
         Args:
             config: The Zamba2 model configuration
             bare_block_idx: Index of the bare attention block
@@ -229,12 +229,12 @@ class Zamba2Attention(nn.Module):
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass through the attention layer.
-        
+
         Args:
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
             position_ids: Position IDs for positional embeddings
             block_idx: Current shared transformer block index
-            
+
         Returns:
             Output tensor [batch_size, seq_len, hidden_size]
         """
@@ -271,9 +271,9 @@ class Zamba2Attention(nn.Module):
 
 class Zamba2MLP(nn.Module):
     """Feed-forward MLP layer for the Zamba2 model.
-    
-    Implements a gated feed-forward network that projects inputs to a larger 
-    intermediate size, applies GELU activation with gating, then projects back 
+
+    Implements a gated feed-forward network that projects inputs to a larger
+    intermediate size, applies GELU activation with gating, then projects back
     to the original size. Includes optional adapter layers for model adaptation.
     """
 
@@ -285,7 +285,7 @@ class Zamba2MLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         """Initialize the MLP layer.
-        
+
         Args:
             config: The Zamba2 model configuration
             bare_block_idx: Index of the bare block in the model
@@ -334,11 +334,11 @@ class Zamba2MLP(nn.Module):
     def forward(self, hidden_states: torch.Tensor,
                 block_idx: int) -> torch.Tensor:
         """Forward pass through the MLP layer.
-        
+
         Args:
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
             block_idx: Current shared transformer block index
-            
+
         Returns:
             Output tensor [batch_size, seq_len, hidden_size] after applying
             gated feed-forward transformation
@@ -362,7 +362,7 @@ class Zamba2MLP(nn.Module):
 
 class Zamba2AttentionDecoderLayer(nn.Module):
     """Single decoder layer combining attention and feed-forward networks.
-    
+
     This layer implements a standard transformer block with:
     - Input layer normalization
     - Multi-head self-attention
@@ -380,7 +380,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         """Initialize the decoder layer.
-        
+
         Args:
             config: The Zamba2 model configuration
             bare_block_idx: Index of the bare block
@@ -425,14 +425,14 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass through the decoder layer.
-        
+
         Args:
             hidden_states: Input tensor from previous layer
-            original_hidden_states: Original input tensor for residual 
+            original_hidden_states: Original input tensor for residual
                 connection
             block_idx: Current shared transformer block index
             positions: IDs for positional embeddings
-            
+
         Returns:
             Transformed hidden states after attention and feed-forward
         """
@@ -465,9 +465,9 @@ class Zamba2AttentionDecoderLayer(nn.Module):
 
 class Zamba2MambaDecoderLayer(nn.Module):
     """Single Mamba decoder layer with normalization.
-    
-    This implements a  Mamba block. It includes input normalization 
-    and can process sequences using either chunked or full 
+
+    This implements a  Mamba block. It includes input normalization
+    and can process sequences using either chunked or full
     computation depending on configuration.
     """
 
@@ -477,7 +477,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         """Initialize the Mamba decoder layer.
-        
+
         Args:
             config: The Zamba2 model configuration
             quant_config: Configuration for model quantization
@@ -515,10 +515,10 @@ class Zamba2MambaDecoderLayer(nn.Module):
         original_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass through the Mamba decoder layer.
-        
+
         Args:
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
-            mamba_cache_params: Parameters for Mamba's state caches 
+            mamba_cache_params: Parameters for Mamba's state caches
                 (one for conv, one for ssm)
             sequence_idx: Index tensor for identifying sequences in batch
                 Required for proper chunked processing in prefill
@@ -526,7 +526,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
                 Added to input if provided (used in hybrid architecture)
             positions: Optional position IDs (unused in Mamba)
             original_hidden_states: Optional original inputs (unused in Mamba)
-            
+
         Returns:
             Transformed hidden states with residual connection applied
         """
@@ -560,7 +560,7 @@ class Zamba2MambaDecoderLayer(nn.Module):
 
 class Zamba2HybridLayer(nn.Module):
     """Hybrid layer combining Transformer and Mamba architectures.
-    
+
     This layer implements the hybrid architecture described in the Zamba paper,
     where a shared transformer pathway processes input in parallel with a Mamba
     pathway. The transformer output is projected and added to the Mamba input
@@ -575,7 +575,7 @@ class Zamba2HybridLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         """Initialize the hybrid layer.
-        
+
         Args:
             shared_transformer: Transformer decoder layer for attention pathway
             linear: Linear projection for transformer output before Mamba
@@ -600,23 +600,23 @@ class Zamba2HybridLayer(nn.Module):
         mamba2_metadata: Mamba2Metadata,
     ) -> torch.Tensor:
         """Forward pass through the hybrid layer.
-        
+
         Processes input through parallel transformer and Mamba paths:
         1. Transformer path processes input with attention
         2. Transformer output is projected to match hidden size
         3. Projected output is added to Mamba path input
         4. Final output combines both paths' representations
-        
+
         Args:
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
-            original_hidden_states: Original input for transformer residual 
+            original_hidden_states: Original input for transformer residual
                 connection
             positions: Position IDs for positional embeddings
-            mamba_cache_params: Parameters for Mamba's state caches 
+            mamba_cache_params: Parameters for Mamba's state caches
                 (one for conv, one for ssm)
             sequence_idx: Indices for identifying sequences in batch,
                 required for proper chunked processing in prefill
-            
+
         Returns:
             Output tensor combining transformer and Mamba representations
         """
@@ -644,16 +644,16 @@ class Zamba2HybridLayer(nn.Module):
 
 class Zamba2Model(nn.Module):
     """Core Zamba2 model combining transformer and Mamba architectures.
-    
-    The model processes input through a sequence of hybrid and Mamba-only 
+
+    The model processes input through a sequence of hybrid and Mamba-only
     layers, using token embeddings and final layer normalization.
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         """Initialize the Zamba2 model.
-        
+
         Args:
-            vllm_config: Configuration object containing model, cache, 
+            vllm_config: Configuration object containing model, cache,
                 quantization and LoRA settings
             prefix: Optional prefix for parameter names in state dict
         """
@@ -715,10 +715,10 @@ class Zamba2Model(nn.Module):
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings.
-        
+
         Args:
             input_ids: Tensor of input token IDs
-            
+
         Returns:
             Embedded representation of the input tokens
         """
@@ -732,16 +732,16 @@ class Zamba2Model(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """Forward pass through the model.
-        
+
         Args:
             input_ids: Input token IDs
             positions: Position IDs for embeddings
-            mamba_cache_params: Parameters for Mamba's state caches 
+            mamba_cache_params: Parameters for Mamba's state caches
                 (one for conv, one for ssm)
             inputs_embeds: Optional pre-computed input embeddings
-            
+
         Returns:
-            Either final hidden states or intermediate tensors for pipeline 
+            Either final hidden states or intermediate tensors for pipeline
             parallelism
         """
         # Handle pipeline parallelism for first rank
@@ -805,7 +805,7 @@ class Zamba2Model(nn.Module):
 
 class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
     """Zamba2 model with causal language modeling head.
-    
+
     This class wraps the core Zamba2 model and adds:
     - A language modeling head for next token prediction
     - Mamba state caching functionality
@@ -821,14 +821,14 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         """Initialize the Zamba2 model for causal language modeling.
-        
+
         Args:
             vllm_config: Configuration containing model, cache, quantization,
                         LoRA and scheduler settings
             prefix: Optional prefix for parameter names
-        
+
         Raises:
-            AssertionError: If prefix caching is enabled (not supported by 
+            AssertionError: If prefix caching is enabled (not supported by
             Mamba)
         """
         config = vllm_config.model_config.hf_config
@@ -886,13 +886,13 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
         """Forward pass through the model.
-        
+
         Args:
             input_ids: Input token IDs
             positions: Position IDs for embeddings
             inputs_embeds: Optional pre-computed input embeddings
             **kwargs: Additional arguments passed to cache manager
-            
+
         Returns:
             Output hidden states
         """
@@ -920,11 +920,11 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
                                                                  torch.Tensor],
                                        **kwargs) -> dict[str, torch.Tensor]:
         """Copy inputs before CUDA graph capture.
-        
+
         Args:
             input_buffers: Dictionary of input tensors
             **kwargs: Additional arguments passed to cache manager
-            
+
         Returns:
             Updated input buffers
         """
@@ -934,7 +934,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
     def get_seqlen_agnostic_capture_inputs(
             self, batch_size: int) -> dict[str, torch.Tensor]:
         """Get inputs for sequence-length-agnostic graph capture.
-        
+
         Args:
             batch_size: Size of batch to capture
         Returns:
@@ -945,7 +945,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
     def _get_mamba_cache_shape(
             self) -> tuple[tuple[int, int], tuple[int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
-        
+
         Returns:
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
@@ -991,11 +991,11 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         """Compute logits for next token prediction.
-        
+
         Args:
             hidden_states: Hidden states from model forward pass
             sampling_metadata: Metadata for sampling process
-            
+
         Returns:
             Logits for next token prediction
         """

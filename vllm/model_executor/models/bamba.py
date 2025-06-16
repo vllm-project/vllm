@@ -277,6 +277,7 @@ class BambaModel(nn.Module):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
         )
+        self.mamba2_metadata = None
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
@@ -313,9 +314,10 @@ class BambaModel(nn.Module):
 
         attn_metadata = get_forward_context().attn_metadata
 
-        mamba2_metadata = prepare_mamba2_metadata(
+        self.mamba2_metadata = prepare_mamba2_metadata(
             chunk_size=self.config.mamba_chunk_size,
             attn_metadata=attn_metadata,
+            mamba2_metadata=self.mamba2_metadata,
         )
 
         if get_pp_group().is_first_rank:
@@ -346,9 +348,8 @@ class BambaModel(nn.Module):
                 hidden_states=hidden_states,
                 residual=residual,
                 mamba_cache_params=layer_mamba_cache_params,
-                mamba2_metadata=mamba2_metadata,
+                mamba2_metadata=self.mamba2_metadata,
             )
-
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
