@@ -322,15 +322,21 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             # Process moved requests, unidirectional (a->b) and
             # swapped (a<->b)
             for a_index, b_index, direct in batch_update.moved:
-                a_entry = self.min_toks.pop(a_index, None)
-                if direct == MoveDirectionalityEnum.SWAP and (
-                        b_entry := self.min_toks.pop(b_index,
-                                                     None)) is not None:
-                    needs_update = True
-                    self.min_toks[a_index] = b_entry
-                if a_entry:
-                    needs_update = True
-                    self.min_toks[b_index] = a_entry
+                if direct == MoveDirectionalityEnum.UNIDIRECTIONAL:
+                    if (a_entry := self.min_toks.pop(a_index, None)) is None:
+                        if self.min_toks.pop(b_index,None) is not None:
+                            needs_update=True
+                    else:
+                        self.min_toks[b_index] = a_entry
+                        needs_update=True
+                else:
+                    a_entry = self.min_toks.pop(a_index, None)
+                    if (b_entry := self.min_toks.pop(b_index, None)) is not None:
+                        self.min_toks[a_index]=b_entry
+                        needs_update=True
+                    if a_entry is not None:
+                        self.min_toks[b_index]=a_entry
+                        needs_update=True
 
         if self.min_toks:
             # Check for any requests that have attained their min tokens.
