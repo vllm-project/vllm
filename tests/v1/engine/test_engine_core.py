@@ -19,7 +19,7 @@ from vllm.v1.executor.abstract import Executor, UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
-from ...utils import create_new_process_for_each_test
+from ...utils import create_new_process_for_each_test, multi_gpu_test
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -378,3 +378,37 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
                 # Odd steps schedules a new batch.
                 assert output is None
             step += 1
+
+
+@multi_gpu_test(num_gpus=2)
+def test_engine_core_tp(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test engine can initialize worker in tp properly
+    """
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        """Setup the EngineCore."""
+        engine_args = EngineArgs(
+            model=MODEL_NAME,
+            tensor_parallel_size=2,
+            # Reduce startup time.
+            enforce_eager=True,
+        )
+        vllm_config = engine_args.create_engine_config()
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            engine_core = EngineCore(vllm_config=vllm_config,
+                                     executor_class=executor_class,
+                                     log_stats=True)
+
+        def get_worker_cache_config_field(worker, key: str):
+            return getattr(worker.cache_config, key)
+
+        num_gpu_blocks = engine_core.collective_rpc(
+            get_worker_cache_config_field, args=("num_gpu_blocks", ))
+        num_cpu_blocks = engine_core.collective_rpc(
+            get_worker_cache_config_field, args=("num_cpu_blocks", ))
+        assert all(x is not None for x in num_gpu_blocks)
+        assert all(x is not None for x in num_cpu_blocks)
