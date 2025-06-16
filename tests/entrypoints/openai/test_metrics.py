@@ -295,9 +295,15 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
-    for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
-        if (not server.show_hidden_metrics
-                and metric not in HIDDEN_DEPRECATED_METRICS):
+    metrics_list = EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS
+    if not server.show_hidden_metrics:
+        for metric in HIDDEN_DEPRECATED_METRICS:
+            assert metric not in response.text
+        for metric in metrics_list:
+            if metric not in HIDDEN_DEPRECATED_METRICS:
+                assert metric in response.text
+    else:
+        for metric in metrics_list:
             assert metric in response.text
 
 
