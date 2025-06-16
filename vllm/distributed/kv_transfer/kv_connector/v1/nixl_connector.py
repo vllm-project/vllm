@@ -452,13 +452,18 @@ class NixlConnectorWorker:
                 fut.result()  # This will raise if the handshake failed
                 logger.debug("Handshake succeeded for engine %s", engine_id)
                 with self._lock:
-                    # Remove from futures dict - requests will remain pending
-                    # and be handled by scheduler retry logic
+                    # Remove from futures dict
                     if engine_id in self._handshake_futures:
                         del self._handshake_futures[engine_id]
-                    logger.debug("Handshake completed for engine %s. "
-                                  "Pending requests will be retried by" \
-                                  "scheduler.", engine_id)
+                    # Clear pending requests - they are no longer pending
+                    # handshake and will be processed normally by the scheduler
+                    if engine_id in self._pending_requests:
+                        completed_reqs = self._pending_requests[engine_id]
+                        del self._pending_requests[engine_id]
+                        logger.debug(
+                            "Handshake completed for engine %s. "
+                            "Cleared %d requests from pending state.",
+                            engine_id, len(completed_reqs))
             except Exception as e:
                 logger.warning("Handshake failed for engine %s: %s", engine_id,
                                e)
