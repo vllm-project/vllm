@@ -14,8 +14,16 @@ from compressed_tensors.quantization import (ActivationOrdering,
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe import (
+    fused_experts,
+    FusedMoE,
+    FusedMoEConfig,
+    FusedMoEMethodBase,
+    FusedMoeWeightScaleSupported,
+    FusedMoEActivationFormat,
+    FusedMoEPermuteExpertsUnpermute,
+    FusedMoEPrepareAndFinalize,
+    CutlassExpertsFp8)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -304,15 +312,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                                                  requires_grad=False)
 
             self.rocm_aiter_fused_experts_func = rocm_aiter_fused_experts
-        else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
-            self.fused_experts_func = fused_experts
-
-        if self.use_marlin:
+        elif self.use_marlin:
             prepare_moe_fp8_layer_for_marlin(layer, False)
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
+            self.fused_experts_func = None
+        else:
+            self.fused_experts_func = fused_experts
 
     def apply(
         self,
@@ -552,29 +559,36 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
-    def select_gemm_impl(self, prepare_finalize, moe):
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-            CutlassExpertsFp8)
+    def select_gemm_impl(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+    ) -> FusedMoEPermuteExpertsUnpermute:
 
-        assert moe is not None
+        if prepare_finalize.activation_format == FusedMoEActivationFormat.BatchedExperts:
+            # TODO(bnell): attrs from prepare_finalize sketchy
+            max_experts_per_worker = (
+                (moe.num_experts + prepare_finalize.world_size - 1) //
+                prepare_finalize.world_size)
 
-        max_experts_per_worker = (
-            (moe.num_experts + prepare_finalize.world_size - 1) //
-            prepare_finalize.world_size)
-        experts = CutlassExpertsFp8(
-            max_experts_per_worker,
-            moe.in_dtype,
-            self.input_quant.strategy == QuantizationStrategy.TOKEN,
-            self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
-            use_batched_format=True,
-        )
-
-        if has_pplx and isinstance(
-                prepare_finalize,
-            (BatchedPrepareAndFinalize, PplxPrepareAndFinalize)):
-            # no expert_map support in this case
+            # TODO(bnell): fix this supports_expert_map() method?
             self.disable_expert_map = True
-        return experts
+
+            return CutlassExpertsFp8(
+                max_experts_per_worker,
+                moe.in_dtype,
+                self.input_quant.strategy == QuantizationStrategy.TOKEN,
+                self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
+                use_batched_format=True,
+            )
+        else:
+            return CutlassExpertsFp8(
+                moe.num_experts,
+                moe.in_dtype,
+                self.input_quant.strategy == QuantizationStrategy.TOKEN,
+                self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
+                use_batched_format=False,
+            )
 
     def apply(
         self,
@@ -606,7 +620,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            indices_type=torch.uint32)
+            indices_type=self.topk_indices_dtype,
+        )
 
         return self.fused_experts(
             x,
