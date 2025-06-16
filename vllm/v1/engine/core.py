@@ -209,11 +209,14 @@ class EngineCore:
     def execute_model(self, scheduler_output: SchedulerOutput):
         try:
             return self.model_executor.execute_model(scheduler_output)
-        except BaseException as err:
+        except Exception as err:
+            # We do not want to catch BaseException here since we're only
+            # interested in dumping info when the exception is due to an
+            # error from execute_model itself.
+
             # NOTE: This method is exception-free
             dump_engine_exception(self.vllm_config, scheduler_output,
                                   self.scheduler.make_stats())
-            # Re-raise exception
             raise err
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
