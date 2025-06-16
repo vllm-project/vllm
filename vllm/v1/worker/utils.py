@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.sample.logits_processor import (LogitBiasLogitsProcessor,
                                              LogitsProcessor,
@@ -19,7 +20,7 @@ STR_LOGITS_BIAS_LOGITPROC_ID = "logit_bias"
 
 
 def sanity_check_mm_encoder_outputs(
-    mm_embeddings: object,
+    mm_embeddings: MultiModalEmbeddings,
     expected_num_items: int,
 ) -> None:
     """
