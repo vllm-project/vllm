@@ -14,7 +14,7 @@ from torch.nn import Parameter
 from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
@@ -111,6 +111,8 @@ def run_moe_test(
                                baseline_output,
                                atol=atol,
                                rtol=rtol)
+
+    return baseline_output
 
     return baseline_output
 
