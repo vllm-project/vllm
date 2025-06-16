@@ -6,8 +6,8 @@ The current vLLM's policy is to always use the latest PyTorch stable
 release in CI/CD, so it’s a standard practice to submit a PR to update
 PyTorch version as early as possible when there is a new [PyTorch stable
 release](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-cadence).
-This is not a trivial process because of the complex integration between
-[#16859](https://github.com/vllm-project/vllm/pull/16859)
+This is not a trivial process because of the gap between PyTorch
+releases.  With [#16859](https://github.com/vllm-project/vllm/pull/16859) as
 an example, this documents common steps to achieve that together with
 the list of potential issues and how to address them.
 
