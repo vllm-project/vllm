@@ -901,6 +901,8 @@ class Scheduler:
                     num_new_tokens=num_new_tokens_uncached,
                     num_new_seqs=num_new_seqs,
             ):
+                self.remove_seq_from_computed_blocks_tracker(
+                    seq_group, SequenceStatus.SWAPPED)
                 break
 
             if lora_int_id > 0 and curr_loras is not None:
@@ -1024,6 +1026,9 @@ class Scheduler:
             # Put the sequence back into the waiting queue
             waiting_queue.appendleft(seq_group)
 
+            self.remove_seq_from_computed_blocks_tracker(
+                seq_group, SequenceStatus.WAITING)
+
         waiting_queue = deque(sorted(waiting_queue, key=self._get_priority))
 
         self.waiting = waiting_queue
@@ -1113,6 +1118,8 @@ class Scheduler:
                 )
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
+                self.remove_seq_from_computed_blocks_tracker(
+                    seq_group, SequenceStatus.FINISHED_IGNORED)
                 ignored_seq_groups.append(seq_group)
                 waiting_queue.popleft()
                 continue
@@ -1126,6 +1133,8 @@ class Scheduler:
             can_allocate = self.block_manager.can_allocate(
                 seq_group, num_lookahead_slots=num_lookahead_slots)
             if can_allocate == AllocStatus.LATER:
+                self.remove_seq_from_computed_blocks_tracker(
+                    seq_group, SequenceStatus.WAITING)
                 break
             elif can_allocate == AllocStatus.NEVER:
                 logger.warning(
@@ -1136,6 +1145,8 @@ class Scheduler:
                 )
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
+                self.remove_seq_from_computed_blocks_tracker(
+                    seq_group, SequenceStatus.FINISHED_IGNORED)
                 ignored_seq_groups.append(seq_group)
                 waiting_queue.popleft()
                 continue
@@ -1145,6 +1156,8 @@ class Scheduler:
             if len(seq_groups) == 0:
                 using_prompt_embeds = seq_group.uses_prompt_embeds()
             if using_prompt_embeds != seq_group.uses_prompt_embeds():
+                self.remove_seq_from_computed_blocks_tracker(
+                    seq_group, SequenceStatus.WAITING)
                 leftover_waiting_sequences.appendleft(seq_group)
                 waiting_queue.popleft()
                 continue
@@ -1159,6 +1172,8 @@ class Scheduler:
                         and len(curr_loras) >= self.lora_config.max_loras):
                     # We don't have a space for another LoRA, so
                     # we ignore this request for now.
+                    self.remove_seq_from_computed_blocks_tracker(
+                        seq_group, SequenceStatus.WAITING)
                     leftover_waiting_sequences.appendleft(seq_group)
                     waiting_queue.popleft()
                     continue
@@ -1168,6 +1183,8 @@ class Scheduler:
                 # We've reached the budget limit - since there might be
                 # continuous prefills in the running queue, we should break
                 # to avoid scheduling any new prefills.
+                self.remove_seq_from_computed_blocks_tracker(
+                    seq_group, SequenceStatus.WAITING)
                 break
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
@@ -1175,6 +1192,8 @@ class Scheduler:
                     num_new_tokens=num_new_tokens_uncached,
                     num_new_seqs=num_new_seqs,
             ):
+                self.remove_seq_from_computed_blocks_tracker(
+                    seq_group, SequenceStatus.WAITING)
                 break
 
             # Can schedule this request.
@@ -1687,6 +1706,20 @@ class Scheduler:
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
         self.block_manager.free(seq)
+
+    def remove_seq_from_computed_blocks_tracker(
+            self, seq_group: SequenceGroup,
+            status: Optional[SequenceStatus]) -> None:
+        seqs = seq_group.get_seqs(status=status)
+        for seq in seqs:
+            self._remove_seq_from_computed_blocks_tracker(seq)
+
+    def _remove_seq_from_computed_blocks_tracker(self, seq: Sequence) -> None:
+        """
+        Free a sequence computed blocks tracker _seq_id_to_blocks_hashes
+        and _seq_id_to_num_tokens_computed.
+        """
+        self.block_manager.remove_seq_from_computed_blocks_tracker(seq)
 
     def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:
         """Free finished seqs in a sequence group."""
