@@ -505,6 +505,7 @@ async def test_serialize_and_serve_entrypoints(tmp_path):
         stderr=asyncio.subprocess.STDOUT,
     )
 
+    assert proc.stdout is not None
     fut = proc.stdout.readuntil(b"Application startup complete.")
 
     try:
