@@ -52,7 +52,6 @@ struct CodecFP : public CodecBase {
   }
 };
 
-// MARK: Q4 Line Codec
 // Int4 symmetric quantization codec.
 // We quantize the FP16 data to block-scaled Int4 in blocks of 4 *
 // kThreadGroupSize.
@@ -207,7 +206,6 @@ struct CodecQ4 : public CodecBase {
   }
 };
 
-// MARK: Q6 Line Codec
 // Int6 symmetric quantization codec.
 // We quantize the FP16 data to block-scaled Int6 in blocks of 4 *
 // kThreadGroupSize.
@@ -386,7 +384,6 @@ struct CodecQ6 : public CodecBase {
   }
 };
 
-// MARK: Q8 Line Codec
 // Int8 symmetric quantization codec.
 // We quantize the FP16 data to block-scaled Int8 in blocks of 4 *
 // kThreadGroupSize.
@@ -545,7 +542,6 @@ struct CodecQ8 : public CodecBase {
   }
 };
 
-// MARK: Twoshot All Reduce
 // Twoshot All Reduce
 template <typename T, class Codec>
 struct AllReduceTwoshot {
@@ -681,7 +677,6 @@ struct AllReduceTwoshot {
   }
 };
 
-// MARK: Oneshot All Reduce
 // Oneshot AllReduce
 template <typename T, int world_size>
 struct AllReduceOneshot {
