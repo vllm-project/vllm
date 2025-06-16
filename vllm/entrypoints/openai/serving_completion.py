@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import math
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -13,7 +14,7 @@ from fastapi import Request
 from typing_extensions import assert_never
 
 from vllm.beam.beam import BeamScorer
-from vllm.beam.filtering import BeamValidator
+from vllm.beam.filtering import _CHUNK_SIZE, BeamValidator
 from vllm.beam.penalty import MEOW_CLASSI_IDX, PenaltyComputer
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -110,11 +111,14 @@ class OpenAIServingCompletion(OpenAIServing):
         async def _should_stop(final):
             return final.choices[0].finish_reason == "stop" or final.choices[0].is_filtered
         
+        max_chunks = math.ceil(request.max_tokens / _CHUNK_SIZE)
         async def _chunk_generator():
             num_chunks = 0
             should_stop = False
-        
-            while num_chunks < 4 and not should_stop:
+            output = None
+
+            # TODO(@tanuj): calc created tokens
+            while num_chunks < max_chunks and not should_stop:
                 num_chunks += 1
                 beams = await self.beam_validator.get_n_valid_beams(create_completion=self.create_completion, request=request, raw_request=raw_request)
                 final = await self.beam_scorer.collapse_beams(beams, num_chunks)
@@ -605,7 +609,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 else:
                     logprobs = None
 
-                
+
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
                     text=output_text,
