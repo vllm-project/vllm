@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
 from vllm.utils import make_tensor_with_pad
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -58,26 +59,6 @@ def _create_logit_bias(
         logit_bias = {min(i, vocab_size - 1): bias_value}
         res.append(logit_bias)
     return res
-
-
-def _create_allowed_token_ids(
-    batch_size: int,
-    vocab_size: int,
-    num_allowed_token_ids: int,
-    device: torch.device,
-) -> Optional[torch.Tensor]:
-    mask: Optional[torch.Tensor] = None
-    for i in range(batch_size):
-        if i % 2 == 1:
-            continue
-        if mask is None:
-            mask = torch.zeros((batch_size, vocab_size),
-                               dtype=torch.bool,
-                               device=device)
-        start = min(i, vocab_size - 1)
-        end = min(i + num_allowed_token_ids, vocab_size - 1)
-        mask[i, start:end] = True
-    return mask
 
 
 def _create_bad_words_token_ids(
@@ -151,6 +132,7 @@ def _create_default_sampling_metadata(
         prompt_token_ids=_create_prompt_tokens_tensor(prompt_token_ids,
                                                       vocab_size, device),
         output_token_ids=output_token_ids,
+        last_spec_token_ids=[[] for _ in range(batch_size)],
         frequency_penalties=_create_penalty_tensor(batch_size, 0.0, device),
         presence_penalties=_create_penalty_tensor(batch_size, 0.0, device),
         repetition_penalties=_create_penalty_tensor(batch_size, 1.0, device),
@@ -246,7 +228,8 @@ def test_sampler_min_tokens_penalty(device: str, batch_size: int):
         batch_indices_for_min_token_penalty)
     sampling_metadata.min_tokens = min_tokens
     sampler = Sampler()
-    logits = sampler.apply_penalties(fake_logits, sampling_metadata)
+    logits = sampler.apply_penalties(fake_logits, sampling_metadata,
+                                     sampling_metadata.output_token_ids)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         for token_id in range(VOCAB_SIZE):
@@ -277,7 +260,8 @@ def test_sampler_presence_penalty(device: str, batch_size: int,
         batch_size, presence_penalty, torch.device(device))
     sampling_metadata.no_penalties = False
     sampler = Sampler()
-    logits = sampler.apply_penalties(fake_logits, sampling_metadata)
+    logits = sampler.apply_penalties(fake_logits, sampling_metadata,
+                                     sampling_metadata.output_token_ids)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         # Since all tokens initially have the same logits, the non-penalized
@@ -327,7 +311,8 @@ def test_sampler_frequency_penalty(device: str, batch_size: int,
     sampling_metadata.output_token_ids = output_token_ids
     sampling_metadata.no_penalties = False
     sampler = Sampler()
-    logits = sampler.apply_penalties(fake_logits, sampling_metadata)
+    logits = sampler.apply_penalties(fake_logits, sampling_metadata,
+                                     sampling_metadata.output_token_ids)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         non_penalized_token_id = logits[batch_idx].argmax().item()
@@ -375,7 +360,8 @@ def test_sampler_repetition_penalty(device: str, batch_size: int,
         batch_size, repetition_penalty, torch.device(device))
     sampling_metadata.no_penalties = False
     sampler = Sampler()
-    logits = sampler.apply_penalties(fake_logits, sampling_metadata)
+    logits = sampler.apply_penalties(fake_logits, sampling_metadata,
+                                     sampling_metadata.output_token_ids)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         non_penalized_token_id = logits[batch_idx].argmax().item()
@@ -491,7 +477,7 @@ def test_sampler_allowed_token_ids(device: str, batch_size: int,
     fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
     sampling_metadata = _create_default_sampling_metadata(
         NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
-    mask = _create_allowed_token_ids(
+    mask = create_allowed_token_ids(
         batch_size=batch_size,
         vocab_size=VOCAB_SIZE,
         num_allowed_token_ids=num_allowed_token_ids,
@@ -536,7 +522,8 @@ def test_sampler_bad_words(device: str, batch_size: int,
     bad_words_last_tokens = _update_output_token_ids_for_bad_words(
         sampling_metadata, VOCAB_SIZE)
     sampler = Sampler()
-    logits = sampler.apply_bad_words(fake_logits, sampling_metadata)
+    logits = sampler.apply_bad_words(fake_logits, sampling_metadata,
+                                     sampling_metadata.output_token_ids)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         logits_for_req = logits[batch_idx]
