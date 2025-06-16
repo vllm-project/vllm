@@ -64,12 +64,14 @@ class OpenAIServingChat(OpenAIServing):
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
+        enforce_include_usage: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         enforce_include_usage=enforce_include_usage)
 
         self.response_role = response_role
         self.chat_template = chat_template
@@ -262,7 +264,7 @@ class OpenAIServingChat(OpenAIServing):
         if request.stream:
             return self.chat_completion_stream_generator(
                 request, result_generator, request_id, model_name,
-                conversation, tokenizer, request_metadata)
+                conversation, tokenizer, request_metadata, enforce_include_usage=self.enforce_include_usage)
 
         try:
             return await self.chat_completion_full_generator(
@@ -405,6 +407,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
+        enforce_include_usage: bool,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -471,7 +474,7 @@ class OpenAIServingChat(OpenAIServing):
 
         stream_options = request.stream_options
         if stream_options:
-            include_usage = stream_options.include_usage
+            include_usage = stream_options.include_usage or enforce_include_usage
             include_continuous_usage = include_usage and \
                                        stream_options.continuous_usage_stats
         else:

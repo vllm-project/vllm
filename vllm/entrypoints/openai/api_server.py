@@ -1144,6 +1144,7 @@ async def init_app_state(
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
     model_config = vllm_config.model_config
+    enforce_include_usage = vllm_config.model_config.enforce_include_usage
 
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
@@ -1190,6 +1191,7 @@ async def init_app_state(
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enforce_include_usage=enforce_include_usage,
     ) if model_config.runner_type == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
@@ -1197,6 +1199,7 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enforce_include_usage=enforce_include_usage,
     ) if model_config.runner_type == "generate" else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
