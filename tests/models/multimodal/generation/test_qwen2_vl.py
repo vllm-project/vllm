@@ -17,11 +17,9 @@ from ...utils import check_logprobs_close
 
 
 @pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    V1 Test: batch_make_xxxxx_embeddings calls a V0 internal
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 models = ["Qwen/Qwen2-VL-2B-Instruct"]
@@ -126,9 +124,8 @@ def batch_make_image_embeddings(
             image_grid_thw_on_device = image_grid_thw.to(visual.device,
                                                          dtype=torch.int64)
             return visual(pixel_values_on_device,
-                          grid_thw=image_grid_thw_on_device)
+                          grid_thw=image_grid_thw_on_device).cpu()
 
-    # V1 Test: this calls a V0 internal.
     image_embeds = torch.concat(llm.apply_model(get_image_embeds))
 
     # split into original batches
@@ -210,7 +207,7 @@ def batch_make_video_embeddings(
             video_grid_thw_on_device = video_grid_thw.to(visual.device,
                                                          dtype=torch.int64)
             return visual(pixel_values_on_device,
-                          grid_thw=video_grid_thw_on_device)
+                          grid_thw=video_grid_thw_on_device).cpu()
 
     # V1 Test: this calls a V0 internal.
     video_embeds = torch.concat(llm.apply_model(get_image_embeds))
@@ -329,9 +326,13 @@ def run_embedding_input_test(
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
 def test_qwen2_vl_image_embeddings_input(vllm_runner, image_assets, model,
-                                         size_factors, dtype: str,
-                                         max_tokens: int,
-                                         num_logprobs: int) -> None:
+                                         size_factors, dtype, max_tokens,
+                                         num_logprobs, monkeypatch) -> None:
+
+    # Test V1: this test hangs after the first generate_greedy_logprobs call
+    # TODO: figure out why and re-enable this on V1.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
+
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_case: list[tuple[
