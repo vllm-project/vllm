@@ -684,6 +684,7 @@ setuptools==77.0.3
     # via
     #   mamba-ssm
     #   pytablewriter
+    #   torch
     #   triton
 shellingham==1.5.4
     # via typer
