@@ -997,20 +997,25 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
         )
 
-    def maybe_validate_tensorizer_config(self) -> bool:
-
+    def valid_tensorizer_config_provided(self) -> bool:
+        """
+        Checks if a parseable TensorizerConfig was passed to
+        model-loader-extra-config. It first checks if the config passed
+        is a dict or a TensorizerConfig object directly, and if the latter is
+        true (by checking that the object has TensorizerConfig's
+        .to_serializable() method), converts it in to a serializable dict
+        format.
+        """
         if self.model_loader_extra_config:
+            if hasattr(self.model_loader_extra_config, "to_serializable"):
+                self.model_loader_extra_config = (
+                    self.model_loader_extra_config.to_serializable())
             for allowed_to_pass in ["tensorizer_uri", "tensorizer_dir"]:
                 try:
                     self.model_loader_extra_config[allowed_to_pass]
                     return False
                 except KeyError:
                     pass
-                finally:
-                    if hasattr(self.model_loader_extra_config,
-                               "to_serializable"):
-                        self.model_loader_extra_config = (
-                            self.model_loader_extra_config.to_serializable())
         return True
 
     def create_load_config(self) -> LoadConfig:
@@ -1019,7 +1024,7 @@ class EngineArgs:
             self.load_format = "bitsandbytes"
 
         if (self.load_format == "tensorizer"
-                and self.maybe_validate_tensorizer_config()):
+                and self.valid_tensorizer_config_provided()):
             logger.info("Inferring Tensorizer args from %s", self.model)
             self.model_loader_extra_config = {"tensorizer_dir": self.model}
         else:
