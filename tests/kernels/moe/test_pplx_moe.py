@@ -18,8 +18,8 @@ try:
 except ImportError:
     has_pplx = False
 
+from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import override_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedExperts, BatchedPrepareAndFinalize, BatchedTritonExperts)
@@ -28,8 +28,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (fused_topk,
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
-
-from tests.kernels.utils import torch_experts
 
 from .deepep_utils import ProcessGroupInfo, parallel_launch
 

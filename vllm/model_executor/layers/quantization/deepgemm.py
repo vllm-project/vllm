@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
 import logging
+from typing import Optional
 
 import torch
-
-from typing import Optional
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -86,7 +85,8 @@ def m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm(
     expert_ids: torch.Tensor,
 ) -> None:
     import deep_gemm as dg
-    dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous((a, a_scale), (b, b_scale), output, expert_ids)
+    dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous((a, a_scale), (b, b_scale),
+                                                 output, expert_ids)
 
 
 direct_register_custom_op(
@@ -96,7 +96,6 @@ direct_register_custom_op(
     fake_impl=w8a8_block_fp8_matmul_deepgemm_fake,
     dispatch_key=current_platform.dispatch_key,
 )
-
 
 direct_register_custom_op(
     op_name="m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm",
