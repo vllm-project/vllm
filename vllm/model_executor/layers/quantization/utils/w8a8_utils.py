@@ -118,6 +118,7 @@ def requantize_with_max_scale(
         start = 0
         for idx, logical_width in enumerate(logical_widths):
             end = start + logical_width
+            print(f"weight[start:end, :].shape: {weight[start:end, :].shape}")
             weight_dq = per_tensor_dequantize(weight[start:end, :],
                                               weight_scale[idx])
             weight[start:end, :], _ = ops.scaled_fp8_quant(
