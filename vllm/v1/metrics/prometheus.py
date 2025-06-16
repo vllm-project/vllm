@@ -3,6 +3,7 @@
 
 import os
 import tempfile
+from socket import gethostname
 from typing import Optional
 
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
@@ -13,6 +14,10 @@ logger = init_logger(__name__)
 
 # Global temporary directory for prometheus multiprocessing
 _prometheus_multiproc_dir: Optional[tempfile.TemporaryDirectory] = None
+
+
+def get_instance_id():
+    return os.getenv("VLLM_INSTANCE_ID", gethostname())
 
 
 def setup_multiprocess_prometheus():
