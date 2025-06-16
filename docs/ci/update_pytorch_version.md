@@ -2,22 +2,22 @@
 title: Update PyTorch version on vLLM OSS CI/CD
 ---
 
-The current vLLM's policy is to always use the latest PyTorch stable
-release in CI/CD, so it’s a standard practice to submit a PR to update
-PyTorch version as early as possible when there is a new [PyTorch stable
-release](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-cadence).
-This is not a trivial process because of the gap between PyTorch
-releases.  With [#16859](https://github.com/vllm-project/vllm/pull/16859) as
-an example, this documents common steps to achieve that together with
-the list of potential issues and how to address them.
+vLLM's current policy is to always use the latest PyTorch stable
+release in CI/CD. It is standard practice to submit a PR to update the
+PyTorch version as early as possible when a new [PyTorch stable
+release](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-cadence) becomes available.
+This process is non-trivial due to the gap between PyTorch
+releases. Using [#16859](https://github.com/vllm-project/vllm/pull/16859) as
+an example, this document outlines common steps to achieve this update along with
+a list of potential issues and how to address them.
 
 ## Test PyTorch release candidates (RCs)
 
-Updating the PyTorch version on vLLM after PyTorch has been released is not
-ideal because any issues from PyTorch found at that point could only be resolved
-by waiting for the next release or by providing hacky workarounds on vLLM.
-The solution is to test vLLM with PyTorch release candidates (RC) to ensure that
-they are working with each other before each release.
+Updating PyTorch in vLLM after the official release is not
+ideal because any issues discovered at that point can only be resolved
+by waiting for the next release or by implementing hacky workarounds in vLLM.
+The better solution is to test vLLM with PyTorch release candidates (RC) to ensure
+compatibility before each release.
 
 PyTorch release candidates can be downloaded from PyTorch test index at https://download.pytorch.org/whl/test.
 For example, torch2.7.0+cu12.8 RC can be installed using the following command:
@@ -26,10 +26,10 @@ For example, torch2.7.0+cu12.8 RC can be installed using the following command:
 uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/test/cu128
 ```
 
-Once the final RC is ready for testing, it will be announced to the community
-on [PyTorch dev-discuss forum](https://dev-discuss.pytorch.org/c/release-announcements).
-After this, we can start testing vLLM integration by drafting a pull request
-following the 3-step process:
+When the final RC is ready for testing, it will be announced to the community
+on the [PyTorch dev-discuss forum](https://dev-discuss.pytorch.org/c/release-announcements).
+After this announcement, we can begin testing vLLM integration by drafting a pull request
+following this 3-step process:
 
 1. Update requirements files in https://github.com/vllm-project/vllm/tree/main/requirements
 to point to the new releases for torch, torchvision, and torchaudio.
@@ -39,17 +39,16 @@ and `rocm6.2.4`.
 3. As vLLM uses uv, make sure that `unsafe-best-match` strategy is set either
 via `UV_INDEX_STRATEGY` env variable or via `--index-strategy unsafe-best-match`.
 
-If failures were found in the pull request, the next step would be to raise them
-as issues on vLLM and cc PyTorch release team to start the discussion on
-how to address them.
+If failures are found in the pull request, raise them as issues on vLLM and
+cc the PyTorch release team to initiate discussion on how to address them.
 
 ## Update CUDA version
 
-PyTorch release matrix has the concept of stable and experimental [CUDA versions](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix).  Due to its limitation, only the latest stable CUDA version, for example
-torch2.7.0+cu12.6, is uploaded to PyPI.  On the other hand, vLLM might be looking
-for a different CUDA version, for example 12.8 for Blackwell support.
-This makes the process more complicated because we couldn’t use out-of-the-box
-`pip install torch torchvision torchaudio` command.  The solution is to use
+The PyTorch release matrix includes both stable and experimental [CUDA versions](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix). Due to limitations, only the latest stable CUDA version (for example,
+torch2.7.0+cu12.6) is uploaded to PyPI. However, vLLM may require a different CUDA version,
+such as 12.8 for Blackwell support.
+This complicates the process as we cannot use the out-of-the-box
+`pip install torch torchvision torchaudio` command. The solution is to use
 `--extra-index-url` in vLLM's Dockerfiles.
 
 1. Use `--extra-index-url https://download.pytorch.org/whl/cu128` to install torch+cu128.
@@ -63,18 +62,18 @@ on CI.
 
 ## Address long vLLM build time
 
-When building vLLM with a new PyTorch / CUDA version, there won’t be any cache
-on vLLM sccache S3 bucket and the build job on CI could take more than 5 hours
-and timeout.  In addition, running in read-only mode, vLLM’s fastcheck
-pipeline doesn’t populate the cache, so re-running it to warm up the cache
-doesn’t work.
+When building vLLM with a new PyTorch/CUDA version, no cache will exist
+in the vLLM sccache S3 bucket, causing the build job on CI to potentially take more than 5 hours
+and timeout. Additionally, since vLLM's fastcheck pipeline runs in read-only mode,
+it doesn't populate the cache, so re-running it to warm up the cache
+is ineffective.
 
-While there are ongoing efforts like [#17419](https://github.com/vllm-project/vllm/issues/17419)
-to fix the long build time at its source, the current workaround is to point VLLM_CI_BRANCH
-to a custom branch provided by @khluu `VLLM_CI_BRANCH=khluu/use_postmerge_q`
-when triggering a build manually on Buildkite.  This branch does 2 things:
+While ongoing efforts like [#17419](https://github.com/vllm-project/vllm/issues/17419)
+address the long build time at its source, the current workaround is to set VLLM_CI_BRANCH
+to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/use_postmerge_q`)
+when manually triggering a build on Buildkite. This branch accomplishes two things:
 
-1. Increase the timeout limit to 10 hours so that the build doesn’t timeout.
+1. Increase the timeout limit to 10 hours so that the build doesn't timeout.
 2. Allow the compiled artifacts to be written to the vLLM sccache S3 bucket
 to warm it up so that future builds are faster.
 
@@ -84,10 +83,10 @@ to warm it up so that future builds are faster.
 
 ## Update dependencies
 
-Some vLLM dependencies like FlashInfer also depend on PyTorch and will need
-to be updated accordingly.  However, waiting for all of them to publish new
-releases is going to take too much time.  Instead, they will be built from
-source to unblock the update.
+Several vLLM dependencies, such as FlashInfer, also depend on PyTorch and need
+to be updated accordingly. Rather than waiting for all of them to publish new
+releases (which would take too much time), they can be built from
+source to unblock the update process.
 
 ### FlashInfer
 Here is how to build and install it from source with torch2.7.0+cu128 in vLLM [Dockerfile](https://github.com/vllm-project/vllm/blob/27bebcd89792d5c4b08af7a65095759526f2f9e1/docker/Dockerfile#L259-L271):
@@ -98,9 +97,9 @@ export FLASHINFER_ENABLE_SM90=1
 uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.6.post1"
 ```
 
-A small gotcha here is that building FlashInfer from source adds around 30
-minutes to vLLM build time.  Thus, it’s better to cache the wheel somewhere
-public so that it can be installed right away, for example https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl.  In future releases, please reach out to PyTorch release
+One caveat is that building FlashInfer from source adds approximately 30
+minutes to the vLLM build time. Therefore, it's preferable to cache the wheel in a
+public location for immediate installation, such as https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl. For future releases, contact the PyTorch release
 team if you want to get the package published there.
 
 ### xFormers
@@ -125,11 +124,11 @@ uv pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
 
 ## Update all the different vLLM platforms
 
-Instead of trying to update all vLLM platforms in one pull request, it’s easier
-to deal with some platforms later.  The separation of requirements and Dockerfiles
-for different platforms on vLLM CI/CD gives us the ability to pick and choose
-which platforms to update.  For example, updating XPU requires the corresponding
-release of https://github.com/intel/intel-extension-for-pytorch from Intel.
-So, while https://github.com/vllm-project/vllm/pull/16859 updated vLLM to PyTorch
+Rather than attempting to update all vLLM platforms in a single pull request, it's more manageable
+to handle some platforms separately. The separation of requirements and Dockerfiles
+for different platforms in vLLM CI/CD allows us to selectively choose
+which platforms to update. For instance, updating XPU requires the corresponding
+release from https://github.com/intel/intel-extension-for-pytorch by Intel.
+While https://github.com/vllm-project/vllm/pull/16859 updated vLLM to PyTorch
 2.7.0 on CPU, CUDA, and ROCm, https://github.com/vllm-project/vllm/pull/17444
-finished it for XPU.
+completed the update for XPU.
