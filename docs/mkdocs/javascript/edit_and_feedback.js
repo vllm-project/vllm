@@ -22,7 +22,7 @@ document.addEventListener("DOMContentLoaded", function () {
   )}&body=${encodeURIComponent(`📄 **Reference:**\n${url}\n\n📝 **Feedback:**\n_Your response_`)}`;
   feedbackLink.target = "_blank";
   feedbackLink.rel = "noopener";
-  feedbackLink.title = "Question? Give us feedback";
+  feedbackLink.title = "Provide feedback";
   feedbackLink.className = "md-content__button";
   feedbackLink.innerHTML = `
   <svg
