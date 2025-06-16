@@ -6,7 +6,7 @@ import gc
 import time
 import weakref
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import numpy as np
 import torch
@@ -53,6 +53,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.mlp import MlpProposer
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
@@ -69,6 +70,15 @@ if TYPE_CHECKING:
 
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+
+    class Drafter(Protocol):
+
+        def propose(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+            ...
+
+        def load_model(self, target_model: nn.Module) -> None:
+            ...
+
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
     xgr_torch_compile = LazyLoader(
@@ -79,6 +89,8 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+
+    drafter: "Drafter"
 
     def __init__(
         self,
@@ -170,6 +182,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter = MedusaProposer(
                     vllm_config=self.vllm_config,
                     device=self.device)  # type: ignore
+            elif self.speculative_config.method == 'mlp_speculator':
+                self.drafter = MlpProposer(
+                    self.vllm_config,
+                    self.device,
+                )
             else:
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
@@ -1523,6 +1540,70 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
             spec_token_ids = draft_token_ids.tolist()
+        elif self.speculative_config.method == "mlp_speculator":
+            if TYPE_CHECKING:
+                assert isinstance(self.drafter, MlpProposer)
+
+            mlp_attn_metadata = attn_metadata[next(iter(attn_metadata.keys()))]
+
+            # TODO: Refactor this to share logic with Eagle
+            next_token_ids: list[int] = []  # type: ignore
+            for i, token_ids in enumerate(valid_sampled_token_ids):
+                if token_ids:
+                    # Common case.
+                    next_token_id = token_ids[-1]
+                else:
+                    # Partial prefill (rare case).
+                    # Get the next token id from the request state.
+                    req_id = self.input_batch.req_ids[i]
+                    req_state = self.requests[req_id]
+                    seq_len = (req_state.num_computed_tokens +
+                               scheduler_output.num_scheduled_tokens[req_id])
+                    next_token_id = req_state.get_token_id(seq_len)
+                next_token_ids.append(next_token_id)
+            next_token_ids_tensor = async_tensor_h2d(
+                next_token_ids,
+                dtype=torch.int32,
+                target_device=self.device,
+                pin_memory=True,
+            )
+
+            if spec_decode_metadata is None:
+                if self.use_aux_hidden_state_outputs:
+                    target_hidden_states = torch.cat(
+                        [h[:num_scheduled_tokens] for h in aux_hidden_states],
+                        dim=-1)
+                else:
+                    target_hidden_states = hidden_states[:num_scheduled_tokens]
+                cu_num_tokens = mlp_attn_metadata.query_start_loc
+            else:
+                num_draft_tokens = spec_decode_metadata.num_draft_tokens
+                num_rejected_tokens = [
+                    n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+                    for i, n in enumerate(num_draft_tokens)
+                ]
+                num_rejected_tokens_tensor = async_tensor_h2d(
+                    num_rejected_tokens,
+                    dtype=torch.int32,
+                    target_device=self.device,
+                    pin_memory=True,
+                )
+                # TODO: Implement proper handling of rejected tokens
+                # for MLP
+                target_positions = positions[:num_scheduled_tokens]
+                if self.use_aux_hidden_state_outputs:
+                    target_hidden_states = torch.cat(
+                        [h[:num_scheduled_tokens] for h in aux_hidden_states],
+                        dim=-1)
+                else:
+                    target_hidden_states = hidden_states[:num_scheduled_tokens]
+                cu_num_tokens = mlp_attn_metadata.query_start_loc
+            draft_token_ids = self.drafter.propose(
+                target_hidden_states=target_hidden_states,
+                next_token_ids=next_token_ids_tensor,
+                cu_num_tokens=cu_num_tokens,
+            )
+            spec_token_ids = draft_token_ids.tolist()
 
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
@@ -1768,7 +1849,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
         This is to help balance expert-selection
          - during profile_run
-         - during DP rank dummy run 
+         - during DP rank dummy run
         """
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
@@ -1890,6 +1971,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
+                self.drafter.dummy_run(num_tokens)
+            if self.speculative_config \
+                and self.speculative_config.method == 'mlp_speculator':
+                if TYPE_CHECKING:
+                    assert isinstance(self.drafter, MlpProposer)
                 self.drafter.dummy_run(num_tokens)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
