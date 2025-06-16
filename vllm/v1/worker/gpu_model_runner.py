@@ -1554,8 +1554,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if has_kv_transfer_group():
-            return get_kv_transfer_group().get_finished(
+            result = get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids)
+            return (
+                result.finished_sending if result.finished_sending else None,
+                result.finished_recving if result.finished_recving else None)
         return None, None
 
     @staticmethod

@@ -153,17 +153,18 @@ class NixlConnector(KVConnectorBase_V1):
             self.set_handshake_metadata(self.connector_worker.xfer_metadata)
 
     def get_finished(self,
-                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+                     finished_req_ids: set[str]) -> KVTransferFinishedResult:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        result = self.connector_worker.get_finished()
-        # Store pending handshake for the new method to retrieve
-        self._pending_handshake_req_ids = result.pending_handshake
-        return result.finished_sending, result.finished_recving
+        return self.connector_worker.get_finished()
 
     def get_pending_handshake_req_ids(self) -> Optional[set[str]]:
         """Get request IDs that are currently pending handshake completion."""
-        return getattr(self, '_pending_handshake_req_ids', None)
+        if self.connector_worker is not None:
+            result = self.connector_worker.get_finished()
+            return (result.pending_handshake
+                    if result.pending_handshake else None)
+        return None
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -188,7 +189,7 @@ class NixlConnector(KVConnectorBase_V1):
         logger.debug("Setting handshake metadata for NIXL connector: %s",
                      handshake_metadata)
         assert self.connector_worker is not None
-        return super().set_handshake_metadata(handshake_metadata)
+        self._handshake_metadata = handshake_metadata
 
 
 class NixlConnectorScheduler:
