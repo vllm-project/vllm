@@ -80,7 +80,8 @@ class EngineCore:
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config, \
-            transfer_handshake_metadata = self._initialize_kv_caches(vllm_config)
+            transfer_handshake_metadata = self._initialize_kv_caches(
+                vllm_config)
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -171,9 +172,12 @@ class EngineCore:
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
 
-        # Collect KV connector xfer metadata from workers (after KV cache registration)
+        # Collect KV connector xfer metadata from workers
+        # (after KV cache registration)
         transfer_handshake_metadata = (
-            self.model_executor.get_kv_connector_handshake_metadata())
+            self.model_executor.get_kv_connector_handshake_metadata()
+            if self.vllm_config.cache_config.transfer_handshake_metadata else
+            None)
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
@@ -448,9 +452,9 @@ class EngineCoreProc(EngineCore):
             }
 
             # Include KV connector metadata if available
-            if hasattr(self,
-                       'transfer_handshake_metadata') and self.transfer_handshake_metadata:
-                # self.transfer_handshake_metadata is a list of dicts from workers
+            if hasattr(self, 'transfer_handshake_metadata'
+                       ) and self.transfer_handshake_metadata:
+                # self.transfer_handshake_metadata is list of dicts from workers
                 # Each dict already has structure {tp_rank: {dp_rank: metadata}}
                 # Merge all worker dicts into a single dict
                 content = {}
@@ -458,7 +462,7 @@ class EngineCoreProc(EngineCore):
                     if worker_dict is not None:
                         content.update(worker_dict)
                 handshake_message["transfer_handshake_metadata"] = content
-                
+
             handshake_socket.send(msgspec.msgpack.encode(handshake_message))
 
     @staticmethod

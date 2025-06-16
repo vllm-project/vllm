@@ -10,8 +10,6 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.device_allocator.cumem import CuMemAllocator
@@ -19,8 +17,8 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                          is_v1_kv_transfer_group,
-                                          get_kv_transfer_group)
+                                          get_kv_transfer_group,
+                                          is_v1_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -240,30 +238,22 @@ class Worker(WorkerBase):
 
         connector = get_kv_transfer_group()
         if not is_v1_kv_transfer_group(connector):
-            logger.warning(
-                "The KV connector is not a v1 connector. "
-                "This method is only supported for v1 connectors.")
+            logger.warning("The KV connector is not a v1 connector. "
+                           "This method is only supported for v1 connectors.")
             return None
-        
-        # Only return metadata if this is a worker role
-        if connector.role == KVConnectorRole.WORKER:
-            metadata = connector.get_handshake_metadata()
-            if metadata is None:
-                logger.warning(
-                    "KV connector metadata is not available. "
-                    "This may happen if the KV connector is not initialized "
-                    "or the worker is not part of a disaggregated KV cache setup."
-                )
-                return None
-            
-            tp_rank = get_tp_group().rank_in_group
-            dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
-            return {
-                tp_rank: {
-                    dp_rank: msgspec.to_builtins(metadata)
-                }
-            }
-        
+
+        metadata = connector.get_handshake_metadata()
+        if metadata is None:
+            logger.warning(
+                "KV connector metadata is not available. "
+                "This may happen if the KV connector is not initialized "
+                "or the worker is not part of a disaggregated KV cache setup.")
+            return None
+
+        tp_rank = get_tp_group().rank_in_group
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
+        return {tp_rank: {dp_rank: msgspec.to_builtins(metadata)}}
+
         return None
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:

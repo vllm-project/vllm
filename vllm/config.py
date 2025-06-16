@@ -10,7 +10,7 @@ import json
 import textwrap
 import uuid
 import warnings
-from collections import Counter, defaultdict
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
@@ -1513,10 +1513,8 @@ class CacheConfig:
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
-    transfer_handshake_metadata: dict[int, dict[int, 
-        KVConnectorHandshakeMetadata]] = field(
-        default_factory=lambda: defaultdict(dict), 
-        init=False)
+    transfer_handshake_metadata: Optional[dict[int, dict[
+        int, KVConnectorHandshakeMetadata]]] = field(default=None, init=False)
     """Metadata for the KV connector handshake."""
 
     def compute_hash(self) -> str:
