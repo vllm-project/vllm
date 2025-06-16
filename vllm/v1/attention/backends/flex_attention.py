@@ -13,9 +13,11 @@ from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -25,8 +27,6 @@ if current_platform.is_cuda():
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 create_block_mask_compiled = torch.compile(create_block_mask,
@@ -237,7 +237,12 @@ class FlexAttentionMetadata:
 
     def build_block_mask(self) -> BlockMask:
         assert self.mask_mod is not None
-        return create_block_mask_compiled(
+        # FIXME: With TP>1, create_block_mask_compiled will raise
+        # CUDA error: an illegal memory access was encountered
+        create_block_mask_fn = (create_block_mask_compiled
+                                if get_tensor_model_parallel_world_size() == 1
+                                else create_block_mask)
+        return create_block_mask_fn(
             self.mask_mod,
             None,
             None,
@@ -256,7 +261,8 @@ class FlexAttentionMetadata:
         self.block_mask = self.build_block_mask()
 
 
-class FlexAttentionMetadataBuilder:
+class FlexAttentionMetadataBuilder(
+        AttentionMetadataBuilder[FlexAttentionMetadata]):
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -272,13 +278,12 @@ class FlexAttentionMetadataBuilder:
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return False
-
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
+    def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
@@ -332,9 +337,6 @@ class FlexAttentionMetadataBuilder:
         )
         return out
 
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
-
 
 class FlexAttentionImpl(AttentionImpl):
     sliding_window: Optional[tuple[int, int]]
@@ -380,7 +382,6 @@ class FlexAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "FlexAttention does not support logits soft cap yet.")
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         if kv_sharing_target_layer_name is not None:
@@ -414,6 +415,7 @@ class FlexAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlexAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FLexAttention.
 
@@ -427,6 +429,12 @@ class FlexAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlexAttentionImpl")
+
         enable_gqa = self.num_kv_heads != self.num_heads
 
         if attn_metadata is None:
