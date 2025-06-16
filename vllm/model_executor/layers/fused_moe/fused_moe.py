@@ -845,29 +845,17 @@ def try_get_optimal_moe_config_list(
         config['BLOCK_SIZE_M'],
         config['BLOCK_SIZE_N'],
         config['BLOCK_SIZE_K'],
-        config['GROUP_SIZE_SIZE_M'],
-        config.get('num_warps', 0),
-        config.get('num_stages', 0),
+        config['GROUP_SIZE_M'],
+        config.get('num_warps', 4),
+        config.get('num_stages', 3 if not current_platform.is_rocm() else 2),
     ]
-
-
-def try_get_optimal_moe_config_list_fake(
-    w1_shape: list[int],
-    w2_shape: list[int],
-    top_k: int,
-    dtype: Optional[str],
-    M: int,
-    is_marlin: bool = False,
-    block_shape: Optional[list[int]] = None,
-) -> tuple[int, int, int, int]:
-    return [64, 64, 64, 8, 4, 3]
 
 
 direct_register_custom_op(
     op_name="try_get_optimal_moe_config_list",
     op_func=try_get_optimal_moe_config_list,
-    fake_impl=try_get_optimal_moe_config_list_fake,
     mutates_args=[],
+    dispatch_key="",
 )
 
 
