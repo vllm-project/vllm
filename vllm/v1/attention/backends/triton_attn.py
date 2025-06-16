@@ -77,24 +77,10 @@ class TritonAttentionMetadataBuilder(
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
-        model_config = runner.model_config
-        compilation_config = runner.vllm_config.compilation_config
-
         self.runner = runner
-        self.use_full_cuda_graph = compilation_config.full_cuda_graph
-        self.num_heads_q = model_config.get_num_attention_heads(
-            runner.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(
-            runner.parallel_config)
-        self.headdim = model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
-
-        # Sliding window size to be used with the AOT scheduler will be
-        # populated on first build() call.
-        self.aot_sliding_window: Optional[tuple[int, int]] = None
-        self.aot_schedule = False
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
