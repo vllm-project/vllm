@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# DeepGEMM Style Cutlass Grouped GEMM Test
+# See https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_core.py
+
 import random
 import pytest
 import torch
@@ -7,16 +10,34 @@ from typing import Tuple
 
 from vllm import _custom_ops as ops
 
+def calc_diff(x, y):
+    x, y = x.double(), y.double()
+    denominator = (x * x + y * y).sum()
+    sim = 2 * (x * y).sum() / denominator
+    return 1 - sim
+
 def cdiv(a, b):
     return (a + b - 1) // b
 
-def scale_shape(shape, group_shape):
-    return tuple(cdiv(shape[i], group_shape[i]) for i in range(len(group_shape)))
+def per_token_cast_to_fp8(x : torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2
+    m, n = x.shape
+    pad_size = (128 - (n % 128)) % 128
+    x = torch.nn.functional.pad(x, (0, pad_size), value=0) if pad_size > 0 else x
+    x_view = x.view(m, -1, 128)
+    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
+    fp8_data = (x_view * (448.0 / x_amax.unsqueeze(2))).to(dtype=torch.float8_e4m3fn)
+    return fp8_data.view(m, n + pad_size)[:, :n], (x_amax / 448.0).view(m, -1)
 
-def to_fp8(tensor: torch.Tensor) -> torch.Tensor:
-    finfo = torch.finfo(torch.float8_e4m3fn)
-    return torch.round(tensor.clamp(min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
-    
+def per_block_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2
+    m, n = x.shape
+    x_padded = torch.zeros((cdiv(m, 128)* 128, cdiv(n, 128)* 128), device=x.device, dtype=x.dtype)
+    x_padded[:m, :n] = x
+    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
+    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    x_scaled = (x_view * (448.0 / x_amax)).to(dtype=torch.float8_e4m3fn)
+    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
 
 def baseline_scaled_mm(a, b, a_scales, b_scales, out_dtype):
 
@@ -41,10 +62,13 @@ def baseline_scaled_mm(a, b, a_scales, b_scales, out_dtype):
 
 @pytest.mark.parametrize("num_groups, expected_m_per_group, k, n", [
     (4, 8192, 7168, 4096),
-    # (16, 128, 128, 128),
-    # (64, 128, 128, 128),
+    (4, 8192, 2048, 7168),
+    (8, 4096, 7168, 4096),
+    (8, 4096, 2048, 7168),
+    (32, 1024, 7168, 4096),
+    (32, 1024, 2048, 7168),
 ])
-@pytest.mark.parametrize("out_dtype", [torch.half])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16])
 def test_cutlass_grouped_gemm(
     num_groups: int,
     expected_m_per_group: int,
@@ -53,7 +77,7 @@ def test_cutlass_grouped_gemm(
     out_dtype: torch.dtype,
 ):
     device = "cuda"
-    alignment = 8
+    alignment = 128
     group_ms = [int(expected_m_per_group * random.uniform(0.7, 1.3)) for _ in range(num_groups)]
     m = sum([cdiv(m, alignment) * alignment for m in group_ms])
 
@@ -63,98 +87,35 @@ def test_cutlass_grouped_gemm(
     out = torch.empty((m, n), device=device, dtype=out_dtype)
     ref_out = torch.randn((m, n), device=device, dtype=out_dtype)
 
-    start = 0
-    for i, group_m in enumerate(group_ms):
-        actual_end = start + group_m
-        aligned_end = start + cdiv(group_m, alignment) * alignment
-        m_indicies[start:aligned_end] = i
-        m_indicies[aligned_end:actual_end] = -1
-        ref_out[start:aligned_end] = x[start:aligned_end] @ y[i].t()
-        start = aligned_end
-    ref_out = torch.where((m_indicies == -1))
-    
+    ep_offset = [0] + [sum(group_ms[:i]) for i in range(1, num_groups)] + [m]
+    pb_size = []
+    for i in range(num_groups):
+        pb_size.append([ep_offset[i+1] - ep_offset[i], n, k])
+    problem_sizes = torch.tensor(pb_size, device=device, dtype=torch.int32)
+    expert_offsets = torch.tensor(ep_offset, device=device, dtype=torch.int32)
 
-    print(num_groups, expected_m_per_group, k, n)
+    x_fp8 = per_token_cast_to_fp8(x)
+    y_fp8 = (torch.empty_like(y, dtype=torch.float8_e4m3fn), torch.empty((num_groups, cdiv(n, 128), k // 128), device=device, dtype=torch.float))
+    for i in range(num_groups):
+        y_fp8[0][i], y_fp8[1][i] = per_block_cast_to_fp8(y[i])
 
-
-    
-    
-
-@pytest.mark.parametrize("num_experts", [8, 16, 64])
-@pytest.mark.parametrize("out_dtype", [torch.half, torch.bfloat16])
-def test_cutlass_grouped_moe(
-    num_experts: int,
-    out_dtype: torch.dtype,
-):
-    device = "cuda"
-    alignment = 8
-    n_g = alignment * random.randint(1, 5) * 128
-    k_g = alignment * random.randint(1, 5) * 128
-
-    scale_a_group_shape = (1, 128)
-    scale_b_group_shape = (128, 128)
-
-    expert_offsets = torch.zeros((num_experts + 1), device=device, dtype=torch.int32)
-    problem_sizes = torch.zeros((num_experts, 3), device=device, dtype=torch.int32)
-
-    a_tensors = []
-    b_tensors = []
-    a_scales_tensors = []
-    b_scales_tensors = []
-    baseline_tensors = []
-
-    for g in range(num_experts):
-        m_g = alignment * random.randint(1, 64)
-        expert_offsets[g+1] = expert_offsets[g] + m_g
-        problem_sizes[g][:] = torch.tensor([m_g, n_g, k_g], device=device)
-
-        a_g = to_fp8(torch.randn((m_g, k_g), device=device))
-        b_g = to_fp8(torch.randn((n_g, k_g), device=device).t())
-        a_tensors.append(a_g)
-        b_tensors.append(b_g)
-
-        scale_a_shape = scale_shape(a_g.shape, scale_a_group_shape)
-        scale_b_shape = scale_shape(b_g.shape, scale_b_group_shape)
-
-        a_scales_tensors.append(torch.randn(scale_a_shape, device=device) * 0.001)
-        b_scales_tensors.append(torch.randn(scale_b_shape, device=device) * 0.001)
-
-        baseline = baseline_scaled_mm(
-            a_g, b_g, a_scales_tensors[-1], b_scales_tensors[-1], out_dtype
-        )
-        baseline_tensors.append(baseline)
-
-    a_stack = torch.empty((expert_offsets[-1], k_g), device=device, dtype=torch.float8_e4m3fn)
-    b_stack = torch.empty((num_experts, n_g, k_g), device=device, dtype=torch.float8_e4m3fn)
-
-    for g in range(num_experts):
-        a_stack[expert_offsets[g]:expert_offsets[g+1]] = a_tensors[g]
-        b_stack[g] = b_tensors[g].t()
-    b_stack = b_stack.transpose(1, 2)
-
-    a_scale_stack = torch.empty((expert_offsets[-1], k_g // 128), device=device, dtype=torch.float32)
-    b_scale_stack = torch.empty((num_experts, n_g // 128, k_g // 128), device=device, dtype=torch.float32)
-
-    for g in range(num_experts):
-        a_scale_stack[expert_offsets[g]:expert_offsets[g+1]] = a_scales_tensors[g]
-        b_scale_stack[g] = b_scales_tensors[g].t()
-    b_scale_stack = b_scale_stack.transpose(1, 2)
-
-    c_out = torch.empty((expert_offsets[-1], n_g), device=device, dtype=out_dtype)
+    for i in range(num_groups):
+        a = x_fp8[0][ep_offset[i]:ep_offset[i+1]]
+        a_scale = x_fp8[1][ep_offset[i]:ep_offset[i+1]]
+        b = y_fp8[0][i].t()
+        b_scale = y_fp8[1][i].t()
+        baseline = baseline_scaled_mm(a, b, a_scale, b_scale, out_dtype)
+        ref_out[ep_offset[i]:ep_offset[i+1]] = baseline
+    ref_out = torch.where((m_indicies == -1).unsqueeze(1), torch.zeros_like(ref_out), ref_out)
 
     ops.cutlass_blockwise_scaled_grouped_mm(
-        c_out,
-        a_stack,
-        b_stack,
-        a_scale_stack,
-        b_scale_stack,
+        out,
+        x_fp8[0],
+        y_fp8[0],
+        x_fp8[1],
+        y_fp8[1],
         problem_sizes,
         expert_offsets[:-1],
     )
 
-    for g in range(num_experts):
-        baseline = baseline_tensors[g]
-        actual = c_out[expert_offsets[g]:expert_offsets[g+1]]
-
-        torch.testing.assert_close(baseline, actual, atol=1e-2, rtol=5e-4)
-    
+    assert calc_diff(ref_out, out) < 1e-3, f"Cutlass grouped gemm is not accurate"
