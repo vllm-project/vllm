@@ -57,7 +57,11 @@ def test_fused_moe(
     ep_size: int,
     dtype: torch.dtype,
     padding: bool,
+    monkeypatch,
 ):
+    current_platform.seed_everything(7)
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
+
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -83,6 +87,10 @@ def test_fused_moe(
                                            use_int4_w4a16=False,
                                            per_channel_quant=False,
                                            block_shape=None)
+
+    m_fused_moe = torch.compile(m_fused_moe,
+                                backend='inductor',
+                                fullgraph=True)
 
     with set_current_vllm_config(vllm_config):
         torch_output = torch_moe(a, w1, w2, score, topk, e_map)
