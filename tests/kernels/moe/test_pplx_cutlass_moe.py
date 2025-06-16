@@ -15,8 +15,6 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
 
-from tests.kernels.utils import torch_experts
-
 from .deepep_utils import ProcessGroupInfo, parallel_launch
 
 try:
