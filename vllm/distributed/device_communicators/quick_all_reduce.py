@@ -107,7 +107,7 @@ class QuickAllReduce:
         Performs an out-of-place all reduce.       
         """
         inp_size = inp.numel() * inp.element_size()
-        if inp_size >= self.max_size:
+        if inp_size > self.max_size:
             return None
 
         inp_dtype = inp.dtype
