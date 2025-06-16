@@ -4,13 +4,25 @@ import pytest
 import requests
 
 from vllm.config import PoolerConfig
-from vllm.entrypoints.metadata.embed import EmbedMetadata, EmbedOverview
+from vllm.entrypoints.metadata.embed import (EmbedBrief, EmbedDetail,
+                                             EmbedMetadata)
 
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
 MODEL_NAME = "intfloat/e5-small"
 
-expected_overview = EmbedOverview(
+expected_brief = EmbedBrief(
+    task="embed",
+    served_model_name=MODEL_NAME,
+    architectures=["BertModel"],
+    embedding_dim=384,
+    max_model_len=512,
+    is_matryoshka=False,
+    matryoshka_dimensions=None,
+    truncation_side="right",
+)
+
+expected_detail = EmbedDetail(
     task="embed",
     served_model_name=MODEL_NAME,
     architectures=["BertModel"],
@@ -37,9 +49,8 @@ def test_embed_offline_metadata(vllm_runner):
 
         assert isinstance(metadata, EmbedMetadata)
 
-        overview = metadata.overview
-
-        assert overview == expected_overview
+        assert metadata.brief == expected_brief
+        assert metadata.detail == expected_detail
 
         assert metadata.hf_config["architectures"][0] == "BertModel"
         assert metadata.pooler_config == PoolerConfig(pooling_type='MEAN',
@@ -61,9 +72,13 @@ def server():
 
 
 def test_embed_online_metadata(server):
-    url = server.url_for("metadata/overview")
+    url = server.url_for("metadata/brief")
     response = requests.get(url)
-    assert response.json() == expected_overview.model_dump()
+    assert response.json() == expected_brief.model_dump()
+
+    url = server.url_for("metadata/detail")
+    response = requests.get(url)
+    assert response.json() == expected_detail.model_dump()
 
     url = server.url_for("metadata/hf_config")
     response = requests.get(url)
