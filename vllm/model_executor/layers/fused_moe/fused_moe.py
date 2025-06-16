@@ -810,15 +810,15 @@ def get_default_config(
     return config
 
 
-def try_get_optimal_moe_config(
-    w1_shape: tuple[int, ...],
-    w2_shape: tuple[int, ...],
+def try_get_optimal_moe_config_list(
+    w1_shape: list[int],
+    w2_shape: list[int],
     top_k: int,
     dtype: Optional[str],
     M: int,
     is_marlin: bool = False,
     block_shape: Optional[list[int]] = None,
-):
+) -> tuple[int, int, int, int, int, int]:
     from vllm.model_executor.layers.fused_moe import get_config
     override_config = get_config()
     if override_config:
@@ -840,7 +840,59 @@ def try_get_optimal_moe_config(
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
                                         is_marlin, block_shape)
-    return config
+
+    return [config['BLOCK_SIZE_M'],
+            config['BLOCK_SIZE_N'],
+            config['BLOCK_SIZE_K'],
+            config['GROUP_SIZE_SIZE_M'],
+            config['num_warps'] if 'num_warps' in config else 0,
+            config['num_stages'] if 'num_stages' in config else 0]
+
+
+def try_get_optimal_moe_config_list_fake(
+    w1_shape: list[int],
+    w2_shape: list[int],
+    top_k: int,
+    dtype: Optional[str],
+    M: int,
+    is_marlin: bool = False,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[int, int, int, int]:
+    return [64, 64, 64, 8, 4, 3]
+
+
+direct_register_custom_op(
+    op_name="try_get_optimal_moe_config_list",
+    op_func=try_get_optimal_moe_config_list,
+    fake_impl=try_get_optimal_moe_config_list_fake,
+    mutates_args=[],
+)
+
+
+def try_get_optimal_moe_config(
+    w1_shape: list[int],
+    w2_shape: list[int],
+    top_k: int,
+    dtype: Optional[str],
+    M: int,
+    is_marlin: bool = False,
+    block_shape: Optional[list[int]] = None,
+) -> dict[str, int]:
+    block_m, block_n, block_k, group_m, num_warps, num_stages = torch.ops.vllm.try_get_optimal_moe_config_list(
+        w1_shape,
+        w2_shape,
+        top_k,
+        dtype,
+        M,
+        is_marlin,
+        block_shape,
+    )
+    return dict(BLOCK_SIZE_M=block_m,
+                BLOCK_SIZE_N=block_n,
+                BLOCK_SIZE_K=block_k,
+                GROUP_SIZE_M=group_m,
+                num_warps=num_warps,
+                num_stages=num_stages)
 
 
 def vllm_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
@@ -1181,6 +1233,32 @@ def fused_experts(hidden_states: torch.Tensor,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
+        )
+    elif True:
+        fn = modular_triton_fused_moe(
+            use_fp8_w8a8=use_fp8_w8a8,
+            use_int8_w8a8=use_int8_w8a8,
+            use_int8_w8a16=use_int8_w8a16,
+            use_int4_w4a16=use_int4_w4a16,
+            per_channel_quant=per_channel_quant,
+            block_shape=block_shape)
+
+        return fn(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_zp=w1_zp,
+            w2_zp=w2_zp,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
         )
     else:
         return dispatch_fused_experts_func(inplace)(
