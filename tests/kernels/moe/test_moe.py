@@ -9,11 +9,12 @@ from typing import Callable, Optional, Union
 
 import pytest
 import torch
+
 from torch.nn import Parameter
 from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
-from typing import Callable
+from typing import Callable, Optional
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
@@ -143,6 +144,9 @@ def test_fused_moe(
     # Setup test data
     #
 
+    #
+    # Setup test data
+    #
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -226,6 +230,62 @@ def test_fused_moe(
                m_fused_moe,
                use_compile=use_compile,
                use_cudagraph=use_cudagraph)
+
+
+def run_moe_test(
+    baseline_moe_fn: Callable,
+    moe_fn: Callable,
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    score: torch.Tensor,
+    topk: int,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    padding: bool = False,
+    use_compile: bool = False,
+    use_cudagraph: bool = False,
+    atol:float=2e-2,
+    rtol:float=0,
+):
+    baseline_output = baseline_moe_fn(a, w1, w2, score, topk, global_num_experts=global_num_experts, expert_map=expert_map)
+
+    # Pad the weight if moe padding is enabled
+    if padding:
+        w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
+        torch.cuda.empty_cache()
+        w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
+        torch.cuda.empty_cache()
+
+    if use_compile:
+        moe_fn = torch.compile(moe_fn, backend="inductor", fullgraph=True)
+
+    test_output = moe_fn(a,
+                         w1,
+                         w2,
+                         score,
+                         topk,
+                         global_num_experts=global_num_experts,
+                         expert_map=expert_map)
+
+
+    if use_cudagraph:
+        test_output.fill_(0)
+        stream = torch.cuda.Stream()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            test_output = moe_fn(a,
+                                 w1,
+                                 w2,
+                                 score,
+                                 topk,
+                                 global_num_experts=global_num_experts,
+                                 expert_map=expert_map)
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+    torch.testing.assert_close(test_output, baseline_output, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("m", [1, 32, 222])
