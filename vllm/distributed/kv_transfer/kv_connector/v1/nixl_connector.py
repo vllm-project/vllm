@@ -683,7 +683,12 @@ class NixlConnectorWorker:
         tp_ratio = divide(self._tp_size[self.engine_id],
                           self._tp_size[engine_id])
         assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
-        if self.use_mla:
+
+        # Handle tp_size>num_kv_heads: replicate KV cache.
+        total_num_kv_heads = self.model_config.get_total_num_kv_heads()
+        is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
+
+        if self.use_mla or is_kv_replicated:
             # With MLA the only difference is in the number of blocks.
             remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes)
@@ -708,10 +713,6 @@ class NixlConnectorWorker:
             assert self.dst_num_blocks[engine_id] == nixl_agent_meta.num_blocks
         else:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
-
-        # Handle tp_size>num_kv_heads: replicate KV cache.
-        total_num_kv_heads = self.model_config.get_total_num_kv_heads()
-        is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
 
         blocks_data = []
         # With homogeneous TP, D pulls the whole kv cache from corresponding
