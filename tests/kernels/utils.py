@@ -1063,7 +1063,8 @@ def torch_experts(a: torch.Tensor,
                   expert_map: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert (global_num_experts == -1
             or (global_num_experts == w1.shape[0] and expert_map is None)
-            or global_num_experts == expert_map.shape[0])
+            or (expert_map is not None
+                and global_num_experts == expert_map.shape[0]))
     topk = topk_ids.shape[1]
     B, D = a.shape
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
