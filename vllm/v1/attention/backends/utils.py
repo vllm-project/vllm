@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import abc
+import functools
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar
@@ -11,6 +12,13 @@ import torch
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
+
+import vllm.envs as envs
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    get_kv_connector_cache_layout)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -119,3 +127,16 @@ def validate_kv_sharing_target(current_layer_name, target_layer_name,
         raise ValueError(
             error_msg +
             f"must be the same type as the current layer ({expected}).")
+
+
+@functools.lru_cache
+def get_kv_cache_layout():
+    # Override with format specified by the user.
+    cache_layout = envs.VLLM_KV_CACHE_LAYOUT
+    if cache_layout is None:
+        cache_layout = get_kv_connector_cache_layout()
+    else:
+        logger.info_once("`FLASHINFER_KV_CACHE_LAYOUT` environment variable " \
+        "detected. Setting KV cache layout to %s.", cache_layout)
+
+    return cache_layout
