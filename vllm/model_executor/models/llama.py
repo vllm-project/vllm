@@ -30,7 +30,6 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
@@ -198,16 +197,6 @@ class LlamaAttention(nn.Module):
                     f"{type(interleaved_sliding_window)} is not supported.")
         else:
             sliding_window = None
-
-        # For CUDA devices and Navi4x, attn_fp8 will be set to false.
-        use_fp8 = isinstance(
-            quant_config, Fp8Config) or (isinstance(quant_config, QuarkConfig)
-                                         and quant_config.is_fp8_w8a8())
-        self.attn_fp8_out = (envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT
-                             and envs.VLLM_USE_TRITON_FLASH_ATTN
-                             and current_platform.is_fp8_fnuz() and use_fp8)
-        if envs.VLLM_USE_V1 and not envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
-            self.attn_fp8_out = False
 
         self.attn = Attention(
             self.num_heads,
@@ -678,10 +667,3 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
-
-    def process_weights_after_loading(self) -> None:
-        for layer in self.model.layers:
-            assert isinstance(layer, LlamaDecoderLayer)
-            if layer.self_attn.attn_fp8_out:
-                layer.self_attn.attn._out_scale = \
-                    layer.self_attn.o_proj.input_scale

@@ -76,6 +76,10 @@ class TritonAttentionBackend(AttentionBackend):
 
 class TritonAttentionImpl(AttentionImpl):
 
+    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
+                                     group_shape: tuple[int, int]):
+        return True
+
     def __init__(
         self,
         num_heads: int,
@@ -114,7 +118,6 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.use_irope = use_irope
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         support_head_sizes = TritonAttentionBackend.get_supported_head_sizes()
@@ -142,6 +145,7 @@ class TritonAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -258,7 +262,7 @@ class TritonAttentionImpl(AttentionImpl):
                                          alibi_slopes=self.alibi_slopes,
                                          sliding_window=self.sliding_window[0],
                                          sm_scale=self.scale,
-                                         fp8_out_scale=layer._out_scale)
+                                         output_scale=output_scale)
 
         else:
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
@@ -281,6 +285,6 @@ class TritonAttentionImpl(AttentionImpl):
                 q_descale=None,  # Not supported
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
-            )
+                output_scale=output_scale)
 
         return output

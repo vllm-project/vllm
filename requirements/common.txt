@@ -8,7 +8,7 @@ tqdm
 blake3
 py-cpuinfo
 transformers >= 4.51.1
-huggingface-hub[hf_xet] >= 0.32.0  # Required for Xet downloads.
+huggingface-hub[hf_xet] >= 0.33.0  # Required for Xet downloads.
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
@@ -31,7 +31,7 @@ pyzmq >= 25.0.0
 msgspec
 gguf >= 0.13.0
 importlib_metadata; python_version < '3.10'
-mistral_common[opencv] >= 1.5.4
+mistral_common[opencv] >= 1.6.2
 opencv-python-headless >= 4.11.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
@@ -44,7 +44,3 @@ watchfiles # required for http server to monitor the updates of TLS files
 python-json-logger # Used by logging as per examples/others/logging_configuration.md
 scipy # Required for phi-4-multimodal-instruct
 ninja # Required for xgrammar, rocm, tpu, xpu
-opentelemetry-sdk>=1.26.0  # vllm.tracing
-opentelemetry-api>=1.26.0  # vllm.tracing
-opentelemetry-exporter-otlp>=1.26.0  # vllm.tracing
-opentelemetry-semantic-conventions-ai>=0.4.1  # vllm.tracing

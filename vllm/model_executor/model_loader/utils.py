@@ -58,7 +58,9 @@ def initialize_model(
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
-        with set_current_vllm_config(vllm_config, check_compile=True):
+        with set_current_vllm_config(vllm_config,
+                                     check_compile=True,
+                                     prefix=prefix):
             return model_class(vllm_config=vllm_config, prefix=prefix)
 
     msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
@@ -86,7 +88,9 @@ def initialize_model(
         kwargs["lora_config"] = vllm_config.lora_config
     if "scheduler_config" in all_params:
         kwargs["scheduler_config"] = vllm_config.scheduler_config
-    with set_current_vllm_config(vllm_config, check_compile=True):
+    with set_current_vllm_config(vllm_config,
+                                 check_compile=True,
+                                 prefix=prefix):
         return model_class(**kwargs)
 
 
@@ -117,10 +121,6 @@ def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
-
-    if hasattr(model, "process_weights_after_loading"):
-        with device_loading_context(model, target_device):
-            model.process_weights_after_loading()
 
 
 @contextmanager
