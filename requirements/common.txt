@@ -2,7 +2,7 @@ regex # Replace re for higher-performance regex matching
 cachetools
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
-numpy
+numpy==1.26.4
 requests >= 2.26.0
 tqdm
 blake3
