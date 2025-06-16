@@ -565,17 +565,6 @@ class ModelConfig:
 
         self.pooler_config = self._init_pooler_config()
 
-        # Defer "auto" dtype resolution to the worker, since ModelConfig may be
-        # initialized in a process without access to the current platform.
-        if self.dtype != "auto":
-            self.dtype = _get_and_verify_dtype(
-                self.model,
-                self.hf_config,
-                self.dtype,
-                is_pooling_model=self.runner_type == "pooling",
-                revision=self.revision,
-            )
-
         # Workaround for Gemma 2 which uses interleaved sliding window
         # attention, but it's not specified in its config. TODO: remove this
         # when Gemma 2 is fixed in Transformers.
@@ -634,6 +623,20 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    def resolve_dtype(self):
+        self.dtype = _get_and_verify_dtype(
+            self.model,
+            self.hf_config,
+            self.dtype,
+            is_pooling_model=self.runner_type == "pooling",
+            revision=self.revision,
+        )
+
+        if envs.VLLM_USE_V1 and self.dtype not in V1_SUPPORTED_DTYPES:
+            raise ValueError(f"dtype 'auto' resolved to {self.dtype}, "
+                             f"which is not supported in V1. "
+                             f"Supported dtypes are {V1_SUPPORTED_DTYPES}.")
 
     @field_validator("quantization", mode="before")
     @classmethod
@@ -938,8 +941,7 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
-            from vllm.platforms import current_platform
-            current_platform.verify_quantization(self.quantization)
+
             if self.quantization not in optimized_quantization_methods:
                 logger.warning(
                     "%s quantization is not fully "
@@ -4360,27 +4362,10 @@ class VllmConfig:
             model_config: ModelConfig,
             load_config: LoadConfig) -> Optional[QuantizationConfig]:
         """Get the quantization config."""
-        from vllm.platforms import current_platform
         if model_config.quantization is not None:
             from vllm.model_executor.model_loader.weight_utils import (
                 get_quant_config)
             quant_config = get_quant_config(model_config, load_config)
-            capability_tuple = current_platform.get_device_capability()
-
-            if capability_tuple is not None:
-                capability = capability_tuple.to_int()
-                if capability < quant_config.get_min_capability():
-                    raise ValueError(
-                        f"The quantization method {model_config.quantization} "
-                        "is not supported for the current GPU. Minimum "
-                        f"capability: {quant_config.get_min_capability()}. "
-                        f"Current capability: {capability}.")
-            supported_dtypes = quant_config.get_supported_act_dtypes()
-            if model_config.dtype not in supported_dtypes:
-                raise ValueError(
-                    f"{model_config.dtype} is not supported for quantization "
-                    f"method {model_config.quantization}. Supported dtypes: "
-                    f"{supported_dtypes}")
             return quant_config
         return None
 
@@ -4409,6 +4394,73 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
+    def resolve_config_with_hardware(self):
+        """        
+        This method performs final configuration steps that depend on the 
+        current platform's hardware capabilities and resolves interdependencies 
+        between configuration components.
+        
+        Raises:
+            ValueError: If dtype is incompatible with V1, quantization method
+                       is unsupported by hardware, or dtype is incompatible
+                       with quantization method.
+        
+        Note:
+            This method should be called during initialization of a worker with
+            access to accelerator hardware, if it exists.
+        """
+        # Resolve model config dtype
+        model_config = self.model_config
+        model_config.resolve_dtype()
+
+        # LoRA config dtype depends on resolved model config dtype
+        if self.lora_config:
+            self.lora_config.verify_with_model_config(model_config)
+
+        # Resolve model config against cache config
+        if model_config.use_mla:
+            from vllm.attention.ops.flashmla import is_flashmla_supported
+            use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None
+                            or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
+            if (use_flashmla and is_flashmla_supported()[0]
+                    and self.cache_config.block_size != 64):
+                self.cache_config.block_size = 64
+                logger.info(
+                    "Forcing kv cache block size 64 for FlashMLA backend.")
+
+        # Resolve quantization config against model config
+        quant_config = self.quant_config
+        if quant_config:
+            from vllm.platforms import current_platform
+
+            capability_tuple = current_platform.get_device_capability()
+            if capability_tuple is not None:
+                capability = capability_tuple.to_int()
+                if capability < quant_config.get_min_capability():
+                    raise ValueError(
+                        f"The quantization method {model_config.quantization} "
+                        "is not supported for the current GPU. Minimum "
+                        f"capability: {quant_config.get_min_capability()}. "
+                        f"Current capability: {capability}.")
+
+            supported_dtypes = quant_config.get_supported_act_dtypes()
+            if model_config.dtype not in supported_dtypes:
+                raise ValueError(
+                    f"{model_config.dtype} is not supported for quantization "
+                    f"method {model_config.quantization}. Supported dtypes: "
+                    f"{supported_dtypes}")
+
+            current_platform.verify_quantization(model_config.quantization)
+
+        # Check Turing tensor core limitation
+        if self.scheduler_config.chunked_prefill_enabled and \
+            model_config.dtype == torch.float32 and \
+            current_platform.get_device_capability() == (7, 5):
+            logger.warning_once(
+                "Turing devices tensor cores do not support float32 matmul. "
+                "To workaround this limitation, vLLM will set 'ieee' input "
+                "precision for chunked prefill triton kernels.")
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
@@ -4424,7 +4476,6 @@ class VllmConfig:
 
         if self.lora_config is not None:
             self.lora_config.verify_with_cache_config(self.cache_config)
-            self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_lora_support()
         if self.prompt_adapter_config is not None:
             self.prompt_adapter_config.verify_with_model_config(
@@ -4433,16 +4484,6 @@ class VllmConfig:
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
-
-        from vllm.platforms import current_platform
-        if self.model_config is not None and \
-            self.scheduler_config.chunked_prefill_enabled and \
-            self.model_config.dtype == torch.float32 and \
-            current_platform.get_device_capability() == (7, 5):
-            logger.warning_once(
-                "Turing devices tensor cores do not support float32 matmul. "
-                "To workaround this limitation, vLLM will set 'ieee' input "
-                "precision for chunked prefill triton kernels.")
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
