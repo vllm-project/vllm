@@ -33,6 +33,9 @@ class BaseModelLoader(ABC):
         """Load a model with the given configurations."""
         device_config = vllm_config.device_config
         target_device = torch.device(device_config.device)
+
+        # Model weights may be loaded in place, dtype not resolved for config
+        model_config.resolve_dtype()
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config,

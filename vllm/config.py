@@ -565,6 +565,18 @@ class ModelConfig:
 
         self.pooler_config = self._init_pooler_config()
 
+        # Defer auto dtype resolution until resolve_config_with_hardware()
+        # running on the final accelerator, where current_platform is set.
+        # For non-auto dtypes, we resolve them to torch.dtype immediately.
+        if self.dtype != "auto":
+            self.dtype = _get_and_verify_dtype(
+                self.model,
+                self.hf_config,
+                self.dtype,
+                is_pooling_model=self.runner_type == "pooling",
+                revision=self.revision,
+            )
+
         # Workaround for Gemma 2 which uses interleaved sliding window
         # attention, but it's not specified in its config. TODO: remove this
         # when Gemma 2 is fixed in Transformers.
@@ -4450,7 +4462,8 @@ class VllmConfig:
                     f"method {model_config.quantization}. Supported dtypes: "
                     f"{supported_dtypes}")
 
-            current_platform.verify_quantization(model_config.quantization)
+            if model_config.quantization is not None:
+                current_platform.verify_quantization(model_config.quantization)
 
         # Check Turing tensor core limitation
         if self.scheduler_config.chunked_prefill_enabled and \
