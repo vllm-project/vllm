@@ -115,7 +115,6 @@ class OpenAIServingCompletion(OpenAIServing):
         async def _chunk_generator():
             num_chunks = 0
             should_stop = False
-            output = None
 
             # TODO(@tanuj): calc created tokens
             while num_chunks < max_chunks and not should_stop:
