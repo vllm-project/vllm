@@ -897,7 +897,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # leave the layout choice to the backend. Mind that backends may only
     # implement and support a subset of all possible layouts.
     "VLLM_KV_CACHE_LAYOUT":
-    lambda: os.getenv("VLLM_KV_CACHE_LAYOUT", None)
+    lambda: os.getenv("VLLM_KV_CACHE_LAYOUT", None),
+    
+    # If set, use the TRTLLM Decode Attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_DECODE_ATTENTION":
+    lambda: bool(int(os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

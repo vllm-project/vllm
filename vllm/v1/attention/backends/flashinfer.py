@@ -10,7 +10,7 @@ import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
-
+from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
@@ -425,6 +425,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         page_size = self.kv_cache_spec.block_size
         device = self.runner.device
         qo_indptr = common_attn_metadata.query_start_loc
+        max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = self.block_table.get_device_tensor()[:num_reqs]
         slot_mapping = self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
@@ -663,12 +664,30 @@ class FlashInferImpl(AttentionImpl):
             assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
                                                        or 0.0)
             assert decode_wrapper._sm_scale == self.scale
-            decode_wrapper.run(
-                decode_query,
-                kv_cache.permute(*stride_order),
-                k_scale=layer._k_scale_float,
-                v_scale=layer._v_scale_float,
-                out=output[:num_decode_tokens],
+           
+            if envs.LLM_USE_TRTLLM_DECODE_ATTENTION:
+                output[:num_decode_tokens] = trtllm_batch_decode_with_kv_cache(
+                    query=decode_query,
+                    kv_cache=kv_cache,
+                    workspace_buffer=decode_wrapper._get_workspace_buffer(),
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_kv_heads,
+                    scale=self.scale,
+                    block_tables=decode_wrapper.block_tables,
+                    seq_lens=decode_wrapper.seq_lens_tensor,
+                    block_size=decode_wrapper.page_size,
+                    max_seq_len=kv_cache.shape[-3],
+                    kv_cache_dtype=decode_wrapper.kv_cache_dtype,
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
+                )
+            else:
+                decode_wrapper.run(
+                    decode_query,
+                    kv_cache.permute(*stride_order),
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
+                    out=output[:num_decode_tokens],
             )
 
         return output_padded
