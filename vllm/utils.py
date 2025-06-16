@@ -40,6 +40,7 @@ from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
                              Hashable, Iterable, Iterator, KeysView, Mapping)
+from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
@@ -64,6 +65,7 @@ import zmq.asyncio
 from packaging import version
 from packaging.version import Version
 from torch.library import Library
+from transformers.tokenization_utils_base import BatchEncoding
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
@@ -508,6 +510,176 @@ def get_cpu_memory() -> int:
 
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
+
+
+class AsyncMicrobatchTokenizer:
+    """Asynchronous tokenizer with micro-batching.
+
+    A single background task pulls pending encode / decode requests from
+    an ``asyncio.Queue`` and groups them into micro-batches.  The actual
+    blocking tokenizer call is executed inside a ``ThreadPoolExecutor`` 
+    with a single worker, so the event-loop never blocks.
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        max_batch_size: int = 32,
+        batch_wait_timeout_s: float = 0.002,
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.max_batch_size = max_batch_size
+        self.batch_wait_timeout_s = batch_wait_timeout_s
+
+        self._queue: Optional[asyncio.Queue[tuple[str, object, dict,
+                                                  asyncio.Future]]] = None
+
+        # Single worker that owns the blocking tokenizer.
+        self._executor = ThreadPoolExecutor(max_workers=1)
+
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+        # Handle to the currently running batcher task (if any).
+        self._batcher_task: Optional[asyncio.Task] = None
+
+    # ------------------------------------------------------------------
+    # Public async API
+    # ------------------------------------------------------------------
+    async def __call__(self, prompt, **kwargs):
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._ensure_queue_and_batcher(loop)
+        assert self._queue is not None
+        await self._queue.put(("encode", prompt, kwargs, fut))
+        return await fut
+
+    async def decode(self, token_ids, **kwargs):
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._ensure_queue_and_batcher(loop)
+        assert self._queue is not None
+        await self._queue.put(("decode", token_ids, kwargs, fut))
+        return await fut
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _ensure_queue_and_batcher(self, loop: asyncio.AbstractEventLoop):
+        if self._loop is not loop:
+            self._queue = asyncio.Queue()
+            self._loop = loop
+            self._batcher_task = None
+
+        if self._batcher_task is None or self._batcher_task.done():
+            self._batcher_task = loop.create_task(self._batch_loop())
+
+    async def _batch_loop(self):
+        """Runs until the queue stays empty long enough to finish."""
+        loop = asyncio.get_running_loop()
+
+        while True:
+            try:
+                assert self._queue is not None
+                first_item = await self._queue.get()
+            except asyncio.CancelledError:
+                return
+
+            batch = [first_item]
+            deadline = loop.time() + self.batch_wait_timeout_s
+
+            while len(batch) < self.max_batch_size:
+                timeout = deadline - loop.time()
+                if timeout <= 0:
+                    break
+                try:
+                    assert self._queue is not None
+                    item = await asyncio.wait_for(self._queue.get(), timeout)
+                    batch.append(item)
+                except asyncio.TimeoutError:
+                    break
+
+            # Split by op type
+            encode_items = [it for it in batch if it[0] == "encode"]
+            decode_items = [it for it in batch if it[0] == "decode"]
+
+            # ---------------- Encode ----------------
+            if encode_items:
+                prompts = [it[1] for it in encode_items]
+                kwargs_list = [it[2] for it in encode_items]
+
+                # If every request uses identical kwargs we can run a single
+                # batched tokenizer call for a big speed-up.
+                can_batch = all(kw == kwargs_list[0] for kw in kwargs_list)
+
+                def _encode_batch_single(prompts=prompts,
+                                         kwargs_list=kwargs_list):
+                    """Tokenize each prompt individually (fallback)."""
+                    return [
+                        self.tokenizer(p, **kw)
+                        for p, kw in zip(prompts, kwargs_list)
+                    ]
+
+                def _encode_batch_group(prompts=prompts,
+                                        kwargs_list=kwargs_list):
+                    """Tokenize the micro-batch in one call 
+                    and split results."""
+                    grouped = self.tokenizer(prompts, **kwargs_list[0])
+                    single_encodings = []
+                    for i in range(len(prompts)):
+                        data_i = {k: v[i] for k, v in grouped.items()}
+                        single_encodings.append(BatchEncoding(data_i))
+                    return single_encodings
+
+                encode_fn = _encode_batch_group if can_batch and len(
+                    prompts) > 1 else _encode_batch_single
+
+                try:
+                    results = await loop.run_in_executor(
+                        self._executor, encode_fn)
+                    for (_, _, _, fut), res in zip(encode_items, results):
+                        if not fut.done():
+                            fut.set_result(res)
+                except Exception as e:  # pragma: no cover – exception path
+                    for (_, _, _, fut) in encode_items:
+                        if not fut.done():
+                            fut.set_exception(e)
+
+            # ---------------- Decode ----------------
+            if decode_items:
+                token_id_batches = [it[1] for it in decode_items]
+                decode_kwargs = decode_items[0][2]
+
+                def _decode_batch(token_id_batches=token_id_batches,
+                                  decode_kwargs=decode_kwargs):
+                    return self.tokenizer.batch_decode(token_id_batches,
+                                                       **decode_kwargs)
+
+                try:
+                    results = await loop.run_in_executor(
+                        self._executor, _decode_batch)
+                    for (_, _, _, fut), res in zip(decode_items, results):
+                        if not fut.done():
+                            fut.set_result(res)
+                except Exception as e:
+                    for (_, _, _, fut) in decode_items:
+                        if not fut.done():
+                            fut.set_exception(e)
+
+            # If queue is empty, exit and let new requests spawn a fresh task
+            if self._queue is not None and self._queue.empty():
+                return
+
+    def __del__(self):
+        if self._batcher_task is None:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        if loop.is_running():
+            self._batcher_task.cancel()
 
 
 def make_async(
