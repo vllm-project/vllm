@@ -5,19 +5,22 @@ title: Using Kubernetes
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 
-* [Deployment with CPUs](#deployment-with-cpus)
-* [Deployment with GPUs](#deployment-with-gpus)
+- [Deployment with CPUs](#deployment-with-cpus)
+- [Deployment with GPUs](#deployment-with-gpus)
+- [Troubleshooting](#troubleshooting)
+  - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
+- [Conclusion](#conclusion)
 
 Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
-* [Helm](frameworks/helm.md)
-* [InftyAI/llmaz](integrations/llmaz.md)
-* [KServe](integrations/kserve.md)
-* [kubernetes-sigs/lws](frameworks/lws.md)
-* [meta-llama/llama-stack](integrations/llamastack.md)
-* [substratusai/kubeai](integrations/kubeai.md)
-* [vllm-project/aibrix](https://github.com/vllm-project/aibrix)
-* [vllm-project/production-stack](integrations/production-stack.md)
+- [Helm](frameworks/helm.md)
+- [InftyAI/llmaz](integrations/llmaz.md)
+- [KServe](integrations/kserve.md)
+- [kubernetes-sigs/lws](frameworks/lws.md)
+- [meta-llama/llama-stack](integrations/llamastack.md)
+- [substratusai/kubeai](integrations/kubeai.md)
+- [vllm-project/aibrix](https://github.com/vllm-project/aibrix)
+- [vllm-project/production-stack](integrations/production-stack.md)
 
 ## Deployment with CPUs
 
@@ -350,6 +353,17 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       ```
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
+
+## Troubleshooting
+
+### Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"
+
+If the startup or readiness probe failureThreshold is too low for the time needed to startup the server, Kubernetes scheduler will kill the container. A couple of indications that this has happened:
+
+1. container log contains "KeyboardInterrupt: terminated"
+2. `kubectl get events` shows message `Container $NAME failed startup probe, will be restarted`
+
+To mitigate, increase the failureThreshold to allow more time for the model server to start serving. You can identify an ideal failureThreshold by removing the probes from the manifest and measuring how much time it takes for the model server to show it's ready to serve.
 
 ## Conclusion
 

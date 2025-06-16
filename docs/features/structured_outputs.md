@@ -149,7 +149,7 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-See also: [full example](../../examples/online_serving/structured_outputs)
+See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
 
 ## Reasoning Outputs
 
@@ -190,7 +190,7 @@ print("reasoning_content: ", completion.choices[0].message.reasoning_content)
 print("content: ", completion.choices[0].message.content)
 ```
 
-See also: [full example](../../examples/online_serving/structured_outputs)
+See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
 
 ## Experimental Automatic Parsing (OpenAI API)
 
@@ -311,4 +311,4 @@ outputs = llm.generate(
 print(outputs[0].outputs[0].text)
 ```
 
-See also: [full example](../../examples/online_serving/structured_outputs)
+See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
