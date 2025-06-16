@@ -273,8 +273,17 @@ class FlexAttentionMetadataBuilder(
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
-    def build(self, common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        decode_only_common_attn_metadata: Optional[
+            CommonAttentionMetadata] = None,
+    ):
+        if decode_only_common_attn_metadata is not None:
+            raise NotImplementedError(
+                "FlexAttention backend does not support decode-only "
+                "attention yet.")
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len

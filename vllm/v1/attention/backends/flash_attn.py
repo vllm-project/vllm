@@ -131,6 +131,8 @@ class FlashAttentionMetadata:
 
     local_attn_metadata: Optional[LocalAttentionMetadata] = None
 
+    decode_only_attn_metadata: Optional["FlashAttentionMetadata"] = None
+
 
 def _get_sliding_window_configs(
         vllm_config: VllmConfig) -> set[Optional[tuple[int, int]]]:
@@ -197,9 +199,19 @@ class FlashAttentionMetadataBuilder(
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
     def build(
-        self, common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        decode_only_common_attn_metadata: Optional[
+            CommonAttentionMetadata] = None,
     ) -> FlashAttentionMetadata:
+        decode_only_attn_metadata = None
+        if decode_only_common_attn_metadata is not None:
+            decode_only_attn_metadata = self.build(
+                common_prefix_len=0,  # disable cascade attention
+                common_attn_metadata=decode_only_common_attn_metadata,
+            )
+
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -257,10 +269,15 @@ class FlashAttentionMetadataBuilder(
         # for local attention
         local_attn_metadata = None
         if self.runner.attention_chunk_size is not None:
+            query_start_loc_np = (common_attn_metadata.query_start_loc_np
+                                  if common_attn_metadata.query_start_loc_np
+                                  is not None else
+                                  self.runner.query_start_loc_np[:num_reqs +
+                                                                 1])
             seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
                 virt_block_table_tensor = make_local_attention_virtual_batches(
                     self.runner.attention_chunk_size,
-                    self.runner.query_start_loc_np[:num_reqs + 1],
+                    query_start_loc_np,
                     self.runner.seq_lens_np[:num_reqs],
                     block_table_tensor,
                     self.block_size,
@@ -364,6 +381,7 @@ class FlashAttentionMetadataBuilder(
             local_attn_metadata=local_attn_metadata,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
+            decode_only_attn_metadata=decode_only_attn_metadata,
         )
         return attn_metadata
 
@@ -470,6 +488,11 @@ class FlashAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output
+
+        if (self.kv_sharing_target_layer_name is not None
+                and attn_metadata.decode_only_attn_metadata is not None):
+            # Override with decode-only attention metadata
+            attn_metadata = attn_metadata.decode_only_attn_metadata
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in

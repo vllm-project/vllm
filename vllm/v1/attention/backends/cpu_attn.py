@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+from typing import Optional
+
 import numpy as np
 import torch
 
@@ -119,11 +121,22 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
         return True
 
-    def build(self, common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        decode_only_common_attn_metadata: Optional[
+            CommonAttentionMetadata] = None,
+    ):
+        if decode_only_common_attn_metadata is not None:
+            raise NotImplementedError(
+                "CPU backend does not support decode-only attention yet.")
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
+        query_start_loc_np = (common_attn_metadata.query_start_loc_np
+                              if common_attn_metadata.query_start_loc_np
+                              is not None else self.runner.query_start_loc_np)
 
         runner = self.runner
         block_table = self.block_table
@@ -135,8 +148,8 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         ) if num_prompt_req < num_reqs else 0
         self.seq_start_loc_np[0] = 0
         np.cumsum(seq_lens_np, out=self.seq_start_loc_np[1:num_reqs + 1])
-        num_prefill_tokens = runner.query_start_loc_np[num_prompt_req].item()
-        num_decode_tokens = runner.query_start_loc_np[num_reqs].item(
+        num_prefill_tokens = query_start_loc_np[num_prompt_req].item()
+        num_decode_tokens = query_start_loc_np[num_reqs].item(
         ) - num_prefill_tokens
         slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].long()
         block_table_tensor = block_table.get_device_tensor()
