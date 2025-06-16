@@ -47,7 +47,8 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available, round_up)
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+                                              CommonAttentionMetadata,
+                                              compute_decode_only_common_attn_metadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec, MambaSpec,
@@ -696,45 +697,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.query_start_loc_cpu[num_reqs].item())
 
         query_start_loc = self.query_start_loc[:num_reqs + 1]
+        query_start_loc_np = self.query_start_loc_np[:num_reqs + 1]
         seq_lens = self.seq_lens[:num_reqs]
 
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc,
+            query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
         )
-
-        attn_metadata: dict[str, Any] = {}
-        # Prepare the attention metadata for each KV cache group and make layers
-        # in the same group share the same metadata.
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(
-                self.kv_cache_config.kv_cache_groups):
-
-            # Prepare for cascade attention if enabled & beneficial.
-            common_prefix_len = 0
-            builder = self.attn_metadata_builders[kv_cache_group_id]
-            if self.cascade_attn_enabled:
-                common_prefix_len = self._compute_cascade_attn_prefix_len(
-                    num_scheduled_tokens,
-                    scheduler_output.
-                    num_common_prefix_blocks[kv_cache_group_id],
-                    kv_cache_group_spec.kv_cache_spec,
-                    builder,
-                )
-
-            attn_metadata_i = (builder.build(
-                common_prefix_len=common_prefix_len,
-                common_attn_metadata=common_attn_metadata,
-            ))
-
-            for layer_name in kv_cache_group_spec.layer_names:
-                attn_metadata[layer_name] = attn_metadata_i
-
-        attention_cuda_graphs = all(
-            b.can_run_in_cudagraph(common_attn_metadata)
-            for b in self.attn_metadata_builders)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -759,6 +732,53 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
+
+        decode_only_common_attn_metadata = None
+        if envs.VLLM_V1_KV_SHARING_SKIP_PREFILL:
+            decode_only_common_attn_metadata = (
+                compute_decode_only_common_attn_metadata(
+                    num_reqs=num_reqs,
+                    # TODO(sarckk): logits_indices contains tokens for partial
+                    # prefill requests, so we can optimize further by only
+                    # considering tokens if its index is more than or equal to
+                    # input_batch.num_prompt_tokens[req_index], which correspond
+                    # to positions that are required for sampling output tokens
+                    decode_indices=logits_indices,
+                    query_start_loc=query_start_loc,
+                    seq_lens=seq_lens,
+                ))
+
+        attn_metadata: dict[str, Any] = {}
+        # Prepare the attention metadata for each KV cache group and make layers
+        # in the same group share the same metadata.
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups):
+
+            # Prepare for cascade attention if enabled & beneficial.
+            common_prefix_len = 0
+            builder = self.attn_metadata_builders[kv_cache_group_id]
+            if self.cascade_attn_enabled:
+                common_prefix_len = self._compute_cascade_attn_prefix_len(
+                    num_scheduled_tokens,
+                    scheduler_output.
+                    num_common_prefix_blocks[kv_cache_group_id],
+                    kv_cache_group_spec.kv_cache_spec,
+                    builder,
+                )
+
+            attn_metadata_i = (builder.build(
+                common_prefix_len=common_prefix_len,
+                common_attn_metadata=common_attn_metadata,
+                decode_only_common_attn_metadata=
+                decode_only_common_attn_metadata,
+            ))
+
+            for layer_name in kv_cache_group_spec.layer_names:
+                attn_metadata[layer_name] = attn_metadata_i
+
+        attention_cuda_graphs = all(
+            b.can_run_in_cudagraph(common_attn_metadata)
+            for b in self.attn_metadata_builders)
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1358,13 +1378,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                skip_cuda_graphs=skip_cuda_graphs,
-        ):
+        decode_indices = (logits_indices
+                          if envs.VLLM_V1_KV_SHARING_SKIP_PREFILL else None)
+        with set_forward_context(attn_metadata,
+                                 self.vllm_config,
+                                 num_tokens=num_input_tokens,
+                                 num_tokens_across_dp=num_tokens_across_dp,
+                                 skip_cuda_graphs=skip_cuda_graphs,
+                                 decode_indices=decode_indices):
             self.maybe_setup_kv_connector(scheduler_output)
 
             model_output = self.model(
@@ -1961,6 +1982,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata = {}
 
             query_start_loc = self.query_start_loc[:num_reqs + 1]
+            query_start_loc_np = self.query_start_loc_np[:num_reqs + 1]
             # Make sure max_model_len is used at the graph capture time.
             self.seq_lens_np[:num_reqs] = self.max_model_len
             self.seq_lens_np[num_reqs:] = 0
@@ -1970,6 +1992,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
+                query_start_loc_np=query_start_loc_np,
                 seq_lens=seq_lens,
                 num_reqs=num_reqs,
                 num_actual_tokens=num_tokens,
