@@ -167,6 +167,7 @@ struct DeviceComms {
     }
 
     // Configuration.
+    uint32_t msg_size = N * sizeof(T);
     uint64_t num_blocks = divceil(msg_size, kTileSize);
     uint64_t grid = min(kMaxNumBlocks, num_blocks);
     auto quant_level_ = static_cast<QuickReduceQuantLevel>(quant_level);
