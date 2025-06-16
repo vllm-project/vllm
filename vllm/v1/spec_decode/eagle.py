@@ -138,15 +138,17 @@ class EagleProposer:
             max_query_len = query_lens.max().item()
 
             common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=cu_num_tokens, seq_lens=seq_lens)
+                query_start_loc=cu_num_tokens,
+                seq_lens=seq_lens,
+                num_reqs=batch_size,
+                num_actual_tokens=num_tokens,
+                max_query_len=max_query_len,
+            )
 
             assert self.runner is not None
 
             # FIXME: need to consider multiple kv_cache_groups
             attn_metadata = self.runner.attn_metadata_builder.build(
-                num_reqs=batch_size,
-                num_actual_tokens=num_tokens,
-                max_query_len=max_query_len,
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
             )
@@ -320,8 +322,10 @@ class EagleProposer:
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
-        self.model = get_model(vllm_config=self.vllm_config,
-                               model_config=draft_model_config)
+        from vllm.compilation.backends import set_model_tag
+        with set_model_tag("eagle_head"):
+            self.model = get_model(vllm_config=self.vllm_config,
+                                   model_config=draft_model_config)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
