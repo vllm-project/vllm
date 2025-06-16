@@ -11,27 +11,21 @@ MODELS = [
     ########## BertModel
     EmbedModelInfo("thenlper/gte-large",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=True),
     EmbedModelInfo("thenlper/gte-base",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=False),
     EmbedModelInfo("thenlper/gte-small",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=False),
     EmbedModelInfo("thenlper/gte-large-zh",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=False),
     EmbedModelInfo("thenlper/gte-base-zh",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=False),
     EmbedModelInfo("thenlper/gte-small-zh",
                    architecture="BertModel",
-                   dtype="float32",
                    enable_test=False),
     ########### NewModel
     EmbedModelInfo("Alibaba-NLP/gte-multilingual-base",
@@ -46,12 +40,20 @@ MODELS = [
     ########### Qwen2ForCausalLM
     EmbedModelInfo("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
                    architecture="Qwen2ForCausalLM",
-                   dtype="float32",
                    enable_test=True),
     ########## ModernBertModel
     EmbedModelInfo("Alibaba-NLP/gte-modernbert-base",
                    architecture="ModernBertModel",
                    enable_test=True),
+    ########## Qwen3ForCausalLM
+    EmbedModelInfo("Qwen/Qwen3-Embedding-0.6B",
+                   architecture="Qwen3ForCausalLM",
+                   dtype="float32",
+                   enable_test=True),
+    EmbedModelInfo("Qwen/Qwen3-Embedding-4B",
+                   architecture="Qwen3ForCausalLM",
+                   dtype="float32",
+                   enable_test=False),
 ]
 
 

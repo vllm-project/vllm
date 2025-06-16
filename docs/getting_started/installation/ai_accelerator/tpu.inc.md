@@ -58,11 +58,13 @@ assigned to your Google Cloud project for your immediate exclusive use.
 ### Provision Cloud TPUs with GKE
 
 For more information about using TPUs with GKE, see:
+
 - <https://cloud.google.com/kubernetes-engine/docs/how-to/tpus>
 - <https://cloud.google.com/kubernetes-engine/docs/concepts/tpus>
 - <https://cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus>
 
-## Configure a new environment
+# --8<-- [end:requirements]
+# --8<-- [start:configure-a-new-environment]
 
 ### Provision a Cloud TPU with the queued resource API
 
@@ -70,23 +72,23 @@ Create a TPU v5e with 4 TPU chips:
 
 ```console
 gcloud alpha compute tpus queued-resources create QUEUED_RESOURCE_ID \
---node-id TPU_NAME \
---project PROJECT_ID \
---zone ZONE \
---accelerator-type ACCELERATOR_TYPE \
---runtime-version RUNTIME_VERSION \
---service-account SERVICE_ACCOUNT
+  --node-id TPU_NAME \
+  --project PROJECT_ID \
+  --zone ZONE \
+  --accelerator-type ACCELERATOR_TYPE \
+  --runtime-version RUNTIME_VERSION \
+  --service-account SERVICE_ACCOUNT
 ```
 
 | Parameter name     | Description                                                                                                                                                                                              |
 |--------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | QUEUED_RESOURCE_ID | The user-assigned ID of the queued resource request.                                                                                                                                                     |
-| TPU_NAME           | The user-assigned name of the TPU which is created when the queued                                                                                                                                       |
+| TPU_NAME           | The user-assigned name of the TPU which is created when the queued resource request is allocated.                                                                                                        |
 | PROJECT_ID         | Your Google Cloud project                                                                                                                                                                                |
-| ZONE               | The GCP zone where you want to create your Cloud TPU. The value you use                                                                                                                                  |
-| ACCELERATOR_TYPE   | The TPU version you want to use. Specify the TPU version, for example                                                                                                                                    |
-| RUNTIME_VERSION    | The TPU VM runtime version to use. For example, use `v2-alpha-tpuv6e` for a VM loaded with one or more v6e TPU(s). For more information see [TPU VM images](https://cloud.google.com/tpu/docs/runtimes). |
-  <figcaption>Parameter descriptions</figcaption>
+| ZONE               | The GCP zone where you want to create your Cloud TPU. The value you use depends on the version of TPUs you are using. For more information, see [TPU regions and zones]                                  |
+| ACCELERATOR_TYPE   | The TPU version you want to use. Specify the TPU version, for example `v5litepod-4` specifies a v5e TPU with 4 cores, `v6e-1` specifies a v6e TPU with 1 core. For more information, see [TPU versions]. |
+| RUNTIME_VERSION    | The TPU VM runtime version to use. For example, use `v2-alpha-tpuv6e` for a VM loaded with one or more v6e TPU(s). For more information see [TPU VM images].                                             |
+| SERVICE_ACCOUNT    | The email address for your service account. You can find it in the IAM Cloud Console under *Service Accounts*. For example: `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`              |
 
 Connect to your TPU using SSH:
 
@@ -94,7 +96,11 @@ Connect to your TPU using SSH:
 gcloud compute tpus tpu-vm ssh TPU_NAME --zone ZONE
 ```
 
-# --8<-- [end:requirements]
+[TPU versions]: https://cloud.google.com/tpu/docs/runtimes
+[TPU VM images]: https://cloud.google.com/tpu/docs/runtimes
+[TPU regions and zones]: https://cloud.google.com/tpu/docs/regions-zones
+
+# --8<-- [end:configure-a-new-environment]
 # --8<-- [start:set-up-using-python]
 
 # --8<-- [end:set-up-using-python]

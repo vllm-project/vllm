@@ -402,6 +402,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.block_quant:
             assert self.quant_config.weight_block_size is not None
+
             return torch.ops.vllm.apply_w8a8_block_fp8_linear(
                 input=x,
                 weight=layer.weight,
@@ -769,23 +770,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-    def select_gemm_impl(self, prepare_finalize):
+    def select_gemm_impl(self, prepare_finalize, moe):
 
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-            BatchedTritonExperts)
+        from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
+            BatchedTritonOrDeepGemmExperts)
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts)
 
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
 
-        experts: Optional[Union[BatchedTritonExperts,
+        experts: Optional[Union[BatchedTritonOrDeepGemmExperts,
                                 TritonOrDeepGemmExperts]] = None
         max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
         use_batched_experts = max_num_tokens_per_rank is not None
 
         if use_batched_experts:
-            experts = BatchedTritonExperts(
+            experts = BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 world_size=prepare_finalize.world_size,
                 dp_size=prepare_finalize.dp_size,
@@ -793,7 +794,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 use_int8_w8a8=False,
                 use_int8_w8a16=False,
                 use_int4_w4a16=False,
-                block_shape=None,
+                per_channel_quant=False,
+                block_shape=self.quant_config.weight_block_size,
+                allow_deep_gemm=self.allow_deep_gemm,
             )
         else:
             experts = TritonOrDeepGemmExperts(

@@ -122,6 +122,10 @@ def run_test(
             for prompts, images, audios in inputs
         ]
 
+    # This error occurs inside `get_peft_model`
+    # FIXME: https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/75
+    pytest.skip("HF impl is not compatible with current transformers")
+
     hf_model_kwargs = {"_attn_implementation": "sdpa"}
     with hf_runner(model, dtype=dtype,
                    model_kwargs=hf_model_kwargs) as hf_model:

@@ -283,14 +283,14 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         batch_size, k, _ = draft_probs.shape
         batch_indices = torch.arange(batch_size,
                                      device=target_probs.device)[:, None]
-        probs_indicies = torch.arange(k, device=target_probs.device)
+        probs_indices = torch.arange(k, device=target_probs.device)
 
         # shape [batch_size, k]
-        selected_draft_probs = draft_probs[batch_indices, probs_indicies,
+        selected_draft_probs = draft_probs[batch_indices, probs_indices,
                                            draft_token_ids]
 
         # shape [batch_size, k]
-        selected_target_probs = target_probs[batch_indices, probs_indicies,
+        selected_target_probs = target_probs[batch_indices, probs_indices,
                                              draft_token_ids]
 
         uniform_rand = self._create_uniform_samples(seeded_seqs, batch_size,

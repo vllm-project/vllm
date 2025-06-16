@@ -91,7 +91,7 @@ def bench_run(
 
     score = torch.randn((m, num_experts), device=device, dtype=dtype)
 
-    topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
+    topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
 
     quant_blocksize = 16
     w1_blockscale = torch.empty(
