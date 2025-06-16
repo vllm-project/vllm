@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import cache
 from typing import Callable, Optional, Union
 
 import torch
@@ -9,18 +10,22 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.platforms import current_platform
+from vllm.utils import is_torch_equal_or_newer
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = None
 
+
 # The condition to determine if it is on a platform that supports
 # torch._scaled_mm rowwise feature.
-# The condition is determined once as the operations
-# are time consuming.
-USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm()
-                               and torch.__version__[0:3] >= "2.7"
-                               and current_platform.has_device_capability(94))
+# Cache the result to avoid determining it multiple times, as
+# this is time-consuming.
+@cache
+def use_rowwise_torch_scaled_mm() -> bool:
+    return current_platform.is_rocm() and (
+        is_torch_equal_or_newer("2.7")
+        and current_platform.has_device_capability(94))
 
 
 def sparse_cutlass_supported() -> bool:
@@ -283,7 +288,7 @@ def dispatch_w8a8_scaled_mm(
     # torch.scaled_mm supports per tensor weights + activations only
     # so fallback to naive if per channel or per token
     if (use_per_token_if_dynamic and not per_tensor_weights
-            and not per_tensor_activations and USE_ROWWISE_TORCH_SCALED_MM):
+            and not per_tensor_activations and use_rowwise_torch_scaled_mm()):
         return torch_per_token_w8a8_scaled_mm
     return torch_channelwise_w8a8_scaled_mm
 
