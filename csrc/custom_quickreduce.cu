@@ -10,6 +10,8 @@
 quickreduce::fptr_t init_custom_qr(int64_t rank, int64_t world_size) {
   if (world_size > 8)
     throw std::invalid_argument("world size > 8 is not supported");
+  if (world_size == 6)
+    throw std::invalid_argument("world size == 6 is not supported");
   if (world_size % 2 != 0)
     throw std::invalid_argument("Odd num gpus is not supported for now");
   if (rank < 0 || rank >= world_size)
@@ -20,9 +22,11 @@ quickreduce::fptr_t init_custom_qr(int64_t rank, int64_t world_size) {
 }
 
 void qr_destroy(quickreduce::fptr_t _fa) {
-  auto fa = reinterpret_cast<quickreduce::DeviceComms*>(_fa);
-  fa->destroy();
-  delete fa;
+  if (_fa) {
+    auto fa = reinterpret_cast<quickreduce::DeviceComms*>(_fa);
+    fa->destroy();
+    delete fa;
+  }
 }
 
 torch::Tensor qr_get_handle(quickreduce::fptr_t _fa) {
