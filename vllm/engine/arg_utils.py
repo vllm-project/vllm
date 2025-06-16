@@ -997,7 +997,7 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
         )
 
-    def no_valid_tensorizer_args_in_model_loader_extra_config(self) -> bool:
+    def tensorizer_config_is_validated(self) -> bool:
 
         if self.model_loader_extra_config:
             for allowed_to_pass in ["tensorizer_uri", "tensorizer_dir"]:
@@ -1007,6 +1007,11 @@ class EngineArgs:
                     return False
                 except KeyError:
                     pass
+                finally:
+                    if hasattr(self.model_loader_extra_config,
+                               "to_serializable"):
+                        self.model_loader_extra_config = self.model_loader_extra_config.to_serializable(
+                        )
         return True
 
     def create_load_config(self) -> LoadConfig:
@@ -1014,8 +1019,8 @@ class EngineArgs:
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
 
-        if (self.load_format == "tensorizer" and
-                self.no_valid_tensorizer_args_in_model_loader_extra_config()):
+        if (self.load_format == "tensorizer"
+                and self.tensorizer_config_is_validated()):
             logger.info("Inferring Tensorizer args from %s", self.model)
             self.model_loader_extra_config = {"tensorizer_dir": self.model}
         else:
