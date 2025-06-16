@@ -85,7 +85,7 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     rustup show
 
 FROM python-install AS torch
-ARG TORCH_VERSION=2.7.0
+ARG TORCH_VERSION=2.7.1
 ENV export _GLIBCXX_USE_CXX11_ABI=1
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
@@ -98,7 +98,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
     git clone https://github.com/pytorch/pytorch.git && \
     cd pytorch && \
-    git checkout v2.7.0 && \
+    git checkout v2.7.1 && \
     git submodule sync && \
     git submodule update --init --recursive && \
     uv pip install cmake ninja && \
@@ -108,8 +108,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM python-install AS torch-vision
 # Install torchvision
-ARG TORCH_VERSION=2.7.0
-ARG TORCH_VISION_VERSION=v0.20.1
+ARG TORCH_VERSION=2.7.1
+ARG TORCH_VISION_VERSION=v0.22.1
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=torch,source=/tmp/pytorch/dist,target=/tmp/torch-wheels/ \
