@@ -1197,6 +1197,51 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                 dtype=torch.int32)
         return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
 
+    def _pool(
+        self,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        num_scheduled_tokens_np: np.ndarray,
+        finished_sending: Optional[set[str]],
+        finished_recving: Optional[set[str]],
+    ) -> ModelRunnerOutput:
+        assert self.input_batch.num_reqs ==\
+            len(self.input_batch.pooling_params), \
+        "Either all or none of the requests in" \
+        " a batch must be pooling request"
+
+        extracted_hidden_states = list(
+            torch.split(hidden_states[:num_scheduled_tokens],
+                        num_scheduled_tokens_np.tolist()))
+
+        pooling_metadata = self.input_batch.pooling_metadata
+
+        raw_pooler_output = self.model.pooler(
+            hidden_states=extracted_hidden_states,
+            pooling_metadata=pooling_metadata)
+
+        pooler_output: list[Optional[torch.Tensor]] = []
+        seq_lens = self.seq_lens[:self.input_batch.num_reqs]
+        for raw_output, seq_len, prompt_len in zip(
+                raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
+
+            if seq_len == prompt_len:
+                pooler_output.append(raw_output.data.cpu())
+            else:
+                pooler_output.append(None)
+
+        return ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=[],
+            spec_token_ids=None,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=pooler_output,
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1328,44 +1373,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = None
         else:
             if self.input_batch.pooling_params:
-                assert self.input_batch.num_reqs ==\
-                    len(self.input_batch.pooling_params), \
-                "Either all or none of the requests in" \
-                " a batch must be pooling request"
-
-                total_len = num_scheduled_tokens_np.sum()
-                extracted_hidden_states = list(
-                    torch.split(hidden_states[:total_len],
-                                num_scheduled_tokens_np.tolist()))
-
-                pooling_metadata = self.input_batch.pooling_metadata
-
-                raw_pooler_output = self.model.pooler(
-                    hidden_states=extracted_hidden_states,
-                    pooling_metadata=pooling_metadata)
-
-                pooler_output: list[Optional[torch.Tensor]] = []
-                seq_lens = self.seq_lens[:self.input_batch.num_reqs]
-                for raw_output, seq_len, prompt_len in zip(
-                        raw_pooler_output, seq_lens,
-                        pooling_metadata.prompt_lens):
-
-                    if seq_len == prompt_len:
-                        pooler_output.append(raw_output.data.to("cpu"))
-                    else:
-                        pooler_output.append(None)
-
-                return ModelRunnerOutput(
-                    req_ids=self.input_batch.req_ids,
-                    req_id_to_index=self.input_batch.req_id_to_index,
-                    sampled_token_ids=[],
-                    spec_token_ids=None,
-                    logprobs=None,
-                    prompt_logprobs_dict={},
-                    pooler_output=pooler_output,
-                    finished_sending=finished_sending,
-                    finished_recving=finished_recving,
-                )
+                return self._pool(hidden_states, num_scheduled_tokens,
+                                  num_scheduled_tokens_np, finished_sending,
+                                  finished_recving)
 
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states, None)
