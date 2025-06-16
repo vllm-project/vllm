@@ -229,9 +229,9 @@ EXPECTED_METRICS = [
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
-    "vllm:gpu_cache_usage_perc", # deprecated
+    "vllm:gpu_cache_usage_perc",  # deprecated
     "vllm:cache_usage_perc",
-    "vllm:gpu_prefix_cache_queries", # deprecated
+    "vllm:gpu_prefix_cache_queries",  # deprecated
     "vllm:prefix_cache_queries",
     "vllm:gpu_prefix_cache_hits",  # deprecated
     "vllm:prefix_cache_hits",

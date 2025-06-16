@@ -194,25 +194,26 @@ class PrometheusStatLogger(StatLoggerBase):
                     "GPU KV-cache usage. 1 means 100 percent usage."
                     "DEPRECATED: Use vllm:kv_cache_usage_perc instead."),
                 multiprocess_mode="mostrecent",
-            labelnames=labelnames).labels(*labelvalues)
+                labelnames=labelnames).labels(*labelvalues)
 
             # Deprecated in 0.9 - Renamed as vllm:prefix_cache_queries
             # Hidden in 0.10, due to be removed in 0.11
             self.counter_gpu_prefix_cache_queries = self._counter_cls(
                 name="vllm:gpu_prefix_cache_queries",
-                documentation=
-                ("GPU prefix cache queries, in terms of number of queried tokens."
-             "DEPRECATED: Use vllm:prefix_cache_queries instead."),
-            labelnames=labelnames).labels(*labelvalues)
+                documentation=(
+                    "GPU prefix cache queries, in terms of number of "
+                    "queried tokens."
+                    "DEPRECATED: Use vllm:prefix_cache_queries instead."),
+                labelnames=labelnames).labels(*labelvalues)
 
             # Deprecated in 0.9 - Renamed as vllm:prefix_cache_hits
             # Hidden in 0.10, due to be removed in 0.11
             self.counter_gpu_prefix_cache_hits = self._counter_cls(
                 name="vllm:gpu_prefix_cache_hits",
-                documentation=(
-                    "GPU prefix cache hits, in terms of number of cached tokens."
-                "DEPRECATED: Use vllm:prefix_cache_hits instead."),
-            labelnames=labelnames).labels(*labelvalues)
+                documentation=
+                ("GPU prefix cache hits, in terms of number of cached tokens."
+                 "DEPRECATED: Use vllm:prefix_cache_hits instead."),
+                labelnames=labelnames).labels(*labelvalues)
 
         self.gauge_kv_cache_usage = self._gauge_cls(
             name="vllm:kv_cache_usage_perc",
