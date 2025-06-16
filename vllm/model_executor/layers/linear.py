@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -228,6 +229,12 @@ class LinearBase(torch.nn.Module):
         return_bias: bool = True,
     ):
         super().__init__()
+
+        # tpa -- find out why this is needed
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
 
         # Keep input parameters
         self.input_size = input_size

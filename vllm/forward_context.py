@@ -27,6 +27,12 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 
 @dataclass
+class ALoRAMetadata:
+    k_offsets: torch.Tensor
+    query_start_locs: list[int]
+
+
+@dataclass
 class DPMetadata:
     max_tokens_across_dp_cpu: torch.Tensor
     cu_tokens_across_dp_cpu: torch.Tensor
@@ -94,6 +100,7 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
+    alora_metadata: Optional[ALoRAMetadata] = None
     skip_cuda_graphs: bool = False
 
 
@@ -116,6 +123,7 @@ def set_forward_context(
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     skip_cuda_graphs: bool = False,
+    alora_metadata: Optional[ALoRAMetadata] = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -140,6 +148,7 @@ def set_forward_context(
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
+        alora_metadata=alora_metadata,
         skip_cuda_graphs=skip_cuda_graphs,
     )
 
