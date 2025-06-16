@@ -259,10 +259,6 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    if not self.running:
-                        # No request to preempt.
-                        can_schedule = False
-                        break
                     if self.policy == "priority":
                         preempted_req = max(
                             self.running,
