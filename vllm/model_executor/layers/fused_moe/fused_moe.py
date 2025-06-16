@@ -841,12 +841,14 @@ def try_get_optimal_moe_config_list(
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
                                         is_marlin, block_shape)
 
-    return [config['BLOCK_SIZE_M'],
-            config['BLOCK_SIZE_N'],
-            config['BLOCK_SIZE_K'],
-            config['GROUP_SIZE_SIZE_M'],
-            config['num_warps'] if 'num_warps' in config else 0,
-            config['num_stages'] if 'num_stages' in config else 0]
+    return [
+        config['BLOCK_SIZE_M'],
+        config['BLOCK_SIZE_N'],
+        config['BLOCK_SIZE_K'],
+        config['GROUP_SIZE_SIZE_M'],
+        config.get('num_warps', 0),
+        config.get('num_stages', 0),
+    ]
 
 
 def try_get_optimal_moe_config_list_fake(
@@ -878,15 +880,16 @@ def try_get_optimal_moe_config(
     is_marlin: bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> dict[str, int]:
-    block_m, block_n, block_k, group_m, num_warps, num_stages = torch.ops.vllm.try_get_optimal_moe_config_list(
-        w1_shape,
-        w2_shape,
-        top_k,
-        dtype,
-        M,
-        is_marlin,
-        block_shape,
-    )
+    block_m, block_n, block_k, group_m, num_warps, num_stages = (
+        torch.ops.vllm.try_get_optimal_moe_config_list(
+            w1_shape,
+            w2_shape,
+            top_k,
+            dtype,
+            M,
+            is_marlin,
+            block_shape,
+        ))
     return dict(BLOCK_SIZE_M=block_m,
                 BLOCK_SIZE_N=block_n,
                 BLOCK_SIZE_K=block_k,
@@ -1235,13 +1238,12 @@ def fused_experts(hidden_states: torch.Tensor,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
     elif True:
-        fn = modular_triton_fused_moe(
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=use_int4_w4a16,
-            per_channel_quant=per_channel_quant,
-            block_shape=block_shape)
+        fn = modular_triton_fused_moe(use_fp8_w8a8=use_fp8_w8a8,
+                                      use_int8_w8a8=use_int8_w8a8,
+                                      use_int8_w8a16=use_int8_w8a16,
+                                      use_int4_w4a16=use_int4_w4a16,
+                                      per_channel_quant=per_channel_quant,
+                                      block_shape=block_shape)
 
         return fn(
             hidden_states=hidden_states,
