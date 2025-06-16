@@ -233,6 +233,9 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using Triton backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "triton_attn.TritonAttentionBackend")
+            elif selected_backend == _Backend.CONCH:
+                logger.info_once("Using Conch backend on V1 engine.")
+                return ("vllm.v1.attention.backends.conch.ConchBackend")
             elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
