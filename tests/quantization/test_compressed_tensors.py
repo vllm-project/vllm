@@ -667,7 +667,13 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method,
                               CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, scheme)
+            if isinstance(qkv_proj.scheme, scheme) or isinstance(
+                    qkv_proj.scheme, CompressedTensorsW4A16Fp4
+            ) and not CompressedTensorsW4A4Fp4.cutlass_fp4_supported():
+                assert True
+            else:
+                raise AssertionError("FP4 Scheme Mismatch")
+
             assert qkv_proj.scheme.group_size == 16
 
         llm.apply_model(check_model)

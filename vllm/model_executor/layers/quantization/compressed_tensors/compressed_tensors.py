@@ -374,7 +374,14 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if is_activation_quantization_format(self.quant_format):
             if self._is_fp4a4_nvfp4(weight_quant, input_quant):
-                return CompressedTensorsW4A4Fp4()
+                if CompressedTensorsW4A4Fp4.cutlass_fp4_supported():
+                    return CompressedTensorsW4A4Fp4()
+                else:
+                    logger.warning_once(
+                        "Current platform does not support cutlass NVFP4."
+                        " Running CompressedTensorsW4A16Fp4.")
+                    return CompressedTensorsW4A16Fp4(
+                        has_input_global_scale=True)
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
