@@ -104,7 +104,7 @@ struct DeviceComms {
   static long constexpr kTileSize = 256 * 16 * 8;
 
   // Max problem size is 2GB (in bytes) or half of uint32_t max value.
-  static int64_t constexpr kMaxProblemSize = 2147483647;
+  static int64_t constexpr kMaxProblemSize = 2147483648;
   static int64_t constexpr kMaxTiles = kMaxProblemSize / kTileSize;
 
   // Max TP-8
