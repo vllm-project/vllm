@@ -12,6 +12,34 @@ Available Commands:
 vllm {chat,complete,serve,bench,collect-env,run-batch}
 ```
 
+## vLLM CLI completion
+
+To enable vLLM CLI completion, follow these steps:
+
+- Download the completion script
+
+```bash
+curl https://raw.githubusercontent.com/vllm-project/vllm/refs/heads/main/scripts/vllm-completion.bash -o ~/.vllm-completion.bash
+```
+
+- Set it in your shell config (e.g., ~/.bash_profile)
+
+```bash
+cat <<'EOF' >> ~/.bash_profile
+
+# Enable vLLM CLI completion
+if [ -f ~/.vllm-completion.bash ]; then
+  . ~/.vllm-completion.bash
+fi
+EOF
+```
+
+- Reload the config.
+
+```bash
+source ~/.bash_profile
+```
+
 ## serve
 
 Start the vLLM OpenAI Compatible API server.
