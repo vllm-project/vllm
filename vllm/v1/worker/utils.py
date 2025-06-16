@@ -4,11 +4,12 @@ from typing import Optional
 
 import torch
 
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
 
 def sanity_check_mm_encoder_outputs(
-    mm_embeddings: object,
+    mm_embeddings: MultiModalEmbeddings,
     expected_num_items: int,
 ) -> None:
     """
