@@ -248,6 +248,42 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# GLM-4.1V
+def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "THUDM/GLM-4.1V-9B-Thinking"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+    elif modality == "video":
+        placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+
+    prompts = [
+        (
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            f"{placeholder}"
+            f"{question}<|assistant|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # H2OVL-Mississippi
 def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
