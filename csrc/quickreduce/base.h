@@ -51,9 +51,6 @@ static constexpr int kWavefront = 64;
 // 256 thread, 4 wavefronts.
 static dim3 constexpr kBlockTwoShot = {kWavefront, kBlockSize / kWavefront, 1};
 
-static constexpr int kThreadsOneShot = 512;
-static dim3 constexpr kBlockOneShot = {kThreadsOneShot, 1, 1};
-
 // Number of threads in a group for quantization
 // It corresponds to 32 F16 elements in quantization block
 static constexpr int kThreadGroupSize = 8;
