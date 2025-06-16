@@ -16,6 +16,7 @@ from typing import Set, Type, Union, cast
 import torch
 from typing_extensions import TypeVar
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
