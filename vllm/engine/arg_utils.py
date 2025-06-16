@@ -1002,7 +1002,6 @@ class EngineArgs:
         if self.model_loader_extra_config:
             for allowed_to_pass in ["tensorizer_uri", "tensorizer_dir"]:
                 try:
-                    logger.info("Got %s", self.model_loader_extra_config)
                     self.model_loader_extra_config[allowed_to_pass]
                     return False
                 except KeyError:
@@ -1010,8 +1009,8 @@ class EngineArgs:
                 finally:
                     if hasattr(self.model_loader_extra_config,
                                "to_serializable"):
-                        self.model_loader_extra_config = self.model_loader_extra_config.to_serializable(
-                        )
+                        self.model_loader_extra_config = (
+                            self.model_loader_extra_config.to_serializable())
         return True
 
     def create_load_config(self) -> LoadConfig:
