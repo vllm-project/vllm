@@ -293,7 +293,6 @@ def load_llava(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "llava-hf/llava-1.5-7b-hf"
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=8192,
         max_num_seqs=16,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
@@ -359,7 +358,7 @@ def load_llava_onevision(question: str, image_urls: list[str]) -> ModelRequestDa
     model_name = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=8192,
+        max_model_len=16384,
         max_num_seqs=16,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
