@@ -997,7 +997,7 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
         )
 
-    def tensorizer_config_is_validated(self) -> bool:
+    def maybe_validate_tensorizer_config(self) -> bool:
 
         if self.model_loader_extra_config:
             for allowed_to_pass in ["tensorizer_uri", "tensorizer_dir"]:
@@ -1019,7 +1019,7 @@ class EngineArgs:
             self.load_format = "bitsandbytes"
 
         if (self.load_format == "tensorizer"
-                and self.tensorizer_config_is_validated()):
+                and self.maybe_validate_tensorizer_config()):
             logger.info("Inferring Tensorizer args from %s", self.model)
             self.model_loader_extra_config = {"tensorizer_dir": self.model}
         else:
