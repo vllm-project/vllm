@@ -94,20 +94,20 @@ Here is how to build and install it from source with torch2.7.0+cu128 as done in
 ```
 export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX'
 export FLASHINFER_ENABLE_SM90=1
-uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc"
+uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.6.post1"
 ```
 
 A small gotcha here is that building FlashInfer from source adds around 30
 minutes to vLLM build time.  Thus, it’s better to cache the wheel somewhere
-public so that it can be installed right away, for example https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.5%2Bcu128torch2.7-cp38-abi3-linux_x86_64.whl.  In future releases, please reach out to PyTorch release
+public so that it can be installed right away, for example https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl.  In future releases, please reach out to PyTorch release
 team if you want to get the package published there.
 
 ### xFormers
 Similar to FlashInfer, here is how to build and install xFormers from source:
 
 ```
-export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0 10.0+PTX'
-MAX_JOBS=16 uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@f2de641ef670510cadab099ce6954031f52f191c"
+export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
+MAX_JOBS=16 uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
 ```
 
 ### Mamba
