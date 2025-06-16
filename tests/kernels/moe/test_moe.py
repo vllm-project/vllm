@@ -13,6 +13,7 @@ from torch.nn import Parameter
 from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
+from typing import Callable
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
