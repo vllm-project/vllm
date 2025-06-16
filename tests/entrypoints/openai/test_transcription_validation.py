@@ -98,6 +98,7 @@ async def test_long_audio_request(mary_had_lamb):
         out = json.loads(transcription)['text']
         assert out.count("Mary had a little lamb") == 10
 
+
 @pytest.mark.asyncio
 async def test_non_asr_model(winning_call):
     # text to text model
