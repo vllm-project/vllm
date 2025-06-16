@@ -4,13 +4,15 @@
 
 Run `pytest tests/kernels/test_moe.py`.
 """
+import functools
 import pytest
 import torch
+
 from torch.nn import Parameter
 from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
-from typing import Callable
+from typing import Callable, Optional
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
@@ -41,53 +43,6 @@ vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
 
 
-def run_moe_test(
-    m: int,
-    n: int,
-    k: int,
-    e: int,
-    topk: int,
-    ep_size: int,
-    dtype: torch.dtype,
-    padding: bool,
-    baseline_moe_fn: Callable,
-    moe_fn: Callable,
-    use_compile: bool = False,
-    use_cudagraph: bool = False,
-):
-    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
-
-    score = torch.randn((m, e), device="cuda", dtype=dtype)
-
-    if ep_size > 1:
-        local_e = e // ep_size
-        e_ids = torch.randint(0,
-                              e, (local_e, ),
-                              device="cuda",
-                              dtype=torch.int32)
-        e_map = torch.full((e, ), -1, device="cuda", dtype=torch.int32)
-        e_map[e_ids] = torch.arange(local_e, device="cuda", dtype=torch.int32)
-        w1 = w1[e_ids]
-        w2 = w2[e_ids]
-    else:
-        e_map = None
-
-    with set_current_vllm_config(vllm_config):
-        baseline_output = baseline_moe_fn(a, w1, w2, score, topk, e_map)
-        test_output = moe_fn(a,
-                             w1,
-                             w2,
-                             score,
-                             topk,
-                             global_num_experts=e,
-                             expert_map=e_map,
-                             renormalize=False)
-
-    torch.testing.assert_close(test_output, baseline_output, atol=2e-2, rtol=2e-2)
-
-
 @pytest.mark.parametrize("m", [1, 33, 64, 222, 32768, 40000])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 511, 1024])
@@ -108,8 +63,11 @@ def test_fused_moe(
     monkeypatch,
 ):
     current_platform.seed_everything(7)
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "1024")
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
 
+    #
+    # Setup test data
+    #
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -129,19 +87,67 @@ def test_fused_moe(
     else:
         e_map = None
 
-    m_fused_moe = modular_triton_fused_moe(use_fp8_w8a8=False,
-                                           use_int8_w8a8=False,
-                                           use_int8_w8a16=False,
-                                           use_int4_w4a16=False,
-                                           per_channel_quant=False,
-                                           block_shape=None)
+    #
+    # Setup test functions
+    #
+    m_fused_moe_fn = modular_triton_fused_moe(use_fp8_w8a8=False,
+                                              use_int8_w8a8=False,
+                                              use_int8_w8a16=False,
+                                              use_int4_w4a16=False,
+                                              per_channel_quant=False,
+                                              block_shape=None)
+
+    def m_fused_moe(
+        a: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        score: torch.Tensor,
+        topk: int,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor]= None,
+    ) -> torch.Tensor:
+        topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+        return m_fused_moe_fn(a,
+                              w1,
+                              w2,
+                              topk_weights,
+                              topk_ids,
+                              global_num_experts=global_num_experts,
+                              expert_map=expert_map)
+
+    fused_moe_fn = functools.partial(fused_moe, renormalize=False)
+
+    #
+    # Run tests
+    #
+    runner = functools.partial(
+        run_moe_test,
+        a=a,
+        w1=w1,
+        w2=w2,
+        score=score,
+        topk=topk,
+        global_num_experts=e,
+        expert_map=e_map,
+        padding=padding,
+    )
+
+    use_compile=True   # TODO: platform supports torch.compile
+    use_cudagraph=True # TODO: platform supports cudagraphs
+
+    with set_current_vllm_config(vllm_config):
+        runner(torch_moe, iterative_moe)
+        runner(torch_moe, fused_moe_fn, use_compile=use_compile, use_cudagraph=use_cudagraph)
+        runner(torch_moe, m_fused_moe, use_compile=use_compile, use_cudagraph=use_cudagraph)
+
+    return
 
     m_fused_moe = torch.compile(m_fused_moe,
                                 backend='inductor',
                                 fullgraph=True)
 
     with set_current_vllm_config(vllm_config):
-        torch_output = torch_moe(a, w1, w2, score, topk, e_map)
+        torch_output = torch_moe(a, w1, w2, score, topk, expert_map=e_map)
         iterative_output = iterative_moe(a,
                                          w1,
                                          w2,
@@ -171,8 +177,8 @@ def test_fused_moe(
         m_triton_output = m_fused_moe(a,
                                       w1,
                                       w2,
-                                      topk_weights,
-                                      topk_ids,
+                                      score,
+                                      topk,
                                       global_num_experts=e,
                                       expert_map=e_map)
 
@@ -185,6 +191,62 @@ def test_fused_moe(
                                torch_output,
                                atol=2e-2,
                                rtol=0)
+
+
+def run_moe_test(
+    baseline_moe_fn: Callable,
+    moe_fn: Callable,
+    a: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    score: torch.Tensor,
+    topk: int,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    padding: bool = False,
+    use_compile: bool = False,
+    use_cudagraph: bool = False,
+    atol:float=2e-2,
+    rtol:float=0,
+):
+    baseline_output = baseline_moe_fn(a, w1, w2, score, topk, global_num_experts=global_num_experts, expert_map=expert_map)
+
+    # Pad the weight if moe padding is enabled
+    if padding:
+        w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
+        torch.cuda.empty_cache()
+        w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
+        torch.cuda.empty_cache()
+
+    if use_compile:
+        moe_fn = torch.compile(moe_fn, backend="inductor", fullgraph=True)
+
+    test_output = moe_fn(a,
+                         w1,
+                         w2,
+                         score,
+                         topk,
+                         global_num_experts=global_num_experts,
+                         expert_map=expert_map)
+
+
+    if use_cudagraph:
+        test_output.fill_(0)
+        stream = torch.cuda.Stream()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            test_output = moe_fn(a,
+                                 w1,
+                                 w2,
+                                 score,
+                                 topk,
+                                 global_num_experts=global_num_experts,
+                                 expert_map=expert_map)
+        torch.cuda.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+
+    torch.testing.assert_close(test_output, baseline_output, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("m", [1, 32, 222])
@@ -294,7 +356,7 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
                                   w1_zp=w1_qzeros if has_zp else None,
                                   w2_zp=w2_qzeros if has_zp else None,
                                   block_shape=[0, group_size])
-        torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, e_map)
+        torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, expert_map=e_map)
 
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
@@ -602,7 +664,7 @@ def test_fused_marlin_moe(
     topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
 
     with set_current_vllm_config(vllm_config):
-        torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, e_map)
+        torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, expert_map=e_map)
 
     marlin_output = torch.ops.vllm.fused_marlin_moe(
         a,
