@@ -47,12 +47,6 @@ class ReqMeta:
                 block_ids_tensor.reshape((num_blocks, 1)) * block_size
         slot_mapping = slot_mapping.flatten()[:valid_num_tokens]
 
-        logger.debug(
-            "🐞P2pNcclConnector make_meta, request_id:%s, token_ids:%s, "
-            "valid_num_tokens:%d, block_ids:%s, num_blocks:%d, block_size:%d, "
-            "slot_mapping:%s", request_id, token_ids, valid_num_tokens,
-            block_ids, num_blocks, block_size, slot_mapping.tolist())
-
         return ReqMeta(
             request_id=request_id,
             token_ids=token_ids_tensor,
@@ -126,8 +120,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
-            logger.warning(
-                "In connector.start_load_kv, but the attn_metadata is None")
             return
 
         def inject_kv_into_layer(
@@ -195,9 +187,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
         assert isinstance(metadata, P2pNcclConnectorMetadata)
 
         if metadata is None:
-            logger.warning(
-                "In connector.start_load_kv, but the connector metadata is None"
-            )
             return
 
         # Load the KV for each request each layer
@@ -217,10 +206,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
                 inject_kv_into_layer(kv_cache_layer, kv_cache,
                                      request.slot_mapping, request.request_id)
-
-            logger.debug(
-                "Inject KV cache of %d tokens to the paged memory, %s",
-                len(request.slot_mapping), request.request_id)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -331,11 +316,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         num_external_tokens = (len(request.prompt_token_ids) - 1 -
                                num_computed_tokens)
-        logger.debug(
-            "🍒num_external_tokens:%d, num_prompt_tokens:%d, "
-            "num_computed_tokens:%d, request_id:%s", num_external_tokens,
-            len(request.prompt_token_ids), num_computed_tokens,
-            request.request_id)
 
         if num_external_tokens < 0:
             num_external_tokens = 0
@@ -365,9 +345,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        logger.debug("🐞build_connector_meta, scheduler_output:%s",
-                     scheduler_output)
-
         meta = P2pNcclConnectorMetadata()
 
         for new_req in scheduler_output.scheduled_new_reqs:
@@ -380,13 +357,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     # 'CachedRequestData' has no attribute 'prompt_token_ids'
                     self.chunked_prefill[new_req.req_id] = (
                         new_req.block_ids[0], new_req.prompt_token_ids)
-                    logger.debug(
-                        "🐞build_connector_meta, chunked prefill, "
-                        "request_id:%s, num_scheduled_tokens:%d, "
-                        "num_prompt_tokens:%d, num_computed_tokens:%d, "
-                        "num_tokens:%d", new_req.req_id, num_scheduled_tokens,
-                        len(new_req.prompt_token_ids),
-                        new_req.num_computed_tokens, num_tokens)
                     continue
                 # the request's prompt is not chunked prefill
                 meta.add_request(request_id=new_req.req_id,
@@ -413,11 +383,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     block_ids = (self.chunked_prefill[cached_req.req_id][0] +
                                  block_ids)
                 prompt_token_ids = self.chunked_prefill[cached_req.req_id][1]
-                logger.debug(
-                    "🐞build_connector_meta, cached_req, request_id:%s, "
-                    "num_scheduled_tokens:%d, num_prompt_tokens:%d",
-                    cached_req.req_id, num_scheduled_tokens,
-                    len(prompt_token_ids))
                 # the request's prompt is chunked prefill again
                 if num_tokens < len(prompt_token_ids):
                     self.chunked_prefill[cached_req.req_id] = (
@@ -444,13 +409,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # of the block_ids for the request.
                 block_ids = cached_req.new_block_ids[0]
 
-                logger.debug(
-                    "🐞build_connector_meta, req_id:%s, total_tokens:%d, "
-                    "num_computed_tokens:%d, token_ids:%s, num_token_ids:%d, "
-                    "block_ids:%s, num_block_ids:%d", cached_req.req_id,
-                    total_tokens, cached_req.num_computed_tokens, token_ids,
-                    len(token_ids), block_ids, len(block_ids))
-
                 meta.add_request(request_id=cached_req.req_id,
                                  token_ids=token_ids,
                                  block_ids=block_ids,
@@ -463,9 +421,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
         #                      token_ids=request.prompt_token_ids,
         #                      block_ids=block_ids,
         #                      block_size=self._block_size)
-
-        logger.debug("🐞build_connector_meta, _requests_need_load:%s",
-                     self._requests_need_load)
 
         self._requests_need_load.clear()
         return meta
@@ -485,9 +440,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-
-        logger.debug("🐞request_finished, request_id:%s, block_ids:%s",
-                     request.request_id, block_ids)
 
         self.chunked_prefill.pop(request.request_id, None)
 
@@ -511,10 +463,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
             # Extract the ranks
             ip = match.group(1)
             port = int(match.group(2))
-
-            logger.debug(
-                "parse_request_id, request_id: %s, ip: %s, port: %s, "
-                "is_prefill:%s", request_id, ip, str(port), is_prefill)
 
             return ip, port
         raise ValueError(

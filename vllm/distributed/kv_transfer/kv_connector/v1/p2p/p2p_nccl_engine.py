@@ -224,7 +224,7 @@ class P2pNcclEngine:
 
                     self.send_store[tensor_id] = tensor
                     self.buffer_size += tensor_size
-                    logger.info(
+                    logger.debug(
                         "🔵[GET]Send to %s, tensor_id:%s, tensor_size:%d, "
                         "shape:%s, rank:%d, buffer_size:%d(%.2f%%)",
                         remote_address, tensor_id, tensor_size, tensor.shape,
@@ -251,16 +251,8 @@ class P2pNcclEngine:
                     tensor = self.pool.load_tensor(addr, dtype, shape,
                                                    self.device)
                 else:
-                    addr = 0
                     self.buffer_size -= (tensor.element_size() *
                                          tensor.numel())
-                duration = time.time() - start_time
-                logger.info(
-                    "🔵[PUT]Recv From %s, tensor_id:%s, shape:%s, "
-                    "duration:%.3fms, size:%.3fGB, addr:%d, rank:%d",
-                    remote_address, tensor_id, tensor.shape, duration * 1000,
-                    tensor.element_size() * tensor.numel() / 1024**3, addr,
-                    self.rank)
             else:
                 duration = time.time() - start_time
                 logger.warning(
@@ -293,14 +285,7 @@ class P2pNcclEngine:
                              dtype=getattr(torch, data["dtype"]),
                              device=self.device)
 
-        start_time = time.time()
         self._recv(comm, tensor, rank ^ 1, self.recv_stream)
-        duration = time.time() - start_time
-        logger.info(
-            "🔵[GET]Recv From %s, tensor_id:%s, shape:%s, duration:%.3fms, "
-            "size:%.3fGB, rank:%d", remote_address, tensor_id, tensor.shape,
-            duration * 1000,
-            tensor.element_size() * tensor.numel() / 1024**3, self.rank)
 
         return tensor
 
@@ -310,8 +295,6 @@ class P2pNcclEngine:
             if self.router_socket in socks:
                 remote_address, message = self.router_socket.recv_multipart()
                 data = msgpack.loads(message)
-                logger.debug("Received message from %s, data:%s",
-                             remote_address.decode(), data)
                 if data["cmd"] == "NEW":
                     unique_id = self.nccl.unique_id_from_bytes(
                         bytes(data["unique_id"]))
@@ -347,11 +330,6 @@ class P2pNcclEngine:
                                 remote_address.decode(), data, addr)
                         else:
                             self.buffer_size += tensor_size
-                            logger.info(
-                                "🔵[PUT]Recv Tensor, %s👈%s, MyRank:%s, "
-                                "data:%s, shape:%s", self.zmq_address,
-                                remote_address.decode(), rank, data,
-                                tensor.shape)
 
                     except torch.cuda.OutOfMemoryError:
                         self.router_socket.send_multipart(
@@ -387,16 +365,10 @@ class P2pNcclEngine:
                     self.router_socket.send_multipart(
                         [remote_address, msgpack.dumps(data)])
 
-                    rank = -1
                     if data["ret"] == 0:
                         comm, rank = self.comms[remote_address.decode()]
                         self._send(comm, tensor.to(self.device), rank ^ 1,
                                    self.send_stream)
-
-                    logger.info(
-                        "🔵[GET]Send Tensor, %s👉%s, "
-                        "MyRank:%s, data:%s", self.zmq_address,
-                        remote_address.decode(), rank, data)
                 else:
                     logger.warning(
                         "🚧Unexpected, Received message from %s, data:%s",
@@ -471,8 +443,6 @@ class P2pNcclEngine:
         if self.send_type == "PUT_ASYNC":
             self._have_sent_tensor_id(tensor_id)
 
-        logger.info("🔵Send Tensor, %s👉%s, MyRank:%s, data:%s",
-                    self.zmq_address, remote_address, rank, data)
         return True
 
     def get_finished(
@@ -489,8 +459,6 @@ class P2pNcclEngine:
             call to this method (this call or a prior one).
         """
 
-        logger.debug("🐞get_finished, finished_req_ids:%s", finished_req_ids)
-
         # Clear the buffer upon request completion.
         for request_id in finished_req_ids:
             for layer_name in forward_context.no_compile_layers:
@@ -506,17 +474,12 @@ class P2pNcclEngine:
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
                         self.pool.free(addr)
-                    logger.debug("🐞get_finished, remove tensor_id:%s, addr:%d",
-                                 tensor_id, addr)
 
         # TODO:Retrieve requests that have already sent the KV cache.
         finished_sending: set[str] = set()
 
         # TODO:Retrieve requests that have already received the KV cache.
         finished_recving: set[str] = set()
-
-        logger.debug("🐞get_finished, finished_sending:%s, finished_recving:%s",
-                     finished_sending, finished_recving)
 
         return finished_sending or None, finished_recving or None
 
@@ -541,18 +504,11 @@ class P2pNcclEngine:
         if stream is None:
             stream = current_stream()
 
-        start_time = time.time()
         with torch.cuda.stream(stream):
             self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), dst,
                                comm, cudaStream_t(stream.cuda_stream))
         stream.synchronize()
-
-        duration = time.time() - start_time
-        logger.info(
-            "🕐Nccl Send Tensor, shape:%s, duration:%.3fms, size:%.3fGB, "
-            "rank:%d", tensor.shape, duration * 1000,
-            tensor.element_size() * tensor.numel() / 1024**3, dst)
 
     def _recv(self, comm, tensor: torch.Tensor, src: int, stream=None):
         assert tensor.device == self.device, (
@@ -561,17 +517,11 @@ class P2pNcclEngine:
         if stream is None:
             stream = current_stream()
 
-        start_time = time.time()
         with torch.cuda.stream(stream):
             self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                                ncclDataTypeEnum.from_torch(tensor.dtype), src,
                                comm, cudaStream_t(stream.cuda_stream))
         stream.synchronize()
-        duration = time.time() - start_time
-        logger.info(
-            "🕐Nccl Recv Tensor, shape:%s, duration:%.3fms, size:%.3fGB, "
-            "rank:%d", tensor.shape, duration * 1000,
-            tensor.element_size() * tensor.numel() / 1024**3, src)
 
     def close(self) -> None:
         self._listener_thread.join()
