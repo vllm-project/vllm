@@ -14,6 +14,8 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    _valid_flashinfer_fused_moe, flashinfer_cutlass_fused_moe_nvfp4)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
@@ -1149,6 +1151,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   use_int8_w8a8: bool = False,
                   use_int8_w8a16: bool = False,
                   use_int4_w4a16: bool = False,
+                  use_nvfp4_w4a4: bool = False,
                   per_channel_quant: bool = False,
                   global_num_experts: int = -1,
                   expert_map: Optional[torch.Tensor] = None,
@@ -1158,11 +1161,42 @@ def fused_experts(hidden_states: torch.Tensor,
                   w2_zp: Optional[torch.Tensor] = None,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None,
+                  g1_alphas: Optional[torch.Tensor] = None,
+                  g2_alphas: Optional[torch.Tensor] = None,
+                  ep_rank: Optional[int] = 0,
+                  ep_size: Optional[int] = 1,
+                  tp_rank: Optional[int] = 0,
+                  tp_size: Optional[int] = 1,
                   block_shape: Optional[list[int]] = None,
-                  allow_deep_gemm: bool = False) -> torch.Tensor:
+                  allow_deep_gemm: bool = False,
+                  allow_flashinfer_cutlass: bool = False) -> torch.Tensor:
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
     N = w1.shape[1]
+    #TODO(shuw): hijack for now
+    if (allow_flashinfer_cutlass and use_nvfp4_w4a4
+        and _valid_flashinfer_fused_moe(hidden_states, w1, w2)):
+        return flashinfer_cutlass_fused_moe_nvfp4(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            w1=w1,
+            w2=w2,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            g1_alphas=g1_alphas,
+            g2_alphas=g2_alphas,
+            inplace=inplace,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            ep_rank=ep_rank,
+            ep_size=ep_size,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )    
     if (allow_deep_gemm and use_fp8_w8a8 and N > 512
             and _valid_deep_gemm(hidden_states, w1, w2)):
         assert apply_router_weight_on_input is False
