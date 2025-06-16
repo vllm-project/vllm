@@ -1267,6 +1267,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (
                 self.get_finished_kv_transfers(scheduler_output))
+            pending_handshake_req_ids = self.get_pending_handshake_req_ids()
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1505,6 +1506,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,
             finished_sending=finished_sending,
             finished_recving=finished_recving,
+            pending_handshake_req_ids=pending_handshake_req_ids,
         )
 
     def kv_connector_no_forward(
@@ -1514,13 +1516,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.maybe_setup_kv_connector(scheduler_output)
             finished_sending, finished_recving = (
                 self.get_finished_kv_transfers(scheduler_output))
+            pending_handshake_req_ids = self.get_pending_handshake_req_ids()
 
-        if not finished_sending and not finished_recving:
+        if (not finished_sending and not finished_recving
+                and not pending_handshake_req_ids):
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.finished_sending = finished_sending
         output.finished_recving = finished_recving
+        output.pending_handshake_req_ids = pending_handshake_req_ids
         return output
 
     @staticmethod
@@ -1552,6 +1557,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids)
         return None, None
+
+    @staticmethod
+    def get_pending_handshake_req_ids() -> Optional[set[str]]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_pending_handshake_req_ids()
+        return None
 
     def generate_draft_token_ids(
         self,

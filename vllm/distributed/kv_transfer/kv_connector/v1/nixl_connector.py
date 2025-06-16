@@ -3,10 +3,12 @@
 import base64
 import json
 import math
+import queue
 import threading
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.error import HTTPError, URLError
@@ -19,7 +21,7 @@ from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorHandshakeMetadata, KVConnectorMetadata,
-    KVConnectorRole)
+    KVConnectorRole, KVTransferFinishedResult)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -154,7 +156,14 @@ class NixlConnector(KVConnectorBase_V1):
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_finished()
+        result = self.connector_worker.get_finished()
+        # Store pending handshake for the new method to retrieve
+        self._pending_handshake_req_ids = result.pending_handshake
+        return result.finished_sending, result.finished_recving
+
+    def get_pending_handshake_req_ids(self) -> Optional[set[str]]:
+        """Get request IDs that are currently pending handshake completion."""
+        return getattr(self, '_pending_handshake_req_ids', None)
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -378,10 +387,6 @@ class NixlConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_transfers = defaultdict[str, list[Transfer]](list)
 
-        # Pending requests waiting for handshake completion
-        # [engine_id -> list[(req_id, meta)]]
-        self._pending_requests: dict[str, list[tuple[str, ReqMeta]]] = {}
-
         # Complete transfer tracker. Used by the rank 0 to track finished
         # transactions on ranks 1 to N-1.
         # [req_id -> count]
@@ -391,10 +396,13 @@ class NixlConnectorWorker:
                                               int] = defaultdict(lambda: 0)
 
         # Background handshake threads for remote engines
-        self._handshake_threads: dict[str, threading.Thread] = {}
-
+        self._executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="nixl-handshake")
         # Thread results for handshake completion tracking
-        self._handshake_results: dict[str, bool] = {}
+        self._handshake_futures: dict[str, Future] = {}
+        self._pending_requests: dict[str, list[tuple[str, ReqMeta]]] = {}
+        self._ready_requests: queue.Queue[tuple[str, ReqMeta]] = queue.Queue()
+        self._lock = threading.Lock()
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -423,28 +431,49 @@ class NixlConnectorWorker:
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[str, int](int)
 
-    def _run_handshake_in_thread(self, engine_id: str, host: str, port: int):
-        """Run handshake in background thread."""
+    def __del__(self):
+        """Cleanup ThreadPoolExecutor on destruction."""
+        if hasattr(self, '_executor'):
+            self._executor.shutdown(wait=False)
 
-        def handshake_worker():
-            logger.debug("Starting handshake worker for engine %s", engine_id)
+    def _start_handshake(self, engine_id: str, host: str, port: int):
+        """Start handshake using ThreadPoolExecutor."""
+        if engine_id in self._handshake_futures:
+            return
+
+        logger.debug("Starting handshake for engine %s", engine_id)
+        future = self._executor.submit(self._nixl_handshake, host, port)
+        self._handshake_futures[engine_id] = future
+
+        # Set up callback to handle completion
+        def on_handshake_complete(fut: Future):
             try:
-                self._nixl_handshake(host, port)
-                self._handshake_results[engine_id] = True
+                fut.result()  # This will raise if the handshake failed
                 logger.debug("Handshake succeeded for engine %s", engine_id)
+                with self._lock:
+                    # Remove from futures dict - requests will remain pending
+                    # and be handled by scheduler retry logic
+                    if engine_id in self._handshake_futures:
+                        del self._handshake_futures[engine_id]
+                    logger.debug("Handshake completed for engine %s. "
+                                  "Pending requests will be retried by" \
+                                  "scheduler.", engine_id)
             except Exception as e:
-                self._handshake_results[engine_id] = False
                 logger.warning("Handshake failed for engine %s: %s", engine_id,
                                e)
-            finally:
-                logger.debug("Handshake worker finished for engine %s",
-                             engine_id)
+                with self._lock:
+                    # clean up failed handshake - requests will remain pending
+                    # and be reported to scheduler for retry
+                    if engine_id in self._handshake_futures:
+                        del self._handshake_futures[engine_id]
+                    if engine_id in self._pending_requests:
+                        failed_reqs = self._pending_requests[engine_id]
+                        logger.warning(
+                            "Handshake failed for engine %s, leaving"
+                            "%d requests pending for scheduler retry",
+                            engine_id, len(failed_reqs))
 
-        thread = threading.Thread(target=handshake_worker, daemon=True)
-        thread._start_time = time.time()  # track when thread started
-        self._handshake_threads[engine_id] = thread
-        thread.start()
-        return thread
+        future.add_done_callback(on_handshake_complete)
 
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote instance."""
@@ -761,9 +790,9 @@ class NixlConnectorWorker:
                 engine_id] = self.nixl_wrapper.prep_xfer_dlist(
                     self._remote_agents[engine_id][remote_tp_rank], descs)
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(self) -> KVTransferFinishedResult:
         """
-        Get requests that are done sending or recving.
+        Get requests that are done sending, done recving, and pending handshake.
 
         In TP>1 setup, each rank exchanges KVs with its counterpart
         ranks independently. get_finished() runs in a worker creates
@@ -773,61 +802,84 @@ class NixlConnectorWorker:
         to Rank 0 once their transaction is done + Rank 0 returns
         finished sets to Scheduler only once all ranks are done.
         """
-        # Process any completed handshakes first
-        self._process_completed_handshakes()
+        # process requests that became ready after handshake completion
+        self._process_ready_requests()
 
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
-        if len(done_sending) > 0 or len(done_recving) > 0:
+
+        with self._lock:
+            pending_handshake = set()
+            for pending_reqs in self._pending_requests.values():
+                for req_id, _ in pending_reqs:
+                    pending_handshake.add(req_id)
+
+        local_result = KVTransferFinishedResult(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            pending_handshake=pending_handshake)
+
+        if not local_result.is_empty():
             logger.debug(
-                "Rank %s, get_finished: %s requests done sending "
-                "and %s requests done recving", self.tp_rank,
-                len(done_sending), len(done_recving))
+                "Rank %s, get_finished: %s requests done sending, "
+                "%s requests done recving, %s pending handshake", self.tp_rank,
+                len(done_sending), len(done_recving), len(pending_handshake))
 
         if self.world_size == 1:
-            return done_sending, done_recving
+            return local_result
 
-        # Rank 0: get finished from all other ranks.
+        return self._coordinate_multi_rank_results(local_result)
+
+    def _coordinate_multi_rank_results(
+            self, local_result: KVTransferFinishedResult
+    ) -> KVTransferFinishedResult:
+        """Coordinate results across multiple TP ranks."""
+
         if self.tp_rank == 0:
-            for req_id in done_sending:
+            # Rank 0 collects results from all other ranks.
+            for req_id in local_result.finished_sending:
                 self._done_sending_count[req_id] += 1
-            for req_id in done_recving:
+            for req_id in local_result.finished_recving:
                 self._done_recving_count[req_id] += 1
 
-            # Keep track of how many other ranks have finished.
-            other_ranks_finished_ids: list[str] = []
+            all_pending_handshake = local_result.pending_handshake.copy()
             for i in range(1, self.world_size):
-                other_ranks_finished_ids.extend(
-                    self.tp_group.recv_object(src=i))
-            for req_id in other_ranks_finished_ids:
-                if (req_id in self._done_recving_count
-                        or req_id in self._recving_transfers):
-                    self._done_recving_count[req_id] += 1
-                else:
-                    self._done_sending_count[req_id] += 1
+                rank_data = self.tp_group.recv_object(src=i)
+                other_rank_result = KVTransferFinishedResult.from_tuple(
+                    rank_data)
 
-            # Return ids that finished on all ranks to the scheduler.
-            all_done_recving: set[str] = set()
-            for req_id in list(self._done_recving_count.keys()):
-                if self._done_recving_count[req_id] == self.world_size:
-                    del self._done_recving_count[req_id]
-                    all_done_recving.add(req_id)
+                for req_id in other_rank_result.get_all_finished_req_ids():
+                    if (req_id in self._done_recving_count
+                            or req_id in self._recving_transfers):
+                        self._done_recving_count[req_id] += 1
+                    else:
+                        self._done_sending_count[req_id] += 1
 
-            all_done_sending: set[str] = set()
-            for req_id in list(self._done_sending_count.keys()):
-                if self._done_sending_count[req_id] == self.world_size:
-                    del self._done_sending_count[req_id]
-                    all_done_sending.add(req_id)
+                all_pending_handshake.update(
+                    other_rank_result.pending_handshake)
 
-            return all_done_sending, all_done_recving
+            all_done_recving = self._get_globally_finished_requests(
+                self._done_recving_count)
+            all_done_sending = self._get_globally_finished_requests(
+                self._done_sending_count)
 
-        # Ranks 1 to N-1: send finished ids to Rank 0.
+            return KVTransferFinishedResult(
+                finished_sending=all_done_sending,
+                finished_recving=all_done_recving,
+                pending_handshake=all_pending_handshake)
         else:
-            finished_req_ids = list(done_recving.union(done_sending))
-            self.tp_group.send_object(finished_req_ids, dst=0)
+            self.tp_group.send_object(local_result.to_tuple(), dst=0)
+            return local_result
 
-            # Unused as only Rank 0 results are sent to scheduler.
-            return done_sending, done_recving
+    def _get_globally_finished_requests(
+            self, counter_dict: dict[str, int]) -> set[str]:
+        """Get request IDs that have finished on all ranks."""
+        finished_req_ids = set()
+        for req_id in list(counter_dict.keys()):
+            if counter_dict[req_id] == self.world_size:
+                del counter_dict[req_id]
+                finished_req_ids.add(req_id)
+        return finished_req_ids
 
     def _get_new_notifs(self) -> set[str]:
         """
@@ -871,78 +923,18 @@ class NixlConnectorWorker:
                                        xfer_state)
         return done_req_ids
 
-    def _process_completed_handshakes(self):
-        """Process completed handshakes and mark remote agents as ready."""
-
-        # debug: log current state
-        if self._handshake_threads:
-            logger.debug(
-                "Processing handshakes: %d active threads, %d pending",
-                len(self._handshake_threads),
-                sum(len(reqs) for reqs in self._pending_requests.values()))
-
-        completed_engines = []
-        for engine_id, thread in list(self._handshake_threads.items()):
-            logger.debug("Checking handshake thread for engine %s: alive=%s",
-                         engine_id, thread.is_alive())
-
-            # check for timeout (threads running > 30 seconds)
-            thread_age = time.time() - getattr(thread, '_start_time',
-                                               time.time())
-            if thread.is_alive() and thread_age > 30.0:
-                logger.warning("Handshake thread for %s running %.1fs (hung?)",
-                               engine_id, thread_age)
-
-            if not thread.is_alive():
-                logger.debug("Handshake completed for engine %s", engine_id)
-                completed_engines.append(engine_id)
-
-                success = self._handshake_results.get(engine_id, False)
-                logger.debug("Handshake result for engine %s: success=%s",
-                             engine_id, success)
-                if not success:
-                    logger.warning("Handshake failed for engine %s", engine_id)
-                    continue
-
-                logger.debug("Handshake succeeded for engine %s", engine_id)
-                if engine_id in self._pending_requests:
-                    pending_reqs = self._pending_requests[engine_id]
-                    logger.debug(
-                        "Handshake completed for %s, immediately retrying %d " \
-                        "pending requests",
-                        engine_id, len(pending_reqs))
-
-                    for req_id, meta in pending_reqs:
-                        logger.debug(
-                            "Immediately retrying request %s for engine %s",
-                            req_id, engine_id)
-                        try:
-                            self._read_blocks(
-                                request_id=req_id,
-                                dst_engine_id=meta.remote_engine_id,
-                                local_block_ids=meta.local_block_ids,
-                                remote_block_ids=meta.remote_block_ids,
-                            )
-                        except Exception as e:
-                            logger.error("Failed to retry request %s: %s",
-                                         req_id, e)
-
-                    del self._pending_requests[engine_id]
-
-        for engine_id in completed_engines:
-            logger.debug("Cleaning up handshake thread for engine %s",
-                         engine_id)
-            del self._handshake_threads[engine_id]
-            if engine_id in self._handshake_results:
-                del self._handshake_results[engine_id]
-
-    def _is_request_pending_handshake(self, req_id: str) -> bool:
-        """Check if request is still pending handshake completion."""
-        for engine_requests in self._pending_requests.values():
-            for pending_req_id, _ in engine_requests:
-                if pending_req_id == req_id:
-                    return True
-        return False
+    def _process_ready_requests(self):
+        """Process requests that are ready after handshake completion.
+        
+        Note: With scheduler-based retry logic, this method is simplified
+        as automatic retries are handled by the scheduler.
+        """
+        # Clear any remaining items in the ready queue to prevent memory leaks
+        while True:
+            try:
+                self._ready_requests.get_nowait()
+            except queue.Empty:
+                break
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
@@ -951,49 +943,47 @@ class NixlConnectorWorker:
         """
         logger.debug("start_load_kv called with %d requests",
                      len(metadata.requests))
+
         for req_id, meta in metadata.requests.items():
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
-                "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
+                "Num local_block_ids: %s. Num remote_block_ids: %s.", req_id,
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
 
-            if meta.remote_engine_id not in self._remote_agents:
-                logger.debug(
-                    "Remote engine %s not registered for request %s, "
-                    "starting handshake and deferring transfer",
-                    meta.remote_engine_id, req_id)
-
-                if meta.remote_engine_id not in self._handshake_threads:
+            with self._lock:
+                if meta.remote_engine_id in self._remote_agents:
                     logger.debug(
-                        "Starting handshake thread for remote engine %s",
+                        "Remote agent available for %s, calling _read_blocks",
                         meta.remote_engine_id)
-                    self._run_handshake_in_thread(meta.remote_engine_id,
-                                                  meta.remote_host,
-                                                  meta.remote_port)
+                    self._read_blocks(
+                        request_id=req_id,
+                        dst_engine_id=meta.remote_engine_id,
+                        local_block_ids=meta.local_block_ids,
+                        remote_block_ids=meta.remote_block_ids,
+                    )
+                elif meta.remote_engine_id in self._handshake_futures:
+                    logger.debug(
+                        "Handshake in progress for engine %s, adding"
+                        " request %s to pending", meta.remote_engine_id,
+                        req_id)
+                    if meta.remote_engine_id not in self._pending_requests:
+                        self._pending_requests[meta.remote_engine_id] = []
+                    self._pending_requests[meta.remote_engine_id].append(
+                        (req_id, meta))
                 else:
                     logger.debug(
-                        "Handshake thread already exists for remote engine %s",
-                        meta.remote_engine_id)
+                        "Starting handshake for engine %s and adding"
+                        " request %s to pending", meta.remote_engine_id,
+                        req_id)
+                    if meta.remote_engine_id not in self._pending_requests:
+                        self._pending_requests[meta.remote_engine_id] = []
+                    self._pending_requests[meta.remote_engine_id].append(
+                        (req_id, meta))
+                    self._start_handshake(meta.remote_engine_id,
+                                          meta.remote_host, meta.remote_port)
 
-                if meta.remote_engine_id not in self._pending_requests:
-                    self._pending_requests[meta.remote_engine_id] = []
-                self._pending_requests[meta.remote_engine_id].append(
-                    (req_id, meta))
-
-                logger.debug(
-                    "Request %s marked as pending handshake for engine %s",
-                    req_id, meta.remote_engine_id)
-                continue
-
-            logger.debug("Remote agent available for %s, calling _read_blocks",
-                         meta.remote_engine_id)
-            self._read_blocks(
-                request_id=req_id,
-                dst_engine_id=meta.remote_engine_id,
-                local_block_ids=meta.local_block_ids,
-                remote_block_ids=meta.remote_block_ids,
-            )
+        self._process_ready_requests()
 
     def _read_blocks(
         self,

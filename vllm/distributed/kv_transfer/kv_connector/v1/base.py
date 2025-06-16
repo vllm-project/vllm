@@ -22,6 +22,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import msgspec
@@ -39,6 +40,64 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class KVTransferFinishedResult:
+    """Result of KV transfer get_finished operation."""
+
+    finished_sending: set[str]
+    finished_recving: set[str]
+    pending_handshake: set[str]
+
+    def has_any_finished(self) -> bool:
+        """Check if any requests finished or are pending."""
+        return bool(self.finished_sending or self.finished_recving
+                    or self.pending_handshake)
+
+    def is_empty(self) -> bool:
+        """Check if all sets are empty."""
+        return not self.has_any_finished()
+
+    def get_all_finished_req_ids(self) -> set[str]:
+        """Get all request IDs that have finished (sending or receiving)."""
+        return self.finished_sending.union(self.finished_recving)
+
+    def merge(self,
+              other: 'KVTransferFinishedResult') -> 'KVTransferFinishedResult':
+        """Merge with another result, combining all sets."""
+        return KVTransferFinishedResult(
+            finished_sending=self.finished_sending.union(
+                other.finished_sending),
+            finished_recving=self.finished_recving.union(
+                other.finished_recving),
+            pending_handshake=self.pending_handshake.union(
+                other.pending_handshake))
+
+    @classmethod
+    def empty(cls) -> 'KVTransferFinishedResult':
+        """Create an empty result."""
+        return cls(finished_sending=set(),
+                   finished_recving=set(),
+                   pending_handshake=set())
+
+    @classmethod
+    def from_tuple(
+        cls, result_tuple: tuple[set[str], set[str], set[str]]
+    ) -> 'KVTransferFinishedResult':
+        """Create from the old tuple format for backward compatibility."""
+        finished_sending, finished_recving, pending_handshake = result_tuple
+        return cls(finished_sending=finished_sending,
+                   finished_recving=finished_recving,
+                   pending_handshake=pending_handshake)
+
+    def to_tuple(self) -> tuple[set[str], set[str], set[str]]:
+        """Convert to the old tuple format for backward compatibility."""
+        return (
+            self.finished_sending,
+            self.finished_recving,
+            self.pending_handshake,
+        )
 
 
 class KVConnectorRole(enum.Enum):
@@ -227,6 +286,15 @@ class KVConnectorBase_V1(ABC):
             call to this method (this call or a prior one).
         """
         return None, None
+
+    def get_pending_handshake_req_ids(self) -> Optional[set[str]]:
+        """
+        Get request IDs that are currently pending handshake completion.
+        
+        Returns:
+            Set of request IDs waiting for handshake, or None if not applicable.
+        """
+        return None
 
     def get_handshake_metadata(self) -> Optional[KVConnectorHandshakeMetadata]:
         """
