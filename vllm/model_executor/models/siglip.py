@@ -516,6 +516,13 @@ class SiglipVisionModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                if name not in params_dict:
+                    potential_name = f"vision_model.{name}"
+                    if potential_name in params_dict:
+                        name = potential_name
+                    else:
+                        loaded_params.add(name)
+                        continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
