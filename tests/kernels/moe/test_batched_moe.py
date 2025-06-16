@@ -133,6 +133,8 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         act_dtype = dtype
         quant_dtype = None
 
+    #print(f"TYPES {dtype}, {act_dtype}, {quant_dtype}")
+
     num_expert_tokens = torch.randint(low=0,
                                       high=max_tokens_per_expert,
                                       size=(num_experts, ),
@@ -153,7 +155,8 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         num_experts,
         N // 2,
         K,
-        quant_dtype=dtype,
+        in_dtype=act_dtype,
+        quant_dtype=quant_dtype,
         block_shape=block_shape,
     )
 
@@ -167,6 +170,8 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         torch.bfloat16: tl.bfloat16,
         torch.float32: tl.float32
     }[test_output.dtype]
+
+    assert A_q.dtype == B_q.dtype
 
     invoke_moe_batched_triton_kernel(
         A_q,
@@ -185,7 +190,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         config={
             "BLOCK_SIZE_M": 16,
             "BLOCK_SIZE_N": 16,
-            "BLOCK_SIZE_K": 16
+            "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else 32
         },
         block_shape=block_shape,
     )
@@ -209,7 +214,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         torch.float32: (1e-2, 1e-2),
     }[test_output.dtype]
 
-    torch.testing.assert_close(ref_output, q_ref_output, atol=atol, rtol=rtol)
+    torch.testing.assert_close(ref_output, test_output, atol=atol, rtol=rtol)
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
 
@@ -234,7 +239,6 @@ def test_fused_moe_batched_experts(
     current_platform.seed_everything(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
-    quant_type = torch.float8_e4m3fn if use_fp8_w8a8 else None
 
     if not use_fp8_w8a8 and per_act_token_quant and block_shape is not None:
         pytest.skip("Skip quantization test for non-quantized type")
@@ -244,20 +248,30 @@ def test_fused_moe_batched_experts(
 
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(e, n, k, block_shape=block_shape, quant_dtype=dtype)
+
+    if dtype.itemsize == 1:
+        act_dtype = torch.bfloat16
+        quant_dtype = dtype
+    else:
+        act_dtype = dtype
+        quant_dtype = None
+
+    _, w1, w1_s, _, w2, w2_s = make_test_weights(e, n, k, block_shape=block_shape,
+                                                 in_dtype=act_dtype,
+                                                 quant_dtype=quant_dtype)
 
     torch.set_printoptions(profile="full")
 
     with set_current_vllm_config(vllm_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
         batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                     w2_s, quant_type, per_act_token_quant,
+                                     w2_s, quant_dtype, per_act_token_quant,
                                      block_shape)
         baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                     w2_s, quant_type, per_act_token_quant,
+                                     w2_s, quant_dtype, per_act_token_quant,
                                      block_shape)
         triton_output = triton_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                   w2_s, quant_type, per_act_token_quant,
+                                   w2_s, quant_dtype, per_act_token_quant,
                                    block_shape)
 
     torch.testing.assert_close(triton_output,
