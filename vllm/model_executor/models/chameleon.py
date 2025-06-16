@@ -1005,7 +1005,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
 
         inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.model.vocabulary_mapping.image_token_id)
