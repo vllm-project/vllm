@@ -274,12 +274,16 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
     if not _valid_deep_gemm_shape(M, N, K):
         pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
 
+    chunk_size = 1024
+
     torch.manual_seed(seed)
 
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
+
     block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
     block_size = [block_m, block_m]
     dtype = torch.bfloat16
+
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
@@ -315,6 +319,10 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
         w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
         w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
 
+    use_compile = (chunk_size < M and N >= 1024 and K >= 1024
+                   and current_platform.is_cuda_alike())
+    use_cudagraph = use_compile
+
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
         if M >= 128:
@@ -327,7 +335,26 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             a, score.float(), topk, False)
 
-        out = deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids)
+        if use_compile:
+            deep_gemm_moe_fp8_fn = torch.compile(deep_gemm_moe_fp8,
+                                                 backend="inductor",
+                                                 fullgraph=True)
+        else:
+            deep_gemm_moe_fp8_fn = deep_gemm_moe_fp8
+
+        out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights,
+                                   topk_ids)
+
+        if use_cudagraph:
+            out.fill_(0)
+            stream = torch.cuda.Stream()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights,
+                                           topk_ids)
+            torch.cuda.synchronize()
+            graph.replay()
+            torch.cuda.synchronize()
 
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
