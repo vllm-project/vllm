@@ -275,11 +275,7 @@ class Scheduler(SchedulerInterface):
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
 
-                    self.waiting.push_request(
-                        preempted_req,
-                        preempted_req.priority,
-                        preempted_req.arrival_time,
-                    )
+                    self.waiting.push_request(preempted_req)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt.
