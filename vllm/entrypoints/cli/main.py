@@ -8,6 +8,7 @@ import sys
 import vllm.entrypoints.cli.benchmark.main
 import vllm.entrypoints.cli.collect_env
 import vllm.entrypoints.cli.openai
+import vllm.entrypoints.cli.process
 import vllm.entrypoints.cli.run_batch
 import vllm.entrypoints.cli.serve
 import vllm.version
@@ -20,6 +21,7 @@ CMD_MODULES = [
     vllm.entrypoints.cli.benchmark.main,
     vllm.entrypoints.cli.collect_env,
     vllm.entrypoints.cli.run_batch,
+    vllm.entrypoints.cli.process,
 ]
 
 
