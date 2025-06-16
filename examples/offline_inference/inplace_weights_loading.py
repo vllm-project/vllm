@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from vllm import LLM, SamplingParams
+from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 
 # Sample prompts.
 prompts = [
@@ -14,28 +13,26 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 
-# def aync_main():
-#     engine = AsyncLLMEngine.from_engine_args(engine_args)
-#     example_input = {
-#         "prompt": "What is LLM?",
-#         "stream": False, # assume the non-streaming case
-#         "temperature": 0.0,
-#         "request_id": 0,
-#     }
-#     # start the generation
-#     results_generator = engine.generate(
-#     example_input["prompt"],
-#     SamplingParams(temperature=example_input["temperature"]),
-#     example_input["request_id"])
-#     # get the results
-#     final_output = None
-#     async for request_output in results_generator:
-#         if await request.is_disconnected():
-#             # Abort the request if the client disconnects.
-#             await engine.abort(request_id)
-#             # Return or raise an error
-#             ...
-#         final_output = request_output
+async def aync_main():
+    engine_args = AsyncEngineArgs(
+        model="facebook/opt-125m",
+        load_format="dummy",
+    )
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    engine.engine.vllm_config.load_config.load_format = "auto"
+    await engine.collective_rpc("load_model")
+    # start the generation
+    results_generator = engine.generate(
+        prompt="What is LLM?",
+        sampling_params=SamplingParams(temperature=0.0),
+        request_id="0",
+    )
+    # get the results
+    final_output = None
+    async for request_output in results_generator:
+        final_output = request_output
+    assert final_output is not None
+    print("Async engine output:", final_output.outputs[0].text)
 
 
 def main():
@@ -45,8 +42,10 @@ def main():
         load_format="dummy",
     )
 
+    # llm.llm_engine.model_executor.driver_worker.worker.\
+    #    model_runner.vllm_config.load_config.load_format = "auto"
     # Now load real weights inplace
-    llm.llm_engine.vllm_config.load_config.load_format = "auto"
+    # llm.llm_engine.vllm_config.load_config.load_format = "auto"
     llm.collective_rpc("load_model")
 
     # Check real weights are loaded
@@ -62,3 +61,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # asyncio.run(aync_main())
