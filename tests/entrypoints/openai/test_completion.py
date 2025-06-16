@@ -779,3 +779,57 @@ async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
             prompt="Give an example string that fits this regex",
             extra_body=dict(guided_regex=sample_regex,
                             guided_json=sample_json_schema))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name,stream,echo",
+    [
+        (MODEL_NAME, False, False),
+        (MODEL_NAME, False, True),
+        (MODEL_NAME, True, False),
+        (MODEL_NAME, True, True)  # should not raise BadRequestError error
+    ],
+)
+async def test_echo_stream_completion(client: openai.AsyncOpenAI,
+                                      model_name: str, stream: bool,
+                                      echo: bool):
+    saying: str = "Hello, my name is"
+    result = await client.completions.create(model=model_name,
+                                             prompt=saying,
+                                             max_tokens=10,
+                                             temperature=0.0,
+                                             echo=echo,
+                                             stream=stream)
+
+    stop_reason = "length"
+
+    if not stream:
+        completion = result
+        assert completion.id is not None
+        assert completion.choices is not None and len(completion.choices) == 1
+
+        choice = completion.choices[0]
+        assert len(choice.text) >= 5
+        assert choice.finish_reason == stop_reason
+
+        if echo:
+            assert choice.text is not None and saying in choice.text
+        else:
+            assert choice.text is not None and saying not in choice.text
+
+    else:
+        chunks: list[str] = []
+        final_finish_reason = None
+        async for chunk in result:
+            if chunk.choices and chunk.choices[0].text:
+                chunks.append(chunk.choices[0].text)
+            if chunk.choices and chunk.choices[0].finish_reason:
+                final_finish_reason = chunk.choices[0].finish_reason
+
+        assert final_finish_reason == stop_reason
+        content = "".join(chunks)
+        if echo:
+            assert content is not None and saying in content
+        else:
+            assert content is not None and saying not in content
