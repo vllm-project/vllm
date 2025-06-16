@@ -45,7 +45,6 @@ logger = init_logger(__name__)
 class SwiGLUActivation(nn.Module):
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
-        # print(f"x1 shape: {x1.shape}, x2 shape: {x2.shape}")
         return x1 * nn.functional.silu(x2)
     
 
@@ -175,7 +174,7 @@ class SambaYAttention(nn.Module):
         return self.out_proj(attn_output)
 
 
-class Phi3Mamba(nn.Module):
+class Phi4Mamba(nn.Module):
     def __init__(
         self,
         d_model,
@@ -249,15 +248,6 @@ class Phi3Mamba(nn.Module):
                                             skip_bias_add=True,
                                             params_dtype=dtype,
                                         )
-
-        # # S4D real initialization
-        # A = repeat(
-        #     torch.arange(1, self.d_state + 1, dtype=torch.float32),
-        #     "n -> d n",
-        #     d=self.d_inner,
-        # ).contiguous()
-        # A_log = torch.log(A)  # Keep A_log in fp32
-        # self.A_log = nn.Parameter(A_log)
 
         # # D "skip" parameter
         # self.D = nn.Parameter(torch.ones(self.d_inner))  # Keep in fp32
@@ -417,7 +407,7 @@ class SambaYDecoderLayer(nn.Module):
         self.use_mamba = config.mb_per_layer > 0 and layer_idx % config.mb_per_layer == 0
         if self.use_mamba:
             factory_kwargs = {"dtype": None}
-            self.attn = Phi3Mamba(config.hidden_size, layer_idx=layer_idx, 
+            self.attn = Phi4Mamba(config.hidden_size, layer_idx=layer_idx, 
                                   yoco_cross=self.yoco_cross, yoco_kv=self.yoco_mb, **factory_kwargs)
         else:
             self.attn = SambaYAttention(config, layer_idx=layer_idx, yoco_cross=self.yoco_cross, cache_config=cache_config, prefix=f"{prefix}.self_attn")
@@ -590,7 +580,7 @@ class SambaYModel(nn.Module):
         return hidden_states
 
 
-class Phi4MiniFlashForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
+class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
@@ -603,7 +593,7 @@ class Phi4MiniFlashForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Onl
         # Prefix caching is not supported since there are mamba layers in this 
         # mode.
         assert not cache_config.enable_prefix_caching, \
-            "SambaY currently does not support prefix caching"
+            "Phi4flash currently does not support prefix caching"
 
         super().__init__()
         self.config = config
