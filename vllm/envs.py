@@ -136,7 +136,7 @@ if TYPE_CHECKING:
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
     VLLM_ROCM_QR_QUANT_REGIME: str = "FP"
-    VLLM_ROCM_QR_CAST_BF16_TO_FP16: bool = True
+    VLLM_ROCM_QR_CAST_BF16_TO_FP16: bool = False
 
 
 def get_default_cache_root():
@@ -701,9 +701,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Custom quick allreduce kernel for MI3* cards
     # Due to the lack of the bfloat16 asm instruction, bfloat16
     # kernels are slower than fp16,
-    # If environment is not set to 1, we convert input to fp16
+    # If environment variable is not set to 1, we convert input to fp16
     "VLLM_ROCM_QR_CAST_BF16_TO_FP16":
-    lambda: (os.getenv("VLLM_ROCM_QR_CAST_BF16_TO_FP16", "True").lower() in
+    lambda: (os.getenv("VLLM_ROCM_QR_CAST_BF16_TO_FP16", "False").lower() in
              ("true", "1")),
 
     # If set, when running in Quark emulation mode, do not dequantize the

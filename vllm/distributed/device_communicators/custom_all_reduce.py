@@ -11,7 +11,6 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
 from vllm.distributed.parallel_state import in_the_same_node_as
@@ -66,14 +65,23 @@ class CustomAllreduce:
 
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
     _QR_SUPPORTED_WORLD_SIZES = [2, 4, 8]
+    _QR_SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
+
+    # TODO need to do kernel benchmarking for TP8 to get min sizes
+    _QR_MIN_SIZE = {
+        (torch.float16, 2): 512 * 1024,  # 512KB
+        (torch.float16, 4): 512 * 1024,  # 512KB
+        (torch.float16, 8): 512 * 1024,  # 512KB
+        (torch.bfloat16, 2): 1024 * 1024,  # 1MB
+        (torch.bfloat16, 4): 4 * 1024 * 1024,  # 4MB
+        (torch.bfloat16, 8): 4 * 1024 * 1024,  # 4KB
+    }
 
     # max_size: max supported allreduce size
     def __init__(self,
                  group: ProcessGroup,
                  device: Union[int, str, torch.device],
-                 cr_max_size=8192 * 1024,
-                 qr_max_size=512 * 1024 * 1024,
-                 qr_min_size=2 * 1024 * 1024) -> None:
+                 cr_max_size=8192 * 1024) -> None:
         """
         Custom allredcue (cr) is non-destructive acceleration, which is
         available for cuda and rocm MI300 series.
@@ -91,9 +99,6 @@ class CustomAllreduce:
             device: the device to bind the CustomAllreduce to. If None,
                 it will be bind to f"cuda:{local_rank}".
             cr_max_size: max supported size of cr.
-            qr_max_size: max supported size of qr.
-            qr_min_size: min supported size of qr. Less than this size, 
-                cr is better.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
@@ -101,9 +106,9 @@ class CustomAllreduce:
         self._QR_SHOULD_INIT = True
         self._IS_CAPTURING = False
         self.disabled = True
+        self.qr_disabled = True
         self.cr_max_size = cr_max_size
-        self.qr_max_size = qr_max_size
-        self.qr_min_size = qr_min_size
+        self.qr_max_size = ops.qr_max_size()
 
         if not custom_ar:
             # disable because of missing custom allreduce library
@@ -190,14 +195,15 @@ class CustomAllreduce:
                 " more than two PCIe-only GPUs. To silence this warning, "
                 "specify disable_custom_all_reduce=True explicitly.")
             return
-        # test P2P capability, this checks software/cudaruntime support
-        # this is expensive to compute at the first time
-        # then we cache the result
-        # On AMD GPU, p2p is always enabled between XGMI connected GPUs
         if not current_platform.is_rocm():
-            # First, we only enable custom allreduce for MI300 series,
+            # First, we only enable quickreduce for MI300 series,
             # If it's rocm then it must be MI300 series, qr must be available.
             self._QR_SHOULD_INIT = False
+
+            # test P2P capability, this checks software/cudaruntime support
+            # this is expensive to compute at the first time
+            # then we cache the result
+            # On AMD GPU, p2p is always enabled between XGMI connected GPUs
             if not _can_p2p(rank, world_size):
                 logger.warning(
                     "Custom allreduce is disabled because your platform lacks "
@@ -205,8 +211,10 @@ class CustomAllreduce:
                     "warning, specify disable_custom_all_reduce=True "
                     "explicitly.")
                 return
-        self.disabled = False
+
         self.init_custom_allreduce()
+        self.disabled = False
+
         self.init_custom_quick_allreduce()
 
     def init_custom_allreduce(self):
@@ -243,17 +251,11 @@ class CustomAllreduce:
         Initialize a custom quick allreduce implementation for AMD
         based on quick reduce (https://github.com/mk1-project/quickreduce).
         """
-        vllm_config = get_current_vllm_config()
-        dtype = vllm_config.model_config.dtype
-        if dtype not in [torch.float16, torch.bfloat16]:
-            self._QR_SHOULD_INIT = False
-
         # On RocM bfloat16 kernels are slower than fp16
         # due to slower match operations
         # If environment is not set to 1 we convert input to fp16
         self.use_fp16_kernels: bool = envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16
         regime_str = envs.VLLM_ROCM_QR_QUANT_REGIME
-
         if self._QR_SHOULD_INIT:
             if regime_str not in QuickReduceRegime.__members__:
                 logger.warning(
@@ -272,22 +274,9 @@ class CustomAllreduce:
             # These numbers are based on kernel tests.
             # TODO: We need the full kernel test to guide the
             # size adjustment here
-            if self.world_size == 2:
-                self.qr_min_size = 1 * 1024 * 1024
-            else:
-                self.qr_min_size = 2 * 1024 * 1024
             self._qr_ptr = ops.init_custom_qr(self.rank, self.world_size)
             self.create_qr_shared_buffer()
-            if dtype == torch.bfloat16 and self.use_fp16_kernels:
-                logger.info(
-                    "Custom quick allreduce: due to the lack of bf16 assembly "
-                    "instruction set, the performance gain of bf16 is "
-                    "limited. We convert bfloat16 to float16 to speed "
-                    "up quick allreduce. You can set "
-                    "envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16=0 to turn "
-                    "this conversion off.")
-            # There is no case where qr is initialized and
-            # cr is not initialized
+            self.qr_disabled = False
 
     @contextmanager
     def capture(self):
@@ -328,29 +317,23 @@ class CustomAllreduce:
         """
         Check if quickreduce is available
         """
-        if self.disabled and not self._QR_SHOULD_INIT:
+        if self.qr_disabled:
             return False
         inp_size = inp.numel() * inp.element_size()
         # custom quick allreduce requires input byte size to be
         # multiples of 16
+        if inp.dtype not in self._QR_SUPPORTED_DTYPES:
+            return False
         if inp_size % 16 != 0:
             return False
         if not is_weak_contiguous(inp):
             return False
         # custom quick allreduce requires input byte size to be multiples of 16
-        if inp.dtype == torch.float16:
-            return inp_size <= self.qr_max_size and inp_size >= self.qr_min_size
-        elif inp.dtype == torch.bfloat16:
-            if self.use_fp16_kernels:
-                # cast2half, so the same condition
-                return inp_size <= self.qr_max_size and \
-                    inp_size >= self.qr_min_size
-            else:
-                # TODO: check bf16 condition for mi300
-                return (inp_size <= self.qr_max_size
-                        and inp_size > 1024 * 1024 * 16
-                        and self.world_size == 2)
-        return False
+        dtype = inp.dtype
+        if self.use_fp16_kernels:
+            dtype = torch.float16
+        return inp_size > self._QR_MIN_SIZE[(dtype, self.world_size)] and \
+            inp_size <= self.qr_max_size
 
     def should_custom_allreduce(self, inp: torch.Tensor):
         if self.disabled:
@@ -404,21 +387,12 @@ class CustomAllreduce:
 
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
         """The main allreduce API that provides support for cuda graph."""
-        # When custom allreduce is disabled, this will be None.
-        if self.disabled:
-            return None
         # try custom quick allreduce first, then custom allreduce
         if self.should_quick_allreduce(input):
             # We don't need the context of quick allreduce to do graph capture
             # because the ipc access is already collected in init() and
             # we can capture the quick allreduce directly.
-            if self._IS_CAPTURING and \
-                not torch.cuda.is_current_stream_capturing():
-                # If warm up, mimic the allocation pattern since custom
-                # allreduce is out-of-place.
-                return torch.empty_like(input)
-            else:
-                return self.qr_all_reduce(input)
+            return self.qr_all_reduce(input)
 
         if self.should_custom_allreduce(input):
             if self._IS_CAPTURING:
@@ -438,17 +412,18 @@ class CustomAllreduce:
         return None
 
     def close(self):
-        if not self.disabled:
-            if self._cr_ptr:
-                if ops is not None:
-                    ops.dispose(self._cr_ptr)
-                self._cr_ptr = 0
-                self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
-                self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
-            if self._qr_ptr:
-                if ops is not None:
-                    ops.qr_destroy(self._qr_ptr)
-                self._qr_ptr = 0
+        if not self.cr_disabled and self._cr_ptr:
+            if ops is not None:
+                ops.dispose(self._cr_ptr)
+            self._cr_ptr = 0
+            self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
+            self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
+            self.cr_disabled = True
+        if not self.qr_disabled and self._qr_ptr:
+            if ops is not None:
+                ops.qr_destroy(self._qr_ptr)
+            self._qr_ptr = 0
+            self.qr_disabled = True
 
     def __del__(self):
         self.close()

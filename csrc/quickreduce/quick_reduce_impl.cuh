@@ -553,7 +553,6 @@ struct AllReduceTwoshot {
       T const* __restrict__ input, T* __restrict__ output,
       uint32_t const N,                    // number of elements
       int const block,                     // block index
-      int const num_blocks,                // number of blocks
       int const rank,                      // rank index
       uint8_t** __restrict__ buffer_list,  // communication buffers
       uint32_t const data_offset,          // offset to start of the data buffer
@@ -562,7 +561,8 @@ struct AllReduceTwoshot {
     int thread = threadIdx.x + threadIdx.y * kWavefront;
     uint8_t* rank_buffer = buffer_list[rank];
     Codec codec(thread, rank);
-
+    int block_id = blockIdx.x;
+    int grid_size = gridDim.x;
     // --------------------------------------------------------
     // Read input into registers
     int32x4_t tA[kAtoms];
@@ -580,13 +580,13 @@ struct AllReduceTwoshot {
     // Phase-1A: Write segment data into the communication buffer of the target
     // rank responsible for this segment.
     uint32_t comm_data0_offset =
-        data_offset + block * Codec::kTransmittedTileSize;
+        data_offset + block_id * Codec::kTransmittedTileSize;
     uint32_t comm_data1_offset =
-        num_blocks * Codec::kTransmittedTileSize + comm_data0_offset;
+        grid_size * Codec::kTransmittedTileSize + comm_data0_offset;
 
-    uint32_t comm_flags0_offset = block * (kWorldSize * sizeof(uint32_t));
+    uint32_t comm_flags0_offset = block_id * (kWorldSize * sizeof(uint32_t));
     uint32_t comm_flags1_offset =
-        num_blocks * (kWorldSize * sizeof(uint32_t)) + comm_flags0_offset;
+        grid_size * (kWorldSize * sizeof(uint32_t)) + comm_flags0_offset;
 
     for (int r = 0; r < kWorldSize; r++) {
       int32x4_t* send_buffer =
