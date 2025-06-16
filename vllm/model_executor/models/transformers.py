@@ -599,6 +599,7 @@ class TransformersModel(nn.Module):
             if param.device == torch.device("meta"):
                 new_param = nn.Parameter(
                     torch.empty_like(param.data,
+                                     dtype=self.model_config.dtype,
                                      device=self.device_config.device))
                 setattr(module, name, new_param)
         for child in module.children():
