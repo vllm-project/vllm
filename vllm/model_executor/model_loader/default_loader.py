@@ -20,7 +20,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     fastsafetensors_weights_iterator, filter_duplicate_safetensors_files,
     filter_files_not_needed_for_inference, get_lock, np_cache_weights_iterator,
-    pt_weights_iterator, safetensors_weights_iterator)
+    pt_weights_iterator, safetensors_weights_iterator, prefetch_weight_files)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -104,7 +104,7 @@ class DefaultModelLoader(BaseModelLoader):
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
         # Some quantized models use .pt files for storing the weights.
-        if load_format == LoadFormat.AUTO:
+        if load_format == LoadFormat.AUTO or load_format == LoadFormat.PREFETCH_AUTO:
             allow_patterns = ["*.safetensors", "*.bin"]
         elif (load_format == LoadFormat.SAFETENSORS
               or load_format == LoadFormat.FASTSAFETENSORS):
@@ -195,11 +195,15 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.use_tqdm_on_load,
                 )
             else:
+                if self.load_config.load_format == LoadFormat.PREFETCH_AUTO:
+                    prefetch_weight_files(hf_weights_files)
                 weights_iterator = safetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                 )
         else:
+            if self.load_config.load_format == LoadFormat.PREFETCH_AUTO:
+                prefetch_weight_files(hf_weights_files)
             weights_iterator = pt_weights_iterator(
                 hf_weights_files,
                 self.load_config.use_tqdm_on_load,
