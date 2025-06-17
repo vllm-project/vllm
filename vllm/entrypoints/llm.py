@@ -10,6 +10,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
 
 import cloudpickle
 import torch.nn as nn
+from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
@@ -179,7 +180,8 @@ class LLM:
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
-        compilation_config: Optional[Union[int, dict[str, Any]]] = None,
+        compilation_config: Optional[Union[int, dict[str, Any],
+                                           CompilationConfig]] = None,
         **kwargs,
     ) -> None:
         """LLM constructor."""
@@ -193,6 +195,23 @@ class LLM:
             # we serialize it using cloudpickle to avoid pickling issues
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
+
+        if "kv_transfer_config" in kwargs and isinstance(
+                kwargs["kv_transfer_config"], dict):
+            from vllm.config import KVTransferConfig
+            raw_config_dict = kwargs["kv_transfer_config"]
+            try:
+                kwargs["kv_transfer_config"] = KVTransferConfig(
+                    **raw_config_dict)
+            except ValidationError as e:
+                logger.error(
+                    "Failed to convert 'kv_transfer_config' dict to "
+                    "KVTransferConfig object. Dict: %s. Error: %s",
+                    raw_config_dict, e)
+                # Consider re-raising a more specific vLLM error or ValueError
+                # to provide better context to the user.
+                raise ValueError(
+                    f"Invalid 'kv_transfer_config' provided: {e}") from e
 
         if hf_overrides is None:
             hf_overrides = {}

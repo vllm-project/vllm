@@ -607,7 +607,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         quant_type: int,
         row: torch.SymInt,
     ) -> torch.Tensor:
-        return torch.empty((1, row), dtype=X.dtype, device=W.device)
+        return torch.empty((X.shape[0], row), dtype=X.dtype, device=W.device)
 
     @register_fake("_C::ggml_mul_mat_a8")
     def _ggml_mul_mat_a8_fake(
@@ -1238,6 +1238,7 @@ def scaled_fp8_quant(
     num_token_padding: Optional[int] = None,
     scale_ub: Optional[torch.Tensor] = None,
     use_per_token_if_dynamic: bool = False,
+    output: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
@@ -1269,7 +1270,12 @@ def scaled_fp8_quant(
     out_dtype: torch.dtype = current_platform.fp8_dtype()
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
-    output = torch.empty(shape, device=input.device, dtype=out_dtype)
+    if output is None:
+        output = torch.empty(shape, device=input.device, dtype=out_dtype)
+    else:
+        assert num_token_padding is None, \
+            "padding not supported if output passed in"
+        assert output.dtype == out_dtype
 
     if scale is None:
         if use_per_token_if_dynamic:
@@ -1277,7 +1283,7 @@ def scaled_fp8_quant(
                                 device=input.device,
                                 dtype=torch.float32)
             torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale, scale_ub)
+                output, input.contiguous(), scale, scale_ub)
         else:
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
@@ -1386,8 +1392,8 @@ def scaled_int8_quant(
                                dtype=torch.float32)
     input_azp = None if symmetric else torch.empty_like(input_scales,
                                                         dtype=torch.int32)
-    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
-                                           input_azp)
+    torch.ops._C.dynamic_scaled_int8_quant(output, input.contiguous(),
+                                           input_scales, input_azp)
     return output, input_scales, input_azp
 
 
