@@ -3102,7 +3102,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                              "attention metadata")
         return phase_type
 
-    def _check_config(self, batch_size, seq_len, attn_metadata, warmup_mode):
+    def _check_config(self, batch_size, seq_len, ctx, attn_metadata,
+                      warmup_mode):
         is_prefix_caching = self.vllm_config.cache_config.enable_prefix_caching
         cfg: Optional[tuple] = None
         assert cfg is None, "Configs changed between 2D and 3D"
