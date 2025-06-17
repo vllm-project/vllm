@@ -44,7 +44,13 @@ class QuarkW4A4MXFP4(QuarkScheme):
                 "QDQ (quantize and dequantize) will be used, with the linear "
                 "layers computed in high precision.")
         else:
-            self.emulate = False
+            self.emulate = True
+            logger.warning_once(
+                "The current platform support native MXFP4 "
+                "computation, but kernels are not yet integrated in vLLM. "
+                "Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision.")
 
     @classmethod
     def get_min_capability(cls) -> int:
