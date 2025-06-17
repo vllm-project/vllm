@@ -687,8 +687,8 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
-        assert isinstance(request_id, str), \
-            f"request_id must be a string, got {type(request_id)}"
+        if not isinstance(request_id, str):
+            raise TypeError(f"request_id must be a string, got {type(request_id)}")
 
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
