@@ -417,6 +417,8 @@ FROM vllm-base AS test
 
 ADD . /vllm-workspace/
 
+ARG PYTHON_VERSION
+
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 
@@ -430,7 +432,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 
 # install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \   
+RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
         uv pip install --system -r requirements/dev.txt; \
@@ -446,7 +448,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
 # Copy in the v1 package for testing (it isn't distributed yet)
-COPY vllm/v1 /usr/local/lib/python3.12/dist-packages/vllm/v1
+COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
