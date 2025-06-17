@@ -135,6 +135,7 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_LAYOUT: Optional[str] = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
+    VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT: bool = False
 
 
 def get_default_cache_root():
@@ -927,7 +928,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # generations on machines < 100 for compressed-tensors
     # models
     "VLLM_USE_NVFP4_CT_EMULATIONS":
-    lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0")))
+    lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))),
+
+    # Offload model weights to cpu before online fp8 quantization
+    "VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT":
+    lambda: os.environ.get("VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT", "0") == "1",
 }
 
 # --8<-- [end:env-vars-definition]

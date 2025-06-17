@@ -135,4 +135,4 @@ print(result[0].outputs[0].text)
 ```
 
 !!! warning
-    Currently, we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model.
+    Currently, by default we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model. To avoid this, adding `VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT=1` can allow offloading weights to cpu before quantization and quantized weights will be kept in device.

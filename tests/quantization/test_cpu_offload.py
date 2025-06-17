@@ -13,6 +13,16 @@ from ..utils import compare_two_settings
 
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
+def test_offload_weights_before_quant_fp8():
+    # Test quantization of an unquantized checkpoint
+    compare_two_settings("meta-llama/Llama-3.2-1B-Instruct",
+                         ["--quantization", "fp8"], ["--quantization", "fp8"],
+                         {"VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT": "1"},
+                         max_wait_seconds=480)
+
+
+@pytest.mark.skipif(not is_quant_method_supported("fp8"),
+                    reason="fp8 is not supported on this GPU type.")
 def test_cpu_offload_fp8():
     # Test quantization of an unquantized checkpoint
     compare_two_settings("meta-llama/Llama-3.2-1B-Instruct",

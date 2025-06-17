@@ -1560,6 +1560,10 @@ class CacheConfig:
             raise ValueError("CPU offload space must be non-negative"
                              f", but got {self.cpu_offload_gb}")
 
+        if self.cpu_offload_gb > 0 and envs.VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT:
+            raise ValueError("CPU offload can't work together with"
+                             "OFFLOAD_WEIGHTS_BEFORE_QUANT")
+
         if self.gpu_memory_utilization > 1.0:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "

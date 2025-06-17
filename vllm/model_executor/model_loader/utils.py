@@ -16,6 +16,7 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from vllm.attention import Attention
 from vllm.config import (ModelConfig, ModelImpl, VllmConfig,
                          set_current_vllm_config)
+from vllm.envs import VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
@@ -144,26 +145,30 @@ def device_loading_context(module: torch.nn.Module,
         yield module
 
     finally:
-        # Restore parameters to their original devices, ignoring new parameters
-        pin_memory = is_pin_memory_available()
-        for name, p in module.named_parameters():
-            if name in original_device_states:
-                original_device: torch.device = original_device_states[name]
-                if original_device.type == "cpu":
-                    # `torch.empty_like` does not support `pin_memory` argument
-                    cpu_data = torch.empty_strided(
-                        size=p.data.size(),
-                        stride=p.data.stride(),
-                        dtype=p.data.dtype,
-                        layout=p.data.layout,
-                        device="cpu",
-                        pin_memory=pin_memory,
-                    )
-                    cpu_data.copy_(p.data)
-                    p.data = cpu_data
-                else:
-                    p.data = p.data.to(original_device)
-        # New parameters or parameters already on target device are untouched
+        # If weights were loaded onto the CPU for FP8 online quantization, there
+        # is no need to move them back to the original device.
+        if not VLLM_OFFLOAD_WEIGHTS_BEFORE_QUANT:
+            # Restore parameters to their original devices, ignoring new parameters # noqa: E501
+            pin_memory = is_pin_memory_available()
+            for name, p in module.named_parameters():
+                if name in original_device_states:
+                    original_device: torch.device = original_device_states[
+                        name]
+                    if original_device.type == "cpu":
+                        # `torch.empty_like` does not support `pin_memory` argument # noqa: E501
+                        cpu_data = torch.empty_strided(
+                            size=p.data.size(),
+                            stride=p.data.stride(),
+                            dtype=p.data.dtype,
+                            layout=p.data.layout,
+                            device="cpu",
+                            pin_memory=pin_memory,
+                        )
+                        cpu_data.copy_(p.data)
+                        p.data = cpu_data
+                    else:
+                        p.data = p.data.to(original_device)
+            # New parameters or parameters already on target device are untouched # noqa: E501
 
 
 def resolve_transformers_arch(model_config: ModelConfig,
