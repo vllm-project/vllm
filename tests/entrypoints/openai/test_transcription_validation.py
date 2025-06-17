@@ -74,19 +74,29 @@ async def test_bad_requests(mary_had_lamb):
                                                      language="hh",
                                                      temperature=0.0)
 
-        # Expect audio too long: repeat the timeseries
-        mary_had_lamb.seek(0)
-        audio, sr = librosa.load(mary_had_lamb)
-        repeated_audio = np.tile(audio, 10)
-        # Repeated audio to buffer
-        buffer = io.BytesIO()
-        sf.write(buffer, repeated_audio, sr, format='WAV')
-        buffer.seek(0)
-        with pytest.raises(openai.BadRequestError):
-            await client.audio.transcriptions.create(model=model_name,
-                                                     file=buffer,
-                                                     language="en",
-                                                     temperature=0.0)
+
+@pytest.mark.asyncio
+async def test_long_audio_request(mary_had_lamb):
+    model_name = "openai/whisper-large-v3-turbo"
+    server_args = ["--enforce-eager"]
+
+    mary_had_lamb.seek(0)
+    audio, sr = librosa.load(mary_had_lamb)
+    repeated_audio = np.tile(audio, 10)
+    # Repeated audio to buffer
+    buffer = io.BytesIO()
+    sf.write(buffer, repeated_audio, sr, format='WAV')
+    buffer.seek(0)
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        transcription = await client.audio.transcriptions.create(
+            model=model_name,
+            file=buffer,
+            language="en",
+            response_format="text",
+            temperature=0.0)
+        out = json.loads(transcription)['text']
+        assert out.count("Mary had a little lamb") == 10
 
 
 @pytest.mark.asyncio
