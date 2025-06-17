@@ -573,10 +573,11 @@ class HPUModelRunner:
         self.input_batch = InputBatch(
             max_num_reqs=self.scheduler_config.max_num_seqs,
             max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=[self.block_size]
         )
         self.mem_margin = None
 
