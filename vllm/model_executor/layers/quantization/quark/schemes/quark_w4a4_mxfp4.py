@@ -56,17 +56,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
         layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
                                                 requires_grad=False)
 
-        if self.emulate and not envs.VLLM_QUARK_EMU_MEM_OPT:
-            layer.weight = torch.nn.Parameter(
-                dequant_mxfp4(layer.weight.data, layer.weight_scale.data,
-                              self.out_dtype),
-                requires_grad=False,
-            )
-            layer.weight_scale = None
-
-            # This call is necessary to release the scales memory.
-            torch.cuda.empty_cache()
-
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: list[int],
                        input_size_per_partition: int,
@@ -109,10 +98,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         if self.emulate:
-            if envs.VLLM_QUARK_EMU_MEM_OPT:
-                dq_w = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
-            else:
-                dq_w = layer.weight
+            dq_w = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
 
             x = quant_dequant_mxfp4(x)
 

@@ -1249,14 +1249,9 @@ def fused_experts_impl(
         assert hidden_states.shape[1] // 2 == w1.shape[
             2], "Hidden size mismatch"
     elif use_mxfp4_w4a4:
-        if current_platform.supports_mx() or envs.VLLM_QUARK_EMU_MEM_OPT:
-            # 16bit activation and fp4x2 packed weight
-            assert hidden_states.shape[1] // 2 == w1.shape[
-                2], "hidden size mismatch"
-        else:
-            # 16bit activation and dequantized 16bit weight
-            assert hidden_states.shape[1] == w1.shape[
-                2], "hidden size mismatch"
+        # 16bit activation and fp4x2 packed weight
+        assert hidden_states.shape[1] // 2 == w1.shape[
+            2], "hidden size mismatch"
     else:
         assert hidden_states.shape[1] == w1.shape[2], (
             f"Hidden size mismatch {hidden_states.shape[1]} != {w1.shape[2]}")
@@ -1329,8 +1324,7 @@ def fused_experts_impl(
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    if use_mxfp4_w4a4 and not current_platform.supports_mx(
-    ) and envs.VLLM_QUARK_EMU_MEM_OPT:
+    if use_mxfp4_w4a4:
         # Weight has to be dequantized for mxfp4 emulation.
         w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
         w1_scale = None

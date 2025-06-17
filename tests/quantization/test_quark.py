@@ -24,7 +24,7 @@ from vllm.platforms import current_platform
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
-        importlib.metadata.version("amd-quark")) >= version.parse('0.9')
+        importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
 
 try:
     huggingface_hub.list_repo_refs(
@@ -189,7 +189,6 @@ def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
     task = "gsm8k"
     rtol = 0.03
 
-    os.environ["VLLM_QUARK_EMU_MEM_OPT"] = "1"
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
     results = lm_eval.simple_evaluate(
@@ -206,5 +205,4 @@ def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
             and measured_value + rtol > EXPECTED_VALUE
             ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
-    del os.environ["VLLM_QUARK_EMU_MEM_OPT"]
     del os.environ["VLLM_USE_TRITON_FLASH_ATTN"]

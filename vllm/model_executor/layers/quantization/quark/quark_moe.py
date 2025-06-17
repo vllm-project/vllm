@@ -333,29 +333,6 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        float_dtype = torch.get_default_dtype()
-
-        if self.emulate and not envs.VLLM_QUARK_EMU_MEM_OPT:
-            # Unpack and dequantize the weights, the operators are in
-            # high-precision, with simulated quantization).
-            layer.w13_weight = torch.nn.Parameter(
-                dequant_mxfp4(layer.w13_weight.data,
-                              layer.w13_weight_scale.data, float_dtype),
-                requires_grad=False,
-            )
-            layer.w13_weight_scale = None
-
-            layer.w2_weight = torch.nn.Parameter(
-                dequant_mxfp4(layer.w2_weight.data, layer.w2_weight_scale.data,
-                              float_dtype),
-                requires_grad=False,
-            )
-            layer.w2_weight_scale = None
-
-            # This call is necessary to release the scales memory.
-            torch.cuda.empty_cache()
-
     def apply(
         self,
         layer: torch.nn.Module,
