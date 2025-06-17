@@ -6,7 +6,6 @@ from typing import Any, Callable, Optional
 import torch
 import torch.nn.functional as F
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (

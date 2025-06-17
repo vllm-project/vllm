@@ -9,6 +9,7 @@ import importlib
 import importlib.metadata
 import os
 from dataclasses import dataclass
+from typing import List
 
 import huggingface_hub
 import lm_eval
@@ -22,16 +23,15 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkW4A4MXFp4MoEMethod)
 from vllm.platforms import current_platform
 
-from typing import List
-
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
         importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
 
 if QUARK_MXFP4_AVAILABLE:
-    from quark.torch.quantization.config.config import FP4PerGroupSpec
-    from quark.torch.export.nn.modules.realquantizer import StaticScaledRealQuantizer
+    from quark.torch.export.nn.modules.realquantizer import (
+        StaticScaledRealQuantizer)
     from quark.torch.kernel import mx as mx_kernel
+    from quark.torch.quantization.config.config import FP4PerGroupSpec
 
 try:
     huggingface_hub.list_repo_refs(
@@ -214,18 +214,23 @@ def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
 
     del os.environ["VLLM_USE_TRITON_FLASH_ATTN"]
 
+
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
                     reason="amd-quark>=0.9 is not available")
 @pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
-def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: List[int]):
+@pytest.mark.parametrize("scalings",
+                         [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype,
+                                     scalings: List[int]):
     torch.manual_seed(0)
 
     hidden_size = 64 * 32
-    inp = (torch.rand(1, hidden_size, dtype=float_dtype, device="cuda") - 0.5) * 2
+    inp = (torch.rand(1, hidden_size, dtype=float_dtype, device="cuda") -
+           0.5) * 2
     for i in range(hidden_size // 32):
-        inp[:, i * 32: (i + 1) * 32] = inp[:, i * 32: (i + 1) * 32] * scalings[i % len(scalings)]
-    
+        inp[:, i * 32:(i + 1) *
+            32] = inp[:, i * 32:(i + 1) * 32] * scalings[i % len(scalings)]
+
     inp_kernel = inp.clone()
     inp_kernel_clone = inp_kernel.clone()
 
@@ -233,17 +238,20 @@ def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: List[in
     res_torch = mx_kernel.qdq_mxfp4_torch(inp_kernel, "even")
 
     for i in range(hidden_size // 32):
-        assert torch.all(torch.isfinite(res_hip[:, i * 32: (i + 1) * 32]))
-        assert torch.all(torch.isfinite(res_torch[:, i * 32: (i + 1) * 32]))
-        
-        torch.testing.assert_close(res_hip[:, i * 32 : (i + 1) * 32], res_torch[:, i * 32 : (i + 1) * 32])
+        assert torch.all(torch.isfinite(res_hip[:, i * 32:(i + 1) * 32]))
+        assert torch.all(torch.isfinite(res_torch[:, i * 32:(i + 1) * 32]))
+
+        torch.testing.assert_close(res_hip[:, i * 32:(i + 1) * 32],
+                                   res_torch[:, i * 32:(i + 1) * 32])
 
 
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
                     reason="amd-quark>=0.9 is not available")
 @pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
-def test_mxfp4_dequant_kernel_match_quark(float_dtype: torch.dtype, scalings: List[int]):
+@pytest.mark.parametrize("scalings",
+                         [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+def test_mxfp4_dequant_kernel_match_quark(float_dtype: torch.dtype,
+                                          scalings: List[int]):
     qspec = FP4PerGroupSpec(
         ch_axis=-1,
         group_size=32,
@@ -270,7 +278,8 @@ def test_mxfp4_dequant_kernel_match_quark(float_dtype: torch.dtype, scalings: Li
 
     # Make it so that different groups have different scales.
     for i in range(hidden_size // 32):
-        w[:, i * 32: (i + 1) * 32] = w[:, i * 32: (i + 1) * 32] * scalings[i % len(scalings)]
+        w[:, i * 32:(i + 1) *
+          32] = w[:, i * 32:(i + 1) * 32] * scalings[i % len(scalings)]
 
     observer(w)
     scale, _ = observer._calculate_qparams()
