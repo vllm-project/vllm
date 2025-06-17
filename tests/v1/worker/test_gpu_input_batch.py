@@ -246,7 +246,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     req_ids_retained = set(req_id_reqs.keys()) - req_ids_to_remove
 
     # Compact the input batch
-    input_batch.condense(req_indices_to_remove)
+    input_batch.condense()
 
     # Generate the sampling metadata
     sampling_metadata = input_batch._make_sampling_metadata()

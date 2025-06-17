@@ -463,8 +463,8 @@ class InputBatch:
         self.batch_update.moved.append(
             (from_idx, to_idx, MoveDirectionalityEnum.UNIDIRECTIONAL))
 
-    def condense(self, empty_req_indices: Optional[list[int]] = None) -> None:
-        """Slide non-empty requests down into empty indices.
+    def condense(self) -> None:
+        """Slide non-empty requests down into lower, empty indices.
 
         Any consecutive empty indices at the very end of the list are not
         filled.
@@ -476,7 +476,6 @@ class InputBatch:
           swaps: list of (from,to) swap tuples for moved requests
           empty_req_indices: indices not filled by condensation
         """
-        assert empty_req_indices is None
         empty_req_indices = self.batch_update.removed
         num_reqs = self.num_reqs
         if num_reqs == 0:
