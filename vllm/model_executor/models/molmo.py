@@ -1487,7 +1487,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if multimodal_embeddings:
+        if len(multimodal_embeddings) != 0:
             assert self.img_patch_id is not None
 
             inputs_embeds = merge_multimodal_embeddings(
