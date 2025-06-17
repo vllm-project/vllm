@@ -130,8 +130,8 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
 
-void silu_and_mul(torch::Tensor& out, torch::Tensor& input,
-                  torch::Tensor& valid_tokens_array);
+void batched_silu_and_mul(torch::Tensor& out, torch::Tensor& input,
+                          torch::Tensor& valid_tokens_array);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 

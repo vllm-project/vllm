@@ -22,7 +22,6 @@ __device__ void _act_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const int d, const int64_t token_idx) {
-  const int64_t token_idx = blockIdx.x;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
     const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
@@ -39,7 +38,7 @@ __global__ void act_and_mul_kernel(
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const int d) {
   const int64_t token_idx = blockIdx.x;
-  _act_and_mul_kernel(out, input, d, token_idx)
+  _act_and_mul_kernel<scalar_t, ACT_FN, act_first>(out, input, d, token_idx);
 }
 
 template <typename T>
@@ -242,7 +241,7 @@ template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
 __global__ void batched_act_and_mul_kernel(
     scalar_t* out,                      // [B, max_tokens, d]
     const scalar_t* input,              // [B, max_tokens, 2, d]
-    const int64_t* valid_tokens_array,  // [B]
+    const int32_t* valid_tokens_array,  // [B]
     const int d) {
   ;
   const int64_t batch_idx = blockIdx.x;
@@ -260,7 +259,8 @@ __global__ void batched_act_and_mul_kernel(
   scalar_t* __restrict__ batch_out = &out[batch_idx * max_num_tokens * d];
   const scalar_t* __restrict__ batch_input =
       &input[batch_idx * max_num_tokens * d * 2];
-  _act_and_mul_kernel(batch_out, batch_input, d, token_idx)
+  _act_and_mul_kernel<scalar_t, ACT_FN, act_first>(batch_out, batch_input, d,
+                                                   token_idx);
 }
 }  // namespace vllm
 
@@ -280,7 +280,7 @@ __global__ void batched_act_and_mul_kernel(
         vllm::batched_act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST>  \
             <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),       \
                                          input.data_ptr<scalar_t>(), \
-                                         valid_tokens_array.data_ptr<torch::kInt64), \
+                                         valid_tokens_array.data_ptr<torch::kInt32), \
                                           d);                                        \
                                });
 
@@ -289,6 +289,6 @@ void batched_silu_and_mul(torch::Tensor& out,  // [..., d]
                           torch::Tensor& valid_tokens_array)  // [..., 2 * d]
 {
   TORCH_CHECK(out.is_contiguous() && input.is_contiguous());
-  TORCH_CHECK(valid_tokens_array.dtype() == torch.::kInt64);
+  TORCH_CHECK(valid_tokens_array.dtype() == torch::kInt32);
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, true);
 }
