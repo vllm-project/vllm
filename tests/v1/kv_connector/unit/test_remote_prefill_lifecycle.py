@@ -422,3 +422,71 @@ def test_cannot_schedule_after_recv():
     scheduler.update_from_output(scheduler_output, model_runner_output)
     _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)
+
+
+def test_timeout_abort():
+    """
+    Test lifecycle of an aborted Remote Prefill request hitting the timeout.
+    -----> P 
+            |  {process request}
+     <-\--- |  {result is NOT delivered, eg proxy is down}
+            |
+            |
+            |  {eventually free blocks}
+    """
+
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    request = create_request(request_id=1,
+                             max_tokens=1,
+                             num_tokens=1000,
+                             do_remote_decode=True)
+
+    scheduler.add_request(request)
+    request_id = request.request_id
+
+    # STEP (1): Prefill.
+    # (1a): schedule()
+    scheduler_output = scheduler.schedule()
+    assert len(scheduler.running) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 1
+
+    # (1b): execute_model()
+    model_runner_output = create_model_runner_output(reqs=[request])
+
+    # (1c): update_from_output()
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert request_id in scheduler.pending_kv_free_req_ids
+    assert request_id in scheduler.finished_req_ids
+    blocks = scheduler.kv_cache_manager.coordinator.get_blocks(request_id)[0]
+    for block in blocks:
+        assert block.ref_cnt == 1
+
+    # STEP (2): Send Finished to PB.
+    # (2a): schedule() - pass finished request to PB.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(reqs=[])
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert len(scheduler.pending_kv_free_req_ids) > 0
+    import time
+    time.sleep(2)
+    # Simulate other scheduler step
+    scheduler_output = scheduler.schedule()
+    # SIMULATE ABORT.
+    # scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+    assert_scheduler_empty(scheduler)
+    return
+
+    # SIMULATE ABORT on empty scheduler (should be allowed).
+    scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+    assert_scheduler_empty(scheduler)
+
+    # SIMULATE Got Free After Abort.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(
+        reqs=[], finished_sending=[request_id])
+    # This should not double free!!!
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert_scheduler_empty(scheduler)

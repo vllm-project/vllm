@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
 GET_META_MSG = b"get_meta_msg"
+REQS_TIMEOUT = 180  # TODO add to vllm.envs
 
 logger = init_logger(__name__)
 
@@ -397,6 +398,7 @@ class NixlConnectorWorker:
         # In progress transfers.
         # [req_id -> list[handle]]
         self._recving_transfers = defaultdict[str, list[Transfer]](list)
+        self._reqs_to_send: dict[str, int] = {}
 
         # Completed xfers. Rank 0 tracks finished on remote ranks.
         # [req_id -> count]
@@ -789,6 +791,16 @@ class NixlConnectorWorker:
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
 
+        # Handle timeout
+        now = time.perf_counter()
+        for req_id, finish_time in self._reqs_to_send.items():
+            if finish_time == -1:
+                # Request just finished, start timeout.
+                self._reqs_to_send[req_id] = now
+            elif now - finish_time >= REQS_TIMEOUT:
+                # Timeout exceed, abort request and clear.
+                aborted_req_ids.add(req_id)
+
         # Handle aborted requests.
         for req_id in aborted_req_ids:
             # Set done counts to work size so we will mark as done.
@@ -801,6 +813,9 @@ class NixlConnectorWorker:
             if (handle := self._recving_transfers.get(req_id)):
                 self.nixl_wrapper.release_xfer_handle(handle)
                 del self._recving_transfers[req_id]
+
+            if req_id in self._reqs_to_send:
+                del self._reqs_to_send[req_id]
 
         # Rank 0: get finished from all other ranks.
         if self.tp_rank == 0:
@@ -861,6 +876,7 @@ class NixlConnectorWorker:
                         tp_ratio):
                     notified_req_ids.add(req_id)
                     del self.consumer_notification_counts_by_req[req_id]
+                    del self._reqs_to_send[req_id]
         return notified_req_ids
 
     def _pop_done_transfers(
@@ -912,6 +928,7 @@ class NixlConnectorWorker:
         # Await SEND (triggered by corresponding RECV on remote).
         for req_id in metadata.reqs_to_send:
             self._done_sending_count[req_id] = 0
+            self._reqs_to_send[req_id] = -1
 
     def _read_blocks(
         self,
