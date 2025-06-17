@@ -6,8 +6,8 @@ from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import partial_json_parser
-from partial_json_parser.core.options import Allow
 import regex as re
+from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
