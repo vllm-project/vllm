@@ -5,16 +5,17 @@ from typing import Optional
 
 import torch
 
-import vllm.model_executor.layers.quantization.deepgemm
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     _moe_permute)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8)
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache, per_token_group_quant_fp8)
+from vllm.model_executor.layers.quantization.deepgemm import (  # noqa: E501
+    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm as
+    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm)
 from vllm.utils import has_deep_gemm, round_up
 
 logger = init_logger(__name__)
