@@ -842,12 +842,12 @@ def try_get_optimal_moe_config_list(
                                         is_marlin, block_shape)
 
     return (
-        config['BLOCK_SIZE_M'],
-        config['BLOCK_SIZE_N'],
-        config['BLOCK_SIZE_K'],
-        config['GROUP_SIZE_M'],
-        config.get('num_warps', 4),
-        config.get('num_stages', 3 if not current_platform.is_rocm() else 2),
+        config.get('BLOCK_SIZE_M', 0),
+        config.get('BLOCK_SIZE_N', 0),
+        config.get('BLOCK_SIZE_K', 0),
+        config.get('GROUP_SIZE_M', 0),
+        config.get('num_warps', 0),
+        config.get('num_stages', 0),
     )
 
 
@@ -868,22 +868,30 @@ def try_get_optimal_moe_config(
     is_marlin: bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> dict[str, int]:
-    block_m, block_n, block_k, group_m, num_warps, num_stages = (
-        torch.ops.vllm.try_get_optimal_moe_config_list(
-            w1_shape,
-            w2_shape,
-            top_k,
-            dtype,
-            M,
-            is_marlin,
-            block_shape,
-        ))
-    return dict(BLOCK_SIZE_M=block_m,
-                BLOCK_SIZE_N=block_n,
-                BLOCK_SIZE_K=block_k,
-                GROUP_SIZE_M=group_m,
-                num_warps=num_warps,
-                num_stages=num_stages)
+    values = torch.ops.vllm.try_get_optimal_moe_config_list(
+        w1_shape,
+        w2_shape,
+        top_k,
+        dtype,
+        M,
+        is_marlin,
+        block_shape,
+    )
+
+    config = dict()
+
+    keys = ["BLOCK_SIZE_M", "BLOCK_SIZE_N",
+            "BLOCK_SIZE_K", "GROUP_SIZE_M",
+            "num_warps", "num_stages"]
+
+    assert len(keys) == len(values)
+
+    config = dict()
+    for k, v in zip(keys, values):
+        if v != 0:
+            config[k] = v
+
+    return config
 
 
 def vllm_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
@@ -1224,31 +1232,6 @@ def fused_experts(hidden_states: torch.Tensor,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
-        )
-    elif True:
-        fn = modular_triton_fused_moe(use_fp8_w8a8=use_fp8_w8a8,
-                                      use_int8_w8a8=use_int8_w8a8,
-                                      use_int8_w8a16=use_int8_w8a16,
-                                      use_int4_w4a16=use_int4_w4a16,
-                                      per_channel_quant=per_channel_quant,
-                                      block_shape=block_shape)
-
-        return fn(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_zp=w1_zp,
-            w2_zp=w2_zp,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
         )
     else:
         return dispatch_fused_experts_func(inplace)(
