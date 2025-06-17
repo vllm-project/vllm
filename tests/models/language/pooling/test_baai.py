@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from .embed_utils import EmbedModelInfo, correctness_test_embed_models
-from .mteb_utils import mteb_test_embed_models
+from ...utils import EmbedModelInfo, RerankModelInfo
+from .embed_utils import correctness_test_embed_models
+from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
 
 MODELS = [
     ########## BertModel
@@ -57,6 +58,20 @@ MODELS = [
                    enable_test=True),
 ]
 
+RERANK_MODELS = [
+    ########## XLMRobertaForSequenceClassification
+    RerankModelInfo("BAAI/bge-reranker-base",
+                    architecture="XLMRobertaForSequenceClassification",
+                    enable_test=True),
+    RerankModelInfo("BAAI/bge-reranker-large",
+                    architecture="XLMRobertaForSequenceClassification",
+                    enable_test=False),
+    RerankModelInfo("BAAI/bge-reranker-v2-m3",
+                    architecture="XLMRobertaForSequenceClassification",
+                    dtype="float32",
+                    enable_test=False)
+]
+
 
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner,
@@ -70,3 +85,9 @@ def test_embed_models_correctness(hf_runner, vllm_runner,
                                   example_prompts) -> None:
     correctness_test_embed_models(hf_runner, vllm_runner, model_info,
                                   example_prompts)
+
+
+@pytest.mark.parametrize("model_info", RERANK_MODELS)
+def test_rerank_models_mteb(hf_runner, vllm_runner,
+                            model_info: RerankModelInfo) -> None:
+    mteb_test_rerank_models(hf_runner, vllm_runner, model_info)

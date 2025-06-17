@@ -1,12 +1,11 @@
-# --8<-- [start:installation]
+# Intel Gaudi
 
-This tab provides instructions on running vLLM with Intel Gaudi devices.
+This page provides instructions on running vLLM with Intel Gaudi devices.
 
 !!! warning
     There are no pre-built wheels or images for this device, so you must build vLLM from source.
 
-# --8<-- [end:installation]
-# --8<-- [start:requirements]
+## Requirements
 
 - OS: Ubuntu 22.04 LTS
 - Python: 3.10
@@ -56,16 +55,13 @@ docker run \
   vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
 ```
 
-# --8<-- [end:requirements]
-# --8<-- [start:set-up-using-python]
+## Set up using Python
 
-# --8<-- [end:set-up-using-python]
-# --8<-- [start:pre-built-wheels]
+### Pre-built wheels
 
 Currently, there are no pre-built Intel Gaudi wheels.
 
-# --8<-- [end:pre-built-wheels]
-# --8<-- [start:build-wheel-from-source]
+### Build wheel from source
 
 To build and install vLLM from source, run:
 
@@ -86,16 +82,13 @@ pip install -r requirements/hpu.txt
 python setup.py develop
 ```
 
-# --8<-- [end:build-wheel-from-source]
-# --8<-- [start:set-up-using-docker]
+## Set up using Docker
 
-# --8<-- [end:set-up-using-docker]
-# --8<-- [start:pre-built-images]
+### Pre-built images
 
 Currently, there are no pre-built Intel Gaudi images.
 
-# --8<-- [end:pre-built-images]
-# --8<-- [start:build-image-from-source]
+### Build image from source
 
 ```console
 docker build -f docker/Dockerfile.hpu -t vllm-hpu-env  .
@@ -112,10 +105,9 @@ docker run \
 !!! tip
     If you're observing the following error: `docker: Error response from daemon: Unknown runtime specified habana.`, please refer to "Install Using Containers" section of [Intel Gaudi Software Stack and Driver Installation](https://docs.habana.ai/en/v1.18.0/Installation_Guide/Bare_Metal_Fresh_OS.html). Make sure you have `habana-container-runtime` package installed and that `habana` container runtime is registered.
 
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:extra-information]
+## Extra information
 
-## Supported features
+### Supported features
 
 - [Offline inference][offline-inference]
 - Online serving via [OpenAI-Compatible Server][openai-compatible-server]
@@ -129,14 +121,14 @@ docker run \
   for accelerating low-batch latency and throughput
 - Attention with Linear Biases (ALiBi)
 
-## Unsupported features
+### Unsupported features
 
 - Beam search
 - LoRA adapters
 - Quantization
 - Prefill chunking (mixed-batch inferencing)
 
-## Supported configurations
+### Supported configurations
 
 The following configurations have been validated to function with
 Gaudi2 devices. Configurations that are not listed may or may not work.
@@ -183,7 +175,6 @@ Currently in vLLM for HPU we support four execution modes, depending on selected
 |                    0 |                 0 | torch.compile      |
 |                    0 |                 1 | PyTorch eager mode |
 |                    1 |                 0 | HPU Graphs         |
-  <figcaption>vLLM execution modes</figcaption>
 
 !!! warning
     In 1.18.0, all modes utilizing `PT_HPU_LAZY_MODE=0` are highly experimental and should be only used for validating functional correctness. Their performance will be improved in the next releases. For obtaining the best performance in 1.18.0, please use HPU Graphs, or PyTorch lazy mode.
@@ -401,4 +392,3 @@ the below:
   higher batches. You can do that by adding `--enforce-eager` flag to
   server (for online serving), or by passing `enforce_eager=True`
   argument to LLM constructor (for offline inference).
-# --8<-- [end:extra-information]
