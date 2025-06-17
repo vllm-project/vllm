@@ -6,7 +6,6 @@ from typing import Optional
 
 import torch
 
-import vllm.model_executor.layers.quantization.deepgemm
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
@@ -15,6 +14,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, per_token_group_quant_fp8)
+from vllm.model_executor.layers.quantization.deepgemm import (  # noqa: E501
+    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm as
+    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm)
 from vllm.utils import round_up
 
 logger = init_logger(__name__)
@@ -49,7 +51,7 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     M = hidden_states.size(0)
     _, K, N = w2.size()
     if not _valid_deep_gemm_shape(M, N, K):
-        logger.debug("DeepGemm disabled: unalinged problem size.")
+        logger.debug("DeepGemm disabled: unaligned problem size.")
         return False
 
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):

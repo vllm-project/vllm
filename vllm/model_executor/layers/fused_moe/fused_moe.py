@@ -878,11 +878,12 @@ def try_get_optimal_moe_config(
         block_shape,
     )
 
-    config = dict()
+    config: dict[str, int] = dict()
 
-    keys = ["BLOCK_SIZE_M", "BLOCK_SIZE_N",
-            "BLOCK_SIZE_K", "GROUP_SIZE_M",
-            "num_warps", "num_stages"]
+    keys = [
+        "BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "GROUP_SIZE_M",
+        "num_warps", "num_stages"
+    ]
 
     assert len(keys) == len(values)
 
