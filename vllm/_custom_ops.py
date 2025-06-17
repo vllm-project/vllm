@@ -3,7 +3,7 @@
 
 import contextlib
 import importlib
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.library
@@ -27,15 +27,7 @@ with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
     supports_moe_ops = True
 
-if TYPE_CHECKING:
 
-    def register_fake(fn):
-        return lambda name: fn
-else:
-    try:
-        from torch.library import register_fake
-    except ImportError:
-        from torch.library import impl_abstract as register_fake
 
 # These are actually defined in vllm_kernels/custom_ops.py
 # but are pasesed through here for backwards compat purposes
@@ -162,9 +154,6 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
     return custom_ops.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
-# quantization ops
-# awq
-
 
 # TODO: Migrate the rest of the functions in here to utilize things from `vllm_kernels.custom_ops`
 #       Rules for the migration:
@@ -178,212 +167,7 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
 #               migrate and do them (at most) 3 at a time and try to validate you made the write moves
 #           5. Prefer to make the most minimal of changes possible
 
-if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
-    @register_fake("_C::gptq_marlin_24_gemm")
-    def _gptq_marlin_24_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                                  b_meta: torch.Tensor, b_scales: torch.Tensor,
-                                  workspace: torch.Tensor,
-                                  b_q_type: ScalarType, size_m: torch.SymInt,
-                                  size_n: torch.SymInt,
-                                  size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
-
-    @register_fake("_C::gptq_marlin_gemm")
-    def _gptq_marlin_gemm_fake(a: torch.Tensor,
-                               c: Optional[torch.Tensor],
-                               b_q_weight: torch.Tensor,
-                               b_scales: torch.Tensor,
-                               global_scale: Optional[torch.Tensor],
-                               b_zeros: Optional[torch.Tensor],
-                               g_idx: Optional[torch.Tensor],
-                               perm: Optional[torch.Tensor],
-                               workspace: torch.Tensor,
-                               b_q_type_id: int,
-                               size_m: torch.SymInt,
-                               size_n: torch.SymInt,
-                               size_k: torch.SymInt,
-                               is_k_full: bool = True,
-                               use_atomic_add: bool = False,
-                               use_fp32_reduce: bool = False,
-                               is_zp_float: bool = False) -> torch.Tensor:
-        return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
-
-    @register_fake("_C::marlin_qqq_gemm")
-    def _marlin_qqq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                              s_tok: torch.Tensor, s_ch: torch.Tensor,
-                              s_group: torch.Tensor, workspace: torch.Tensor,
-                              size_m: torch.SymInt, size_n: torch.SymInt,
-                              size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n),
-                           dtype=torch.float16,
-                           device=a.device)
-
-    @register_fake("_C::marlin_gemm")
-    def _marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                          b_scales: torch.Tensor, workspace: torch.Tensor,
-                          size_m: torch.SymInt, size_n: torch.SymInt,
-                          size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n),
-                           dtype=torch.float16,
-                           device=a.device)
-
-    @register_fake("_C::awq_dequantize")
-    def _awq_dequantize_fake(qweight: torch.Tensor, scales: torch.Tensor,
-                             zeros: torch.Tensor, split_k_iters: torch.SymInt,
-                             thx: int, thy: int) -> torch.Tensor:
-        in_c = qweight.size(0)
-        qout_c = qweight.size(1)
-        out_c = qout_c * 8
-        return torch.empty((in_c, out_c),
-                           dtype=scales.dtype,
-                           device=scales.device)
-
-    @register_fake("_C::awq_gemm")
-    def _awq_gemm_fake(input: torch.Tensor, qweight: torch.Tensor,
-                       qzeros: torch.Tensor, scales: torch.Tensor,
-                       split_k_iters: torch.SymInt) -> torch.Tensor:
-        num_in_feats = input.size(0)
-        return torch.empty((split_k_iters, num_in_feats, qweight.size(1) * 8),
-                           dtype=input.dtype,
-                           device=input.device).sum(0)
-
-    @register_fake("_C::aqlm_gemm")
-    def _aqlm_gemm_fake(input: torch.Tensor, codes: torch.Tensor,
-                        codebooks: torch.Tensor, scales: torch.Tensor,
-                        codebook_partition_sizes: list[int],
-                        bias: Optional[torch.Tensor]) -> torch.Tensor:
-        out_features = codes.size(0) * codebooks.size(2)
-        flat_input = input.reshape((-1, input.size(-1)))
-        flat_output = torch.empty((flat_input.size(0), out_features),
-                                  dtype=input.dtype,
-                                  device=input.device)
-
-        output_sizes = list(input.shape)
-        output_sizes.pop()
-        output_sizes.append(-1)
-        return flat_output.reshape(tuple(output_sizes))
-
-    @register_fake("_C::aqlm_dequant")
-    def _aqlm_dequant_fake(
-            codes: torch.Tensor, codebooks: torch.Tensor,
-            codebook_partition_sizes: list[int]) -> torch.Tensor:
-        in_features = codes.size(1) * 8
-        out_features = codes.size(0)
-        return torch.empty((out_features, in_features),
-                           dtype=codebooks.dtype,
-                           device=codebooks.device)
-
-    @register_fake("_C::machete_mm")
-    def machete_mm_fake(
-        a: torch.Tensor,
-        # b_q Should be the tensor returned by machete_prepack_B
-        b_q: torch.Tensor,
-        b_type: ScalarType,
-        out_type: Optional[torch.dtype] = None,
-        b_group_scales: Optional[torch.Tensor] = None,
-        b_group_zeros: Optional[torch.Tensor] = None,
-        b_group_size: Optional[int] = None,
-        b_channel_scales: Optional[torch.Tensor] = None,
-        a_token_scales: Optional[torch.Tensor] = None,
-        schedule: Optional[str] = None,
-    ) -> torch.Tensor:
-        m = a.size(0)
-        n = b_q.size(1)
-        return torch.empty((m, n), device=a.device, dtype=a.dtype)
-
-    @register_fake("_C::machete_prepack_B")
-    def machete_prepack_B_fake(
-            b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
-            group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
-        return torch.empty_like(b_q_weight,
-                                memory_format=torch.contiguous_format)
-
-
-if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
-
-    @register_fake("_C::allspark_w8a16_gemm")
-    def _allspark_w8a16_gemm_fake(a: torch.Tensor, b_qweight: torch.Tensor,
-                                  b_scales: torch.Tensor,
-                                  b_qzeros: Optional[torch.Tensor],
-                                  n: torch.SymInt, group_size: torch.SymInt,
-                                  sm_count: torch.SymInt,
-                                  sm_version: torch.SymInt,
-                                  CUBLAS_M_THRESHOLD: torch.SymInt,
-                                  has_zp: bool,
-                                  n32k16_reorder: bool) -> torch.Tensor:
-        m = a.size(0)
-        return torch.empty((m, n), device=a.device, dtype=a.dtype)
-
-
-if hasattr(torch.ops._C, "ggml_dequantize"):
-
-    @register_fake("_C::ggml_dequantize")
-    def _ggml_dequantize_fake(
-            W: torch.Tensor,
-            quant_type: int,
-            m: torch.SymInt,
-            n: torch.SymInt,
-            dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        return torch.empty((m, n), dtype=torch.float16, device=W.device)
-
-    @register_fake("_C::ggml_mul_mat_vec_a8")
-    def _ggml_mul_mat_vec_a8_fake(
-        W: torch.Tensor,
-        X: torch.Tensor,
-        quant_type: int,
-        row: torch.SymInt,
-    ) -> torch.Tensor:
-        return torch.empty((1, row), dtype=X.dtype, device=W.device)
-
-    @register_fake("_C::ggml_mul_mat_a8")
-    def _ggml_mul_mat_a8_fake(
-        W: torch.Tensor,
-        X: torch.Tensor,
-        quant_type: int,
-        row: torch.SymInt,
-    ) -> torch.Tensor:
-        batch = X.size(0)
-        return torch.empty((batch, row), dtype=X.dtype, device=W.device)
-
-    @register_fake("_C::ggml_moe_a8")
-    def _ggml_moe_a8_fake(
-        X: torch.Tensor,
-        W: torch.Tensor,
-        sorted_token_ids: torch.Tensor,
-        expert_ids: torch.Tensor,
-        num_tokens_post_padded: torch.Tensor,
-        quant_type: int,
-        row: torch.SymInt,
-        top_k: torch.SymInt,
-        tokens: torch.SymInt,
-    ) -> torch.Tensor:
-        tokens = X.size(0)
-        return torch.empty((tokens * top_k, row),
-                           dtype=torch.float16,
-                           device=W.device)
-
-
-if hasattr(torch.ops._C, "ggml_moe_a8_vec"):
-
-    @register_fake("_C::ggml_moe_a8_vec")
-    def _ggml_moe_a8_vec_fake(
-        X: torch.Tensor,
-        W: torch.Tensor,
-        topk_ids: torch.Tensor,
-        top_k: int,
-        quant_type: int,
-        row: torch.SymInt,
-        tokens: torch.SymInt,
-    ) -> torch.Tensor:
-        tokens = X.size(0)
-        return torch.empty((tokens * top_k, row),
-                           dtype=X.dtype,
-                           device=W.device)
-
-
-# cutlass
-# cutlass support functions (migrated to custom_ops)
 
 
 # Rule 2: Uses current_platform and importlib (vllm imports)
@@ -824,60 +608,3 @@ def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
         topk_weights, moe_block_size, top_k, mul_topk_weights, is_ep,
         b_q_type.id, size_m, size_n, size_k, is_k_full, use_atomic_add,
         use_fp32_reduce, is_zp_float)
-
-
-if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
-
-    @register_fake("_moe_C::marlin_gemm_moe")
-    def marlin_gemm_moe_fake(a: torch.Tensor, b_q_weights: torch.Tensor,
-                             sorted_ids: torch.Tensor,
-                             topk_weights: torch.Tensor,
-                             topk_ids: torch.Tensor, b_scales: torch.Tensor,
-                             b_zero_points: torch.Tensor, g_idx: torch.Tensor,
-                             perm: torch.Tensor, workspace: torch.Tensor,
-                             b_q_type: ScalarType, size_m: torch.SymInt,
-                             size_n: torch.SymInt, size_k: torch.SymInt,
-                             is_k_full: bool, num_experts: int, topk: int,
-                             moe_block_size: int, replicate_input: bool,
-                             apply_weights: bool) -> torch.Tensor:
-        return torch.empty((size_m, topk, size_n),
-                           dtype=a.dtype,
-                           device=a.device)
-
-    @register_fake("_moe_C::moe_wna16_marlin_gemm")
-    def moe_wna16_marlin_gemm_fake(input: torch.Tensor,
-                                   output: Optional[torch.Tensor],
-                                   b_qweight: torch.Tensor,
-                                   b_scales: torch.Tensor,
-                                   b_qzeros: Optional[torch.Tensor],
-                                   g_idx: Optional[torch.Tensor],
-                                   perm: Optional[torch.Tensor],
-                                   workspace: torch.Tensor,
-                                   sorted_token_ids: torch.Tensor,
-                                   expert_ids: torch.Tensor,
-                                   num_tokens_past_padded: torch.Tensor,
-                                   topk_weights: torch.Tensor,
-                                   moe_block_size: int, top_k: int,
-                                   mul_topk_weights: bool, is_ep: bool,
-                                   b_q_type: ScalarType, size_m: int,
-                                   size_n: int, size_k: int, is_k_full: bool,
-                                   use_atomic_add: bool, use_fp32_reduce: bool,
-                                   is_zp_float: bool) -> torch.Tensor:
-        return torch.empty((size_m * top_k, size_n),
-                           dtype=input.dtype,
-                           device=input.device)
-
-
-# cache operations (migrated to custom_ops)
-
-
-# device utility functions (migrated to custom_ops)
-
-
-# custom_ar (migrated to custom_ops)
-
-
-# get_flash_mla_metadata (migrated to custom_ops)
-
-
-# flash_mla_with_kvcache and cutlass_mla_decode (migrated to custom_ops)
