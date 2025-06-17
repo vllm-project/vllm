@@ -51,46 +51,46 @@ def find_seq_idx(query_start_len_ptr, target_idx, num_seqs,
 
 @triton.jit
 def kernel_unified_attention_2d(
-    output_ptr,  # [num_tokens, num_query_heads, head_size]
-    query_ptr,  # [num_tokens, num_query_heads, head_size]
-    key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
-    value_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
-    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-    seq_lens_ptr,  # [num_seqs]
-    alibi_slopes_ptr,  # [num_query_heads]
-    scale,  # float32
-    k_scale,  # float32
-    v_scale,  # float32
-    out_scale,  # float32
-    softcap,  # float32
-    num_query_heads: tl.constexpr,  # int
-    num_queries_per_kv: tl.constexpr,  # int
-    block_table_stride: tl.int64,  # int
-    query_stride_0: tl.int64,  # int
-    query_stride_1: tl.int64,  # int, should be equal to head_size
-    output_stride_0: tl.int64,  # int
-    output_stride_1: tl.int64,  # int, should be equal to head_size
-    BLOCK_SIZE: tl.constexpr,  # int
-    HEAD_SIZE: tl.constexpr,  # int
-    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
-    USE_ALIBI_SLOPES: tl.constexpr,  # bool
-    USE_SOFTCAP: tl.constexpr,  # bool
-    SLIDING_WINDOW: tl.constexpr,  # int
-    stride_k_cache_0: tl.int64,  # int
-    stride_k_cache_1: tl.int64,  # int
-    stride_k_cache_2: tl.int64,  # int
-    stride_k_cache_3: tl.constexpr,  # int
-    stride_v_cache_0: tl.int64,  # int
-    stride_v_cache_1: tl.int64,  # int
-    stride_v_cache_2: tl.int64,  # int
-    stride_v_cache_3: tl.constexpr,  # int
-    query_start_len_ptr,  # [num_seqs+1]
-    BLOCK_Q: tl.constexpr,  # int
-    num_seqs: tl.int32,
-    BLOCK_M: tl.constexpr,  # int
-    USE_FP8: tl.constexpr,  # bool
-    FP8_MIN: tl.constexpr = float8_info.min,
-    FP8_MAX: tl.constexpr = float8_info.max,
+        output_ptr,  # [num_tokens, num_query_heads, head_size]
+        query_ptr,  # [num_tokens, num_query_heads, head_size]
+        key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
+        value_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
+        block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
+        seq_lens_ptr,  # [num_seqs]
+        alibi_slopes_ptr,  # [num_query_heads]
+        scale,  # float32
+        k_scale,  # float32
+        v_scale,  # float32
+        out_scale,  # float32
+        softcap,  # float32
+        num_query_heads: tl.constexpr,  # int
+        num_queries_per_kv: tl.constexpr,  # int
+        block_table_stride: tl.int64,  # int
+        query_stride_0: tl.int64,  # int
+        query_stride_1: tl.int64,  # int, should be equal to head_size
+        output_stride_0: tl.int64,  # int
+        output_stride_1: tl.int64,  # int, should be equal to head_size
+        BLOCK_SIZE: tl.constexpr,  # int
+        HEAD_SIZE: tl.constexpr,  # int
+        HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
+        USE_ALIBI_SLOPES: tl.constexpr,  # bool
+        USE_SOFTCAP: tl.constexpr,  # bool
+        SLIDING_WINDOW: tl.constexpr,  # int
+        stride_k_cache_0: tl.int64,  # int
+        stride_k_cache_1: tl.int64,  # int
+        stride_k_cache_2: tl.int64,  # int
+        stride_k_cache_3: tl.constexpr,  # int
+        stride_v_cache_0: tl.int64,  # int
+        stride_v_cache_1: tl.int64,  # int
+        stride_v_cache_2: tl.int64,  # int
+        stride_v_cache_3: tl.constexpr,  # int
+        query_start_len_ptr,  # [num_seqs+1]
+        BLOCK_Q: tl.constexpr,  # int
+        num_seqs: tl.int32,
+        BLOCK_M: tl.constexpr,  # int
+        USE_FP8: tl.constexpr,  # bool
+        FP8_MIN: tl.constexpr = float8_info.min,
+        FP8_MAX: tl.constexpr = float8_info.max,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -495,6 +495,7 @@ def reduce_segments(
         seq_lens_ptr,  # [num_seqs]
         num_seqs,  # int
         num_query_heads: tl.constexpr,  # int
+        out_scale,  # float32
         output_stride_0: tl.int64,  # int
         output_stride_1: tl.int64,  # int, should be equal to head_size
         block_table_stride: tl.int64,  # int
@@ -504,6 +505,9 @@ def reduce_segments(
         query_start_len_ptr,  # [num_seqs+1]
         BLOCK_Q: tl.constexpr,  # int
         NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
+        USE_FP8: tl.constexpr,  # bool
+        FP8_MIN: tl.constexpr = float8_info.min,
+        FP8_MAX: tl.constexpr = float8_info.max,        
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -558,6 +562,10 @@ def reduce_segments(
     acc_sum = tl.sum(segm_output, axis=0)
     # safely divide by overall_expsum, returning 0.0 if overall_expsum is 0
     acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
+
+    if USE_FP8:
+        acc = acc / tl.load(out_scale)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
     # write result
     output_offset = (query_token_idx * output_stride_0 +
@@ -632,6 +640,7 @@ def unified_attention(
             scale=softmax_scale,
             k_scale=k_descale,
             v_scale=v_descale,
+            out_scale=output_scale,
             softcap=softcap,
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
@@ -658,6 +667,7 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
+            USE_FP8=output_scale is not None,
         )
     else:
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
@@ -701,6 +711,7 @@ def unified_attention(
                 scale=softmax_scale,
                 k_scale=k_descale,
                 v_scale=v_descale,
+                out_scale=output_scale,
                 softcap=softcap,
                 num_query_heads=num_query_heads,
                 num_queries_per_kv=num_queries_per_kv,
@@ -726,6 +737,7 @@ def unified_attention(
                 num_seqs=num_seqs,
                 BLOCK_M=BLOCK_M,
                 NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+                USE_FP8=output_scale is not None,
             )
 
         reduce_segments[(q.shape[0], num_query_heads)](
@@ -736,6 +748,7 @@ def unified_attention(
             seq_lens_ptr=seqused_k,
             num_seqs=num_seqs,
             num_query_heads=num_query_heads,
+            out_scale=output_scale,
             output_stride_0=out.stride(0),
             output_stride_1=out.stride(1),
             block_table_stride=block_table.stride(0),
@@ -745,4 +758,5 @@ def unified_attention(
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+            USE_FP8=output_scale is not None,
         )
