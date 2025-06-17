@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import contextlib
 import importlib
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 import torch.library
@@ -12,13 +11,11 @@ import vllm_kernels.custom_ops as custom_ops
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
 if not current_platform.is_tpu() and not current_platform.is_hpu():
     custom_ops.import_vllm_kernels_C()
-
 
 # These are actually defined in vllm_kernels/custom_ops.py
 # but are pasesed through here for backwards compat purposes
@@ -30,8 +27,7 @@ mla_decode_kvcache_cpu = custom_ops.mla_decode_kvcache_cpu
 merge_attn_states = custom_ops.merge_attn_states
 convert_vertical_slash_indexes = custom_ops.convert_vertical_slash_indexes
 convert_vertical_slash_indexes_mergehead = (
-    custom_ops.convert_vertical_slash_indexes_mergehead
-)
+    custom_ops.convert_vertical_slash_indexes_mergehead)
 rotary_embedding = custom_ops.rotary_embedding
 rms_norm = custom_ops.rms_norm
 fused_add_rms_norm = custom_ops.fused_add_rms_norm
@@ -72,8 +68,7 @@ convert_fp8 = custom_ops.convert_fp8
 gather_cache = custom_ops.gather_cache
 get_device_attribute = custom_ops.get_device_attribute
 get_max_shared_memory_per_block_device_attribute = (
-    custom_ops.get_max_shared_memory_per_block_device_attribute
-)
+    custom_ops.get_max_shared_memory_per_block_device_attribute)
 init_custom_ar = custom_ops.init_custom_ar
 all_reduce = custom_ops.all_reduce
 dispose = custom_ops.dispose
@@ -91,12 +86,10 @@ cutlass_scaled_mm_supports_fp4 = custom_ops.cutlass_scaled_mm_supports_fp4
 cutlass_scaled_fp4_mm = custom_ops.cutlass_scaled_fp4_mm
 cutlass_scaled_mm_supports_fp8 = custom_ops.cutlass_scaled_mm_supports_fp8
 cutlass_scaled_mm_supports_block_fp8 = (
-    custom_ops.cutlass_scaled_mm_supports_block_fp8
-)
+    custom_ops.cutlass_scaled_mm_supports_block_fp8)
 cutlass_scaled_mm_azp = custom_ops.cutlass_scaled_mm_azp
 cutlass_sparse_scaled_mm_supported = (
-    custom_ops.cutlass_sparse_scaled_mm_supported
-)
+    custom_ops.cutlass_sparse_scaled_mm_supported)
 cutlass_group_gemm_supported = custom_ops.cutlass_group_gemm_supported
 cutlass_sparse_compress = custom_ops.cutlass_sparse_compress
 cutlass_scaled_sparse_mm = custom_ops.cutlass_scaled_sparse_mm
@@ -122,12 +115,10 @@ def apply_repetition_penalties_torch(
     repetition_penalties: torch.Tensor,
 ) -> None:
     repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(
-        1, logits.size(1)
-    )
+        1, logits.size(1))
     # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
-    penalties = torch.where(
-        prompt_mask | output_mask, repetition_penalties, 1.0
-    )
+    penalties = torch.where(prompt_mask | output_mask, repetition_penalties,
+                            1.0)
     # If logits are positive, divide by penalty, otherwise multiply by penalty.
     scaling = torch.where(logits > 0, 1.0 / penalties, penalties)
     logits *= scaling
@@ -143,18 +134,19 @@ def apply_repetition_penalties(
 
     Args:
         logits: The logits tensor of shape [num_seqs, vocab_size].
-        prompt_mask: A boolean tensor indicating which tokens appear in the prompt.
-        output_mask: A boolean tensor indicating which tokens appear in the output.
+        prompt_mask: A boolean tensor indicating which tokens appear in the
+                     prompt.
+        output_mask: A boolean tensor indicating which tokens appear in the
+                     output.
         repetition_penalties: The repetition penalties of shape (num_seqs, ).
     """
     if current_platform.is_cuda() and logits.is_contiguous():
-        custom_ops.apply_repetition_penalties_cuda(
-            logits, prompt_mask, output_mask, repetition_penalties
-        )
+        custom_ops.apply_repetition_penalties_cuda(logits, prompt_mask,
+                                                   output_mask,
+                                                   repetition_penalties)
     else:
-        apply_repetition_penalties_torch(
-            logits, prompt_mask, output_mask, repetition_penalties
-        )
+        apply_repetition_penalties_torch(logits, prompt_mask, output_mask,
+                                         repetition_penalties)
 
 
 def awq_dequantize(
@@ -167,13 +159,11 @@ def awq_dequantize(
 ) -> torch.Tensor:
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
-            awq_dequantize_triton,
-        )
+            awq_dequantize_triton)
 
         return awq_dequantize_triton(qweight, scales, zeros)
-    return custom_ops.awq_dequantize(
-        qweight, scales, zeros, split_k_iters, thx, thy
-    )
+    return custom_ops.awq_dequantize(qweight, scales, zeros, split_k_iters,
+                                     thx, thy)
 
 
 def awq_gemm(
@@ -185,8 +175,7 @@ def awq_gemm(
 ) -> torch.Tensor:
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
-            awq_gemm_triton,
-        )
+            awq_gemm_triton)
 
         return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
     return custom_ops.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
@@ -223,9 +212,8 @@ def cutlass_scaled_mm(
         scale_b.shape * [128, 128] == b.shape
     """
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
-    assert (
-        bias is None or bias.shape[0] == b.shape[1] and bias.dtype == out_dtype
-    )
+    assert (bias is None
+            or bias.shape[0] == b.shape[1] and bias.dtype == out_dtype)
 
     m = a.shape[0]
     n = b.shape[1]
@@ -234,8 +222,7 @@ def cutlass_scaled_mm(
     if current_platform.is_rocm() or not cutlass_compatible_b:
         triton_scaled_mm_module = importlib.import_module(
             "vllm.model_executor.layers.quantization.compressed_tensors."
-            "triton_scaled_mm"
-        )
+            "triton_scaled_mm")
         triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
         return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
@@ -253,8 +240,8 @@ machete_prepack_B = custom_ops.machete_prepack_B
 
 
 def scaled_fp4_quant(
-    input: torch.Tensor, input_global_scale: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+        input: torch.Tensor,
+        input_global_scale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale.
 
@@ -304,6 +291,7 @@ def scaled_fp4_experts_quant(
         expert_offsets,
         blockscale_offsets,
         topk,
+        envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE,
     )
 
 
@@ -368,8 +356,7 @@ def moe_wna16_gemm(
     if not current_platform.is_cuda():
         raise NotImplementedError(
             "The optimized moe_wna16_gemm kernel is only "
-            "available on CUDA platforms"
-        )
+            "available on CUDA platforms")
     return custom_ops.moe_wna16_gemm(
         input,
         output,
