@@ -11,13 +11,14 @@ from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
 from .piecewise.test_simple import SillyModel
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v1(monkeypatch):
-    """
-    TODO(rzou): The rest of tests/compile runs VLLM_USE_V1=0 right now,
-    I'll switch them over later.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '1')
+def test_use_cudagraphs_dynamic(monkeypatch):
+    assert vllm.envs.VLLM_USE_V1
+    vllm_config = VllmConfig()
+    assert vllm_config.compilation_config.use_cudagraph
+
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+    vllm_config = VllmConfig()
+    assert not vllm_config.compilation_config.use_cudagraph
 
 
 @pytest.mark.parametrize("enabled", [True, False])
