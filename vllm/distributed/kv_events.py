@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import queue
 import threading
@@ -27,6 +28,7 @@ class EventBatch(
 ):
     ts: float
     events: list[Any]
+    data_parallel_rank: Optional[int] = None
 
 
 class KVCacheEvent(
@@ -59,7 +61,22 @@ class KVEventBatch(EventBatch):
 
 
 class EventPublisher(ABC):
-    """Lightweight publisher for EventBatch batches."""
+    """Lightweight publisher for EventBatch batches with data parallelism
+    support.
+    
+    In data parallel setups, each DP rank runs its own EventPublisher instance
+    to avoid duplicate events and ensure proper event attribution:
+    
+    - Each DP rank creates a separate publisher
+    - Publishers automatically annotate events with their data_parallel_rank
+    - This allows consumers to distinguish events from different DP ranks
+    
+    The publisher is responsible for adding DP metadata since the scheduler
+    operates independently of DP topology and shouldn't need DP awareness.
+    """
+
+    def __init__(self, data_parallel_rank: int = 0) -> None:
+        self._data_parallel_rank = data_parallel_rank
 
     @abstractmethod
     def publish(self, events: EventBatch) -> None:
@@ -112,6 +129,7 @@ class ZmqEventPublisher(EventPublisher):
 
     def __init__(
         self,
+        data_parallel_rank: int,
         endpoint: str = "tcp://*:5557",
         replay_endpoint: Optional[str] = None,
         buffer_steps: int = 10_000,
@@ -120,6 +138,7 @@ class ZmqEventPublisher(EventPublisher):
         topic: str = "",
     ) -> None:
         # Storage
+        super().__init__(data_parallel_rank)
         self._event_queue = Queue[Optional[EventBatch]](maxsize=max_queue_size)
         self._buffer = deque[tuple[int, bytes]](maxlen=buffer_steps)
 
@@ -127,8 +146,11 @@ class ZmqEventPublisher(EventPublisher):
         self._ctx = zmq.Context.instance()
         self._pub: Optional[zmq.Socket] = None
         self._replay: Optional[zmq.Socket] = None
-        self._endpoint = endpoint
-        self._replay_endpoint = replay_endpoint
+        self._dp_rank = data_parallel_rank
+
+        self._endpoint = self.offset_endpoint_port(endpoint, self._dp_rank)
+        self._replay_endpoint = self.offset_endpoint_port(
+            replay_endpoint, self._dp_rank)
         self._hwm = hwm
         self._socket_setup()
 
@@ -148,6 +170,8 @@ class ZmqEventPublisher(EventPublisher):
     def publish(self, events: EventBatch) -> None:
         if not self._running:
             raise RuntimeError("Publisher is closed")
+        if events.data_parallel_rank is None:
+            events.data_parallel_rank = self._data_parallel_rank
         self._event_queue.put(events)
 
     def shutdown(self) -> None:
@@ -190,11 +214,12 @@ class ZmqEventPublisher(EventPublisher):
             self._pub.set_hwm(self._hwm)
             # Heuristic: bind if wildcard / * present, else connect.
             # bind stable, connect volatile convention
-            if ("*" in self._endpoint or "::" in self._endpoint
-                    or self._endpoint.startswith("ipc://")
-                    or self._endpoint.startswith("inproc://")):
+            if (self._endpoint is not None
+                    and ("*" in self._endpoint or "::" in self._endpoint
+                         or self._endpoint.startswith("ipc://")
+                         or self._endpoint.startswith("inproc://"))):
                 self._pub.bind(self._endpoint)
-            else:
+            elif self._endpoint is not None:
                 self._pub.connect(self._endpoint)
 
         # Set up replay socket: use ROUTER
@@ -265,6 +290,38 @@ class ZmqEventPublisher(EventPublisher):
         # receiving payload is (-1, b""")
         self._replay.send_multipart((client_id, b"", self.END_SEQ, b""))
 
+    @staticmethod
+    def offset_endpoint_port(endpoint: Optional[str],
+                             data_parallel_rank: int) -> Optional[str]:
+        """Helper function to offset the port in an endpoint by 
+            the data parallel rank.
+
+        Args:
+            endpoint: The endpoint string 
+                (e.g., "tcp://*:5557" or "inproc://cache")
+            data_parallel_rank: The data parallel rank to offset by
+
+        Returns:
+            The endpoint with the port offset by data_parallel_rank 
+                or suffix appended
+        """
+        # Do nothing if input is None or data_parallel_rank is 0
+        if not endpoint or data_parallel_rank == 0:
+            return endpoint
+
+        if "inproc" in endpoint:
+            return f"{endpoint}_dp{data_parallel_rank}"
+        if "tcp" in endpoint:
+            if endpoint and ":" in endpoint:
+                # Get everything after the last colon (the port)
+                last_colon_idx = endpoint.rfind(":")
+                base_addr = endpoint[:last_colon_idx]
+                base_port = int(endpoint[last_colon_idx + 1:])
+                new_port = base_port + data_parallel_rank
+                return f"{base_addr}:{new_port}"
+            return endpoint
+        raise ValueError("Invalid endpoint: must contain 'inproc' or 'tcp'")
+
 
 class EventPublisherFactory:
     _registry: dict[str, Callable[..., EventPublisher]] = {
@@ -280,7 +337,9 @@ class EventPublisherFactory:
         cls._registry[name] = ctor
 
     @classmethod
-    def create(cls, config: Optional[KVEventsConfig]) -> EventPublisher:
+    def create(cls,
+               config: Optional[KVEventsConfig],
+               data_parallel_rank: int = 0) -> EventPublisher:
         """Create publisher from a config mapping."""
         if not config:
             return NullEventPublisher()
@@ -293,4 +352,5 @@ class EventPublisherFactory:
             constructor = cls._registry[kind]
         except KeyError as exc:
             raise ValueError(f"Unknown event publisher '{kind}'") from exc
-        return constructor(**config_dict)
+        return constructor(data_parallel_rank=data_parallel_rank,
+                           **config_dict)

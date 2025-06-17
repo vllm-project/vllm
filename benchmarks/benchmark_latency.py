@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark the latency of processing a single batch of requests."""
 
 import argparse
@@ -122,7 +123,7 @@ def main(args: argparse.Namespace):
         save_to_pytorch_benchmark_format(args, results)
 
 
-if __name__ == "__main__":
+def create_argument_parser():
     parser = FlexibleArgumentParser(
         description="Benchmark the latency of processing a single batch of "
         "requests till completion."
@@ -170,6 +171,12 @@ if __name__ == "__main__":
     # V1 enables prefix caching by default which skews the latency
     # numbers. We need to disable prefix caching by default.
     parser.set_defaults(enable_prefix_caching=False)
+
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_argument_parser()
     args = parser.parse_args()
     if args.profile and not envs.VLLM_TORCH_PROFILER_DIR:
         raise OSError(

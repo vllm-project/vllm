@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
 from typing import Optional
@@ -73,6 +74,7 @@ class EAGLE(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self.dtype = vllm_config.model_config.dtype
         self.config = config
 
         architectures = getattr(self.config.model, "architectures", [])
@@ -196,7 +198,7 @@ class EAGLE(nn.Module):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        # This implementation is incompitable with https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B
+        # This implementation is incompatible with https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B
         # due to missing lm_head weights and its config being that of a
         # Llama model. Here's a compatible version with the same weights:
         # https://huggingface.co/abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm
@@ -249,7 +251,7 @@ class EAGLE(nn.Module):
             lm_head_weight = torch.zeros(
                 self.lm_head.org_vocab_size,
                 self.lm_head.embedding_dim,
-                dtype=self.config.torch_dtype,
+                dtype=self.dtype,
             )
 
         weight_loader = getattr(self.lm_head.weight, "weight_loader",

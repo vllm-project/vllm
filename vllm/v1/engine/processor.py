@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
 from collections.abc import Mapping, Sequence
@@ -211,6 +212,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        data_parallel_rank: Optional[int] = None,
     ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
@@ -223,6 +225,12 @@ class Processor:
             raise ValueError("V1 does not support tracing yet.")
         if prompt_adapter_request is not None:
             raise ValueError("V1 does not support prompt_adapter_request.")
+
+        data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
+        if data_parallel_rank is not None and not (0 <= data_parallel_rank <
+                                                   data_parallel_size):
+            raise ValueError(f"data_parallel_rank {data_parallel_rank} "
+                             f"is out of range [0, {data_parallel_size}).")
 
         if arrival_time is None:
             arrival_time = time.time()
@@ -327,6 +335,7 @@ class Processor:
             arrival_time=arrival_time,
             lora_request=lora_request,
             cache_salt=decoder_inputs.get("cache_salt"),
+            data_parallel_rank=data_parallel_rank,
         )
 
     def _validate_model_inputs(self,

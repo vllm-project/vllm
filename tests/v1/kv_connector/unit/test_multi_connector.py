@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import filecmp
 import shutil
 import tempfile
@@ -11,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
     SharedStorageConnector)
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -31,7 +33,7 @@ class TestSharedStorageConnector(SharedStorageConnector):
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
         self._event_file = tempfile.gettempdir(
-        ) + f"/connector_{self.name}_events.log"
+        ) + f"/connector_{self.name}-{self.role.name}_events.log"
         # Start with an empty file
         with open(self._event_file, "w") as _:
             pass
@@ -51,10 +53,20 @@ class TestSharedStorageConnector(SharedStorageConnector):
 
             def wrapper(*args, **kwargs):
                 self.call_record[name] += 1
+
+                # Include args that we're interested in
+                to_log = [name]
+                for arg in args:
+                    if isinstance(arg, int):
+                        to_log.append(str(arg))
+                    elif isinstance(arg, KVCacheBlocks):
+                        to_log.append(
+                            f"num_blocks={[len(b) for b in arg.blocks]}")
+
                 # Log the event as a line to the file
                 try:
                     with open(self._event_file, "a") as f:
-                        f.write(name + "\n")
+                        f.write(' '.join(to_log) + "\n")
                 except Exception as e:
                     print(f"[ERROR] Could not log event {name} "
                           f"for {self.name}: {e}")
@@ -161,15 +173,23 @@ def test_multi_shared_storage_connector_consistency():
              f"{storage_1_path} and {storage_2_path}")
 
     events = get_connector_events()
-    # get_num_new_matched_tokens will be called on each connector in turn.
-    # neither of them have hits so update_state_after_alloc won't be called.
-    assert events["storage1"][:3] == [
-        'get_num_new_matched_tokens', 'build_connector_meta',
-        'bind_connector_metadata'
+    # get_num_new_matched_tokens and update_state_after_alloc will be called
+    # on each connector in turn.
+    assert events["storage1-SCHEDULER"][:3] == [
+        'get_num_new_matched_tokens 0',
+        'update_state_after_alloc num_blocks=[0] 0', 'build_connector_meta'
     ]
-    assert events["storage2"][:3] == [
-        'get_num_new_matched_tokens', 'build_connector_meta',
-        'bind_connector_metadata'
+    assert events["storage1-WORKER"][:5] == [
+        'register_kv_caches', 'bind_connector_metadata', 'start_load_kv',
+        'wait_for_layer_load', 'save_kv_layer'
+    ]
+    assert events["storage2-SCHEDULER"][:3] == [
+        'get_num_new_matched_tokens 0',
+        'update_state_after_alloc num_blocks=[0] 0', 'build_connector_meta'
+    ]
+    assert events["storage2-WORKER"][:5] == [
+        'register_kv_caches', 'bind_connector_metadata', 'start_load_kv',
+        'wait_for_layer_load', 'save_kv_layer'
     ]
 
     # Reset prefix cache or else we'll just get the tokens back from there.
@@ -181,16 +201,16 @@ def test_multi_shared_storage_connector_consistency():
 
     events = get_connector_events()
     # get_num_new_matched_tokens will return new tokens from the first
-    # connector so update_state_after_alloc will be called once blocks
-    # are allocated for the first connector.
-    # get_num_new_matched_tokens *won't* be called on the second connector
-    # in this case.
-    assert events["storage1"][:4] == [
-        'get_num_new_matched_tokens', 'update_state_after_alloc',
-        'build_connector_meta', 'bind_connector_metadata'
+    # connector so update_state_after_alloc will be with allocated blocks
+    # on that one but with zero blocks for others (first nonzero match is
+    # chosen).
+    assert events["storage1-SCHEDULER"][:3] == [
+        'get_num_new_matched_tokens 0',
+        'update_state_after_alloc num_blocks=[7] 96', 'build_connector_meta'
     ]
-    assert events["storage2"][:2] == [
-        'build_connector_meta', 'bind_connector_metadata'
+    assert events["storage2-SCHEDULER"][:3] == [
+        'get_num_new_matched_tokens 0',
+        'update_state_after_alloc num_blocks=[0] 0', 'build_connector_meta'
     ]
 
     # Delete storage1 connector state
@@ -204,17 +224,17 @@ def test_multi_shared_storage_connector_consistency():
     _ = llm.generate(PROMPTS, SAMPLING_PARAMS)
 
     events = get_connector_events()
-    # get_num_new_matched_tokens will be called for the first connector but it
-    # won't have a hit so update_state_after_alloc won't be called.
-    # get_num_new_matched_tokens will also be called on the second connector,
-    # but it should have a hit so update_state_after_alloc will be called.
-    assert events["storage1"][:3] == [
-        'get_num_new_matched_tokens', 'build_connector_meta',
-        'bind_connector_metadata'
+    # get_num_new_matched_tokens will be called for both connectors but will
+    # return 0 from the first connector, but the second connector should have
+    # a hit, so update_state_after_alloc will only be called with allocated
+    # blocks for the second connector.
+    assert events["storage1-SCHEDULER"][:3] == [
+        'get_num_new_matched_tokens 0',
+        'update_state_after_alloc num_blocks=[0] 0', 'build_connector_meta'
     ]
-    assert events["storage2"][:4] == [
-        'get_num_new_matched_tokens', 'update_state_after_alloc',
-        'build_connector_meta', 'bind_connector_metadata'
+    assert events["storage2-SCHEDULER"][:3] == [
+        'get_num_new_matched_tokens 0',
+        'update_state_after_alloc num_blocks=[7] 96', 'build_connector_meta'
     ]
 
     # Clean up

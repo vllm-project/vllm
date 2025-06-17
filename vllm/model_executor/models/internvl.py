@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_internvl_chat.py
 # --------------------------------------------------------
@@ -1019,15 +1020,6 @@ class InternVLMultiModalProcessor(
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                         SupportsLoRA):
 
-    packed_modules_mapping = {
-        "wqkv": ["wqkv"],
-        "qkv": ["qkv"],
-        "gate_up_proj": [
-            "w1",
-            "w3",
-        ],
-    }
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
@@ -1312,11 +1304,12 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
+            return []
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each

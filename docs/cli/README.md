@@ -12,19 +12,6 @@ Available Commands:
 vllm {chat,complete,serve,bench,collect-env,run-batch}
 ```
 
-## Table of Contents
-
-- [serve](#serve)
-- [chat](#chat)
-- [complete](#complete)
-- [bench](#bench)
-  - [latency](#latency)
-  - [serve](#serve-1)
-  - [throughput](#throughput)
-- [collect-env](#collect-env)
-- [run-batch](#run-batch)
-- [More Help](#more-help)
-
 ## serve
 
 Start the vLLM OpenAI Compatible API server.
@@ -89,6 +76,8 @@ vllm complete --quick "The future of AI is"
 ## bench
 
 Run benchmark tests for latency online serving throughput and offline inference throughput.
+
+To use benchmark commands, please install with extra dependencies using `pip install vllm[bench]`.
 
 Available Commands:
 

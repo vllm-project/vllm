@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
 from collections.abc import Sequence
@@ -314,6 +315,7 @@ def check_embeddings_close(
                                   dim=0)
 
         fail_msg = (f"Test{prompt_idx}:"
+                    f"\nCosine similarity: \t{sim:.4f}"
                     f"\n{name_0}:\t{embeddings_0[:16]!r}"
                     f"\n{name_1}:\t{embeddings_1[:16]!r}")
 
@@ -331,6 +333,13 @@ class EmbedModelInfo(NamedTuple):
     name: str
     is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
+    architecture: str = ""
+    dtype: str = "auto"
+    enable_test: bool = True
+
+
+class RerankModelInfo(NamedTuple):
+    name: str
     architecture: str = ""
     dtype: str = "auto"
     enable_test: bool = True

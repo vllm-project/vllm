@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pickle
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
@@ -11,9 +11,6 @@ from PIL import Image
 
 from vllm.logger import init_logger
 from vllm.multimodal.image import convert_image_mode
-
-if TYPE_CHECKING:
-    from vllm.inputs import TokensPrompt
 
 logger = init_logger(__name__)
 
@@ -90,28 +87,3 @@ class MultiModalHasher:
                 hasher.update(v_bytes)
 
         return hasher.hexdigest()
-
-    @classmethod
-    def hash_prompt_mm_data(
-            cls, prompt: "TokensPrompt") -> Optional["MultiModalHashDict"]:
-        """Hash multimodal data in the user input prompt if they exist."""
-
-        if "multi_modal_data" not in prompt:
-            return None
-
-        mm_data = prompt["multi_modal_data"]
-        if not mm_data:
-            # mm_data can be None or an empty dict.
-            return None
-
-        mm_items = {
-            modality: items if isinstance(items, list) else [items]
-            for modality, items in mm_data.items()
-        }
-
-        mm_hashes = {
-            modality: [cls.hash_kwargs(**{modality: item}) for item in items]
-            for modality, items in mm_items.items()
-        }
-
-        return mm_hashes

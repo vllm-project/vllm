@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark offline inference throughput."""
 
 import argparse
@@ -594,7 +595,7 @@ def validate_args(args):
         )
 
 
-if __name__ == "__main__":
+def create_argument_parser():
     parser = FlexibleArgumentParser(description="Benchmark the throughput.")
     parser.add_argument(
         "--backend",
@@ -716,6 +717,12 @@ if __name__ == "__main__":
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
+
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_argument_parser()
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

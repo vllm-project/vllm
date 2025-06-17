@@ -243,30 +243,32 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     --extra-index-url https://download.pytorch.org/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # If we need to build FlashInfer wheel before its release:
-# $ export FLASHINFER_ENABLE_AOT=1
 # $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
+# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a'
 # $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
 # $ cd flashinfer
-# $ git checkout 524304395bd1d8cd7d07db083859523fcaa246a4
-# $ rm -rf build
-# $ python3 setup.py bdist_wheel --dist-dir=dist --verbose
-# $ ls dist
-# $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/524304395bd1d8cd7d07db083859523fcaa246a4/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl
+# $ git checkout v0.2.6.post1
+# $ python -m flashinfer.aot
+# $ python -m build --no-isolation --wheel
+# $ ls -la dist
+# -rw-rw-r-- 1 mgoin mgoin 205M Jun  9 18:03 flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
+# $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/v0.2.6.post1/flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
 
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    # FlashInfer alreary has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
+    # FlashInfer already has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
     if [[ "$CUDA_VERSION" == 12.8* ]]; then \
-        uv pip install --system https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.5%2Bcu128torch2.7-cp38-abi3-linux_x86_64.whl; \
+        uv pip install --system https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl; \
     else \
-        export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0+PTX'; \
-        CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
-        if [ "$CUDA_MAJOR" -lt 12 ]; then \
-            export FLASHINFER_ENABLE_SM90=0; \
-        fi; \
-        uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc" ; \
+        export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a' && \
+        git clone https://github.com/flashinfer-ai/flashinfer.git --single-branch --branch v0.2.6.post1 --recursive && \
+        # Needed to build AOT kernels
+        (cd flashinfer && \
+            python3 -m flashinfer.aot && \
+            uv pip install --system --no-build-isolation . \
+        ) && \
+        rm -rf flashinfer; \
     fi \
 fi
 COPY examples examples

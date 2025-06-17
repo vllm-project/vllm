@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
 from flashinfer.sampling import top_k_renorm_probs, top_p_renorm_probs
@@ -27,7 +28,7 @@ def reset_default_device():
     torch.set_default_device(original_device)
 
 
-def test_topk_impl_equivalance():
+def test_topk_impl_equivalence():
 
     torch.set_default_device(DEVICE)
     generator = Generator(device=DEVICE).manual_seed(33)

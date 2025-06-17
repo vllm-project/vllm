@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
@@ -679,7 +680,8 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         return self._items_by_modality.keys()
 
     @staticmethod
-    def _try_stack(nested_tensors: NestedTensors) -> NestedTensors:
+    def _try_stack(nested_tensors: NestedTensors,
+                   pin_memory: bool = False) -> NestedTensors:
         """
         Stack the inner dimensions that have the same shape in
         a nested list of tensors.
@@ -696,7 +698,9 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         if isinstance(nested_tensors, (int, float)):
             return torch.tensor(nested_tensors)
 
-        stacked = [MultiModalKwargs._try_stack(t) for t in nested_tensors]
+        stacked = [
+            MultiModalKwargs._try_stack(t, pin_memory) for t in nested_tensors
+        ]
         if not is_list_of(stacked, torch.Tensor, check="all"):
             # Only tensors (not lists) can be stacked.
             return stacked
@@ -712,10 +716,16 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             # The tensors have incompatible shapes and can't be stacked.
             return tensors_
 
-        return torch.stack(tensors_)
+        outputs = torch.empty(len(tensors_),
+                              *tensors_[0].shape,
+                              dtype=tensors_[0].dtype,
+                              device=tensors_[0].device,
+                              pin_memory=pin_memory)
+        return torch.stack(tensors_, out=outputs)
 
     @staticmethod
-    def batch(inputs_list: list["MultiModalKwargs"]) -> BatchedTensorInputs:
+    def batch(inputs_list: list["MultiModalKwargs"],
+              pin_memory: bool = False) -> BatchedTensorInputs:
         """
         Batch multiple inputs together into a dictionary.
 
@@ -737,7 +747,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
                 item_lists[k].append(v)
 
         return {
-            k: MultiModalKwargs._try_stack(item_list)
+            k: MultiModalKwargs._try_stack(item_list, pin_memory)
             for k, item_list in item_lists.items()
         }
 
@@ -746,17 +756,11 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
         batched_inputs: BatchedTensorInputs,
         *,
         device: torch.types.Device,
-        dtype: Optional[torch.dtype] = None,
     ) -> BatchedTensorInputs:
         json_inputs = cast(JSONTree[torch.Tensor], batched_inputs)
 
-        def maybe_cast_dtype(x: torch.Tensor):
-            # This mimics the behavior of transformers.BatchFeature
-            return x.to(dtype=dtype) if x.is_floating_point() else x
-
         json_mapped = json_map_leaves(
-            # NOTE: Cast the dtype before sending it to device
-            lambda x: maybe_cast_dtype(x).to(device=device, non_blocking=True),
+            lambda x: x.to(device=device, non_blocking=True),
             json_inputs,
         )
 
