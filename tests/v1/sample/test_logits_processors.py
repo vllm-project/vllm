@@ -233,7 +233,7 @@ def _min_p_validate(
     batch_index: int,
     request_params: LogitsProcsRequestParams,
     step_idx: int,
-) -> bool:
+) -> None:
     """Validate min-p logitproc applied correctly"""
     for token_id in range(VOCAB_SIZE):
         logits_for_token = logits_new[batch_index][token_id]
@@ -282,7 +282,7 @@ def _min_tokens_validate(
     batch_index: int,
     request_params: LogitsProcsRequestParams,
     step_idx: int,
-) -> bool:
+) -> None:
     """Validate min-tokens logitsproc applied correctly"""
     num_out_tokens = len(request_params.out_tokens)
     min_reached = num_out_tokens >= MIN_TOKENS_LEN_THRESHOLD
@@ -316,7 +316,7 @@ def _none_validate(
     batch_index: int,
     request_params: LogitsProcsRequestParams,
     step_idx: int,
-) -> bool:
+) -> None:
     """Validate that no logits processors are applied"""
     if not torch.all(logits_new[batch_index] == (test_fakes.logits[
             persistent_batch[batch_index].workload_index].cpu())):
@@ -348,7 +348,7 @@ logitsprocs_test_mapping = {
 }
 
 
-def _get_test_cases() -> list[str]:
+def _get_test_cases() -> list[list[str]]:
     """Each test case is a set of logitsprocs"""
     logitsprocs_ids = list(logitsprocs_test_mapping.keys())
     return [[logitproc_id]
@@ -359,7 +359,7 @@ def _generate_fake_step_update(
     persistent_batch: list[LogitsProcsRequestParams],
     workload_params: list[LogitsProcsRequestParams],
     wdx: int,
-) -> tuple[BatchUpdate, int]:
+) -> tuple[BatchUpdate, int, int]:
     batch_size = len(persistent_batch)
     workload_size = len(workload_params)
     workload_reqs_remaining = workload_size - wdx
@@ -471,7 +471,7 @@ def _assert_valid(
     slice_idxs: list[int],
     logits_w_lp: torch.Tensor,
     step_idx: int,
-)->None:
+) -> None:
     if not slice_idxs:
         # Trivial case of empty persistent batch
         assert len(persistent_batch) == 0
@@ -552,4 +552,4 @@ def test_logitsprocs(device: str, reqs_per_logitproc: int,
             step_idx=step_idx,
         )
 
-        step_idx+=1
+        step_idx += 1
