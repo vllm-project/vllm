@@ -223,8 +223,7 @@ def per_block_cast_to_fp8(
     assert x.dim() == 2
     m, n = x.shape
     x_padded = torch.zeros(
-        (cdiv(m, 128) * 128,
-         cdiv(n, block_size_n) * block_size_n),
+        (cdiv(m, 128) * 128, cdiv(n, block_size_n) * block_size_n),
         dtype=x.dtype,
         device=x.device)
     x_padded[:m, :n] = x

@@ -8,12 +8,10 @@ import pytest
 import torch
 import triton.language as tl
 
-from tests.kernels.moe.utils import (
-    batched_moe,
-    make_test_weights,
-    make_quantized_test_activations,
-    torch_moe2,
-    triton_moe)
+from tests.kernels.utils import torch_experts
+from tests.kernels.moe.utils import (batched_moe,
+                                     make_quantized_test_activations,
+                                     make_test_weights, triton_moe)
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
@@ -109,11 +107,13 @@ def ref_impl(
                          [32, 64, 128, 192, 224, 256, 512])
 @pytest.mark.parametrize("K", [128, 256, 1024])
 @pytest.mark.parametrize("N", [128, 256, 512, 1024])
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype",
+                         [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("block_shape", [None])
 @pytest.mark.parametrize("per_act_token_quant", [False])
 def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
-                    N: int, dtype: torch.dtype, block_shape: Optional[list[int]],
+                    N: int, dtype: torch.dtype,
+                    block_shape: Optional[list[int]],
                     per_act_token_quant: bool):
     current_platform.seed_everything(7)
 
@@ -144,8 +144,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         in_dtype=act_dtype,
         quant_dtype=quant_dtype,
         block_shape=block_shape,
-        per_act_token_quant=per_act_token_quant
-    )
+        per_act_token_quant=per_act_token_quant)
 
     B, B_q, B_scale, _, _, _ = make_test_weights(
         num_experts,
@@ -252,7 +251,10 @@ def test_fused_moe_batched_experts(
         act_dtype = dtype
         quant_dtype = None
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(e, n, k, block_shape=block_shape,
+    _, w1, w1_s, _, w2, w2_s = make_test_weights(e,
+                                                 n,
+                                                 k,
+                                                 block_shape=block_shape,
                                                  in_dtype=act_dtype,
                                                  quant_dtype=quant_dtype)
 
@@ -263,9 +265,11 @@ def test_fused_moe_batched_experts(
         batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
                                      w2_s, quant_dtype, per_act_token_quant,
                                      block_shape)
-        baseline_output = torch_moe2(a, w1, w2, topk_weight, topk_ids, w1_s,
-                                     w2_s, quant_dtype, per_act_token_quant,
-                                     block_shape)
+        baseline_output = torch_experts(a, w1, w2, topk_weight, topk_ids,
+                                        w1_scale=w1_s, w2_scale=w2_s,
+                                        quant_dtype=quant_dtype,
+                                        per_act_token_quant=per_act_token_quant,
+                                        block_shape=block_shape)
         triton_output = triton_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
                                    w2_s, quant_dtype, per_act_token_quant,
                                    block_shape)

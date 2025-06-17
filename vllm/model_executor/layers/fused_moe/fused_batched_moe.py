@@ -446,7 +446,10 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         num_local_experts = num_experts // self.world_size
 
-        b_type = a1.dtype if quant_config.quant_dtype is None else quant_config.quant_dtype
+        if quant_config.quant_dtype is None:
+            b_type = a1.dtype
+        else:
+            b_type = quant_config.quant_dtype
 
         b_a1 = torch.zeros(
             (num_local_experts, self.max_num_tokens, hidden_dim),
@@ -537,7 +540,9 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.dp_size = dp_size
 
     @property
-    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
         return (mk.FusedMoEActivationFormat.BatchedExperts,
                 mk.FusedMoEActivationFormat.BatchedExperts)
 
@@ -652,7 +657,9 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.dp_size = dp_size
 
     @property
-    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
         return (mk.FusedMoEActivationFormat.BatchedExperts,
                 mk.FusedMoEActivationFormat.BatchedExperts)
 

@@ -46,8 +46,12 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ) if self.allow_deep_gemm else None
 
     @property
-    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        assert self.deep_gemm_expert is None or self.triton_expert.activation_formats == self.deep_gemm_expert.activation_formats
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        assert (self.deep_gemm_expert is None or
+                self.triton_expert.activation_formats ==
+                self.deep_gemm_expert.activation_formats)
         return self.triton_expert.activation_formats
 
     def supports_chunking(self) -> bool:
@@ -99,10 +103,8 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
     ):
-        N = w1.size(1)
-
-        use_deep_gemm = (self.allow_deep_gemm and
-                         _valid_deep_gemm(hidden_states, w1, w2))
+        use_deep_gemm = (self.allow_deep_gemm
+                         and _valid_deep_gemm(hidden_states, w1, w2))
 
         experts = self.deep_gemm_expert if use_deep_gemm else self.triton_expert
         assert experts is not None

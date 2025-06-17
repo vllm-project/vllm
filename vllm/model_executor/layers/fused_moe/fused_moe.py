@@ -1532,7 +1532,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_int8_w8a16 = use_int8_w8a16
 
     @property
-    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
         return (mk.FusedMoEActivationFormat.Standard,
                 mk.FusedMoEActivationFormat.Standard)
 
