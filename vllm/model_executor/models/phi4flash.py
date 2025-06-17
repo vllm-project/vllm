@@ -112,8 +112,10 @@ class SambaYAttention(nn.Module):
 
         # disable sliding window for the second half of the model
         sliding_window = config.interleaved_sliding_window[layer_idx]
-        if layer_idx >= config.num_hidden_layers // 2 or layer_idx % 2 == 0:
-            assert sliding_window == None, "sliding_window is not none"
+        if layer_idx >= config.num_hidden_layers // 2:
+            assert sliding_window is None, "sliding_window must be none for the second decoder"
+        else:
+            assert sliding_window is not None, "sliding_window must be set for the first decoder"
 
         assert self.num_heads % 2 == 0, 'num_heads should be even'
         assert self.num_key_value_heads % 2 == 0, 'num_heads should be even'
@@ -397,12 +399,10 @@ class SambaYDecoderLayer(nn.Module):
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         
         self.yoco_mb = False
-        self.yoco_kv = False
         self.yoco_cross = False
         assert config.num_hidden_layers % 4 == 0, 'n_layer should be divisible by 4 for SambaY + yoco'
         if layer_idx >= config.num_hidden_layers//2:
             self.yoco_mb = True
-            self.yoco_kv = (layer_idx >= (config.num_hidden_layers//2 +1))
             self.yoco_cross = (layer_idx >= (config.num_hidden_layers//2 +2))
         self.use_mamba = config.mb_per_layer > 0 and layer_idx % config.mb_per_layer == 0
         if self.use_mamba:
