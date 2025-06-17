@@ -801,6 +801,7 @@ def unified_attention(
                 scale=softmax_scale,
                 k_scale=k_descale,
                 v_scale=v_descale,
+                out_scale=output_scale,
                 softcap=softcap,
                 num_query_heads=num_query_heads,
                 num_queries_per_kv=num_queries_per_kv,
@@ -829,6 +830,7 @@ def unified_attention(
                 num_seqs=num_seqs,
                 BLOCK_M=BLOCK_M,
                 NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+                USE_FP8=output_scale is not None,
             )
 
         reduce_segments[(q.shape[0], num_query_heads)](
