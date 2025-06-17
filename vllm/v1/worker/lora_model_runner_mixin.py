@@ -5,7 +5,7 @@ Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 import numpy as np
 import torch.nn as nn
@@ -16,10 +16,11 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
-from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
-InputBatch = Union[TPUInputBatch, GPUInputBatch]
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
+    from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
+    InputBatch = Union[TPUInputBatch, GPUInputBatch]
 
 logger = init_logger(__name__)
 
