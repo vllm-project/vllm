@@ -545,6 +545,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for param_name, param in param_dict.items():
             if param_name in stacked_quant_state_dict:
                 quant_states = stacked_quant_state_dict[param_name]
+                dequantize_dq(quant_states)
                 set_weight_attrs(param, {"bnb_quant_state": quant_states})
 
                 pack_ratio = getattr(param, "pack_factor", -1)
@@ -568,3 +569,25 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
+
+
+def dequantize_dq(quant_states: dict) -> None:
+    """
+    When BNB employs DQ, that is, applying a second quantization
+    to the quantization constants—we perform the dequantization of these 
+    constants during weight loading rather than at inference time, thereby 
+    avoiding this computational overhead during inference.
+    """
+    from bitsandbytes.functional import dequantize_blockwise
+    for _, quant_state in quant_states.items():
+        # Copied from: https://github.com/bitsandbytes-foundation/bitsandbytes/blob/0.45.3/bitsandbytes/functional.py#L1352-#L1356
+        if quant_state.nested:
+            absmax = dequantize_blockwise(quant_state.absmax,
+                                          quant_state.state2)
+            absmax += quant_state.offset
+            if absmax.dtype != torch.float32:
+                absmax = absmax.float()
+            quant_state.absmax = absmax
+            quant_state.nested = False
+            quant_state.offset = None
+            quant_state.state2 = None
