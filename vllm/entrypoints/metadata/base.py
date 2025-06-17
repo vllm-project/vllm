@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -78,27 +78,50 @@ class Metadata:
 
     @classmethod
     def get_router(cls, brief_metadata_only) -> "APIRouter":
-        from fastapi import APIRouter, Request
+        from fastapi import APIRouter, HTTPException, Request
         router = APIRouter()
 
-        def get_func(metadata_class):
-            response_field = metadata_class if issubclass(
-                metadata_class, BaseModel) else dict
+        def add_api_route(metadata_class):
 
-            async def func(raw_request: Request) -> response_field:
-                out = metadata_class.from_vllm_config(
-                    raw_request.app.state.vllm_config)
-                if isinstance(out, (BaseModel, dict)):
-                    return out
-                else:
-                    return vars(out)
+            def get_metadata(metadata_class):
+                response_field = metadata_class if issubclass(
+                    metadata_class, BaseModel) else dict
 
-            return func
+                async def func(raw_request: Request) -> response_field:
+                    metadata = metadata_class.from_vllm_config(
+                        raw_request.app.state.vllm_config)
+                    if isinstance(metadata, (BaseModel, dict)):
+                        return metadata
+                    else:
+                        return vars(metadata)
+
+                return func
+
+            def quick_access(metadata_class):
+
+                async def func(key: str,
+                               raw_request: Request) -> dict[str, Any]:
+                    metadata = metadata_class.from_vllm_config(
+                        raw_request.app.state.vllm_config)
+
+                    value = getattr(metadata, key, None)
+
+                    if value is not None:
+                        return {key: value}
+                    else:
+                        raise HTTPException(status_code=404)
+
+                return func
+
+            router.get("/metadata/brief")(get_metadata(metadata_class))
+
+            if issubclass(metadata_class, BaseModel):
+                router.get("/metadata/brief/{key}")(
+                    quick_access(metadata_class))
 
         if brief_metadata_only:
-            router.get("/metadata/brief")(get_func(
-                cls.__annotations__["brief"]))
+            add_api_route(cls.__annotations__["brief"])
         else:
             for key, metadata_class in cls.__annotations__.items():
-                router.get(f"/metadata/{key}")(get_func(metadata_class))
+                add_api_route(metadata_class)
         return router

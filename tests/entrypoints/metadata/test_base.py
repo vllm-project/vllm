@@ -55,3 +55,14 @@ def test_brief_metadata_only(server):
     url = server.url_for("metadata/hf_config")
     response = requests.get(url)
     assert response.status_code == HTTPStatus.NOT_FOUND
+
+
+def test_quick_access(server):
+    url = server.url_for("metadata/brief")
+
+    for k, v in expected_brief.model_dump().items():
+        response = requests.get(url + f"/{k}")
+        assert response.json() == {k: v}
+
+    response = requests.get(url + "/foo")
+    assert response.status_code == HTTPStatus.NOT_FOUND
