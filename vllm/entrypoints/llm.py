@@ -613,8 +613,7 @@ class LLM:
             logger.warning(
                 "The progress bar shows the upper bound on token steps and "
                 "may finish early due to stopping conditions. It does not "
-                "reflect instance-level progress.",
-            )
+                "reflect instance-level progress.")
 
         for _ in token_iter:
             all_beams: list[BeamSearchSequence] = list(
