@@ -1,10 +1,8 @@
-include LICENSE
+recursive-exclude vllm-kernels *
+
+include ./LICENSE
 include requirements/common.txt
 include requirements/cuda.txt
 include requirements/rocm.txt
 include requirements/neuron.txt
 include requirements/cpu.txt
-include CMakeLists.txt
-
-recursive-include cmake *
-recursive-include csrc *

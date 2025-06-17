@@ -1,3 +1,4 @@
+vllm-kernels
 regex # Replace re for higher-performance regex matching
 cachetools
 psutil

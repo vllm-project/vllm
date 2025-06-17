@@ -50,6 +50,7 @@ lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:regi
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vllm*"]
+exclude = ["vllm-kernels*"]
 
 [tool.yapfignore]
 ignore_patterns = [
@@ -134,7 +135,7 @@ files = [
 exclude = [
     "vllm/model_executor/parallel_utils/|vllm/model_executor/models/",
     # Ignore triton kernels in ops.
-    'vllm/attention/ops/.*\.py$'
+    'vllm/attention/ops/.*\.py$',
 ]
 
 [tool.codespell]

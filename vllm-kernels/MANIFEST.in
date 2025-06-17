@@ -1,0 +1,4 @@
+include CMakeLists.txt
+
+recursive-include cmake *
+recursive-include csrc *

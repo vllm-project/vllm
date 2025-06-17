@@ -640,29 +640,6 @@ def get_requirements() -> list[str]:
     return requirements
 
 
-ext_modules = []
-
-if _is_cuda() or _is_hip():
-    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
-
-if _is_hip():
-    ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
-
-if _is_cuda():
-    ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
-        # FA3 requires CUDA 12.3 or later
-        ext_modules.append(
-            CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
-        # Optional since this doesn't get built (produce an .so file) when
-        # not targeting a hopper system
-        ext_modules.append(
-            CMakeExtension(name="vllm._flashmla_C", optional=True))
-    ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
-
-if _build_custom_ops():
-    ext_modules.append(CMakeExtension(name="vllm._C"))
-
 package_data = {
     "vllm": [
         "py.typed",
@@ -671,21 +648,9 @@ package_data = {
     ]
 }
 
-if _no_device():
-    ext_modules = []
-
-if not ext_modules:
-    cmdclass = {}
-else:
-    cmdclass = {
-        "build_ext":
-        repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
-    }
-
 setup(
     # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
-    ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
         "bench": ["pandas", "datasets"],
@@ -695,6 +660,6 @@ setup(
         "audio": ["librosa", "soundfile"],  # Required for audio processing
         "video": []  # Kept for backwards compatibility
     },
-    cmdclass=cmdclass,
     package_data=package_data,
+    include_package_data=True,
 )
