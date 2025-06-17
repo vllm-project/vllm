@@ -577,8 +577,13 @@ def _pplx_moe(
 
     with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        torch_output = torch_experts(a, w1, w2, topk_weight, topk_ids,
-                                     w1_scale=w1_s, w2_scale=w2_s,
+        torch_output = torch_experts(a,
+                                     w1,
+                                     w2,
+                                     topk_weight,
+                                     topk_ids,
+                                     w1_scale=w1_s,
+                                     w2_scale=w2_s,
                                      quant_dtype=qtype,
                                      per_act_token_quant=per_act_token_quant,
                                      block_shape=block_shape)

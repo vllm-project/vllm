@@ -5,7 +5,6 @@ from typing import Optional
 
 import torch
 
-import vllm.model_executor.layers.quantization.deepgemm
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -15,6 +14,9 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, per_token_group_quant_fp8)
+from vllm.model_executor.layers.quantization.deepgemm import (
+    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm as
+    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm)
 from vllm.utils import round_up
 
 from vllm.model_executor.layers.quantization.deepgemm import (  # isort:skip
