@@ -14,10 +14,10 @@ import torch
 from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
-
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input)
 from vllm.platforms.interface import _Backend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
                         STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
@@ -1081,10 +1081,7 @@ def torch_experts(
 
     a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
 
-    out = torch.zeros(M * topk,
-                      w2.shape[1],
-                      dtype=a.dtype,
-                      device=a.device)
+    out = torch.zeros(M * topk, w2.shape[1], dtype=a.dtype, device=a.device)
 
     a, a_scale = moe_kernel_quantize_input(a, None, quant_dtype,
                                            per_act_token_quant, block_shape)

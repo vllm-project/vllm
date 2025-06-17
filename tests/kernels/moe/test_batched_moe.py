@@ -8,11 +8,11 @@ import pytest
 import torch
 import triton.language as tl
 
-from tests.kernels.utils import torch_experts
 from tests.kernels.moe.utils import (batched_moe,
                                      make_quantized_test_activations,
                                      make_test_weights, triton_moe)
 from tests.kernels.quant_utils import native_w8a8_block_matmul
+from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     invoke_moe_batched_triton_kernel)
@@ -265,11 +265,17 @@ def test_fused_moe_batched_experts(
         batched_output = batched_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
                                      w2_s, quant_dtype, per_act_token_quant,
                                      block_shape)
-        baseline_output = torch_experts(a, w1, w2, topk_weight, topk_ids,
-                                        w1_scale=w1_s, w2_scale=w2_s,
-                                        quant_dtype=quant_dtype,
-                                        per_act_token_quant=per_act_token_quant,
-                                        block_shape=block_shape)
+        baseline_output = torch_experts(
+            a,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            w1_scale=w1_s,
+            w2_scale=w2_s,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape)
         triton_output = triton_moe(a, w1, w2, topk_weight, topk_ids, w1_s,
                                    w2_s, quant_dtype, per_act_token_quant,
                                    block_shape)

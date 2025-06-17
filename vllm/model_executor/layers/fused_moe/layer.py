@@ -230,7 +230,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert all2all_manager is not None
 
         if (prepare_finalize.activation_format ==
-            FusedMoEActivationFormat.BatchedExperts):
+                FusedMoEActivationFormat.BatchedExperts):
             logger.debug("BatchedTritonExperts %s", self.moe)
             assert self.moe.dp_size == all2all_manager.dp_world_size
             return BatchedTritonExperts(

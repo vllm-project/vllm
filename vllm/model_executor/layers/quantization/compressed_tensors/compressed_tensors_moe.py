@@ -553,7 +553,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
     ) -> FusedMoEPermuteExpertsUnpermute:
 
         if (prepare_finalize.activation_format ==
-            FusedMoEActivationFormat.BatchedExperts):
+                FusedMoEActivationFormat.BatchedExperts):
             # TODO(bnell): attrs from prepare_finalize sketchy
             max_experts_per_worker = (
                 (moe.num_experts + prepare_finalize.world_size - 1) //

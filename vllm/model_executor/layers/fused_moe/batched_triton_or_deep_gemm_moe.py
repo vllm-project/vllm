@@ -74,9 +74,9 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self
     ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
         if self.batched_triton_experts is not None:
-            assert (self.batched_deep_gemm_experts is None or
-                    self.batched_deep_gemm_experts.activation_formats ==
-                    self.batched_triton_experts.activation_formats)
+            assert (self.batched_deep_gemm_experts is None
+                    or self.batched_deep_gemm_experts.activation_formats
+                    == self.batched_triton_experts.activation_formats)
             return self.batched_triton_experts.activation_formats
         else:
             assert self.batched_deep_gemm_experts is not None

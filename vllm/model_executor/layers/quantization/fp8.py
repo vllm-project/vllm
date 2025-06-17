@@ -782,10 +782,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             "Marlin and ROCm AITER are not supported with all2all yet.")
 
         if (prepare_finalize.activation_format ==
-            FusedMoEActivationFormat.BatchedExperts):
+                FusedMoEActivationFormat.BatchedExperts):
             max_num_tokens_per_rank = (
-                prepare_finalize.max_num_tokens_per_rank()
-            )
+                prepare_finalize.max_num_tokens_per_rank())
             assert max_num_tokens_per_rank is not None
             logger.debug(
                 "BatchedTritonOrDeepGemmExperts(%s): "
