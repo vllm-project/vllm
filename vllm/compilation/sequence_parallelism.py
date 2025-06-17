@@ -145,50 +145,30 @@ class _FusedRMSNormQuantOpHelper(_SequenceParallelPatternHelper):
 class EmbeddingAllReduceRMSNormPattern(_RMSNormOpHelper):
 
     def get_inputs(self):
-        arg2_1 = torch.empty([16, 4], device=self.device, dtype=self.dtype)
-        mul_6 = torch.tensor([[3, 7, 1, 4, 9, 2, 5, 0]],
-                             device=self.device,
-                             dtype=torch.long)
-        unsqueeze = torch.rand([1, 8, 1], device=self.device,
-                               dtype=self.dtype) > 0.5
-        full_default = torch.zeros([1, 8, 4],
-                                   device=self.device,
-                                   dtype=self.dtype)
+        input = torch.empty([1, 8, 4], device=self.device, dtype=self.dtype)
         permute = torch.empty([1, 8, 4], device=self.device, dtype=self.dtype)
         arg3_1 = torch.empty([4], device=self.device, dtype=self.dtype)
 
-        return [arg2_1, mul_6, unsqueeze, full_default, permute, arg3_1]
+        return [input, permute, arg3_1]
 
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(
-            arg2_1: torch.Tensor,
-            mul_6: torch.Tensor,
-            unsqueeze: torch.Tensor,
-            full_default: torch.Tensor,
+            input: torch.Tensor,
             permute: torch.Tensor,
             arg3_1: torch.Tensor,
         ):
-            embedding = torch.ops.aten.embedding.default(arg2_1, mul_6)
-            where = torch.ops.aten.where.self(unsqueeze, full_default,
-                                              embedding)
-            all_reduce = self._all_reduce(where)
+            all_reduce = self._all_reduce(input)
             rmsnorm = self._functional_rmsnorm(permute, all_reduce, arg3_1)
 
             return rmsnorm[1], all_reduce
 
         def replacement(
-            arg2_1: torch.Tensor,
-            mul_6: torch.Tensor,
-            unsqueeze: torch.Tensor,
-            full_default: torch.Tensor,
+            input: torch.Tensor,
             permute: torch.Tensor,
             arg3_1: torch.Tensor,
         ):
-            embedding = torch.ops.aten.embedding.default(arg2_1, mul_6)
-            where = torch.ops.aten.where.self(unsqueeze, full_default,
-                                              embedding)
-            reduce_scatter = self._reduce_scatter(where)
+            reduce_scatter = self._reduce_scatter(input)
 
             rmsnorm_result = torch.empty_like(reduce_scatter)
             rmsnorm = self._functional_rmsnorm(rmsnorm_result, reduce_scatter,
@@ -298,15 +278,7 @@ class EmbeddingAllReduceRMSNormStaticFP8Pattern(_RMSNormQuantOpHelper):
         super().__init__(epsilon, dtype, device, quant_op=op)
 
     def get_inputs(self):
-        arg2_1 = torch.empty([16, 4], device=self.device, dtype=self.dtype)
-        mul_6 = torch.tensor([[3, 7, 1, 4, 9, 2, 5, 0]],
-                             device=self.device,
-                             dtype=torch.long)
-        unsqueeze = torch.rand([1, 8, 1], device=self.device,
-                               dtype=self.dtype) > 0.5
-        full_default = torch.zeros([1, 8, 4],
-                                   device=self.device,
-                                   dtype=self.dtype)
+        input = torch.zeros([1, 8, 4], device=self.device, dtype=self.dtype)
         rmsnorm_result = torch.empty([1, 8, 4],
                                      device=self.device,
                                      dtype=self.dtype)
@@ -315,45 +287,30 @@ class EmbeddingAllReduceRMSNormStaticFP8Pattern(_RMSNormQuantOpHelper):
                                    dtype=FP8_DTYPE)
         weight = torch.empty([4], device=self.device, dtype=self.dtype)
         scale = torch.tensor(1.0, device=self.device, dtype=torch.float32)
-        return [
-            arg2_1, mul_6, unsqueeze, full_default, rmsnorm_result,
-            quant_result, weight, scale
-        ]
+        return [input, rmsnorm_result, quant_result, weight, scale]
 
     def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(
-            arg2_1: torch.Tensor,
-            mul_6: torch.Tensor,
-            unsqueeze: torch.Tensor,
-            full_default: torch.Tensor,
+            input: torch.Tensor,
             rmsnorm_result: torch.Tensor,
             quant_result: torch.Tensor,
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            embedding = torch.ops.aten.embedding.default(arg2_1, mul_6)
-            where = torch.ops.aten.where.self(unsqueeze, full_default,
-                                              embedding)
-            all_reduce = self._all_reduce(where)
+            all_reduce = self._all_reduce(input)
             static_fp8 = self._functional_rmsnorm_then_quant(
                 rmsnorm_result, quant_result, all_reduce, weight, scale)
             return static_fp8[1], all_reduce
 
         def replacement(
-            arg2_1: torch.Tensor,
-            mul_6: torch.Tensor,
-            unsqueeze: torch.Tensor,
-            full_default: torch.Tensor,
+            input: torch.Tensor,
             rmsnorm_result: torch.Tensor,
             quant_result: torch.Tensor,
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            embedding = torch.ops.aten.embedding.default(arg2_1, mul_6)
-            where = torch.ops.aten.where.self(unsqueeze, full_default,
-                                              embedding)
-            reduce_scatter = self._reduce_scatter(where)
+            reduce_scatter = self._reduce_scatter(input)
 
             rmsnorm_result = torch.empty_like(reduce_scatter,
                                               dtype=rmsnorm_result.dtype)
@@ -545,8 +502,13 @@ class SequenceParallelismPass(VllmInductorPass):
 
     def __call__(self, graph: fx.Graph):
         self.begin()
-        self.dump_graph(graph, "before_sequence_parallelism_pass")
+        import torch.distributed as dist
+        if dist.get_rank() == 0:
+            print(f"before_sequence_parallelism_pass {graph}")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_sequence_parallelism_pass")
+        # import torch.distributed as dist
+        if dist.get_rank() == 0:
+            print(f"after_sequence_parallelism_pass {graph}")
         self.end_and_log()
