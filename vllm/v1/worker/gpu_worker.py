@@ -254,8 +254,6 @@ class Worker(WorkerBase):
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
         return {tp_rank: {dp_rank: msgspec.to_builtins(metadata)}}
 
-        return None
-
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 

@@ -113,9 +113,7 @@ class KVConnectorMetadata:
     Abstract Metadata used to communicate between the
     Scheduler KVConnector and Worker KVConnector.
     """
-
-    def __init__(self):
-        pass
+    pass
 
 
 class KVConnectorHandshakeMetadata(
