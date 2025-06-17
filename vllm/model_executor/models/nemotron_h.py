@@ -523,11 +523,11 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     def _get_mamba_cache_shape(
             self) -> tuple[tuple[int, int], tuple[int, int]]:
         world_size = get_tensor_model_parallel_world_size()
-        hidden_size = self.config.hidden_size
 
         conv_state_shape, temporal_state_shape = None, None
 
-        intermediate_size = self.config.mamba_head_dim * self.config.mamba_num_heads
+        intermediate_size = (self.config.mamba_head_dim *
+              self.config.mamba_num_heads)
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
