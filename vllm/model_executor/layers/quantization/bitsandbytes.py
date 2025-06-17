@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
+from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -419,7 +420,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             raise ImportError("Please install bitsandbytes>=0.45.3 via "
                               "`pip install bitsandbytes>=0.45.3` to use "
                               "bitsandbytes quantizer.") from err
-
+        self.topk_indices_dtype = None
         self.quant_config = quant_config
 
     def create_weights(
@@ -435,30 +436,32 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         def _create_weights_4bit():
             quant_ratio = calculate_quant_ratio(params_dtype)
             # Fused gate_up_proj (column parallel)
-            w13_total_size = (num_experts * hidden_size * 2 *
+            w13_total_size = (hidden_size * 2 *
                               intermediate_size_per_partition) // quant_ratio
             w13_qweight = torch.nn.Parameter(
                 torch.empty(
+                    num_experts,
                     w13_total_size,
                     1,
                     dtype=torch.uint8,
                 ),
                 requires_grad=False,
             )
-            layer.register_parameter("w13_qweight", w13_qweight)
+            layer.register_parameter("w13_weight", w13_qweight)
             set_weight_attrs(w13_qweight, extra_weight_attrs)
             # down_proj (row parallel)
-            w2_total_size = (num_experts * hidden_size *
+            w2_total_size = (hidden_size *
                              intermediate_size_per_partition) // quant_ratio
             w2_qweight = torch.nn.Parameter(
                 torch.empty(
+                    num_experts,
                     w2_total_size,
                     1,
                     dtype=torch.uint8,
                 ),
                 requires_grad=False,
             )
-            layer.register_parameter("w2_qweight", w2_qweight)
+            layer.register_parameter("w2_weight", w2_qweight)
             set_weight_attrs(w2_qweight, extra_weight_attrs)
 
         def _create_weights_8bit():
@@ -469,15 +472,52 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         else:
             _create_weights_4bit()
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+    ) -> torch.Tensor:
 
         if self.quant_config.load_in_8bit:
-            return self._apply_8bit_weight(layer, x, bias)
-        else:
-            return self._apply_4bit_weight(layer, x, bias)
+            raise NotImplementedError
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
+
+        return fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=True,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+        )
 
     def _apply_8bit_weight(
             self,

@@ -315,6 +315,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 mapped_weight_name,
                 weight_tensor,
         ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
+
+            if ".mlp.experts" in org_weight_name:
+                pass
             if any(target_module in mapped_weight_name
                    for target_module in self.target_modules
                    ) and mapped_weight_name.endswith(".weight"):
@@ -388,12 +391,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 quant_state_dict[mapped_weight_name] = quant_state
             else:
                 processed_weight = weight_tensor
+            if "layers.13.mlp.experts." in org_weight_name:
+                pass
             yield org_weight_name, processed_weight
 
     def _get_bnb_target_modules(self, model: nn.Module) -> None:
 
         for name, module in model.named_modules():
-            if (isinstance(module, (LinearBase, FusedMoE))  and
+            if (isinstance(module, LinearBase)  and
                     hasattr(module.quant_method, "quant_config")):
                 if modules_info := self.modules_mapping.get_sub_modules(name):
                     # Map vllm's names to transformers's names.
@@ -405,6 +410,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # in case model has a mixture of disk-merged and disk-split
                 # weights with same last name.
                 self.target_modules.append(name)
+            elif (isinstance(module,FusedMoE) and
+                    hasattr(module.quant_method, "quant_config")):
+                expert_mapping=model.get_expert_mapping()
+                for exp in expert_mapping:
+                    rep_name = name.replace("experts",'')+exp[1][:-1]
+                    self.target_modules.append(rep_name)
+
 
         assert (self.target_modules
                 ), "vllm currently does not support BNB quantization for"
@@ -449,6 +461,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # dimension (dim=-1)
             elif isinstance(module, (RowParallelLinear, )):
                 self.column_sharded_weights_modules.append(name)
+            elif isinstance(module,FusedMoE):
+                expert_mapping = model.get_expert_mapping()
+                for exp in expert_mapping:
+                    if exp[-1] == "w2":
+                        rep_name=name.replace("experts",'')+exp[1][:-1]
+                        self.column_sharded_weights_modules.append(rep_name)
 
         self.model_type = type(model).__name__
 
@@ -566,6 +584,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 if load_8bit:
                     set_weight_attrs(
                         param, {"matmul_state": [None] * len(quant_states)})
-
+            # TODO MoE abs tensor concatenation
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
