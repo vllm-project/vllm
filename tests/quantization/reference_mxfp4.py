@@ -113,7 +113,8 @@ def dq_mxfp4_torch(x: torch.Tensor, scale: torch.Tensor,
 def fp16_to_fp4_simulate(val, half_mantissa_bits: int, half_exp_bits: int,
                          half_exp_bias: int):
     # Casts an fp16/bf16 input to the restricted values of float4_e2m1,
-    # that is to say [0., 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0].
+    # that is to say [0., 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0,
+    # -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0].
 
     float_type = val.dtype
 
@@ -135,8 +136,8 @@ def fp16_to_fp4_simulate(val, half_mantissa_bits: int, half_exp_bits: int,
     exp_shift = (new_exp <= 0) * (1 - new_exp)
 
     # Typically 9.
-    # Take the min to prevent overflow on `uint16_t half`. This is the case for very small values,
-    # correctly mapped to `round_close`.
+    # Take the min to prevent overflow on `uint16_t half`. This is the case for
+    # very small values, correctly mapped to `round_close`.
     tail_bits = half_mantissa_bits - FLOAT4_MANTISSA_BITS + exp_shift
     tail_bits[tail_bits >= 16] = 16
 
@@ -201,8 +202,12 @@ def fp16_to_fp4_simulate(val, half_mantissa_bits: int, half_exp_bits: int,
     new_exp_tie = (exp > (half_exp_bias - 2)) * (exp + (mantissa_last == 1))
 
     # Gather round up, round down and tie.
-    new_exp = round_away * new_exp_away + round_close * new_exp_close + tie * new_exp_tie
-    new_mantissa = round_away * new_mantissa_away + round_close * new_mantissa_close
+    new_exp = round_away * new_exp_away \
+        + round_close * new_exp_close \
+        + tie * new_exp_tie
+
+    new_mantissa = round_away * new_mantissa_away \
+        + round_close * new_mantissa_close
 
     # if new_exp > 3:
     #     new_mantissa = 1

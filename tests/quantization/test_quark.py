@@ -9,7 +9,6 @@ import importlib
 import importlib.metadata
 import os
 from dataclasses import dataclass
-from typing import List
 
 import huggingface_hub
 import lm_eval
@@ -221,7 +220,7 @@ def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
 @pytest.mark.parametrize("scalings",
                          [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
 def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype,
-                                     scalings: List[int]):
+                                     scalings: list[int]):
     torch.manual_seed(0)
 
     hidden_size = 64 * 32
@@ -251,7 +250,7 @@ def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype,
 @pytest.mark.parametrize("scalings",
                          [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
 def test_mxfp4_dequant_kernel_match_quark(float_dtype: torch.dtype,
-                                          scalings: List[int]):
+                                          scalings: list[int]):
     qspec = FP4PerGroupSpec(
         ch_axis=-1,
         group_size=32,
