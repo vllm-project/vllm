@@ -1187,7 +1187,7 @@ def fused_experts(hidden_states: torch.Tensor,
             a2_scale=a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
-    elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8 and N > 512
+    elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8
             and _valid_cutlass_block_scaled_grouped_gemm(hidden_states, w1, w2)):
         assert apply_router_weight_on_input is False
         return run_cutlass_block_scaled_fused_experts(

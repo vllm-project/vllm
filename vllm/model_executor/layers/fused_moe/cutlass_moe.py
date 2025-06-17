@@ -7,11 +7,14 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
-from vllm.model_executor.layers.fused_moe.utils import _fp8_perm, _resize_cache, _fp8_quantize
+from vllm.model_executor.layers.fused_moe.utils import (
+    _fp8_perm, _resize_cache, _fp8_quantize, _fp8_dequantize)
 from vllm.scalar_type import scalar_types
 
+logger = init_logger(__name__)
 
 def run_cutlass_moe_fp8(
     output: torch.Tensor,

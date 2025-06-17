@@ -813,7 +813,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Allow use of Cutlass Blockwise Scaled Grouped GEMM kernels for fused moe ops.
     "VLLM_USE_CUTLASS_BLOCKSCALED_GROUPED_GEMM":
-    lambda: bool(int(os.getenv("VLLM_USE_CUTLASS_BLOCKSCALED_GROUPED_GEMM", "0"))),
+    lambda: bool(int(os.getenv(
+        "VLLM_USE_CUTLASS_BLOCKSCALED_GROUPED_GEMM", "0"))),
 
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.

@@ -83,7 +83,6 @@ def test_cutlass_grouped_gemm(
 
     x = torch.randn((m, k), device=device, dtype=out_dtype)
     y = torch.randn((num_groups, n, k), device=device, dtype=out_dtype)
-    m_indicies = torch.empty(m, device=device, dtype=torch.int32)
     out = torch.empty((m, n), device=device, dtype=out_dtype)
     ref_out = torch.randn((m, n), device=device, dtype=out_dtype)
 
@@ -106,7 +105,6 @@ def test_cutlass_grouped_gemm(
         b_scale = y_fp8[1][i].t()
         baseline = baseline_scaled_mm(a, b, a_scale, b_scale, out_dtype)
         ref_out[ep_offset[i]:ep_offset[i+1]] = baseline
-    ref_out = torch.where((m_indicies == -1).unsqueeze(1), torch.zeros_like(ref_out), ref_out)
 
     ops.cutlass_blockwise_scaled_grouped_mm(
         out,
