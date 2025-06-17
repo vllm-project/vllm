@@ -6,6 +6,7 @@ from typing import Optional
 
 import torch
 
+import vllm.model_executor.layers.quantization.deepgemm
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
