@@ -27,10 +27,12 @@ class BlockStored(KVCacheEvent):
     token_ids: list[int]
     block_size: int
     lora_id: Optional[int]
+    medium: Optional[str]
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[int]
+    medium: Optional[str]
 
 
 class AllBlocksCleared(KVCacheEvent):
