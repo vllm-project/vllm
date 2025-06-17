@@ -23,6 +23,7 @@ def test_basic_lifecycle():
         scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
 
     request = create_request(request_id=1,
+                             block_size=BLOCK_SIZE,
                              num_tokens=NUM_TOKENS,
                              do_remote_prefill=True)
 
@@ -133,14 +134,17 @@ def test_interleaved_lifecycle():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request_remote = create_request(request_id=1,
+                                    block_size=BLOCK_SIZE,
                                     num_tokens=NUM_TOKENS,
                                     do_remote_prefill=True)
     request_local_a = create_request(
         request_id=2,
+        block_size=BLOCK_SIZE,
         num_tokens=NUM_TOKENS,
     )
     request_local_b = create_request(
         request_id=3,
+        block_size=BLOCK_SIZE,
         num_tokens=NUM_TOKENS,
     )
 
@@ -236,6 +240,7 @@ def test_no_spurious_prefix_caching():
     # Both of these requests have prompts like [1,1,1,1,1, ...]
     request_remote = create_request(
         request_id=1,
+        block_size=BLOCK_SIZE,
         num_tokens=NUM_TOKENS,
         do_remote_prefill=True,
         use_all_1s_for_prompt_tokens=True,
@@ -243,6 +248,7 @@ def test_no_spurious_prefix_caching():
 
     request_local = create_request(
         request_id=2,
+        block_size=BLOCK_SIZE,
         num_tokens=NUM_TOKENS,
         do_remote_prefill=False,
         use_all_1s_for_prompt_tokens=True,
@@ -292,6 +298,7 @@ def test_full_block_prompt():
     NUM_TOKENS = int(BLOCK_SIZE * NUM_EXTERNAL_FULL_BLOCKS)
 
     request = create_request(request_id=1,
+                             block_size=BLOCK_SIZE,
                              num_tokens=NUM_TOKENS,
                              do_remote_prefill=True)
 
@@ -364,8 +371,11 @@ def test_cannot_schedule_after_recv():
     NUM_TOKENS_LOCAL = int(BLOCK_SIZE * NUM_PROMPT_BLOCKS)
     NUM_TOKENS_REMOTE = int(BLOCK_SIZE * NUM_PROMPT_BLOCKS)
 
-    request_normal = create_request(request_id=1, num_tokens=NUM_TOKENS_LOCAL)
+    request_normal = create_request(request_id=1,
+                                    block_size=BLOCK_SIZE,
+                                    num_tokens=NUM_TOKENS_LOCAL)
     request_remote = create_request(request_id=2,
+                                    block_size=BLOCK_SIZE,
                                     num_tokens=NUM_TOKENS_REMOTE,
                                     do_remote_prefill=True)
 
@@ -456,8 +466,11 @@ def test_cannot_recv():
     NUM_TOKENS_LOCAL = int(BLOCK_SIZE * NUM_PROMPT_BLOCKS)
     NUM_TOKENS_REMOTE = int(BLOCK_SIZE * (NUM_PROMPT_BLOCKS + 0.5))
 
-    request_normal = create_request(request_id=1, num_tokens=NUM_TOKENS_LOCAL)
+    request_normal = create_request(request_id=1,
+                                    block_size=BLOCK_SIZE,
+                                    num_tokens=NUM_TOKENS_LOCAL)
     request_remote = create_request(request_id=2,
+                                    block_size=BLOCK_SIZE,
                                     num_tokens=NUM_TOKENS_REMOTE,
                                     do_remote_prefill=True)
 

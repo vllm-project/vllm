@@ -3242,6 +3242,24 @@ def sha256_cbor_64bit(input) -> int:
     return full_hash & ((1 << 64) - 1)
 
 
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
+    """Get a hash function by name, or raise an error if
+    the function is not found.
+    Args:
+        hash_fn_name: Name of the hash function.
+    Returns:
+        A hash function.
+    """
+    if hash_fn_name == "sha256":
+        return sha256
+    if hash_fn_name == "sha256_cbor_64bit":
+        return sha256_cbor_64bit
+    if hash_fn_name == "builtin":
+        return hash
+
+    raise ValueError(f"Unsupported hash function: {hash_fn_name}")
+
+
 def is_torch_equal_or_newer(target: str) -> bool:
     """Check if the installed torch version is >= the target version.
 

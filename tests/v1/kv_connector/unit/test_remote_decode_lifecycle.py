@@ -21,6 +21,7 @@ def test_basic_lifecycle():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request = create_request(request_id=1,
+                             block_size=BLOCK_SIZE,
                              max_tokens=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_decode=True)
@@ -103,8 +104,10 @@ def test_short_prompt_lifecycle():
     scheduler = create_scheduler(vllm_config)
 
     # Not enough tokens for full block.
-    NUM_TOKENS = vllm_config.cache_config.block_size // 2
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_TOKENS = BLOCK_SIZE // 2
     request = create_request(request_id=1,
+                             block_size=BLOCK_SIZE,
                              max_tokens=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_decode=True)
@@ -148,7 +151,9 @@ def test_prefix_cache_lifecycle():
     NUM_EXTERNAL_FULL_BLOCKS = 3
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
-    request_normal = create_request(request_id=1, num_tokens=NUM_TOKENS)
+    request_normal = create_request(request_id=1,
+                                    block_size=BLOCK_SIZE,
+                                    num_tokens=NUM_TOKENS)
 
     scheduler.add_request(request_normal)
     scheduler_output = scheduler.schedule()
@@ -166,6 +171,7 @@ def test_prefix_cache_lifecycle():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request_remote = create_request(request_id=1,
+                                    block_size=BLOCK_SIZE,
                                     num_tokens=NUM_TOKENS,
                                     do_remote_decode=True)
 
