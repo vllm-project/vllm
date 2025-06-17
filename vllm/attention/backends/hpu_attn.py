@@ -164,7 +164,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads,
                                alibi_slopes, sliding_window, kv_cache_dtype,
                                blocksparse_params, logits_soft_cap, attn_type,
-                               **kwargs)
+                               kv_sharing_target_layer_name, **kwargs)
         self.enable_fp8_attn = kv_cache_dtype == 'fp8_inc' and os.environ.get(
             'QUANT_CONFIG', None) is None
         self.matmul_qk = Matmul() if not self.enable_fp8_attn \
