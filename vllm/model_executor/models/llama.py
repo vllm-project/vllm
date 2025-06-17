@@ -583,7 +583,12 @@ class LlamaForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP)
             # H1 probe: Check if forward is called multiple times
             logger.info(f"[H1] llama forward in draft_mode, positions shape={positions.shape}")
             # Draft mode: early exit
-            return self.forward_with_early_exit(input_ids, positions, self.draft_layer, intermediate_tensors)
+            return self.forward_with_early_exit(
+                input_ids=input_ids,
+                positions=positions,
+                stop_layer=self.draft_layer,
+                intermediate_tensors=intermediate_tensors
+            )
         else:
             # Normal mode: full forward pass
             model_output = self.model(input_ids, positions, intermediate_tensors,
@@ -598,7 +603,16 @@ class LlamaForCausalLM(LayerSkipModelMixin, nn.Module, SupportsLoRA, SupportsPP)
         if self.draft_mode and hasattr(self, 'lsq_heads') and self.draft_layer in self.lsq_heads:
             # Draft mode: use LSQ head (already TP-sharded ParallelLMHead)
             lsq_head = self.lsq_heads[self.draft_layer]
+            # BREAKPOINT 2: Before logits computation
+            # Check: self.draft_layer, lsq_head.weight.shape, hidden_states.shape
             logits = self.logits_processor(lsq_head, hidden_states, sampling_metadata)
+            # BREAKPOINT 3: After logits computation  
+            # Check: logits.shape, logits.argmax(dim=-1), tokenizer.decode([logits.argmax(dim=-1).item()])
+            # DEBUG: Check what token is being predicted
+            if logits is not None:
+                logger.info(f"[DRAFT] Layer {self.draft_layer} predicting: "
+                           f"argmax={logits.argmax(dim=-1).tolist()}, "
+                           f"max_logit={logits.max(dim=-1).values.tolist()}")
             return logits
         else:
             # Normal mode: use LM head

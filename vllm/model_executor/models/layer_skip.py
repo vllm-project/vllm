@@ -53,8 +53,8 @@ class LayerSkipModelMixin:
             
             # Load the full weight and extract this TP rank's shard
             # Use the same sharding as the regular lm_head
-            vocab_start_index = lsq_head.shard_indices.org_vocab_start_index  
-            vocab_end_index = lsq_head.shard_indices.org_vocab_end_index
+            vocab_start_index = self.lm_head.shard_indices.org_vocab_start_index  
+            vocab_end_index = self.lm_head.shard_indices.org_vocab_end_index
             lsq_head.weight.data = full_head_weight[vocab_start_index:vocab_end_index].clone()
             
             # Move LSQ head to same device as main model (critical for device consistency)
@@ -95,6 +95,8 @@ class LayerSkipModelMixin:
             input_ids:      torch.Tensor,
             positions:      torch.Tensor,
             stop_layer:     int,
+            kv_cache: Optional[list[torch.Tensor]] = None,
+            attn_metadata: Optional['AttentionMetadata'] = None,
             intermediate_tensors: Optional['IntermediateTensors'] = None,
     ) -> torch.Tensor:
         """Forward pass with early exit at specified layer for Qwen models."""
@@ -140,5 +142,11 @@ class LayerSkipModelMixin:
                 "residual": residual
             })
         
-        # 4. Last rank applies norm and returns final tensor
+        # 4. Last rank applies norm and returns hidden states
+        # Apply final layer norm
+        hidden_states, _ = self.model.norm(hidden_states, residual)
+        
+        # BREAKPOINT 1: Check hidden states after early exit
+        # Check: hidden_states.shape, hidden_states.norm(), stop_layer value
+        # Return normalized hidden states - the model's compute_logits will handle the rest
         return hidden_states

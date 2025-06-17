@@ -815,6 +815,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         logger = init_logger(__name__)
 
         with Timer() as scoring_timer:
+            # BREAKPOINT 2: Scorer evaluation - watch proposals.proposal_token_ids, full model run
             proposal_scores = self.scorer.score_proposals(
                 execute_model_req,
                 proposals,
@@ -915,6 +916,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 if sgm.sampling_params.seed is not None
             }
 
+        # BREAKPOINT 3: Rejection sampling - watch draft vs target probs, acceptance decisions
         accepted_token_ids = self.spec_decode_sampler(
             target_with_bonus_probs=proposal_verifier_probs,
             bonus_token_ids=bonus_token_ids,
@@ -1127,6 +1129,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         # Populate the data structures needed to keep track of sequences with
         # bonus tokens.
+        # BREAKPOINT 4: Final sequence tracking - watch which tokens were accepted/rejected
         self._track_sequences_with_bonus_tokens(seq_ids,
                                                 request_ids_seq_ids_mapping,
                                                 accepted_token_ids_by_step)

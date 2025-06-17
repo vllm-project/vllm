@@ -2,6 +2,7 @@
 
 import weakref
 from typing import List, Set, Tuple
+import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -143,7 +144,9 @@ class LayerSkipProposer(ProposerWorkerBase, DelegateWorkerBase):
             logger.info(f"[LayerSkipProposer] Draft step {step}/{sample_len}")
             
             # Debug: Check sequence state before execution
+            logger.info(f"[DEBUG] Step {step}: checking {len(execute_model_req.seq_group_metadata_list)} groups")
             for i, seq_group in enumerate(execute_model_req.seq_group_metadata_list):
+                logger.info(f"  Group {i}: {len(seq_group.seq_data)} sequences")
                 for seq_id, seq_data in seq_group.seq_data.items():
                     logger.info(f"  Seq {seq_id}: len={seq_data.get_len()}, "
                               f"computed_tokens={seq_data.get_num_computed_tokens()}, "
@@ -157,9 +160,15 @@ class LayerSkipProposer(ProposerWorkerBase, DelegateWorkerBase):
             # Force num_steps=1 to prevent GPU multi-step optimization
             execute_model_req.num_steps = 1
             
+            # BREAKPOINT 1: Draft token generation - watch model.draft_mode, layer_skip value
             step_outputs = self.worker.execute_model(execute_model_req)
             assert len(step_outputs) == 1, "Expected single output per step"
             step_output = step_outputs[0]
+            
+            # ELEGANT FIX: Force GPU synchronization to break computation graph caching
+            # This prevents stale cached values from polluting subsequent draft steps
+            # while maintaining most of the performance benefits of early exit
+            torch.cuda.synchronize()
             
             # Debug: Check what tokens were generated
             for i, output in enumerate(step_output.outputs):
@@ -175,33 +184,45 @@ class LayerSkipProposer(ProposerWorkerBase, DelegateWorkerBase):
                 )
             
             # Append tokens to sequences for next step
+            # BREAKPOINT 1b: Sequence update after draft generation - watch seq_data changes
             self._append_new_tokens(step_output, execute_model_req.seq_group_metadata_list)
             model_outputs.append(step_output)
         
         return model_outputs, True  # Indicate transposition needed
     
     def _append_new_tokens(self, sampler_output: SamplerOutput, seq_group_metadata_list):
-        """Append sampled tokens to sequences for next step."""
-        for seq_group_metadata, sequence_output in zip(seq_group_metadata_list, sampler_output.outputs):
-            # CRITICAL: Mark as decode mode after first step
-            seq_group_metadata.is_prompt = False
+        """Append sampled tokens to sequences for next step.
+        
+        When include_gpu_probs_tensor=True (for spec decode), the sampler
+        defers CPU pythonization and only provides sampled_token_ids tensor.
+        """
+        # Since we're in spec decode mode with include_gpu_probs_tensor=True,
+        # we need to use the GPU tensor directly
+        if hasattr(sampler_output, 'sampled_token_ids') and sampler_output.sampled_token_ids is not None:
+            # sampled_token_ids shape: [num_query_tokens, 1]
+            # When processing multiple tokens (e.g., step 1 processes ["paris", "famed"]),
+            # we only want the LAST token's output (the newly generated one)
+            last_token_output = sampler_output.sampled_token_ids[-1]  # Get last row
             
-            for seq_output in sequence_output.samples:
-                # Get the sequence and append the token
-                seq_data = seq_group_metadata.seq_data[sequence_output.parent_seq_id]
-                seq_id = sequence_output.parent_seq_id
+            # For each sequence group (usually just 1 in our case)
+            for seq_group_metadata in seq_group_metadata_list:
+                seq_group_metadata.is_prompt = False
                 
-                # Log state before append
-                logger.info(f"[H3] seq {seq_id} len={seq_data.get_len()} "
-                           f"computed={seq_data.get_num_computed_tokens()} "
-                           f"is_prompt={seq_group_metadata.is_prompt}")
+                # Get the first (and usually only) sequence in the group
+                seq_id = list(seq_group_metadata.seq_data.keys())[0]
+                seq_data = seq_group_metadata.seq_data[seq_id]
                 
-                token_id = seq_output.output_token
-                token_logprob = seq_output.logprobs.get(token_id, 0.0) if seq_output.logprobs else 0.0
+                # Convert tensor to int
+                token_id_int = last_token_output.item()
                 
-                seq_data.append_token_id(token_id, token_logprob)
-                # FIX #2: Update computed tokens so positions advance
-                seq_data.update_num_computed_tokens(1)
+                logger.info(f"[APPEND] seq {seq_id}: appending token {token_id_int} "
+                           f"to sequence with len={seq_data.get_len()}")
+                
+                # Append with default logprob since we're using GPU tensors
+                seq_data.append_token_id(token_id_int, 0.0)
+        else:
+            # This path shouldn't be reached in spec decode mode
+            logger.warning("Unexpected: sampler output without GPU tensors in spec decode mode")
     
     # DelegateWorkerBase provides delegation to self.worker automatically
     # No manual delegation needed

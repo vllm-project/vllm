@@ -669,6 +669,8 @@ def _sample_with_torch(
                                           dim=-1)
 
             if sampled_token_ids_tensor is not None:
+                # BREAKPOINT 4: Token selection
+                # Check: greedy_samples, logprobs[long_sample_indices].topk(5)
                 # Store sampled tokens in output tensor.
                 sampled_token_ids_tensor[
                     long_sample_indices] = greedy_samples.unsqueeze(-1)
