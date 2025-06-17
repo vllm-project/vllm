@@ -99,8 +99,13 @@ free_shared_buffer = custom_ops.free_shared_buffer
 get_flash_mla_metadata = custom_ops.get_flash_mla_metadata
 flash_mla_with_kvcache = custom_ops.flash_mla_with_kvcache
 cutlass_mla_decode = custom_ops.cutlass_mla_decode
+cutlass_scaled_mm_supports_fp4 = custom_ops.cutlass_scaled_mm_supports_fp4
+cutlass_scaled_fp4_mm = custom_ops.cutlass_scaled_fp4_mm
+cutlass_scaled_mm_supports_fp8 = custom_ops.cutlass_scaled_mm_supports_fp8
+cutlass_scaled_mm_supports_block_fp8 = custom_ops.cutlass_scaled_mm_supports_block_fp8
 
 
+# Rule 3: Does not use torch.ops._C.*
 def apply_repetition_penalties_torch(
         logits: torch.Tensor, prompt_mask: torch.Tensor,
         output_mask: torch.Tensor, repetition_penalties: torch.Tensor) -> None:
@@ -114,6 +119,7 @@ def apply_repetition_penalties_torch(
     logits *= scaling
 
 
+# Rule 2: Uses current_platform and custom_ops (vllm imports)
 def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
                                output_mask: torch.Tensor,
                                repetition_penalties: torch.Tensor) -> None:
@@ -134,8 +140,7 @@ def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
                                          repetition_penalties)
 
 
-# quantization ops
-# awq
+# Rule 2: Uses envs.VLLM_USE_TRITON_AWQ and custom_ops (vllm imports)
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
@@ -147,6 +152,7 @@ def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                                      thx, thy)
 
 
+# Rule 2: Uses envs.VLLM_USE_TRITON_AWQ and custom_ops (vllm imports)
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
              scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
     if envs.VLLM_USE_TRITON_AWQ:
@@ -156,6 +162,10 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
     return custom_ops.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
+# quantization ops
+# awq
+
+
 # TODO: Migrate the rest of the functions in here to utilize things from `vllm_kernels.custom_ops`
 #       Rules for the migration:
 #           1. If a function is simple (i.e. only utilizes torch.ops._C.*) then prefer to structure it like so:
@@ -163,9 +173,10 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
 #           2. If a function utilizes anything from the main vllm (like current_platform or ScalarType) prefer
 #               to write wrapper functions, similar to what we're doing with awq_gemm
 #               a. Make changes in `vllm-kernels/vllm_kernels/custom_ops.py` if you need to to make it easier on yourself
-#           3. Don't assume you have to do everything at once, write down the list of functions you need to
+#           3. If a function does not use torch.ops._C.* then leave it alone
+#           4. Don't assume you have to do everything at once, write down the list of functions you need to
 #               migrate and do them (at most) 3 at a time and try to validate you made the write moves
-#           4. Prefer to make the most minimal of changes possible
+#           5. Prefer to make the most minimal of changes possible
 
 if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
@@ -372,31 +383,10 @@ if hasattr(torch.ops._C, "ggml_moe_a8_vec"):
 
 
 # cutlass
-def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
+# cutlass support functions (migrated to custom_ops)
 
 
-def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
-                          block_scale_a: torch.Tensor,
-                          block_scale_b: torch.Tensor, alpha: torch.Tensor,
-                          out_dtype: torch.dtype) -> torch.Tensor:
-    assert a.ndim == 2 and b.ndim == 2
-    m, n = a.shape[0], b.shape[0]
-    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-    torch.ops._C.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b,
-                                       alpha)
-    return out
-
-
-def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
-
-
-def cutlass_scaled_mm_supports_block_fp8(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_scaled_mm_supports_block_fp8(
-        cuda_device_capability)
-
-
+# Rule 2: Uses current_platform and importlib (vllm imports)
 def cutlass_scaled_mm(a: torch.Tensor,
                       b: torch.Tensor,
                       scale_a: torch.Tensor,
@@ -447,309 +437,67 @@ def cutlass_scaled_mm(a: torch.Tensor,
     return out
 
 
-def cutlass_scaled_mm_azp(a: torch.Tensor,
-                          b: torch.Tensor,
-                          scale_a: torch.Tensor,
-                          scale_b: torch.Tensor,
-                          out_dtype: torch.dtype,
-                          azp_adj: torch.Tensor,
-                          azp: Optional[torch.Tensor] = None,
-                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """
-    :param azp_adj: In the per-tensor case, this should include the azp.
-    Always per-channel.
-    :param azp: Only set in the per-token case. Per-token if set.
-    """
-    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
-    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
-    assert bias is None or bias.numel(
-    ) == b.shape[1] and bias.dtype == out_dtype
-    assert azp is None or azp.numel() == a.shape[0]
-
-    m = a.shape[0]
-    n = b.shape[1]
-    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-
-    torch.ops._C.cutlass_scaled_mm_azp(out, a, b, scale_a, scale_b, azp_adj,
-                                       azp, bias)
-    return out
+# Rule 1: Only uses torch.ops._C.*
+cutlass_scaled_mm_azp = custom_ops.cutlass_scaled_mm_azp
 
 
-def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_sparse_scaled_mm_supported(
-        cuda_device_capability)
+# Rule 1: Only uses torch.ops._C.*
+cutlass_sparse_scaled_mm_supported = custom_ops.cutlass_sparse_scaled_mm_supported
 
 
-def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
+# Rule 1: Only uses torch.ops._C.*
+cutlass_group_gemm_supported = custom_ops.cutlass_group_gemm_supported
 
-def cutlass_sparse_compress(a: torch.Tensor) \
-    -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Compresses a sparse matrix for use with Cutlass sparse operations.
-
-    This function takes a dense tensor and compresses it into two components:
-    non-zero elements and metadata. The compressed representation is compatible
-    with Cutlass sparse kernels.
-
-    Args:
-        a (torch.Tensor):
-            The input tensor to be compressed. Must have one of the following data types:
-            - `torch.int8`
-            - `torch.float8_e4m3fn`
-            - `torch.bfloat16`
-            - `torch.float16`
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]:
-            A tuple containing:
-            - `a_nzs` (torch.Tensor): A tensor containing non-zero elements of `a`.
-            - `a_meta` (torch.Tensor): A tensor containing metadata for the sparse representation.
-
-    Raises:
-        ValueError: If the compression operation fails.
-
-    Notes:
-        - The `a_meta` tensor has a data type of `torch.uint8`.
-        - Each metadata element encodes the sparsity of 4 non-zero elements (i.e., `elemsPerMetaElem = 4`).
-        - The shape of `a_nzs` is `(m, k // 2)`, where `m` and `k` are the dimensions of the input tensor.
-        - The shape of `a_meta` is `(m, k // 2 // elemsPerMetaElem)`.
-    """
-    assert (a.dtype in [
-        torch.int8, torch.float8_e4m3fn, torch.bfloat16, torch.float16
-    ])
-    assert (a.is_contiguous())
-
-    # a_meta.dtype: torch.uint8 so elemsPerMetaElem = 8b / 2b_per_nz = 4
-    elemsPerMetaElem = 4
-    assert (a.shape[1] % (2 * elemsPerMetaElem) == 0)
-
-    return torch.ops._C.cutlass_sparse_compress(a)
+# Rule 1: Only uses torch.ops._C.*
+cutlass_sparse_compress = custom_ops.cutlass_sparse_compress
 
 
-def cutlass_scaled_sparse_mm(
-        a: torch.Tensor,
-        bt_nzs: torch.Tensor,
-        bt_meta: torch.Tensor,
-        scale_a: torch.Tensor,
-        scale_b: torch.Tensor,
-        out_dtype: torch.dtype,
-        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    """
-    Performs a scaled sparse matrix multiplication using Cutlass.
-
-    Steps:
-    1. Create a dense matrix `a` of shape (m, k) on the CUDA device:
-    `a = torch.randn((m, k), device='cuda')`.
-
-    2. Create a dense matrix `b` of shape (k, n) on the CUDA device:
-    `b = torch.randn((k, n), device='cuda')`.
-
-    3. Prune matrix `b` to 2:4 sparsity along the specified dimension:
-    `b = prune_to_2_4(b, dim=0)`.
-
-    4. Compress the transposed sparse matrix `b.t()`:
-    `bt_nzs, bt_meta = cutlass_sparse_compress(b.t())`.
-
-    5. Perform sparse matrix multiplication using the compressed matrix,
-    applying scaling factors for `a` and `b`, and the output data type:
-    `out = cutlass_scaled_sparse_mm(a, bt_nzs, bt_meta, scale_a, scale_b, out_dtype)`.
-
-    Returns:
-    - The result of the scaled sparse matrix multiplication.
-    """
-    assert (bt_nzs.shape[0] % 16 == 0 and bt_nzs.shape[1] % 16 == 0)
-    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
-    assert bias is None or bias.shape[0] == bt_nzs.shape[0] \
-        and bias.dtype == out_dtype
-
-    m = a.shape[0]
-    n = bt_nzs.shape[0]
-    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-
-    torch.ops._C.cutlass_scaled_sparse_mm(out, a, bt_nzs, bt_meta, scale_a,
-                                          scale_b, bias)
-
-    return out
+# Rule 1: Only uses torch.ops._C.*
+cutlass_scaled_sparse_mm = custom_ops.cutlass_scaled_sparse_mm
 
 
-def get_cutlass_moe_mm_data(topk_ids: torch.Tensor,
-                            expert_offsets: torch.Tensor,
-                            problem_sizes1: torch.Tensor,
-                            problem_sizes2: torch.Tensor,
-                            input_permutation: torch.Tensor,
-                            output_permutation: torch.Tensor,
-                            num_experts: int,
-                            n: int,
-                            k: int,
-                            blockscale_offsets: Optional[torch.Tensor] = None):
-    """
-    Prepare data necessary to perform CUTLASS grouped matrix multiplications
-    used in CUTLASS-based fused MoE.
-
-    The function takes in topk_ids (token-expert mapping) and uses it to
-    compute:
-    - expert_offsets: Indices that mark at which token index each expert begins
-                      its computation after the input is sorted with
-                      input_permutation. The number of tokens computed with
-                      expert E is expert_offsets[E + 1] - expert_offsets[E]
-    - problem_sizes1, problem_sizes2: MxNxK sizes of each expert's
-                                      multiplication in two grouped MMs used in
-                                      the fused MoE operation.
-    - input_permutation: Permutation that must be used to shuffle the input
-                         before executing the MMs.
-    - output_permutation: Permutation that must be used to shuffle the output
-                          after executing the MMs.
-    - blockscale_offsets: Optional argument passed for fp4 moe. Indices that
-                          mark at which block scale index each expert begins
-                          its computation. The number of block scale rows
-                          computed with expert E is blockscale_offsets[E + 1] -
-                          blockscale_offsets[E]
-    """
-    return torch.ops._C.get_cutlass_moe_mm_data(topk_ids, expert_offsets,
-                                                problem_sizes1, problem_sizes2,
-                                                input_permutation,
-                                                output_permutation,
-                                                num_experts, n, k,
-                                                blockscale_offsets)
+# Rule 1: Only uses torch.ops._C.*
+get_cutlass_moe_mm_data = custom_ops.get_cutlass_moe_mm_data
 
 
-def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
-    """
-    Shuffle and expand the input tensor according to the dst2src_map and store the result in output_tensor.
-    This is used in MoE to permute the input tensor before performing grouped matrix multiplications.
-    """
-    num_tokens_permuted = dst2src_map.shape[0]
-    output_tensor = torch.empty((num_tokens_permuted, input_tensor.shape[1]),
-                                device=input_tensor.device,
-                                dtype=input_tensor.dtype)
-    torch.ops._moe_C.shuffle_rows(input_tensor, dst2src_map, output_tensor)
-    return output_tensor
+# Rule 1: Only uses torch.ops._moe_C.*
+shuffle_rows = custom_ops.shuffle_rows
 
 
-def get_cutlass_pplx_moe_mm_data(expert_offsets: torch.Tensor,
-                                 problem_sizes1: torch.Tensor,
-                                 problem_sizes2: torch.Tensor,
-                                 expert_num_tokens: torch.Tensor,
-                                 num_local_experts: int, padded_m: int, n: int,
-                                 k: int):
-    """
-    Prepare data necessary to perform CUTLASS grouped matrix multiplications
-    used in CUTLASS-based fused MoE.
-
-    The function takes in expert_num_tokens (token count per expert) and
-    non_zero_expert_idxs (consecutive indices of experts with non-zero token
-    counts) and uses them to compute:
-    - expert_offsets: Indices that mark at which token index each expert begins
-                      its computation.
-    - problem_sizes1, problem_sizes2: MxNxK sizes of each expert's
-                                      multiplication in two grouped MMs used in
-                                      the fused MoE operation.
-    """
-    return torch.ops._C.get_cutlass_pplx_moe_mm_data(
-        expert_offsets, problem_sizes1, problem_sizes2, expert_num_tokens,
-        num_local_experts, padded_m, n, k)
+# Rule 1: Only uses torch.ops._C.*
+get_cutlass_pplx_moe_mm_data = custom_ops.get_cutlass_pplx_moe_mm_data
 
 
-def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
-                   b_tensors: torch.Tensor, a_scales: torch.Tensor,
-                   b_scales: torch.Tensor, expert_offsets: torch.Tensor,
-                   problem_sizes: torch.Tensor, a_strides: torch.Tensor,
-                   b_strides: torch.Tensor, c_strides: torch.Tensor,
-                   per_act_token: bool, per_out_ch: bool):
-    """
-    A single grouped matrix multiplication used in CUTLASS-based fused MoE.
-    The function executes fp8-quantized OUT = AB matrix multiplication.
-
-    - expert_offsets: Indices that mark at which token index each expert begins
-                      its computation. The number of tokens computed with
-                      expert E is expert_offsets[E + 1] - expert_offsets[E]
-    - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
-                     MMs used in the fused MoE operation.
-    - a/b/c_strides: The data strides passed to grouped matrix multiplication.
-    """
-    return torch.ops._C.cutlass_moe_mm(out_tensors, a_tensors, b_tensors,
-                                       a_scales, b_scales, expert_offsets,
-                                       problem_sizes, a_strides, b_strides,
-                                       c_strides, per_act_token, per_out_ch)
+# Rule 1: Only uses torch.ops._C.*
+cutlass_moe_mm = custom_ops.cutlass_moe_mm
 
 
-def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
-                       a_scales: torch.Tensor, b_scales: torch.Tensor,
-                       alphas: torch.Tensor, problem_sizes: torch.Tensor,
-                       expert_offsets: torch.Tensor, sf_offsets: torch.Tensor,
-                       out_dtype: torch.dtype, device: torch.device):
-    """
-    An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs
-    the gemms for each combination based on the specified problem sizes.
-
-    This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
-    - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
-                     input and expert weights.
-    - a_/b_scales: The blockscales in FP8-E4M3 precision
-    - expert_offsets/sf_offsets: Indices that mark at which token index
-                    each expert begins its computation. The number of tokens
-                    computed with expert E is expert_offsets[E + 1] -
-                    expert_offsets[E] And the sf_size per expert is
-                    sf_offset[E+1] - sf_offset[E]
-    - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
-                     MMs used in the fused MoE operation.
-    """
-    m_topk = a_tensors.shape[0]
-    n = b_tensors.shape[1]
-    c_shape = (m_topk, n)
-    c = torch.empty(c_shape, device=device, dtype=out_dtype)
-    torch.ops._C.cutlass_fp4_group_mm(c, a_tensors, b_tensors, a_scales,
-                                      b_scales, alphas, problem_sizes,
-                                      expert_offsets, sf_offsets)
-    return c.to(out_dtype)
+# Rule 1: Only uses torch.ops._C.*
+cutlass_fp4_moe_mm = custom_ops.cutlass_fp4_moe_mm
 
 
 # aqlm (migrated to custom_ops)
 
 
 # gptq_marlin
-def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
-                       size_k: int, size_n: int,
-                       num_bits: int) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
-                                           num_bits)
+# Rule 1: Only uses torch.ops._C.*
+gptq_marlin_repack = custom_ops.gptq_marlin_repack
 
 
 # gptq_marlin
-def awq_marlin_repack(b_q_weight: torch.Tensor, size_k: int, size_n: int,
-                      num_bits: int) -> torch.Tensor:
-    return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
+# Rule 1: Only uses torch.ops._C.*
+awq_marlin_repack = custom_ops.awq_marlin_repack
 
 
-def gptq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
-                           size_k: int, size_n: int,
-                           num_bits: int) -> torch.Tensor:
-    num_experts = b_q_weight.shape[0]
-    assert size_k % 16 == 0
-    output = torch.empty((num_experts, size_k // 16, size_n * (num_bits // 2)),
-                         device=b_q_weight.device,
-                         dtype=b_q_weight.dtype)
-    for e in range(num_experts):
-        output[e] = torch.ops._C.gptq_marlin_repack(b_q_weight[e], perm[e],
-                                                    size_k, size_n, num_bits)
-    return output
+# Rule 1: Only uses torch.ops._C.*
+gptq_marlin_moe_repack = custom_ops.gptq_marlin_moe_repack
 
 
-def awq_marlin_moe_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
-                          size_k: int, size_n: int,
-                          num_bits: int) -> torch.Tensor:
-    num_experts = b_q_weight.shape[0]
-    assert size_k % 16 == 0
-    output = torch.empty((num_experts, size_k // 16, size_n * (num_bits // 2)),
-                         device=b_q_weight.device,
-                         dtype=b_q_weight.dtype)
-    for e in range(num_experts):
-        output[e] = torch.ops._C.awq_marlin_repack(b_q_weight[e], size_k,
-                                                   size_n, num_bits)
-    return output
+# Rule 1: Only uses torch.ops._C.*
+awq_marlin_moe_repack = custom_ops.awq_marlin_moe_repack
 
 
+# Rule 2: Uses ScalarType (vllm import)
 def gptq_marlin_gemm(a: torch.Tensor,
                      c: Optional[torch.Tensor],
                      b_q_weight: torch.Tensor,
@@ -776,6 +524,7 @@ def gptq_marlin_gemm(a: torch.Tensor,
 
 
 # machete
+# Rule 2: Uses ScalarType (vllm import)
 def machete_supported_schedules(
         a_type: torch.dtype,
         b_type: ScalarType,
@@ -789,6 +538,7 @@ def machete_supported_schedules(
         channel_scales_type, token_scales_type, out_type)
 
 
+# Rule 2: Uses ScalarType (vllm import)
 def machete_mm(
         a: torch.Tensor,
         # b_q Should be the tensor returned by machete_prepack_B
@@ -806,6 +556,7 @@ def machete_mm(
                                    b_channel_scales, a_token_scales, schedule)
 
 
+# Rule 2: Uses ScalarType (vllm import)
 def machete_prepack_B(
         b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
         group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
@@ -817,6 +568,7 @@ def machete_prepack_B(
 
 
 # fp4
+# Rule 2: Uses current_platform (vllm import)
 def scaled_fp4_quant(
         input: torch.Tensor,
         input_global_scale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -874,6 +626,7 @@ def scaled_fp4_quant(
     return output, output_scale
 
 
+# Rule 2: Uses current_platform and envs (vllm imports)
 def scaled_fp4_experts_quant(
     input_tensor: torch.Tensor,
     input_global_scale: torch.Tensor,
@@ -929,6 +682,7 @@ def scaled_fp4_experts_quant(
 
 
 # fp8
+# Rule 2: Uses current_platform (vllm import)
 def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
@@ -987,105 +741,17 @@ def scaled_fp8_quant(
 
 
 # gptq allspark
-def allspark_repack_weight(
-        qweight: torch.Tensor,
-        scale: torch.Tensor,
-        zero_point: Optional[torch.Tensor] = None,
-        has_zp: bool = False
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Rearrange qweight, scale, and zero_point(if asymmetric) to n32k16 format
-    for Ampere W8A16 Fused Gemm kernel
-
-    Args:
-        qweight: uint8 weight tensor, original k x n format.
-        scale: fp16/bf16 weight scale tensor, 1 x n format.
-        zero_point: fp16/bf16 weight zero_point tensor, 1 x n format.
-            Must be provided for asymmetric quantization.
-        has_zp: if use symmetric quantization, has_zp = False.
-            if use asymmetric quantization, has_zp = True.
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] :
-            rearranged weight, scale, and optionally zero_point.
-    """
-    K = qweight.shape[0]
-    N = qweight.shape[1]
-    N_32align = (N + 32 - 1) // 32 * 32
-
-    qweight_reorder = torch.empty((N_32align, K),
-                                  device=qweight.device,
-                                  dtype=qweight.dtype)
-    scale_reorder = torch.empty((1, N_32align),
-                                device=scale.device,
-                                dtype=scale.dtype)
-    zero_point_reorder = None
-    if has_zp:
-        assert zero_point is not None, (
-            "zero_point must be provided for asymmetric quantization.")
-        zero_point_reorder = torch.empty((1, N_32align),
-                                         device=zero_point.device,
-                                         dtype=zero_point.dtype)
-
-    torch.ops._C.rearrange_kn_weight_as_n32k16_order(
-        qweight, scale, zero_point, has_zp, qweight_reorder, scale_reorder,
-        zero_point_reorder, K, N, N_32align)
-
-    return qweight_reorder, scale_reorder, zero_point_reorder
+# Rule 1: Only uses torch.ops._C.*
+allspark_repack_weight = custom_ops.allspark_repack_weight
 
 
-def allspark_w8a16_gemm(a: torch.Tensor, b_qweight: torch.Tensor,
-                        b_scales: torch.Tensor,
-                        b_qzeros: Optional[torch.Tensor], n: int,
-                        group_size: int, sm_count: int, sm_version: int,
-                        CUBLAS_M_THRESHOLD: int, has_zp: bool,
-                        n32k16_reorder: bool) -> torch.Tensor:
-
-    return torch.ops._C.allspark_w8a16_gemm(a, b_qweight, b_scales, b_qzeros,
-                                            n, group_size, sm_count,
-                                            sm_version, CUBLAS_M_THRESHOLD,
-                                            has_zp, n32k16_reorder)
+# Rule 1: Only uses torch.ops._C.*
+allspark_w8a16_gemm = custom_ops.allspark_w8a16_gemm
 
 
 # int8
-def scaled_int8_quant(
-    input: torch.Tensor,
-    scale: Optional[torch.Tensor] = None,
-    azp: Optional[torch.Tensor] = None,
-    symmetric: bool = True
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """
-    Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
-
-    Args:
-        input: The input tensor to be quantized to int8.
-        scale: Optional scaling factor for the int8 quantization.
-            When not provided, we invoke dynamic-per-token quantization.
-        azp: Optional zero-point for the int8 quantization.
-            Must be provided for asymmetric quantization if `scale` is provided.
-        symmetric: Whether to use symmetric quantization (scale only, azp ignored).
-
-    Returns:
-      tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
-    """
-    output = torch.empty_like(input, dtype=torch.int8)
-    if scale is not None:
-        # static-per-tensor quantization.
-        assert symmetric == (
-            azp
-            is None), "azp must only be provided for asymmetric quantization."
-        torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
-        return output, scale, azp
-
-    # dynamic-per-token quantization.
-    input_scales = torch.empty((input.numel() // input.shape[-1], 1),
-                               device=input.device,
-                               dtype=torch.float32)
-    input_azp = None if symmetric else torch.empty_like(input_scales,
-                                                        dtype=torch.int32)
-    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
-                                           input_azp)
-    return output, input_scales, input_azp
+# Rule 1: Only uses torch.ops._C.*
+scaled_int8_quant = custom_ops.scaled_int8_quant
 
 
 # qqq ops (migrated to custom_ops)
@@ -1105,19 +771,14 @@ def scaled_int8_quant(
 # ROCm skinny gemms (migrated to custom_ops)
 
 
-def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
-              scale_a: torch.Tensor, scale_b: torch.Tensor,
-              cu_count: int) -> torch.Tensor:
-    out = torch.empty((b.shape[0], a.shape[0]),
-                      dtype=out_dtype,
-                      device=b.device)
-    torch.ops._rocm_C.wvSplitKQ(a, b, out, scale_a, scale_b, cu_count)
-    return out
+# Rule 1: Only uses torch.ops._rocm_C.*
+wvSplitKQ = custom_ops.wvSplitKQ
 
 
 # moe (simple functions migrated to custom_ops)
 
 
+# Rule 2: Uses current_platform (vllm import)
 def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
                    b_qweight: torch.Tensor, b_scales: torch.Tensor,
                    b_qzeros: Optional[torch.Tensor],
@@ -1140,6 +801,7 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
 # topk_softmax (migrated to custom_ops)
 
 
+# Rule 2: Uses ScalarType (vllm import)
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           b_qweight: torch.Tensor, b_scales: torch.Tensor,
                           global_scale: Optional[torch.Tensor],
