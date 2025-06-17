@@ -157,6 +157,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             blocksparse_params: Optional[Dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
+            kv_sharing_target_layer_name: Optional[str] = None,
             # MLA Specific Arguments
             **kwargs) -> None:
         torch.nn.Module.__init__(self)
