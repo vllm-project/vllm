@@ -18,6 +18,7 @@
 	    "trust_remote_code": "",
             "disable_log_stats": "",
             "disable_log_requests": "",
+	    "enforce_eager": "",
             "load_format": "dummy"
         },
         "client_parameters": {
@@ -25,6 +26,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+	    "max_concurrency": 60,
             "num_prompts": 200
         }
     },
@@ -47,6 +49,7 @@
 	    "trust_remote_code": "",
             "disable_log_stats": "",
             "disable_log_requests": "",
+	    "enforce_eager": "",
             "load_format": "dummy"
         },
         "client_parameters": {
@@ -54,6 +57,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+	    "max_concurrency": 60,
             "num_prompts": 200
         }
     },
@@ -76,6 +80,7 @@
 	    "trust_remote_code": "",
             "disable_log_stats": "",
             "disable_log_requests": "",
+	    "enforce_eager": "",
             "load_format": "dummy"
         },
         "client_parameters": {
@@ -83,6 +88,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+	    "max_concurrency": 60,
             "num_prompts": 200
         }
     },
@@ -106,6 +112,7 @@
 	    "enable_chunked_prefill": "",
             "disable_log_stats": "",
             "disable_log_requests": "",
+	    "enforce_eager": "",
             "load_format": "dummy"
         },
         "client_parameters": {
@@ -115,6 +122,7 @@
 	    "random-input-len": 1024,
 	    "random-output-len": 128,
 	    "ignore-eos": "",
+	    "max_concurrency": 100,
             "num_prompts": 100
         }
     },
@@ -138,6 +146,7 @@
 	    "enable_chunked_prefill": "",
             "disable_log_stats": "",
             "disable_log_requests": "",
+	    "enforce_eager": "",
             "load_format": "dummy"
         },
         "client_parameters": {
@@ -147,6 +156,7 @@
 	    "random-input-len": 1024,
 	    "random-output-len": 128,
 	    "ignore-eos": "",
+	    "max_concurrency": 100,
             "num_prompts": 100
         }
     }
