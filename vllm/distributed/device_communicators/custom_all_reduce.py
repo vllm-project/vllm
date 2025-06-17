@@ -286,8 +286,8 @@ class CustomAllreduce:
             self.create_qr_shared_buffer()
             if dtype == torch.bfloat16 and not self.use_fp16_kernels:
                 logger.info(
-                    "Custom quick allreduce: converting bf16 to fp16 "
-                    "can speed up qr, "
+                    "Custom quick allreduce: converting bf16 inputs to "
+                    "fp16 can improve performance"
                     "set envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16=1 to turn on.")
             self.qr_disabled = False
 
