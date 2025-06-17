@@ -1347,7 +1347,9 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
-        app.include_router(get_metadata(vllm_config).get_router())
+        app.include_router(
+            get_metadata(vllm_config).get_router(
+                brief_metadata_only=not args.disable_brief_metadata_only))
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)

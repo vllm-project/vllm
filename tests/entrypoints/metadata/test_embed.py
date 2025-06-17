@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 
 import pytest
@@ -64,7 +66,8 @@ def test_embed_offline_metadata(vllm_runner):
 def server():
     from tests.utils import RemoteOpenAIServer
     args = [
-        "--task", "embed", "--enforce-eager", "--disable-uvicorn-access-log"
+        "--task", "embed", "--enforce-eager", "--disable-uvicorn-access-log",
+        "--disable-brief-metadata-only"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

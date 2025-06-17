@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from http import HTTPStatus
 
 import pytest
 import requests
 
-from vllm.entrypoints.metadata.generate import (GenerateBrief, GenerateDetail,
-                                                GenerateMetadata)
+from vllm.entrypoints.metadata.generate import GenerateBrief
 
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
@@ -22,36 +22,13 @@ expected_brief = GenerateBrief(task=task,
                                max_model_len=max_model_len,
                                enable_prefix_caching=enable_prefix_caching)
 
-expected_detail = GenerateDetail(task=task,
-                                 served_model_name=MODEL_NAME,
-                                 architectures=architectures,
-                                 max_model_len=max_model_len,
-                                 enable_prefix_caching=enable_prefix_caching)
-
-
-def test_generate_offline_metadata(vllm_runner):
-    with vllm_runner(
-            MODEL_NAME,
-            max_model_len=max_model_len,
-            task=task,
-            enable_prefix_caching=enable_prefix_caching) as vllm_model:
-        metadata: GenerateMetadata = vllm_model.model.metadata
-
-        assert isinstance(metadata, GenerateMetadata)
-
-        assert metadata.brief == expected_brief
-        assert metadata.detail == expected_detail
-
-        assert metadata.hf_config["architectures"] == architectures
-
 
 @pytest.fixture(scope="module")
 def server():
     from tests.utils import RemoteOpenAIServer
     args = [
         "--task", "generate", "--max-model-len", f"{max_model_len}",
-        "--enforce-eager", "--disable-uvicorn-access-log",
-        "--disable-brief-metadata-only"
+        "--enforce-eager", "--disable-uvicorn-access-log"
     ]
 
     if enable_prefix_caching:
@@ -63,15 +40,18 @@ def server():
         yield remote_server
 
 
-def test_generate_online_metadata(server):
+def test_brief_metadata_only(server):
+    # default brief metadata only,
+    # unless --disable-brief-metadata-only is set
+
     url = server.url_for("metadata/brief")
     response = requests.get(url)
     assert response.json() == expected_brief.model_dump()
 
     url = server.url_for("metadata/detail")
     response = requests.get(url)
-    assert response.json() == expected_detail.model_dump()
+    assert response.status_code == HTTPStatus.NOT_FOUND
 
     url = server.url_for("metadata/hf_config")
     response = requests.get(url)
-    assert response.json()
+    assert response.status_code == HTTPStatus.NOT_FOUND

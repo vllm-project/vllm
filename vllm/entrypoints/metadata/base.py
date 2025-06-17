@@ -5,10 +5,10 @@ from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, Field
 
+from vllm.config import PoolerConfig, VllmConfig
+
 if TYPE_CHECKING:
     from fastapi import APIRouter
-
-    from vllm.config import PoolerConfig, VllmConfig
 
 
 class BriefMetadata(BaseModel):
@@ -56,7 +56,10 @@ class PoolerConfigMetadata:
 
     @classmethod
     def from_vllm_config(cls, vllm_config: "VllmConfig") -> "PoolerConfig":
-        return vllm_config.model_config.pooler_config
+        pooler_config = vllm_config.model_config.pooler_config
+        assert isinstance(pooler_config, PoolerConfig)
+
+        return pooler_config
 
 
 @dataclass
@@ -74,7 +77,7 @@ class Metadata:
             })
 
     @classmethod
-    def get_router(cls) -> "APIRouter":
+    def get_router(cls, brief_metadata_only) -> "APIRouter":
         from fastapi import APIRouter, Request
         router = APIRouter()
 
@@ -92,6 +95,10 @@ class Metadata:
 
             return func
 
-        for key, metadata_class in cls.__annotations__.items():
-            router.get(f"/metadata/{key}")(get_func(metadata_class))
+        if brief_metadata_only:
+            router.get("/metadata/brief")(get_func(
+                cls.__annotations__["brief"]))
+        else:
+            for key, metadata_class in cls.__annotations__.items():
+                router.get(f"/metadata/{key}")(get_func(metadata_class))
         return router
