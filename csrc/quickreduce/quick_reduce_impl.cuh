@@ -253,7 +253,9 @@ struct CodecQ6 : public CodecBase {
   static constexpr int kRangeBias = 0x00200020;
 
   __quickreduce_device_inline__ CodecQ6(int thread, int rank)
-      : CodecBase(thread, rank) {}
+      : CodecBase(thread, rank) {
+    set_fp16_ovfl(true);
+  }
 
   __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
                                           const int32x4_t* __restrict__ data) {
