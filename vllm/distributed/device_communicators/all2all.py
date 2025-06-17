@@ -80,6 +80,10 @@ class PPLXAll2AllManager(All2AllManagerBase):
     """
 
     def __init__(self, cpu_group):
+        import os
+        os.environ["NVSHMEM_DEBUG"] = "1"
+        nvshmem_debug = os.environ.get("NVSHMEM_DEBUG", "0")
+        logger.info("NVSHMEM_DEBUG: %s", nvshmem_debug)
         has_pplx = importlib.util.find_spec("pplx_kernels") is not None
         assert has_pplx, "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install pplx_kernels."  # noqa
         super().__init__(cpu_group)

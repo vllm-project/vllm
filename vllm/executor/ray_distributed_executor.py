@@ -356,6 +356,15 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         env_vars_to_copy.extend(current_platform.additional_env_vars)
 
+        if "VLLM_ALL2ALL_BACKEND" in os.environ:
+            logger.info("VLLM_ALL2ALL_BACKEND: %s", os.environ["VLLM_ALL2ALL_BACKEND"])
+        else:
+            os.environ["VLLM_ALL2ALL_BACKEND"] = "pplx"
+            os.environ["RAY_DEBUG"] = "1"
+            logger.info("VLLM_ALL2ALL_BACKEND not set, using pplx")
+        nvshmem_debug = os.environ.get("NVSHMEM_DEBUG", "0")
+        logger.info("NVSHMEM_DEBUG: %s", nvshmem_debug)
+
         # Copy existing env vars to each worker's args
         for args in all_args_to_update_environment_variables:
             # TODO: refactor platform-specific env vars
@@ -473,9 +482,11 @@ class RayDistributedExecutor(DistributedExecutorBase):
     def destroy_dp_states(self):
         logger.info("Destroying dp states")
         self._run_workers("destroy_dp_states")
+        logger.info("Destroying dp states done")
     
     def reinit_dp_states(self, new_dp_size: int):
         logger.info("Reinitializing dp states")
+        self.vllm_config.parallel_config.data_parallel_size = new_dp_size
         self._run_workers("reinit_dp_states", new_dp_size)
 
     def _driver_execute_model(

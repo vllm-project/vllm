@@ -189,10 +189,15 @@ class Worker(WorkerBase):
         logger.info("Reinitializing dp states")
         import time
         start_reinit_dp_states = time.time()
+        self.vllm_config.parallel_config.data_parallel_size = new_dp_size
         with set_current_vllm_config(self.vllm_config):
             reinit_worker_distributed_environment(self.vllm_config, self.rank,
                                                   self.distributed_init_method,
                                                   self.local_rank, new_dp_size)
+            # TODO(rui): only reload MoE layer
+            self.load_model()
+            # NOTE(rui): the following is not sufficient, since MoEConfig has changed
+            # reinit_communication_buffer(self.model_runner)
         end_reinit_dp_states = time.time()
         logger.info("reinit dp states took %.2f seconds", end_reinit_dp_states - start_reinit_dp_states)
 
@@ -424,16 +429,14 @@ def reinit_worker_distributed_environment(
 ) -> None:
     """Re-initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
-    parallel_config.data_parallel_size = new_dp_size
-    logger.info(
-        f"reinit_worker_distributed_environment with dp_size: {parallel_config.data_parallel_size}"
-    )
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank)
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
     logger.info("reinit_worker_distributed_environment done")
 
+def reinit_communication_buffer(model_runner: GPUModelRunner):
+    model_runner.reinit_communication_buffer()
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
     # Check if the GPU supports the dtype.

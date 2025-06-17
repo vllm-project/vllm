@@ -459,7 +459,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def select_gemm_impl(self, prepare_finalize: FusedMoEPrepareAndFinalize,
                          moe: Optional[MoEConfig]):
 
-        assert self.fused_experts == fused_experts
+        # TODO(rui): fix hack
+        if self.fused_experts != fused_experts:
+            assert isinstance(self.fused_experts, FusedMoEModularKernel)
+            logger.warning("Assuming this is reinit, "
+                           "setting self.fused_experts to None")
+            self.fused_experts = None
 
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None

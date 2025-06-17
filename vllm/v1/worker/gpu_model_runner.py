@@ -1728,6 +1728,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
+        logger.info("prepare_communication_buffer_for_model done")
+
+    def reinit_communication_buffer(self):
+        prepare_communication_buffer_for_model(self.model)
 
     def save_tensorized_model(
         self,

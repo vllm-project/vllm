@@ -982,7 +982,8 @@ class DPEngineCoreActor(DPEngineCoreProc):
             raise
         finally:
             self.shutdown()
-
+    
+    # deprecated
     def _reinit_data_parallel(self, new_dp_size: int):
         logger.info(
             f"Reinitializing data parallel with dp_size: {new_dp_size}")
@@ -997,6 +998,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
             new_dp_size,
             backend="gloo")
 
+    # deprecated
     def reinit(self, new_dp_size: int):
         logger.info(f"Reinitializing engine core with dp_size: {new_dp_size}")
         assert isinstance(self.model_executor, RayDistributedExecutor)
@@ -1013,6 +1015,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
                                                    reinit=True)
         logger.info("initialize_from_config() called")
 
+    # deprecated
     def destroy_dp_states(self):
         from vllm.distributed.utils import (
             stateless_destroy_torch_distributed_process_group)

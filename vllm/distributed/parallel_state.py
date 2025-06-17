@@ -1221,6 +1221,7 @@ def destroy_model_parallel():
     if _EP:
         logger.info("Destroying ep group")
         _EP.destroy()
+        logger.info("Destroying ep group done")
     _EP = None
 
 
@@ -1229,10 +1230,13 @@ def destroy_distributed_environment():
     if _WORLD:
         logger.info("Destroying world group")
         _WORLD.destroy()
+        logger.info("Destroying world group done")
     _WORLD = None
     _NODE_COUNT = None
     if torch.distributed.is_initialized():
+        logger.info("Destroying global process group")
         torch.distributed.destroy_process_group()
+        logger.info("Destroying global process group done")
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):

@@ -415,6 +415,7 @@ class CoreEngineActorManager:
         self.run_refs = []
         for actor in self.local_engine_actors + self.remote_engine_actors:
             reinit_refs.append(actor.reinit_dp_states.remote(new_dp_size))
+        assert len(reinit_refs) == 2
         ray.get(new_refs + reinit_refs)
         finish_reinit = time.time()
         logger.info(

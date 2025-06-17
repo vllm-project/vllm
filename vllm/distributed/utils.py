@@ -491,12 +491,18 @@ def stateless_init_torch_distributed_process_group(
     channel is formed with process 9 and 10.
     """
     init_method = get_tcp_uri(host, port)
-    logger.info(f"init_method {init_method}")
+    logger.info("stateless_init_torch_distributed_process_group: "
+                "rank: %s, world_size: %s, init_method: %s",
+                rank, world_size, init_method)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
 
+    passed_rank = rank
+    passed_world_size = world_size
     store, rank, world_size = next(
         rendezvous(init_method, rank, world_size, timeout=timeout))
+    assert passed_rank == rank, "passed_rank: %s, rank: %s" % (passed_rank, rank)
+    assert passed_world_size == world_size, "passed_world_size: %s, world_size: %s" % (passed_world_size, world_size)
     store.set_timeout(timeout)
 
     group_rank = rank
@@ -507,11 +513,15 @@ def stateless_init_torch_distributed_process_group(
     prefix_store = PrefixStore(init_method, store)
 
     if backend == "gloo":
-        return init_gloo_process_group(backend=backend,
+        result = init_gloo_process_group(backend=backend,
                                        prefix_store=prefix_store,
                                        group_rank=group_rank,
                                        group_size=group_size,
                                        timeout=timeout)
+        logger.info("stateless_init_torch_distributed_process_group done: "
+                    "rank: %s, world_size: %s",
+                    rank, world_size)
+        return result
     from vllm.platforms import current_platform
     return current_platform.stateless_init_device_torch_dist_pg(
         backend=backend,
