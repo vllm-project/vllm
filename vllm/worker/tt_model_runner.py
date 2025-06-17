@@ -433,13 +433,9 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # enqueued on device and the last step will trigger the output
         # processor for all outputs but the last. Currently for TT,
         # the inputs/outputs of each step are transferred between host/device,
-        # so async_out_proc does not help unless using async_out_proc_per_trace
-        # which triggers the output processor for step (i) on host while device
-        # is executing step (i+1).
+        # and async_out_proc will trigger the output processor for step (i)
+        # on host while device is executing step (i+1).
         use_async_out_proc = model_input.async_callback is not None
-        async_out_proc_per_trace = (self.trace_mode
-                                    and self.scheduler_config.is_multi_step
-                                    and use_async_out_proc)
 
         if not is_decode:
             assert num_steps == 1, "Num steps must be 1 for prefill"
@@ -452,7 +448,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     model_input,
                     kv_caches,
                     is_decode,
-                    async_out_proc_per_trace,
+                    use_async_out_proc,
                     step_idx=i)
                 self.cached_step_outputs.append(next_token_ids)
 
@@ -491,23 +487,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         sampler_outputs = []  # no outputs unless last step
         if model_input.is_last_step:  # always true if not using multi-step
             num_outputs = len(self.cached_step_outputs)
-            if async_out_proc_per_trace:
+            if use_async_out_proc:
                 assert num_outputs == 1, "Last step should only have one output"
             for i in range(num_outputs):
                 next_token_ids = self.cached_step_outputs.pop(0)
-                # TODO: add read back from device
+                # TODO: sync read back from device
                 # once model can keep executing steps on device
                 sampler_output = self._make_sampler_output(
                     next_token_ids, model_input.seq_groups)
                 sampler_outputs.append(sampler_output)
-                if i < num_outputs - 1 and use_async_out_proc:
-                    self._send_async_out(sampler_output,
-                                         model_input.async_callback,
-                                         is_first_step_output=i == 0)
-            if use_async_out_proc:
-                return [
-                    sampler_outputs[-1]
-                ]  # only return the last output for async output processor
 
         return sampler_outputs
 
@@ -546,17 +534,23 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
     def _send_prev_step_async_out(self, model_input: TTModelInput, step_idx):
         if step_idx > 0:
             next_token_ids = self.cached_step_outputs.pop(0)
+            # TODO: sync read back from device
+            # once model can keep executing steps on device
             sampler_output = self._make_sampler_output(next_token_ids,
                                                        model_input.seq_groups)
             self._send_async_out(sampler_output,
                                  model_input.async_callback,
                                  is_first_step_output=(step_idx == 1))
+        else:
+            # trigger output processor in case last step was prefill
+            assert model_input.async_callback is not None
+            model_input.async_callback()
 
     def _execute_model_single_step(self,
                                    model_input: TTModelInput,
                                    kv_caches: List[torch.Tensor],
                                    is_decode,
-                                   async_out_proc_per_trace=False,
+                                   use_async_out_proc=False,
                                    step_idx=0):
         execute_model_kwargs = {
             "tokens": model_input.input_tokens,
@@ -628,7 +622,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                                **enc_dec_kwargs,
                                                enable_trace=self.trace_mode,
                                                read_from_device=False)
-            if async_out_proc_per_trace:
+            if use_async_out_proc:
                 # trigger output processor on host while device is executing
                 # next step
                 self._send_prev_step_async_out(model_input, step_idx)
