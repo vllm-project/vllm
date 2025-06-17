@@ -816,7 +816,7 @@ def _assert_right_scheduler_output(
 
 def _assert_right_kv_cache_manager(
     scheduler: Scheduler,
-    req_ids: list[str],
+    requests: list[Request],
     num_tokens: int,
     block_size: int,
     num_requests: int,
@@ -826,12 +826,12 @@ def _assert_right_kv_cache_manager(
 
     # Make sure the request stats are right.
     EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
-    for req_id in req_ids:
+    for req in requests:
         blocks = (scheduler.kv_cache_manager.coordinator.
-                  single_type_managers[0].req_to_blocks[req_id])
-        hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
+                  single_type_managers[0].req_to_blocks[req.request_id])
+        hashes = req.block_hashes
         assert (scheduler.kv_cache_manager.coordinator.single_type_managers[0].
-                num_cached_block[req_id] == EXPECTED_TOTAL_BLOCKS)
+                num_cached_block[req.request_id] == EXPECTED_TOTAL_BLOCKS)
         assert len(blocks) == EXPECTED_TOTAL_BLOCKS
         assert len(hashes) == EXPECTED_TOTAL_BLOCKS
 
@@ -922,7 +922,7 @@ def test_kv_connector_basic():
     )
 
     # Ensure KVCacheManager is correct.
-    _assert_right_kv_cache_manager(scheduler, req_ids, NUM_TOKENS, BLOCK_SIZE,
+    _assert_right_kv_cache_manager(scheduler, requests, NUM_TOKENS, BLOCK_SIZE,
                                    NUM_REQUESTS, NUM_TOTAL_BLOCKS)
 
     # Continue Generation until done.
@@ -969,7 +969,7 @@ def test_kv_connector_basic():
                                        NUM_MATCHED_NEW_TOKENS))
 
     # Ensure KVCacheManager is correct.
-    _assert_right_kv_cache_manager(scheduler, req_ids, NUM_TOKENS, BLOCK_SIZE,
+    _assert_right_kv_cache_manager(scheduler, requests, NUM_TOKENS, BLOCK_SIZE,
                                    NUM_REQUESTS, NUM_TOTAL_BLOCKS)
 
     # Continue Generation until done.
@@ -1218,7 +1218,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # KVCache Manager.
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                req_to_blocks) == 0
-    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                num_cached_block) == 0
     num_free_blocks = (
