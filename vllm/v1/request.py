@@ -15,9 +15,7 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
 
-
-class Request:
-
+class RequestParams:
     def __init__(
         self,
         request_id: str,
@@ -40,20 +38,11 @@ class Request:
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
 
-        self.status = (RequestStatus.WAITING_FOR_FSM
-                       if sampling_params.guided_decoding is not None else
-                       RequestStatus.WAITING)
-        self.events: list[EngineCoreEvent] = []
-        self.stop_reason: Union[int, str, None] = None
         assert sampling_params.max_tokens is not None
         self.max_tokens = sampling_params.max_tokens
 
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
-        self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = self.prompt_token_ids.copy()
-        self.spec_token_ids: list[int] = []
-        self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
 
         # Multi-modal related
@@ -63,28 +52,13 @@ class Request:
         self.num_encoder_inputs = len(self.mm_inputs)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
 
-        # P/D: Connector-specific KV transfer parameters.
-        kv_params = (None if sampling_params.extra_args is None else
-                     sampling_params.extra_args.get("kv_transfer_params"))
-        self.kv_transfer_params: Optional[dict[str, Any]] = kv_params
-
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
         if self.mm_hashes:
             assert len(self.mm_inputs) == len(self.mm_hashes)
 
-        # Read-only views
-        # Prevent directly appending to these lists since
-        # they should also be updated simultaneously.
-        self.output_token_ids = ConstantList(self._output_token_ids)
-        self.all_token_ids = ConstantList(self._all_token_ids)
-
-        # State
-        # The number of tokens with prefix cache hits.
-        self.num_cached_tokens = -1
-
     @classmethod
-    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+    def from_engine_core_request(cls, request: EngineCoreRequest) -> "RequestParams":
         if request.mm_inputs is not None:
             assert isinstance(request.mm_inputs, list)
             assert is_list_of(request.mm_inputs, MultiModalKwargs), (
@@ -105,24 +79,62 @@ class Request:
             cache_salt=request.cache_salt,
         )
 
+    def get_num_encoder_tokens(self, input_id: int) -> int:
+        assert input_id < len(self.mm_positions)
+        num_tokens = self.mm_positions[input_id].length
+        return num_tokens
+
+    @property
+    def use_structured_output(self) -> bool:
+        return self.sampling_params.guided_decoding is not None
+
+
+class RequestState:
+    def __init__(self, params: RequestParams) -> None:
+        # convenience alias
+        self.request_id = params.request_id
+        self.client_index = params.client_index
+        
+        self.params = params
+
+        # P/D: Connector-specific KV transfer parameters.
+        kv_params = (None if params.sampling_params.extra_args is None else
+                     params.sampling_params.extra_args.get("kv_transfer_params"))
+        self.kv_transfer_params: Optional[dict[str, Any]] = kv_params
+
+        self.status = (RequestStatus.WAITING_FOR_FSM
+                       if params.sampling_params.guided_decoding is not None else
+                       RequestStatus.WAITING)
+        self.events: list[EngineCoreEvent] = []
+        self.stop_reason: Union[int, str, None] = None
+
+        self._output_token_ids: list[int] = []
+        self._all_token_ids: list[int] = params.prompt_token_ids.copy()
+
+        # Read-only views
+        # Prevent directly appending to these lists since
+        # they should also be updated simultaneously.
+        self.output_token_ids = ConstantList(self._output_token_ids)
+        self.all_token_ids = ConstantList(self._all_token_ids)
+
+        # State
+        # The number of tokens with prefix cache hits.
+        self.num_cached_tokens = -1
+
     def append_output_token_ids(
-        self,
-        token_ids: Union[int, list[int]],
-    ) -> None:
-        if isinstance(token_ids, int):
-            self._output_token_ids.append(token_ids)
-            self._all_token_ids.append(token_ids)
-        else:
-            self._output_token_ids.extend(token_ids)
-            self._all_token_ids.extend(token_ids)
+            self,
+            token_ids: Union[int, list[int]],
+        ) -> None:
+            if isinstance(token_ids, int):
+                self._output_token_ids.append(token_ids)
+                self._all_token_ids.append(token_ids)
+            else:
+                self._output_token_ids.extend(token_ids)
+                self._all_token_ids.extend(token_ids)
 
     @property
     def num_tokens(self) -> int:
         return len(self._all_token_ids)
-
-    @property
-    def num_tokens_with_spec(self) -> int:
-        return len(self._all_token_ids) + len(self.spec_token_ids)
 
     @property
     def num_output_tokens(self) -> int:
@@ -134,14 +146,6 @@ class Request:
     def get_finished_reason(self) -> Union[FinishReason, None]:
         return RequestStatus.get_finished_reason(self.status)
 
-    def get_num_encoder_tokens(self, input_id: int) -> int:
-        assert input_id < len(self.mm_positions)
-        num_tokens = self.mm_positions[input_id].length
-        return num_tokens
-
-    @property
-    def use_structured_output(self) -> bool:
-        return self.sampling_params.guided_decoding is not None
 
     def record_event(
         self,
@@ -155,6 +159,20 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
+
+class SchedulerRequestState:
+    def __init__(self, params: RequestParams) -> None:
+        # Convenience alias
+        self.request_id = params.request_id
+        
+        self.params = params
+
+        self.status = (RequestStatus.WAITING_FOR_FSM
+                       if params.sampling_params.guided_decoding is not None else
+                       RequestStatus.WAITING)
+        self.spec_token_ids: list[int] = []
+        self.num_computed_tokens = 0
+
 
 
 class RequestStatus(enum.IntEnum):

@@ -13,7 +13,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          hash_request_tokens)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, SchedulerRequestState
 
 logger = init_logger(__name__)
 
@@ -131,7 +131,7 @@ class KVCacheManager:
         return stats
 
     def get_computed_blocks(self,
-                            request: Request) -> tuple[KVCacheBlocks, int]:
+                            request: SchedulerRequestState) -> tuple[KVCacheBlocks, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 

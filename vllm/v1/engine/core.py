@@ -6,7 +6,8 @@ import signal
 import sys
 import threading
 import time
-from collections import deque
+import asyncio
+from collections import defaultdict, deque
 from collections.abc import Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
@@ -30,15 +31,16 @@ from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
-from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import RequestInput, RequestState, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
@@ -71,6 +73,7 @@ class EngineCore:
                     VLLM_VERSION, vllm_config)
 
         self.log_stats = log_stats
+        self.requests: dict[str, RequestState] = {}
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -185,7 +188,10 @@ class EngineCore:
             request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
                 request.mm_inputs, request.mm_hashes)
 
-        req = Request.from_engine_core_request(request)
+        req_input = RequestInput.from_engine_core_request(request)
+        req = RequestState(req_input)
+        self.requests[req.request_id] = req
+        
         if req.use_structured_output:
             # Start grammar compilation asynchronously
             self.structured_output_manager.grammar_init(req)
@@ -195,7 +201,7 @@ class EngineCore:
             logger.warning("Got kv_transfer_params, but no KVConnector found. "
                            "Disabling KVTransfer for this request.")
 
-        self.scheduler.add_request(req)
+        self.scheduler.add_request(req_input)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -206,7 +212,7 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def execute_model(self, scheduler_output: SchedulerOutput):
+    def execute_model(self, scheduler_output: SchedulerOutput) -> Future[ModelRunnerOutput]:
         try:
             return self.model_executor.execute_model(scheduler_output)
         except BaseException as err:
@@ -216,7 +222,103 @@ class EngineCore:
             # Re-raise exception
             raise err
 
-    def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+    """
+    Process the model outputs when they become available, i.e.:
+        1) request the sampled token ids and prompt logprobs from the
+            ModelRunnerOutput future.
+        
+    """
+    async def _process_model_output_tasks(model_runner_output_future: Future[ModelRunnerOutput]):
+        model_runner_output: ModelRunnerOutput = await model_runner_output_future
+        sampled_token_ids = model_runner_output.sampled_token_ids
+        logprobs = model_runner_output.logprobs
+        prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
+
+        outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+
+        for req_id in model_runner_output.req_ids:
+            idx = model_runner_output.req_id_to_index[req_id]
+            new_token_ids = sampled_token_ids[idx]
+            if req_id not in self.requests:
+                # Request finished on a previous step, skip it.
+                continue 
+            
+            request = self.requests[req_id]
+            
+            # Append generated tokens and check for stop. Note that if
+            # a request is still being prefilled, we expect the model runner
+            # to return empty token ids for the request.
+            for num_new, output_token_id in enumerate(new_token_ids, 1):
+                request.append_output_token_ids(output_token_id)
+
+                # Check for stop and update request state.
+                # This must be called before we make the EngineCoreOutput.
+                stopped = check_stop(request, self.max_model_len)
+                if stopped:
+                    self.scheduler.finish_requests([req_id])
+                    kv_transfer_params = self.scheduler._free_request(request)
+                    del new_token_ids[num_new:]  # Trim new tokens if needed.
+                    del self.requests[req_id]  # Remove request
+                    break
+
+            # Extract sample logprobs if needed.
+            if request.sampling_params.logprobs is not None and logprobs:
+                # NOTE: once we support N tokens per step (spec decode),
+                # the outer lists can be of length > 1.
+                new_logprobs = logprobs.slice(idx, idx + 1)
+
+            # KV Connector: update state for finished KV Transfers.
+            self.scheduler._update_from_kv_xfer_finished(model_runner_output)
+
+            # Get prompt logprobs for this request.
+            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+            if new_token_ids or kv_transfer_params:
+                # Add EngineCoreOutput for this Request.
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=new_token_ids,
+                        finish_reason=request.get_finished_reason(),
+                        new_logprobs=new_logprobs,
+                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                        stop_reason=request.stop_reason,
+                        events=request.take_events(),
+                        kv_transfer_params=kv_transfer_params,
+                        num_cached_tokens=request.num_cached_tokens,
+                    ))
+
+        
+        # Create EngineCoreOutputs for all clients that have requests with
+        # outputs in this step.
+        engine_core_outputs = {
+            client_index: EngineCoreOutputs(outputs=outs)
+            for client_index, outs in outputs.items()
+        }
+
+        finished_req_ids = self.scheduler.finished_req_ids_dict
+        if finished_req_ids:
+            # Include ids of requests that finished since last outputs
+            # were sent.
+            for client_index, finished_set in finished_req_ids.items():
+                # Set finished request set in EngineCoreOutputs for this client.
+                if (eco := engine_core_outputs.get(client_index)) is not None:
+                    eco.finished_requests = finished_set
+                else:
+                    engine_core_outputs[client_index] = EngineCoreOutputs(
+                        finished_requests=finished_set)
+            finished_req_ids.clear()
+
+        if engine_core_outputs:
+            # Return stats to only one of the front-ends.
+            next(iter(engine_core_outputs.values())).scheduler_stats = (
+                self.make_stats(spec_decoding_stats))
+
+        return engine_core_outputs 
+
+    def process_model_outputs(self, model_runner_output_future: Future[ModelRunnerOutput]) -> Future[dict[int, EngineCoreOutputs]]:
+        return asyncio.ensure_future(self._process_model_output_tasks(model_runner_output_future))
+
+    async def step(self) -> tuple[Future[dict[int, EngineCoreOutputs]], bool]:
         """Schedule, execute, and make output.
 
         Returns tuple of outputs and a flag indicating whether the model
@@ -229,10 +331,13 @@ class EngineCore:
             return {}, False
         scheduler_output = self.scheduler.schedule()
         model_output = self.execute_model(scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output)  # type: ignore
 
-        return (engine_core_outputs,
+        # Wait for the scheduler to complete its update, if the scheduler cannot
+        # update immediately (asynchronously), it will wait for the model to
+        # finish and then update.
+        await self.scheduler.update_from_output(scheduler_output, model_output)  # type: ignore
+
+        return (self.process_model_outputs(model_output),
                 scheduler_output.total_num_scheduled_tokens > 0)
 
     def step_with_batch_queue(
@@ -557,10 +662,13 @@ class EngineCoreProc(EngineCore):
         """Called only when there are unfinished local requests."""
 
         # Step the engine core.
-        outputs, model_executed = self.step_fn()
-        # Put EngineCoreOutputs into the output queue.
-        for output in (outputs.items() if outputs else ()):
-            self.output_queue.put_nowait(output)
+        outputs_future, model_executed = self.step_fn()
+        
+        def send_output_to_client(outputs):
+            # Put EngineCoreOutputs into the output queue.
+            for output in (outputs.items() if outputs else ()):
+                self.output_queue.put_nowait(output)
+        
 
         return model_executed
 

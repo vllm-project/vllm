@@ -7,6 +7,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Any, Optional, Union
+from asyncio import Future
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -28,7 +29,7 @@ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, SchedulerRequestState
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -93,10 +94,10 @@ class Scheduler(SchedulerInterface):
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
-        self.requests: dict[str, Request] = {}
+        self.requests: dict[str, SchedulerRequestState] = {}
         # Priority queues for requests.
-        self.waiting: deque[Request] = deque()
-        self.running: list[Request] = []
+        self.waiting: deque[SchedulerRequestState] = deque()
+        self.running: list[SchedulerRequestState] = []
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -167,10 +168,10 @@ class Scheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
-        scheduled_new_reqs: list[Request] = []
-        scheduled_resumed_reqs: list[Request] = []
-        scheduled_running_reqs: list[Request] = []
-        preempted_reqs: list[Request] = []
+        scheduled_new_reqs: list[SchedulerRequestState] = []
+        scheduled_resumed_reqs: list[SchedulerRequestState] = []
+        scheduled_running_reqs: list[SchedulerRequestState] = []
+        preempted_reqs: list[SchedulerRequestState] = []
 
         # NOTE: structured_output_request_ids maps
         # a request's (request that uses structured output)
@@ -522,8 +523,6 @@ class Scheduler(SchedulerInterface):
         resumed_reqs_data = [
             self._make_cached_request_data(
                 req,
-                num_scheduled_tokens[req.request_id],
-                len(scheduled_spec_decode_tokens.get(req.request_id, ())),
                 req_to_new_block_ids[req.request_id],
                 resumed_from_preemption=True,
             ) for req in scheduled_resumed_reqs
@@ -531,8 +530,6 @@ class Scheduler(SchedulerInterface):
         running_reqs_data = [
             self._make_cached_request_data(
                 req,
-                num_scheduled_tokens[req.request_id],
-                len(scheduled_spec_decode_tokens.get(req.request_id, ())),
                 req_to_new_block_ids[req.request_id],
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
@@ -585,24 +582,18 @@ class Scheduler(SchedulerInterface):
 
     def _make_cached_request_data(
         self,
-        request: Request,
-        num_scheduled_tokens: int,
-        num_scheduled_spec_tokens: int,
+        request: SchedulerRequestState,
         new_block_ids: tuple[list[int], ...],
         resumed_from_preemption: bool,
     ) -> CachedRequestData:
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         num_computed_tokens = request.num_computed_tokens
-        num_regular_tokens = num_scheduled_tokens - num_scheduled_spec_tokens
-        new_token_ids = request.all_token_ids[
-            num_computed_tokens:num_computed_tokens + num_regular_tokens]
 
         req_data_queue = self._cached_reqs_data.get(request.request_id)
         if req_data_queue:
             req_data = req_data_queue.popleft()
             req_data.resumed_from_preemption = resumed_from_preemption
-            req_data.new_token_ids = new_token_ids
             req_data.new_block_ids = new_block_ids
             req_data.num_computed_tokens = num_computed_tokens
         else:
@@ -610,13 +601,12 @@ class Scheduler(SchedulerInterface):
             # used by the scheduled requests.
             req_data = CachedRequestData.from_request(request,
                                                       resumed_from_preemption,
-                                                      new_token_ids,
                                                       new_block_ids)
         return req_data
 
     def _try_schedule_encoder_inputs(
         self,
-        request: Request,
+        request: SchedulerRequestState,
         num_computed_tokens: int,
         num_new_tokens: int,
         encoder_budget: int,
@@ -697,19 +687,17 @@ class Scheduler(SchedulerInterface):
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
-    def update_from_output(
+    async def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
-        model_runner_output: ModelRunnerOutput,
-    ) -> dict[int, EngineCoreOutputs]:
-        sampled_token_ids = model_runner_output.sampled_token_ids
-        spec_token_ids = model_runner_output.spec_token_ids
-        logprobs = model_runner_output.logprobs
-        prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
+        model_runner_output_future: Future[ModelRunnerOutput],
+    ):
+        # spec_token_ids = model_runner_output.spec_token_ids
+        # logprobs = model_runner_output.logprobs
+        # prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
-        new_running: list[Request] = []
-        outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        new_running: list[SchedulerRequestState] = []
         spec_decoding_stats: Optional[SpecDecodingStats] = None
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
@@ -723,12 +711,14 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = sampled_token_ids[req_index]
-
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
+                model_runner_output = await model_runner_output_future
+                req_index = model_runner_output.req_id_to_index[req_id]
+                sampled_token_ids = model_runner_output.sampled_token_ids
+                generated_token_ids = sampled_token_ids[req_index]
+
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -757,76 +747,30 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.free_encoder_input(
                             request, input_id)
 
-            stopped = False
-            new_logprobs = None
             new_token_ids = generated_token_ids
-            kv_transfer_params = None
-
-            # Append generated tokens and check for stop. Note that if
-            # a request is still being prefilled, we expect the model runner
-            # to return empty token ids for the request.
-            for num_new, output_token_id in enumerate(new_token_ids, 1):
-                request.append_output_token_ids(output_token_id)
-
-                # Check for stop and update request state.
-                # This must be called before we make the EngineCoreOutput.
-                stopped = check_stop(request, self.max_model_len)
-                if stopped:
-                    kv_transfer_params = self._free_request(request)
-                    del new_token_ids[num_new:]  # Trim new tokens if needed.
-                    break
-
-            # Extract sample logprobs if needed.
-            if request.sampling_params.logprobs is not None and logprobs:
-                # NOTE: once we support N tokens per step (spec decode),
-                # the outer lists can be of length > 1.
-                new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             if new_token_ids and self.structured_output_manager.should_advance(
                     request):
                 # NOTE: structured_output_request
                 # should not be None if use_structured_output, we have
                 # check above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                request.params.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
 
             # Add newly generated spec token ids to the request.
-            if spec_token_ids is not None:
-                if self.structured_output_manager.should_advance(request):
-                    metadata = request.structured_output_request
-                    # Needs to happen after new_token_ids are accepted.
-                    request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
-                        spec_token_ids[req_index])
-                else:
-                    request.spec_token_ids = spec_token_ids[req_index]
+            if self.vllm_config.speculative_config is not None:
+                model_runner_output = await model_runner_output_future
+                spec_token_ids = model_runner_output.spec_token_ids
+                if spec_token_ids is not None:
+                    if self.structured_output_manager.should_advance(request):
+                        metadata = request.params.structured_output_request
+                        # Needs to happen after new_token_ids are accepted.
+                        request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
+                            spec_token_ids[req_index])
+                    else:
+                        request.spec_token_ids = spec_token_ids[req_index]
 
-            # Get prompt logprobs for this request.
-            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or kv_transfer_params:
-
-                # Add EngineCoreOutput for this Request.
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=new_token_ids,
-                        finish_reason=request.get_finished_reason(),
-                        new_logprobs=new_logprobs,
-                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        stop_reason=request.stop_reason,
-                        events=request.take_events(),
-                        kv_transfer_params=kv_transfer_params,
-                        num_cached_tokens=request.num_cached_tokens,
-                    ))
-
-            else:
-                # Invariant: EngineCore returns no partial prefill outputs.
-                assert not prompt_logprobs_tensors
-
-            if not stopped:
-                new_running.append(request)
-
-        # KV Connector: update state for finished KV Transfers.
-        self._update_from_kv_xfer_finished(model_runner_output)
+            new_running.append(request)
 
         # Return the cached request data to the queue so they can be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
@@ -837,32 +781,6 @@ class Scheduler(SchedulerInterface):
 
         self.running = new_running
 
-        # Create EngineCoreOutputs for all clients that have requests with
-        # outputs in this step.
-        engine_core_outputs = {
-            client_index: EngineCoreOutputs(outputs=outs)
-            for client_index, outs in outputs.items()
-        }
-
-        finished_req_ids = self.finished_req_ids_dict
-        if finished_req_ids:
-            # Include ids of requests that finished since last outputs
-            # were sent.
-            for client_index, finished_set in finished_req_ids.items():
-                # Set finished request set in EngineCoreOutputs for this client.
-                if (eco := engine_core_outputs.get(client_index)) is not None:
-                    eco.finished_requests = finished_set
-                else:
-                    engine_core_outputs[client_index] = EngineCoreOutputs(
-                        finished_requests=finished_set)
-            finished_req_ids.clear()
-
-        if engine_core_outputs:
-            # Return stats to only one of the front-ends.
-            next(iter(engine_core_outputs.values())).scheduler_stats = (
-                self.make_stats(spec_decoding_stats))
-
-        return engine_core_outputs
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""

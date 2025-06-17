@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.sampling_params import SamplingParams
-    from vllm.v1.request import Request
+    from vllm.v1.request import SchedulerRequestState
 
 
 @dataclass
@@ -34,19 +34,19 @@ class NewRequestData:
     @classmethod
     def from_request(
         cls,
-        request: Request,
+        request: SchedulerRequestState,
         block_ids: tuple[list[int], ...],
     ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
-            prompt_token_ids=request.prompt_token_ids,
-            mm_inputs=request.mm_inputs,
-            mm_hashes=request.mm_hashes,
-            mm_positions=request.mm_positions,
-            sampling_params=request.sampling_params,
+            prompt_token_ids=request.params.prompt_token_ids,
+            mm_inputs=request.params.mm_inputs,
+            mm_hashes=request.params.mm_hashes,
+            mm_positions=request.params.mm_positions,
+            sampling_params=request.params.sampling_params,
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
-            lora_request=request.lora_request,
+            lora_request=request.params.lora_request,
         )
 
     def __repr__(self):
@@ -85,22 +85,21 @@ class CachedRequestData:
     # the request's block IDs. If True, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
-    new_token_ids: list[int]
+    # new_token_ids: list[int] # TODO: remove (need to solve PP case)
     new_block_ids: tuple[list[int], ...]
     num_computed_tokens: int
 
     @classmethod
     def from_request(
         cls,
-        request: Request,
+        request: SchedulerRequestState,
         resumed_from_preemption: bool,
-        new_token_ids: list[int],
         new_block_ids: tuple[list[int], ...],
     ) -> CachedRequestData:
         return cls(
             req_id=request.request_id,
             resumed_from_preemption=resumed_from_preemption,
-            new_token_ids=new_token_ids,
+            # new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=request.num_computed_tokens,
         )

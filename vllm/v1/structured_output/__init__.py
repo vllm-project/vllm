@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.reasoning import ReasoningParser
-    from vllm.v1.request import Request
+    from vllm.v1.request import RequestState
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -57,8 +57,8 @@ class StructuredOutputManager:
                 reasoning_backend)
             self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
-    def grammar_init(self, request: Request) -> None:
-        if request.structured_output_request is None:
+    def grammar_init(self, request: RequestState) -> None:
+        if request.params.structured_output_request is None:
             return
 
         if TYPE_CHECKING:
@@ -69,7 +69,7 @@ class StructuredOutputManager:
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
-            backend = request.sampling_params.guided_decoding.backend
+            backend = request.params.sampling_params.guided_decoding.backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
                 self.backend = XgrammarBackend(
@@ -88,13 +88,13 @@ class StructuredOutputManager:
                     f"Unsupported structured output backend: {backend}")
 
         grammar = self.executor.submit(self._async_create_grammar, request)
-        request.structured_output_request.grammar = grammar  # type: ignore[assignment]
+        request.params.structured_output_request.grammar = grammar  # type: ignore[assignment]
 
     def _async_create_grammar(
         self,
-        request: Request,
+        request: RequestState,
     ) -> StructuredOutputGrammar:
-        key = request.structured_output_request.structured_output_key  # type: ignore[union-attr]
+        key = request.params.structured_output_request.structured_output_key  # type: ignore[union-attr]
 
         # Note that the request was validated in the engine core client,
         # so at this point we know it is a supported type of request.
@@ -108,7 +108,7 @@ class StructuredOutputManager:
 
     def grammar_bitmask(
         self,
-        requests: dict[str, Request],
+        requests: dict[str, RequestState],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> Optional[npt.NDArray[np.int32]]:
@@ -151,7 +151,7 @@ class StructuredOutputManager:
         # performance of bitmask generation for large batches.
         for req_id, _ in ordered_seq:
             request = requests[req_id]
-            structured_output_request = request.structured_output_request
+            structured_output_request = request.params.structured_output_request
 
             if TYPE_CHECKING:
                 assert structured_output_request is not None
@@ -160,7 +160,7 @@ class StructuredOutputManager:
             if self.reasoner is not None:
                 if structured_output_request.reasoning_ended is None:
                     structured_output_request.reasoning_ended = \
-                        self.reasoner.is_reasoning_end(request.prompt_token_ids)
+                        self.reasoner.is_reasoning_end(request.params.prompt_token_ids)
                 apply_bitmask = structured_output_request.reasoning_ended
 
             state_advancements = 0
@@ -190,19 +190,19 @@ class StructuredOutputManager:
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
 
-    def should_advance(self, request: Request) -> bool:
-        if not request.use_structured_output:
+    def should_advance(self, request: RequestState) -> bool:
+        if not request.params.use_structured_output:
             return False
 
         # To determine whether we can advance the FSM.
         # Supports thinking usage where we skip the reasoning components.
         if TYPE_CHECKING:
-            assert request.structured_output_request is not None
-            assert request.structured_output_request.grammar is not None
+            assert request.params.structured_output_request is not None
+            assert request.params.structured_output_request.grammar is not None
         # by default, we should always advance
         # for cases that doesn't uses thinking mode.
         if self.reasoner is not None:
-            structured_req = request.structured_output_request
+            structured_req = request.params.structured_output_request
 
             if structured_req.reasoning_ended:
                 return True

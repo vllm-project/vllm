@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional, Union
+from concurrent.futures import Future
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -45,8 +46,8 @@ class SchedulerInterface(ABC):
     def update_from_output(
         self,
         scheduler_output: "SchedulerOutput",
-        model_runner_output: "ModelRunnerOutput",
-    ) -> dict[int, "EngineCoreOutputs"]:
+        model_runner_output: Future["ModelRunnerOutput"],
+    ):
         """Update the scheduler state based on the model runner output.
 
         This method is called after the model runner has processed the scheduled
