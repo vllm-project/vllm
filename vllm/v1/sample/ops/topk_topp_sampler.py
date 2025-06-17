@@ -288,6 +288,6 @@ def flashinfer_sample(
     else:
         # Both top-k and top-p.
         next_token_ids = flashinfer.sampling.top_k_top_p_sampling_from_logits(
-            logits, k, p, deterministic=True)
+            logits.contiguous(), k, p, deterministic=True)
 
     return next_token_ids.view(-1)
