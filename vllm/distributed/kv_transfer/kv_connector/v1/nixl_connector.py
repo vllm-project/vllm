@@ -153,7 +153,9 @@ class NixlConnector(KVConnectorBase_V1):
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_finished()
+        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        return self.connector_worker.get_finished(
+            self._connector_metadata.reqs_to_abort)
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
