@@ -93,6 +93,12 @@ DUMMY_TOKEN_ID = -1
 UNSET_NUM_PATCHES = 9999999
 
 
+class PhaseType(Enum):
+    PREFILL = 'prefill'
+    PREFIX_PREFILL = 'prefix_prefill'
+    DECODE = 'decode'
+
+
 class VisionBuckets:
     '''
     This class is used to bucket image tokens
