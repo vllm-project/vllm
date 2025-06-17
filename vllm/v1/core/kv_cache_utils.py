@@ -660,6 +660,7 @@ def get_num_blocks(vllm_config: VllmConfig, num_layers: int,
         logger.info(
             "Overriding num_gpu_blocks=%d with "
             "num_gpu_blocks_override=%d", num_blocks, num_gpu_blocks_override)
+        num_blocks = num_gpu_blocks_override
     return num_blocks
 
 
