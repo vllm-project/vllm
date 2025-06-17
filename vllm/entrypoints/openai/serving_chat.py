@@ -263,8 +263,14 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, model_name,
-                conversation, tokenizer, request_metadata, enforce_include_usage=self.enforce_include_usage)
+                request,
+                result_generator,
+                request_id,
+                model_name,
+                conversation,
+                tokenizer,
+                request_metadata,
+                enforce_include_usage=self.enforce_include_usage)
 
         try:
             return await self.chat_completion_full_generator(
@@ -474,7 +480,8 @@ class OpenAIServingChat(OpenAIServing):
 
         stream_options = request.stream_options
         if stream_options:
-            include_usage = stream_options.include_usage or enforce_include_usage
+            include_usage = stream_options.include_usage \
+                            or enforce_include_usage
             include_continuous_usage = include_usage and \
                                        stream_options.continuous_usage_stats
         else:
