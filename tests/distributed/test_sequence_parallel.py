@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 WARNING: This test runs in both single-node (4 GPUs) and multi-node
  (2 node with 2 GPUs each) modes. If the test only uses 2 GPUs, it is
@@ -26,6 +27,7 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 class ParallelSetup(NamedTuple):
     tp_size: int
+    pp_size: int
     sp_enabled: bool
     eager_mode: bool
     chunked_prefill: bool
@@ -60,6 +62,7 @@ class SPTestSettings:
     def detailed(
         *,
         tp_base: int = 2,
+        pp_base: int = 1,
         multi_node_only: bool = False,
         task: TaskOption = "auto",
         load_format: Optional[str] = None,
@@ -67,18 +70,42 @@ class SPTestSettings:
         return SPTestSettings(
             parallel_setups=[
                 ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
                               sp_enabled=True,
                               eager_mode=False,
                               chunked_prefill=False),
                 ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
                               sp_enabled=True,
                               eager_mode=False,
                               chunked_prefill=True),
                 ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
                               sp_enabled=True,
                               eager_mode=True,
                               chunked_prefill=False),
                 ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
+                              sp_enabled=True,
+                              eager_mode=True,
+                              chunked_prefill=True),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=2 * pp_base,
+                              sp_enabled=True,
+                              eager_mode=False,
+                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=2 * pp_base,
+                              sp_enabled=True,
+                              eager_mode=False,
+                              chunked_prefill=True),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=2 * pp_base,
+                              sp_enabled=True,
+                              eager_mode=True,
+                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=2 * pp_base,
                               sp_enabled=True,
                               eager_mode=True,
                               chunked_prefill=True)
@@ -94,6 +121,7 @@ class SPTestSettings:
     def fast(
         *,
         tp_base: int = 2,
+        pp_base: int = 1,
         task: TaskOption = "auto",
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
@@ -101,6 +129,12 @@ class SPTestSettings:
         return SPTestSettings(
             parallel_setups=[
                 ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
+                              sp_enabled=True,
+                              eager_mode=False,
+                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=2 * pp_base,
                               sp_enabled=True,
                               eager_mode=False,
                               chunked_prefill=False),
@@ -136,6 +170,7 @@ def _compare_sp(
 ):
     (
         tp_size,
+        pp_size,
         sp_enabled,
         eager_mode,
         chunked_prefill,
@@ -167,7 +202,6 @@ def _compare_sp(
     else:
         model_info.check_available_online(on_fail="skip")
 
-    pp_size = 1
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
     if VLLM_MULTI_NODE and distributed_backend == "mp":
@@ -206,7 +240,7 @@ def _compare_sp(
         'compile_sizes': [4, 8],
         'splitting_ops': [],
         'pass_config': {
-            'enable_sequence_parallism': sp_enabled,
+            'enable_sequence_parallelism': sp_enabled,
             'enable_noop': True,
             'enable_fusion': True,
         },
@@ -223,7 +257,7 @@ def _compare_sp(
         "--distributed-executor-backend",
         distributed_backend,
         "--compilation_config",
-        str(compilation_config),
+        json.dumps(compilation_config),
     ]
 
     tp_env = {
@@ -256,7 +290,7 @@ def _compare_sp(
 
 SP_TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    "meta-llama/Llama-3.2-1B-Instruct": SPTestSettings.detailed(),
+    "meta-llama/Llama-3.2-1B-Instruct": SPTestSettings.fast(),
 }
 
 SP_TEST_MODELS = [

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
@@ -21,7 +22,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -36,13 +38,15 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, PoolerOutput
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsCrossEncoding, SupportsLoRA, SupportsPP
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
@@ -63,7 +67,7 @@ class Qwen3Attention(nn.Module):
                  rope_theta: float = 10000,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 rope_scaling: Optional[Tuple] = None,
+                 rope_scaling: Optional[tuple] = None,
                  prefix: str = "",
                  attn_type: str = AttentionType.DECODER) -> None:
         super().__init__()
@@ -133,11 +137,11 @@ class Qwen3Attention(nn.Module):
         # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
                            self.head_dim)
-        q_by_head = self.q_norm.forward_native(q_by_head)
+        q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
                            self.head_dim)
-        k_by_head = self.k_norm.forward_native(k_by_head)
+        k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -201,7 +205,7 @@ class Qwen3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -309,11 +313,130 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
+
+class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA,
+                                     SupportsCrossEncoding):
+
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        pooler_config = vllm_config.model_config.pooler_config
+
+        self.vllm_config = vllm_config
+        self.config = config
+        self.quant_config = quant_config
+        self.prefix = prefix
+        self.model = Qwen3Model(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
+        self.score = RowParallelLinear(config.hidden_size,
+                                       config.num_labels,
+                                       quant_config=quant_config,
+                                       input_is_parallel=False,
+                                       bias=False,
+                                       prefix=maybe_prefix(prefix, "score"))
+
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=False,
+            softmax=True)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self.model(input_ids=input_ids,
+                          positions=positions,
+                          inputs_embeds=inputs_embeds,
+                          intermediate_tensors=intermediate_tensors)
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        hidden_states = self._pooler.extract_states(hidden_states,
+                                                    pooling_metadata)
+        logits, _ = self.score(hidden_states)
+        pooled_data = self._pooler.head(logits, pooling_metadata)
+        pooled_outputs = [
+            self._pooler.build_output(data.squeeze(-1)) for data in pooled_data
+        ]
+        return PoolerOutput(outputs=pooled_outputs)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        is_original_qwen3_reranker = getattr(self.config,
+                                             "is_original_qwen3_reranker",
+                                             False)
+
+        if not is_original_qwen3_reranker:
+            loader = AutoWeightsLoader(self)
+            return loader.load_weights(weights)
+
+        return self.load_weights_from_original_qwen3_reranker(weights)
+
+    def load_weights_from_original_qwen3_reranker(
+            self, weights: Iterable[tuple[str, torch.Tensor]]):
+        tokens = getattr(self.config, "classifier_from_token", None)
+        assert tokens is not None and len(tokens) == 2, \
+            ("Try loading the original Qwen3 Reranker?, see: "
+             "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/qwen3_reranker.py")
+
+        self.config.num_labels = 1
+        model_config = self.vllm_config.model_config
+
+        device = self.score.weight.device
+        self.score = RowParallelLinear(self.config.hidden_size,
+                                       self.config.num_labels,
+                                       quant_config=self.quant_config,
+                                       input_is_parallel=False,
+                                       bias=False,
+                                       prefix=maybe_prefix(
+                                           self.prefix, "score")).to(device)
+
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.model.embed_tokens
+        else:
+            self.lm_head = ParallelLMHead(self.config.vocab_size,
+                                          self.config.hidden_size,
+                                          quant_config=self.quant_config,
+                                          prefix=maybe_prefix(
+                                              self.prefix, "lm_head"))
+
+        loader = AutoWeightsLoader(self)
+        loaded_weights = loader.load_weights(weights)
+
+        from vllm.transformers_utils.tokenizer import get_tokenizer
+        tokenizer = get_tokenizer(
+            model_config.tokenizer,
+            revision=model_config.tokenizer_revision,
+            tokenizer_mode=model_config.tokenizer_mode,
+            trust_remote_code=model_config.trust_remote_code)
+
+        a = tokenizer.convert_tokens_to_ids(tokens[0])
+        b = tokenizer.convert_tokens_to_ids(tokens[1])
+        weight = self.lm_head.weight.data[b].to(
+            device) - self.lm_head.weight.data[a].to(device)
+        self.score.weight.data.copy_(weight)
+
+        del self.lm_head
+        loaded_weights.add("classifier.weight")
+        loaded_weights.discard("lm_head.weight")

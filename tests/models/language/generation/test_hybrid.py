@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -23,12 +24,15 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
+    # NOTE: ibm-granite/granite-4.0-tiny-preview are skipped currently as
+    # it is not yet available in huggingface transformers
+    # "ibm-granite/granite-4.0-tiny-preview",
     # NOTE: Running Plamo2 in transformers implementation requires to install
     # causal-conv1d package, which is not listed as a test dependency as it's
     # not compatible with pip-compile.
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
-    "hmellor/bamba-tiny-random",
+    "hmellor/tiny-random-BambaForCausalLM",
 ]
 
 # Avoid OOM

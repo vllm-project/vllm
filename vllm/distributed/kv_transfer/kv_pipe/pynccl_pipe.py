@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
     This module implements a PyNccl pipe for sending and receiving
     Optional[torch.Tensor] between distributed ranks with advanced
@@ -15,7 +16,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Optional
 
 import torch
 
@@ -35,7 +36,7 @@ class BrokenPipeException(Exception):
         super().__init__(self.message)
 
 
-Metadata = Dict[str, Optional[torch.Tensor]]
+Metadata = dict[str, Optional[torch.Tensor]]
 
 
 class PyNcclPipe(KVPipeBase):
@@ -83,7 +84,7 @@ class PyNcclPipe(KVPipeBase):
 
     def _get_device_send_recv_impl(
         self, group: StatelessProcessGroup
-    ) -> Tuple[Callable[[torch.Tensor, int], None], Callable[
+    ) -> tuple[Callable[[torch.Tensor, int], None], Callable[
         [torch.Tensor, int], None]]:
 
         send: Callable[[torch.Tensor, int], None]
@@ -118,11 +119,11 @@ class PyNcclPipe(KVPipeBase):
         """
         Create the metadata as a dictionary based on the input tensor.
 
-        Parameters:
-            - tensor: The input tensor or None if no tensor is provided.
+        Args:
+            tensor: The input tensor or None if no tensor is provided.
 
         Returns:
-            - metadata: A dictionary with the following keys:
+            metadata: A dictionary with the following keys:
                 - "dtype": The data type of the tensor or None.
                 - "shape": The shape of the tensor or None.
         """
@@ -135,13 +136,13 @@ class PyNcclPipe(KVPipeBase):
         """
         Create a buffer to receive the tensor based on the provided metadata.
 
-        Parameters:
-            - metadata: A dictionary with keys "dtype" and "shape", describing
-              the tensor's data type and shape.
+        Args:
+            metadata: A dictionary with keys "dtype" and "shape",
+                describing the tensor's data type and shape.
 
         Returns:
-            - buffer: A tensor of the specified type and shape, allocated on
-              self.device.
+            buffer: A tensor of the specified type and shape,
+                allocated on `self.device`.
         """
         return torch.empty(metadata["shape"],
                            dtype=metadata["dtype"],
@@ -151,8 +152,8 @@ class PyNcclPipe(KVPipeBase):
         """
         Send the metadata dictionary to the target rank.
 
-        Parameters:
-            - metadata: A dictionary with keys "dtype" and "shape".
+        Args:
+            metadata: A dictionary with keys "dtype" and "shape".
         """
         self.group.send_obj(metadata, self.target_rank_for_send)
 
@@ -161,8 +162,8 @@ class PyNcclPipe(KVPipeBase):
         Receive the metadata dictionary from the target rank.
 
         Returns:
-            - metadata: A dictionary with keys "dtype" and "shape" describing
-              the tensor.
+            metadata: A dictionary with keys "dtype" and "shape"
+                describing the tensor.
         """
         return self.group.recv_obj(self.target_rank_for_recv)
 
@@ -171,9 +172,9 @@ class PyNcclPipe(KVPipeBase):
         The actual implementation of sending the tensor and its metadata to the
         target rank.
 
-        Parameters:
-            - tensor: The input tensor to be sent, or None if no tensor is
-              being sent.
+        Args:
+            tensor: The input tensor to be sent, or `None` if no tensor is
+                being sent.
         """
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
@@ -187,7 +188,7 @@ class PyNcclPipe(KVPipeBase):
         the target rank.
 
         Returns:
-            - buffer: The received tensor, or None if no tensor is received.
+            buffer: The received tensor, or `None` if no tensor is received.
         """
         metadata = self._recv_metadata()
         if metadata["dtype"] is None:
@@ -227,8 +228,8 @@ class PyNcclPipe(KVPipeBase):
         Sends a tensor and its metadata to the destination rank in a
         non-blocking way.
 
-        Parameters:
-            - tensor: The tensor to send, or None if no tensor is being sent.
+        Args:
+            tensor: The tensor to send, or `None` if no tensor is being sent.
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
@@ -250,8 +251,8 @@ class PyNcclPipe(KVPipeBase):
         """
         Receives a tensor and its metadata from the source rank. Blocking call.
 
-        Returns:
-            - tensor: The received tensor, or None if no tensor is received.
+        Args:
+            tensor: The received tensor, or `None` if no tensor is received.
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pickle
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
@@ -10,9 +10,7 @@ from blake3 import blake3
 from PIL import Image
 
 from vllm.logger import init_logger
-
-if TYPE_CHECKING:
-    from vllm.inputs import TokensPrompt
+from vllm.multimodal.image import convert_image_mode
 
 logger = init_logger(__name__)
 
@@ -35,7 +33,8 @@ class MultiModalHasher:
             return np.array(obj).tobytes()
 
         if isinstance(obj, Image.Image):
-            return cls.item_to_bytes("image", np.array(obj.convert("RGBA")))
+            return cls.item_to_bytes(
+                "image", np.asarray(convert_image_mode(obj, "RGBA")))
         if isinstance(obj, torch.Tensor):
             return cls.item_to_bytes("tensor", obj.numpy())
         if isinstance(obj, np.ndarray):
@@ -43,7 +42,7 @@ class MultiModalHasher:
                 "ndarray", {
                     "dtype": obj.dtype.str,
                     "shape": obj.shape,
-                    "data": obj.data.tobytes(),
+                    "data": obj.tobytes(),
                 })
 
         logger.warning(
@@ -88,28 +87,3 @@ class MultiModalHasher:
                 hasher.update(v_bytes)
 
         return hasher.hexdigest()
-
-    @classmethod
-    def hash_prompt_mm_data(
-            cls, prompt: "TokensPrompt") -> Optional["MultiModalHashDict"]:
-        """Hash multimodal data in the user input prompt if they exist."""
-
-        if "multi_modal_data" not in prompt:
-            return None
-
-        mm_data = prompt["multi_modal_data"]
-        if not mm_data:
-            # mm_data can be None or an empty dict.
-            return None
-
-        mm_items = {
-            modality: items if isinstance(items, list) else [items]
-            for modality, items in mm_data.items()
-        }
-
-        mm_hashes = {
-            modality: [cls.hash_kwargs(**{modality: item}) for item in items]
-            for modality, items in mm_items.items()
-        }
-
-        return mm_hashes

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, Set, Tuple, TypedDict
+from typing import Any, Literal, Optional, TypedDict
 
 import torch
 from torch import nn
@@ -504,18 +505,12 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         return next(self.parameters()).dtype
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            if d.shape != expected_dims:
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_dims}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
+        image_size = self.config.vision_config.image_size
+        expected_dims = (3, image_size, image_size)
+        if data.shape[1:] != expected_dims:
+            raise ValueError(
+                "The expected shape of pixel values per image per batch is "
+                f"{expected_dims}. You supplied {tuple(data.shape)}.")
         return data
 
     def _parse_and_validate_image_input(
@@ -549,9 +544,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         vision_tower: SiglipVisionModel,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-        target_dtype = vision_tower.get_input_embeddings().weight.dtype
-        image_features = vision_tower(pixel_values.to(dtype=target_dtype))
-        return image_features
+        return vision_tower(pixel_values)
 
     def _process_image_input(
         self,
@@ -575,11 +568,11 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         return self._process_image_input(image_input)
 
@@ -641,13 +634,13 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         kwargs["has_images"] = True
         # NOTE(woosuk): Here, we distinguish the sequences by the position id 0.
         # This is a HACK. Fix this.
-        start_idices = (positions == 0).cpu().nonzero()
-        num_seqs = len(start_idices)
+        start_indices = (positions == 0).cpu().nonzero()
+        num_seqs = len(start_indices)
         seq_lens = []
         for i in range(num_seqs):
-            start_idx = start_idices[i].item()
+            start_idx = start_indices[i].item()
             if i < num_seqs - 1:
-                end_idx = start_idices[i + 1].item()
+                end_idx = start_indices[i + 1].item()
             else:
                 end_idx = len(input_ids)
             seq_lens.append(end_idx - start_idx)
@@ -701,8 +694,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/fuyu/modeling_fuyu.py
 # Copyright 2023 The vLLM team.
@@ -18,7 +19,7 @@
 """ PyTorch Fuyu model."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, Set, Tuple, TypedDict
+from typing import Literal, Optional, TypedDict
 
 import torch
 import torch.nn as nn
@@ -323,11 +324,11 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         return self._process_image_input(image_input)
 
@@ -382,7 +383,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             self.language_model.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
