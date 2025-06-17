@@ -307,6 +307,12 @@ class EngineCore:
 
         self.mm_input_cache_server.reset()
 
+    def expert_distribution_record(self, is_start: bool) -> None:
+        self.model_executor.expert_distribution_record(is_start)
+
+    def dump_expert_distribution_record(self) -> None:
+        self.model_executor.dump_expert_distribution_record()
+
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
 

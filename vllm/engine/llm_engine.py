@@ -1854,6 +1854,15 @@ class LLMEngine:
     def stop_profile(self) -> None:
         self.model_executor.stop_profile()
 
+    def start_expert_distribution_record(self) -> None:
+        self.model_executor.expert_distribution_record(is_start=True)
+
+    def stop_expert_distribution_record(self) -> None:
+        self.model_executor.expert_distribution_record(is_start=False)
+
+    def dump_expert_distribution_record(self) -> None:
+        self.model_executor.dump_expert_distribution_record()
+
     def sleep(self, level: int = 1) -> None:
         assert self.vllm_config.model_config.enable_sleep_mode, (
             "Sleep mode is not enabled in the model config")
