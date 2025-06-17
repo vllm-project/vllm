@@ -29,7 +29,7 @@ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus, SchedulerRequestState
+from vllm.v1.request import RequestStatus, SchedulerRequestState, RequestParams
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -366,8 +366,7 @@ class Scheduler(SchedulerInterface):
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
                     new_computed_blocks, num_new_local_computed_tokens = \
-                        self.kv_cache_manager.get_computed_blocks(
-                            request)
+                        self.kv_cache_manager.get_computed_blocks(request.params)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -407,7 +406,7 @@ class Scheduler(SchedulerInterface):
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
-                    if request.has_encoder_inputs:
+                    if request.params.has_encoder_inputs:
                         (encoder_inputs_to_schedule, num_new_tokens,
                          new_encoder_budget
                          ) = self._try_schedule_encoder_inputs(
@@ -448,7 +447,7 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
-                if request.use_structured_output:
+                if request.params.use_structured_output:
                     structured_output_request_ids[
                         request.request_id] = req_index
                 req_index += 1
@@ -472,6 +471,7 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                request.num_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
@@ -728,6 +728,8 @@ class Scheduler(SchedulerInterface):
                 num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
                                        len(generated_token_ids))
                 request.num_computed_tokens -= num_tokens_rejected
+                request.num_tokens -= num_tokens_rejected
+                
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=len(scheduled_spec_token_ids),
@@ -738,7 +740,7 @@ class Scheduler(SchedulerInterface):
             # OPTIMIZATION: Avoid list(set) if the set is empty.
             if cached_encoder_input_ids:
                 for input_id in list(cached_encoder_input_ids):
-                    mm_positions = request.mm_positions[input_id]
+                    mm_positions = request.params.mm_positions[input_id]
                     start_pos = mm_positions.offset
                     num_tokens = mm_positions.length
                     if start_pos + num_tokens <= request.num_computed_tokens:
@@ -786,7 +788,8 @@ class Scheduler(SchedulerInterface):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting)
 
-    def add_request(self, request: Request) -> None:
+    def add_request(self, request_params: RequestParams) -> None:
+        request = SchedulerRequestState(request_params)
         self.waiting.append(request)
         self.requests[request.request_id] = request
         if self.log_stats:
@@ -821,7 +824,7 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request)
 
-    def _free_request(self, request: Request) -> Optional[dict[str, Any]]:
+    def _free_request(self, request: SchedulerRequestState) -> Optional[dict[str, Any]]:
 
         assert request.is_finished()
 
@@ -838,7 +841,7 @@ class Scheduler(SchedulerInterface):
 
         return kv_xfer_params
 
-    def _free_blocks(self, request: Request):
+    def _free_blocks(self, request: SchedulerRequestState):
         assert request.is_finished()
         assert request.request_id not in self._cached_reqs_data
         self.kv_cache_manager.free(request)

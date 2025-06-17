@@ -9,7 +9,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         SlidingWindowSpec)
-from vllm.v1.request import Request
+from vllm.v1.request import RequestState
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -127,7 +127,7 @@ class SingleTypeKVCacheManager(ABC):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
+    def cache_blocks(self, request: RequestState, block_hashes: list[BlockHash],
                      num_tokens: int) -> None:
         """
         Cache the blocks for the request.

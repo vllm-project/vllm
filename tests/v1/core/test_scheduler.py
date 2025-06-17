@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+from concurrent.futures import Future
 from typing import Optional
 from unittest.mock import Mock
 
@@ -15,10 +17,21 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import RequestState, RequestStatus, SchedulerRequestState, RequestParams
 from vllm.v1.structured_output import StructuredOutputManager
 
 EOS_TOKEN_ID = 50256
+
+
+def async_update_from_output(scheduler: Scheduler, scheduler_output: SchedulerOutput, model_runner_output: ModelRunnerOutput):
+    """Helper to run async update_from_output in tests."""
+    # Create a completed future
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    future.set_result(model_runner_output)
+    
+    # Run the async method
+    return loop.run_until_complete(scheduler.update_from_output(scheduler_output, future))
 
 
 def create_scheduler(
@@ -131,7 +144,8 @@ def create_requests(num_requests: int,
         else:
             mm_position = None
             mm_inputs = None
-        request = Request(
+        # Create RequestParams first
+        request = RequestParams(
             request_id=f"{i}",
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
@@ -284,7 +298,7 @@ def test_schedule_partial_requests():
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler.update_from_output(output, model_runner_output)
+    async_update_from_output(scheduler, output, model_runner_output)
 
     # Schedule the next step.
     # Only the first and second requests are scheduled.
@@ -334,7 +348,7 @@ def test_no_mm_input_chunking():
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler.update_from_output(output, model_runner_output)
+    async_update_from_output(scheduler, output, model_runner_output)
 
     output = scheduler.schedule()
     assert len(scheduler.running) == 1
@@ -397,7 +411,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler.update_from_output(output, model_runner_output)
+    async_update_from_output(scheduler, output, model_runner_output)
 
     # Schedule the next step. All three requests are running.
     # Processed the remaining prefills of the first and second requests.
@@ -421,7 +435,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler.update_from_output(output1, model_runner_output)
+    async_update_from_output(scheduler, output1, model_runner_output)
     output2 = scheduler.schedule()
     assert len(scheduler.running) == 3
     assert len(output2.scheduled_new_reqs) == 0
@@ -475,7 +489,7 @@ def test_stop_via_update_from_output():
         logprobs=None,
         prompt_logprobs_dict={})
 
-    scheduler.update_from_output(scheduler_output, model_output)
+    async_update_from_output(scheduler, scheduler_output, model_output)
 
     # Verify first request stopped, second continues
     assert len(scheduler.running) == 1
@@ -525,7 +539,7 @@ def test_stop_via_update_from_output():
         logprobs=None,
         prompt_logprobs_dict={})
 
-    scheduler.update_from_output(scheduler_output, model_output)
+    async_update_from_output(scheduler, scheduler_output, model_output)
 
     # Verify first request stopped on custom token
     assert len(scheduler.running) == 1
@@ -574,7 +588,7 @@ def test_stop_via_update_from_output():
         logprobs=None,
         prompt_logprobs_dict={})
 
-    scheduler.update_from_output(scheduler_output, model_output)
+    async_update_from_output(scheduler, scheduler_output, model_output)
 
     # Verify first request stopped due to length
     assert len(scheduler.running) == 1
@@ -616,7 +630,7 @@ def test_stop_via_update_from_output():
         logprobs=None,
         prompt_logprobs_dict={})
 
-    scheduler.update_from_output(scheduler_output, model_output)
+    async_update_from_output(scheduler, scheduler_output, model_output)
 
     # Verify request continues past EOS
     assert len(scheduler.running) == 1
@@ -664,7 +678,7 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler.update_from_output(scheduler_output0, model_runner_output)
+    async_update_from_output(scheduler, scheduler_output0, model_runner_output)
 
     # Schedule the next step.
     # The first request can be scheduled again while the second
@@ -681,7 +695,7 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler.update_from_output(scheduler_output1, model_runner_output)
+    async_update_from_output(scheduler, scheduler_output1, model_runner_output)
 
 
 # Note - these test cases mirror some of those in test_rejection_sampler.py
@@ -836,7 +850,7 @@ def _step_until_done(
     """Loop over schedule(), update_from_output() until finished."""
 
     all_finished = False
-    _ = scheduler.update_from_output(output, model_runner_output)
+    _ = async_update_from_output(scheduler, output, model_runner_output)
     while not all_finished:
         # Schedule + a few iterations until stopping.
         output = scheduler.schedule()
@@ -845,11 +859,9 @@ def _step_until_done(
             # We should be in the decode phase now.
             assert num_scheduled_tokens == 1
         assert len(output.kv_connector_metadata.requests) == 0
-        ecos = scheduler.update_from_output(output, model_runner_output)[0]
-        all_done = True
-        for eco in ecos.outputs:
-            if eco.finish_reason is None:
-                all_done = False
+        async_update_from_output(scheduler, output, model_runner_output)
+        # Check if all requests are finished by looking at scheduler state
+        all_done = len(scheduler.running) == 0
         all_finished = all_done
 
 
@@ -1097,7 +1109,7 @@ def test_kv_connector_handles_preemption():
         num_requests=2,
         expected_num_scheduled_tokens=NUM_TOKENS - NUM_MATCHED_NEW_TOKENS)
     assert len(scheduler.running) == 2
-    _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
 
     # All can be scheduled - 2nd token.
     output = scheduler.schedule()
@@ -1107,7 +1119,7 @@ def test_kv_connector_handles_preemption():
         num_requests=0,
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 2
-    _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
 
     # This will generate a new block and cause a preemption - 3rd token.
     output = scheduler.schedule()
@@ -1118,7 +1130,7 @@ def test_kv_connector_handles_preemption():
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
-    _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
 
@@ -1131,7 +1143,7 @@ def test_kv_connector_handles_preemption():
         expected_num_scheduled_tokens=1)
     assert len(scheduler.waiting) == 1
     assert len(scheduler.running) == 1
-    _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 1
     # All memory should be freed since nothing is running.
@@ -1151,7 +1163,7 @@ def test_kv_connector_handles_preemption():
     )
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
-    _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
 
@@ -1163,7 +1175,7 @@ def test_kv_connector_handles_preemption():
         num_requests=0,
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 1
-    _ = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 0
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
@@ -1235,7 +1247,7 @@ def test_memory_leak():
         scheduler.add_request(request)
         scheduler_output = scheduler.schedule()
         model_runner_output = make_output(scheduler)
-        scheduler.update_from_output(scheduler_output, model_runner_output)
+        async_update_from_output(scheduler, scheduler_output, model_runner_output)
 
     # Iterate until done.
     while True:
@@ -1243,7 +1255,7 @@ def test_memory_leak():
         if len(scheduler.running) == 0:
             break
         model_runner_output = make_output(scheduler)
-        scheduler.update_from_output(scheduler_output, model_runner_output)
+        async_update_from_output(scheduler, scheduler_output, model_runner_output)
 
     # Confirm no memory leak.
     assert_scheduler_empty(scheduler)

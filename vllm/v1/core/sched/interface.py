@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import ModelRunnerOutput
-    from vllm.v1.request import Request, RequestStatus
+    from vllm.v1.request import RequestStatus, RequestParams
 
 
 class SchedulerInterface(ABC):
@@ -63,7 +63,7 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_request(self, request: "Request") -> None:
+    def add_request(self, request: "RequestParams") -> None:
         """Add a new request to the scheduler's internal queue.
         
         Args:

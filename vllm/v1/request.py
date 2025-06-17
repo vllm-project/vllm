@@ -105,7 +105,6 @@ class RequestState:
         self.status = (RequestStatus.WAITING_FOR_FSM
                        if params.sampling_params.guided_decoding is not None else
                        RequestStatus.WAITING)
-        self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
 
         self._output_token_ids: list[int] = []
@@ -116,10 +115,6 @@ class RequestState:
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
-
-        # State
-        # The number of tokens with prefix cache hits.
-        self.num_cached_tokens = -1
 
     def append_output_token_ids(
             self,
@@ -147,6 +142,38 @@ class RequestState:
         return RequestStatus.get_finished_reason(self.status)
 
 
+class SchedulerRequestState:
+    def __init__(self, params: RequestParams) -> None:
+        # Convenience alias
+        self.request_id = params.request_id
+        
+        self.params = params
+
+        self.status = (RequestStatus.WAITING_FOR_FSM
+                       if params.sampling_params.guided_decoding is not None else
+                       RequestStatus.WAITING)
+        self.spec_token_ids: list[int] = []
+
+        # TODO(lucas): these names match the current names used in the scheduler
+        # but I think these names can be improved
+        # This is the number of tokens that are known (prompt + any generated output tokens)
+        self.num_tokens = params.num_prompt_tokens 
+        # This is the tokens we have a valid KV-cache for
+        self.num_computed_tokens = 0
+
+        self.events: list[EngineCoreEvent] = []
+
+        # State
+        # The number of tokens with prefix cache hits.
+        self.num_cached_tokens = -1
+
+    @property
+    def num_tokens_with_spec(self):
+        return self.num_tokens + len(self.spec_token_ids)
+
+    def is_finished(self) -> bool:
+        return RequestStatus.is_finished(self.status)
+
     def record_event(
         self,
         event_type: EngineCoreEventType,
@@ -159,20 +186,6 @@ class RequestState:
             return None
         events, self.events = self.events, []
         return events
-
-class SchedulerRequestState:
-    def __init__(self, params: RequestParams) -> None:
-        # Convenience alias
-        self.request_id = params.request_id
-        
-        self.params = params
-
-        self.status = (RequestStatus.WAITING_FOR_FSM
-                       if params.sampling_params.guided_decoding is not None else
-                       RequestStatus.WAITING)
-        self.spec_token_ids: list[int] = []
-        self.num_computed_tokens = 0
-
 
 
 class RequestStatus(enum.IntEnum):

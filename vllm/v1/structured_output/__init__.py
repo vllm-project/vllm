@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.reasoning import ReasoningParser
-    from vllm.v1.request import RequestState
+    from vllm.v1.request import RequestParams, RequestState
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -57,8 +57,8 @@ class StructuredOutputManager:
                 reasoning_backend)
             self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
-    def grammar_init(self, request: RequestState) -> None:
-        if request.params.structured_output_request is None:
+    def grammar_init(self, request: RequestParams) -> None:
+        if request.structured_output_request is None:
             return
 
         if TYPE_CHECKING:
@@ -69,7 +69,7 @@ class StructuredOutputManager:
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
         if self.backend is None:
-            backend = request.params.sampling_params.guided_decoding.backend
+            backend = request.sampling_params.guided_decoding.backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
                 self.backend = XgrammarBackend(
