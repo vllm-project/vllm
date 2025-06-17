@@ -265,6 +265,9 @@ def rearrange_expert_weights_inplace(
     expert_weights_buffer = [torch.empty_like(w) for w in expert_weights[0]]
 
     for layer in range(num_moe_layers):
+        # NOTE(bowen): We need this synchronize to run, but I don't know why.
+        # If you figure out the reason, please let me know -- thank you!
+        torch.cuda.synchronize()
         shuffle_layer(
             num_local_physical_experts,
             ep_rank,
