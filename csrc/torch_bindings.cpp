@@ -482,6 +482,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("get_cutlass_pplx_moe_mm_data", torch::kCUDA,
            &get_cutlass_pplx_moe_mm_data);
 
+  // Transpose input scales for blocked cutlass moe mm.
+  ops.def(
+      "transpose_cutlass_moe_a_scales(Tensor! a_scales_t, Tensor a_scales, "
+      "                               Tensor expert_offsets, "
+      "                               Tensor problem_sizes) -> ()",
+      {stride_tag});
+  ops.impl("transpose_cutlass_moe_a_scales", torch::kCUDA,
+           &transpose_cutlass_moe_a_scales);
+
   // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
   ops.def(
       "cutlass_scaled_mm_supports_block_fp8(int cuda_device_capability) -> "

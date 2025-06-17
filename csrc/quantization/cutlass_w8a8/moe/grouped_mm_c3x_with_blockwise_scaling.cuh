@@ -111,8 +111,8 @@ void cutlass_blockwise_group_gemm_caller(
   int num_experts = static_cast<int>(expert_offsets.size(0));
   int k_size = a_tensors.size(1);
   int n_size = out_tensors.size(1);
-  int n_scale_size = b_scales.size(1);
-  int k_scale_size = b_scales.size(2);
+  int n_scale_size = b_scales.size(2);
+  int k_scale_size = b_scales.size(1);
 
   std::cout << "scale sizes: " << n_scale_size << " " << k_scale_size << std::endl;
 

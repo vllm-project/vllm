@@ -1361,6 +1361,7 @@ def fused_experts_impl(
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
+        print("intermediate_cache1:", intermediate_cache1[:, :, 0:5])
         # print("intermediate_cache1:", intermediate_cache1)
 
         if activation == "silu":

@@ -922,6 +922,25 @@ def get_cutlass_pplx_moe_mm_data(expert_offsets: torch.Tensor,
         expert_offsets, problem_sizes1, problem_sizes2, expert_num_tokens,
         num_local_experts, padded_m, n, k)
 
+def transpose_cutlass_moe_a_scales(a_scales_t: torch.Tensor,
+                               a_scales: torch.Tensor,
+                               expert_offsets: torch.Tensor,
+                               problem_sizes: torch.Tensor):
+    """
+    Transpose the a_scales tensor to the format required by the blocked cutlass
+    moe mm.
+    Arguments:
+    - a_scales_t: The transposed a_scales tensor (output).
+    - a_scales: The a_scales tensor.
+    - expert_offsets: Indices that mark at which token index each expert begins
+                      its computation.
+    - problem_sizes: MxNxK sizes of each expert's multiplication in grouped
+                     MM used in the fused MoE operation.
+    """
+    return torch.ops._C.transpose_cutlass_moe_a_scales(a_scales_t, a_scales,
+                                                       expert_offsets,
+                                                       problem_sizes)
+
 
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                    b_tensors: torch.Tensor, a_scales: torch.Tensor,

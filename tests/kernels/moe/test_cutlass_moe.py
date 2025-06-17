@@ -54,8 +54,17 @@ class MOETensors:
     def make_moe_tensors(m: int, k: int, n: int, e: int,
                          dtype: torch.dtype) -> "MOETensors":
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        # for i in range(a.shape[0]):
+        #     a[i] = a[i].fill_(i + 1)
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+        # for ee in range(w1.shape[0]):
+        #     for nn in range(w1.shape[1]):
+        #         for kk in range(132, w1.shape[2]):
+        #             w1[ee][nn][kk] = 0
+        # for ee in range(w1.shape[0]):
+        #     for nn in range(1, w1.shape[1]):
+        #             w1[ee][nn].fill_(0)
         ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
         c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
         ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
@@ -177,11 +186,25 @@ class MOETensors8Bit(MOETensors):
         k_b2_scales = n // block_size[1]
 
         # Get the right scale for tests.
-        _, a_scale = ops.scaled_fp8_quant(
-            moe_tensors_fp16.a, use_per_token_if_dynamic=per_act_token)
-        a_q, _ = ops.scaled_fp8_quant(moe_tensors_fp16.a,
-                                      a_scale,
-                                      use_per_token_if_dynamic=per_act_token)
+        if per_act_token:
+            a_q, a_scale = ops.scaled_fp8_quant(
+                moe_tensors_fp16.a,
+                use_per_token_if_dynamic=per_act_token)
+        else:
+            _, a_scale = ops.scaled_fp8_quant(
+                moe_tensors_fp16.a, use_per_token_if_dynamic=per_act_token)
+            # # a_scale.fill_(1.0)
+            # for i in range(a_scale.shape[0]):
+            #     a_scale[i] = i + 1
+            a_q, _ = ops.scaled_fp8_quant(moe_tensors_fp16.a,
+                                        a_scale,
+                                        use_per_token_if_dynamic=per_act_token)
+        
+        print("scale:", a_scale.t())
+        print("quant:", a_q)
+        print("orig:", moe_tensors_fp16.a)
+        print("dequant:", a_q.float() * a_scale)
+        # raise ValueError("Stop here")
         # don't quantize w1 and w2, just use the original values to simplify
         # the test data preparation
         w1_q = moe_tensors_fp16.w1.to(dtype=q_dtype)
@@ -310,7 +333,8 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
 
 def run_blocked_8_bit(moe_tensors: MOETensors8Bit,
               topk_weights: torch.Tensor,
-              topk_ids: torch.Tensor) -> torch.Tensor:
+              topk_ids: torch.Tensor,
+              per_act_token: bool) -> torch.Tensor:
     assert not any([
         t is None for t in [
             moe_tensors.w1_q, moe_tensors.w2_q, moe_tensors.w1_scale,
@@ -328,6 +352,7 @@ def run_blocked_8_bit(moe_tensors: MOETensors8Bit,
         'w2_scale': moe_tensors.w2_scale,
         'a1_scale': moe_tensors.a_scale,
         'global_num_experts': moe_tensors.w1.size(0),
+        'per_act_token': per_act_token,
     }
 
     return cutlass_moe_blocked_fp8(**kwargs)
@@ -476,16 +501,16 @@ def test_cutlass_moe_8_bit_EP(
                                    rtol=1e-2)
 
 
-# @pytest.mark.parametrize("m", [64]) #[64])
-# @pytest.mark.parametrize("n", [1024]) #[1024])
-# @pytest.mark.parametrize("k", [512]) #[4096])
-# @pytest.mark.parametrize("e", [16])#[16])
-# @pytest.mark.parametrize("topk", [8])#[1, 8])
-# @pytest.mark.parametrize("per_act_token", [False])
-@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
-@pytest.mark.parametrize("e", NUM_EXPERTS)
-@pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("per_act_token", [False])
+@pytest.mark.parametrize("m", [4]) #[64])
+@pytest.mark.parametrize("n", [1024]) #[1024])
+@pytest.mark.parametrize("k", [4096]) #[4096])
+@pytest.mark.parametrize("e", [4])#[16])
+@pytest.mark.parametrize("topk", [1])#[1, 8])
+@pytest.mark.parametrize("per_act_token", [True])
+# @pytest.mark.parametrize("m,n,k", MNK_FACORS)
+# @pytest.mark.parametrize("e", NUM_EXPERTS)
+# @pytest.mark.parametrize("topk", TOP_KS)
+# @pytest.mark.parametrize("per_act_token", [True,False])
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
@@ -510,6 +535,9 @@ def test_blocked_cutlass_moe_8_bit(
                                                topk,
                                                renormalize=False)
 
+        print("w1:", mt.w1_d)
+        print("w2:", mt.w2_d)
+
         # Note that we are using the dequantized versions of the tensors.
         # Using a, w1 and w2 directly results in minor output differences.
         triton_output = fused_experts(mt.a_d, mt.w1_d, mt.w2_d, topk_weights,
@@ -517,10 +545,11 @@ def test_blocked_cutlass_moe_8_bit(
 
         cutlass_output = run_blocked_8_bit(mt,
                                    topk_weights,
-                                   topk_ids)
+                                   topk_ids,
+                                   per_act_token)
 
-        print("out triton:", triton_output)
-        print("out cutlass:", cutlass_output)
+        print("out triton:", triton_output[:, 0:5])
+        print("out cutlass:", cutlass_output[:, 0:5])
 
         torch.testing.assert_close(triton_output,
                                    cutlass_output,
