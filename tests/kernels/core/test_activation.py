@@ -14,6 +14,21 @@ from vllm.model_executor.layers.activation import (FastGELU, FatreluAndMul,
                                                    SiluAndMul)
 from vllm.platforms import current_platform
 
+
+def ref_batched_silu_mul(x, out, valid_tokens_array):
+    """
+    Reference implementation of batched silu_and_mul
+    """
+    valid_tokens_array = valid_tokens_array.to("cpu")
+    batch_size = x.size(0)
+    for b in range(batch_size):
+        # num valid tokens
+        n = valid_tokens_array[b]
+        if n == 0:
+            continue
+        torch.ops._C.silu_and_mul(out[b, :n, :], x[b, :n, :])
+
+
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
 D = [512, 13824]  # Arbitrary values for testing
@@ -106,3 +121,42 @@ def test_activation(
 
     out = torch.empty_like(x)
     opcheck(fn, (out, x))
+
+
+## Test Batched Implementaion ####
+
+BATCH_SIZES = [1, 13, 26, 32]
+NUM_TOKENS = [7, 37, 64, 4096]
+D = [128, 256, 384, 512, 1024, 13824]
+
+
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("d", D)
+@pytest.mark.parametrize("dtype",
+                         [torch.float16, torch.bfloat16, torch.float32])
+def test_batched_silu_mul(batch_size: int, num_tokens: int, d: int,
+                          dtype: torch.dtype):
+
+    input = torch.randn(
+        (batch_size, num_tokens, d), device="cuda", dtype=dtype) / 10.0
+
+    out = torch.empty((batch_size, num_tokens, d // 2),
+                      device="cuda",
+                      dtype=dtype)
+
+    ref_out = out.clone()
+
+    # valid num_tokens per batch
+    valid_num_tokens = torch.randint(low=0,
+                                     high=num_tokens + 1,
+                                     size=(batch_size, ),
+                                     device="cuda").to(dtype=torch.int32)
+
+    # reference
+    ref_batched_silu_mul(input, ref_out, valid_num_tokens)
+
+    # impl
+    torch.ops._C.batched_silu_and_mul(out, input, valid_num_tokens)
+
+    torch.testing.assert_close(ref_out, out)

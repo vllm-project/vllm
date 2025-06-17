@@ -88,7 +88,7 @@ def test_masked_per_token_group_quant_fp8(batch_size: int, num_tokens: int,
     valid_num_tokens = torch.randint(low=0,
                                      high=num_tokens + 1,
                                      size=(batch_size, ),
-                                     device="cuda")
+                                     device="cuda").to(torch.int32)
 
     # Reference
     ref_out_q, ref_out_scales = ref_per_token_group_quant(
@@ -143,7 +143,7 @@ def test_masked_silu_mul(batch_size: int, num_tokens: int, hidden_size: int,
     valid_num_tokens = torch.randint(low=0,
                                      high=num_tokens + 1,
                                      size=(batch_size, ),
-                                     device="cuda")
+                                     device="cuda").to(torch.int32)
 
     # reference
     ref_silu_mul(input, ref_out, valid_num_tokens)
