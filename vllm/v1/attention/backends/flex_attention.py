@@ -13,7 +13,6 @@ from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
@@ -237,17 +236,13 @@ class FlexAttentionMetadata:
 
     def build_block_mask(self) -> BlockMask:
         assert self.mask_mod is not None
-        # FIXME: With TP>1, create_block_mask_compiled will raise
-        # CUDA error: an illegal memory access was encountered
-        create_block_mask_fn = (create_block_mask_compiled
-                                if get_tensor_model_parallel_world_size() == 1
-                                else create_block_mask)
-        return create_block_mask_fn(
+        return create_block_mask_compiled(
             self.mask_mod,
             None,
             None,
             self.num_actual_tokens,
             self.total_cache_tokens,
+            device=self.block_table.device,
         )
 
     def __post_init__(self):
@@ -429,7 +424,6 @@ class FlexAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-
         if output_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
