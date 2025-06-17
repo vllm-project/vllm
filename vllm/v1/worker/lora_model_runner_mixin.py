@@ -16,12 +16,8 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.platforms import current_platform
-
-if current_platform.device_name == "tpu":
-    from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
-else:
-    from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
+from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
+from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
 InputBatch = Union[TPUInputBatch, GPUInputBatch]
 
