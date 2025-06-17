@@ -57,6 +57,48 @@ gptq_gemm = custom_ops.gptq_gemm
 gptq_shuffle = custom_ops.gptq_shuffle
 marlin_gemm = custom_ops.marlin_gemm
 gptq_marlin_24_gemm = custom_ops.gptq_marlin_24_gemm
+aqlm_gemm = custom_ops.aqlm_gemm
+aqlm_dequant = custom_ops.aqlm_dequant
+permute_cols = custom_ops.permute_cols
+marlin_qqq_gemm = custom_ops.marlin_qqq_gemm
+ggml_dequantize = custom_ops.ggml_dequantize
+ggml_mul_mat_vec_a8 = custom_ops.ggml_mul_mat_vec_a8
+ggml_mul_mat_a8 = custom_ops.ggml_mul_mat_a8
+ggml_moe_a8 = custom_ops.ggml_moe_a8
+ggml_moe_a8_vec = custom_ops.ggml_moe_a8_vec
+ggml_moe_get_block_size = custom_ops.ggml_moe_get_block_size
+causal_conv1d_fwd = custom_ops.causal_conv1d_fwd
+causal_conv1d_update = custom_ops.causal_conv1d_update
+selective_scan_fwd = custom_ops.selective_scan_fwd
+LLMM1 = custom_ops.LLMM1
+wvSplitK = custom_ops.wvSplitK
+moe_sum = custom_ops.moe_sum
+moe_align_block_size = custom_ops.moe_align_block_size
+sgl_moe_align_block_size = custom_ops.sgl_moe_align_block_size
+topk_softmax = custom_ops.topk_softmax
+reshape_and_cache = custom_ops.reshape_and_cache
+reshape_and_cache_flash = custom_ops.reshape_and_cache_flash
+concat_and_cache_mla = custom_ops.concat_and_cache_mla
+copy_blocks = custom_ops.copy_blocks
+copy_blocks_mla = custom_ops.copy_blocks_mla
+swap_blocks = custom_ops.swap_blocks
+convert_fp8 = custom_ops.convert_fp8
+gather_cache = custom_ops.gather_cache
+get_device_attribute = custom_ops.get_device_attribute
+get_max_shared_memory_per_block_device_attribute = custom_ops.get_max_shared_memory_per_block_device_attribute
+init_custom_ar = custom_ops.init_custom_ar
+all_reduce = custom_ops.all_reduce
+dispose = custom_ops.dispose
+meta_size = custom_ops.meta_size
+register_buffer = custom_ops.register_buffer
+get_graph_buffer_ipc_meta = custom_ops.get_graph_buffer_ipc_meta
+register_graph_buffers = custom_ops.register_graph_buffers
+allocate_shared_buffer_and_handle = custom_ops.allocate_shared_buffer_and_handle
+open_mem_handle = custom_ops.open_mem_handle
+free_shared_buffer = custom_ops.free_shared_buffer
+get_flash_mla_metadata = custom_ops.get_flash_mla_metadata
+flash_mla_with_kvcache = custom_ops.flash_mla_with_kvcache
+cutlass_mla_decode = custom_ops.cutlass_mla_decode
 
 
 def apply_repetition_penalties_torch(
@@ -663,19 +705,7 @@ def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
     return c.to(out_dtype)
 
 
-# aqlm
-def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
-              codebooks: torch.Tensor, scales: torch.Tensor,
-              codebook_partition_sizes: list[int],
-              bias: Optional[torch.Tensor]) -> torch.Tensor:
-    return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
-                                  codebook_partition_sizes, bias)
-
-
-def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
-                 codebook_partition_sizes: list[int]) -> torch.Tensor:
-    return torch.ops._C.aqlm_dequant(codes, codebooks,
-                                     codebook_partition_sizes)
+# aqlm (migrated to custom_ops)
 
 
 # gptq_marlin
@@ -783,16 +813,7 @@ def machete_prepack_B(
                                           group_scales_type)
 
 
-if hasattr(torch.ops._C, "permute_cols"):
-
-    @register_fake("_C::permute_cols")
-    def _permute_cols_fake(a: torch.Tensor,
-                           perm: torch.Tensor) -> torch.Tensor:
-        return torch.empty_like(a)
-
-
-def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
-    return torch.ops._C.permute_cols(a, perm)
+# permute_cols (migrated to custom_ops)
 
 
 # fp4
@@ -1067,120 +1088,21 @@ def scaled_int8_quant(
     return output, input_scales, input_azp
 
 
-# qqq ops
-def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                    s_tok: torch.Tensor, s_ch: torch.Tensor,
-                    s_group: torch.Tensor, workspace: torch.Tensor,
-                    size_m: int, size_n: int, size_k: int) -> torch.Tensor:
-    return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s_tok, s_ch, s_group,
-                                        workspace, size_m, size_n, size_k)
+# qqq ops (migrated to custom_ops)
+
+# gguf (migrated to custom_ops)
 
 
-# gguf
-def ggml_dequantize(W: torch.Tensor, quant_type: int, m: int, n: int,
-                    dtype: Optional[torch.dtype]) -> torch.Tensor:
-    return torch.ops._C.ggml_dequantize(W, quant_type, m, n, dtype)
+# ggml_mul_mat_a8 (migrated to custom_ops)
 
 
-def ggml_mul_mat_vec_a8(
-    W: torch.Tensor,
-    X: torch.Tensor,
-    quant_type: int,
-    row: int,
-) -> torch.Tensor:
-    return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
+# ggml_moe functions (migrated to custom_ops)
 
 
-def ggml_mul_mat_a8(
-    W: torch.Tensor,
-    X: torch.Tensor,
-    quant_type: int,
-    row: int,
-) -> torch.Tensor:
-    return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
+# mamba (migrated to custom_ops)
 
 
-def ggml_moe_a8(
-    X: torch.Tensor,
-    W: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
-    quant_type: int,
-    row: int,
-    top_k: int,
-    tokens: int,
-) -> torch.Tensor:
-    return torch.ops._C.ggml_moe_a8(X, W, sorted_token_ids, expert_ids,
-                                    num_tokens_post_padded, quant_type, row,
-                                    top_k, tokens)
-
-
-def ggml_moe_a8_vec(
-    X: torch.Tensor,
-    W: torch.Tensor,
-    topk_ids: torch.Tensor,
-    top_k: int,
-    quant_type: int,
-    row: torch.SymInt,
-    tokens: torch.SymInt,
-) -> torch.Tensor:
-    return torch.ops._C.ggml_moe_a8_vec(X, W, topk_ids, top_k, quant_type, row,
-                                        tokens)
-
-
-def ggml_moe_get_block_size(quant_type: int) -> int:
-    return torch.ops._C.ggml_moe_get_block_size(quant_type)
-
-
-# mamba
-def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
-                      bias_: Optional[torch.Tensor],
-                      conv_states: Optional[torch.Tensor],
-                      query_start_loc: Optional[torch.Tensor],
-                      cache_indices: Optional[torch.Tensor],
-                      has_initial_state: Optional[torch.Tensor],
-                      silu_activation: bool, pad_slot_id: int):
-    torch.ops._C.causal_conv1d_fwd(x, weight, bias_, conv_states,
-                                   query_start_loc, cache_indices,
-                                   has_initial_state, silu_activation,
-                                   pad_slot_id)
-
-
-def causal_conv1d_update(x: torch.Tensor, conv_state: torch.Tensor,
-                         weight: torch.Tensor, bias_: Optional[torch.Tensor],
-                         silu_activation: bool,
-                         cache_seqlens: Optional[torch.Tensor],
-                         conv_state_indices: Optional[torch.Tensor],
-                         pad_slot_id: int):
-    torch.ops._C.causal_conv1d_update(x, conv_state, weight, bias_,
-                                      silu_activation, cache_seqlens,
-                                      conv_state_indices, pad_slot_id)
-
-
-def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
-                       B: torch.Tensor, C: torch.Tensor,
-                       D_: Optional[torch.Tensor], z_: Optional[torch.Tensor],
-                       delta_bias_: Optional[torch.Tensor],
-                       delta_softplus: bool,
-                       query_start_loc: Optional[torch.Tensor],
-                       cache_indices: Optional[torch.Tensor],
-                       has_initial_state: Optional[torch.Tensor],
-                       ssm_states: torch.Tensor, pad_slot_id: int):
-    torch.ops._C.selective_scan_fwd(u, delta, A, B, C, D_, z_, delta_bias_,
-                                    delta_softplus, query_start_loc,
-                                    cache_indices, has_initial_state,
-                                    ssm_states, pad_slot_id)
-
-
-# ROCm skinny gemms
-def LLMM1(a: torch.Tensor, b: torch.Tensor,
-          rows_per_block: int) -> torch.Tensor:
-    return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
-
-
-def wvSplitK(a: torch.Tensor, b: torch.Tensor, cu_count: int) -> torch.Tensor:
-    return torch.ops._rocm_C.wvSplitK(a, b, cu_count)
+# ROCm skinny gemms (migrated to custom_ops)
 
 
 def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
@@ -1193,27 +1115,7 @@ def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
     return out
 
 
-# moe
-def moe_sum(input: torch.Tensor, output: torch.Tensor):
-    torch.ops._moe_C.moe_sum(input, output)
-
-
-def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
-                         block_size: int, sorted_token_ids: torch.Tensor,
-                         experts_ids: torch.Tensor,
-                         num_tokens_post_pad: torch.Tensor) -> None:
-    torch.ops._moe_C.moe_align_block_size(topk_ids, num_experts, block_size,
-                                          sorted_token_ids, experts_ids,
-                                          num_tokens_post_pad)
-
-
-def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
-                             block_size: int, sorted_token_ids: torch.Tensor,
-                             experts_ids: torch.Tensor,
-                             num_tokens_post_pad: torch.Tensor) -> None:
-    torch.ops._moe_C.sgl_moe_align_block_size(topk_ids, num_experts,
-                                              block_size, sorted_token_ids,
-                                              experts_ids, num_tokens_post_pad)
+# moe (simple functions migrated to custom_ops)
 
 
 def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
@@ -1235,11 +1137,7 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
                                     bit)
 
 
-def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 token_expert_indicies: torch.Tensor,
-                 gating_output: torch.Tensor) -> None:
-    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
-                                  token_expert_indicies, gating_output)
+# topk_softmax (migrated to custom_ops)
 
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
@@ -1308,207 +1206,16 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
                            device=input.device)
 
 
-def reshape_and_cache(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    kv_cache_dtype: str,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-) -> None:
-    torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache,
-                                             value_cache, slot_mapping,
-                                             kv_cache_dtype, k_scale, v_scale)
+# cache operations (migrated to custom_ops)
 
 
-def reshape_and_cache_flash(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    kv_cache_dtype: str,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-) -> None:
-    torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache,
-                                                   value_cache, slot_mapping,
-                                                   kv_cache_dtype, k_scale,
-                                                   v_scale)
+# device utility functions (migrated to custom_ops)
 
 
-def concat_and_cache_mla(
-    kv_c: torch.Tensor,
-    k_pe: torch.Tensor,
-    kv_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    kv_cache_dtype: str,
-    scale: torch.Tensor,
-) -> None:
-    torch.ops._C_cache_ops.concat_and_cache_mla(kv_c, k_pe, kv_cache,
-                                                slot_mapping, kv_cache_dtype,
-                                                scale)
+# custom_ar (migrated to custom_ops)
 
 
-def copy_blocks(key_caches: list[torch.Tensor],
-                value_caches: list[torch.Tensor],
-                block_mapping: torch.Tensor) -> None:
-    torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+# get_flash_mla_metadata (migrated to custom_ops)
 
 
-def copy_blocks_mla(kv_caches: list[torch.Tensor],
-                    block_mapping: torch.Tensor) -> None:
-    torch.ops._C_cache_ops.copy_blocks_mla(kv_caches, block_mapping)
-
-
-def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
-                block_mapping: torch.Tensor) -> None:
-    torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
-
-
-def convert_fp8(output: torch.Tensor,
-                input: torch.Tensor,
-                scale: float = 1.0,
-                kv_dtype: str = "fp8") -> None:
-    torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
-
-
-def gather_cache(src_cache: torch.Tensor,
-                 dst: torch.Tensor,
-                 block_table: torch.Tensor,
-                 cu_seq_lens: torch.Tensor,
-                 batch_size: int,
-                 seq_starts: Optional[torch.Tensor] = None) -> None:
-    torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
-                                        cu_seq_lens, batch_size, seq_starts)
-
-
-def get_device_attribute(attribute: int, device: int) -> int:
-    return torch.ops._C_cuda_utils.get_device_attribute(attribute, device)
-
-
-def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
-    # ruff: noqa: E501
-    return torch.ops._C_cuda_utils.get_max_shared_memory_per_block_device_attribute(
-        device)
-
-
-# custom ar
-def init_custom_ar(ipc_tensors: list[torch.Tensor], rank_data: torch.Tensor,
-                   rank: int, fully_connected: bool) -> int:
-    return torch.ops._C_custom_ar.init_custom_ar(ipc_tensors, rank_data, rank,
-                                                 fully_connected)
-
-
-def all_reduce(fa: int, inp: torch.Tensor, out: torch.Tensor, reg_buffer: int,
-               reg_buffer_sz_bytes: int) -> None:
-    torch.ops._C_custom_ar.all_reduce(fa, inp, out, reg_buffer,
-                                      reg_buffer_sz_bytes)
-
-
-def dispose(fa: int) -> None:
-    torch.ops._C_custom_ar.dispose(fa)
-
-
-def meta_size() -> int:
-    return torch.ops._C_custom_ar.meta_size()
-
-
-def register_buffer(fa: int, ipc_tensors: list[int]) -> None:
-    return torch.ops._C_custom_ar.register_buffer(fa, ipc_tensors)
-
-
-def get_graph_buffer_ipc_meta(fa: int) -> tuple[list[int], list[int]]:
-    return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta(fa)
-
-
-def register_graph_buffers(fa: int, handles: list[list[int]],
-                           offsets: list[list[int]]) -> None:
-    torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
-
-
-def allocate_shared_buffer_and_handle(size: int) -> tuple[int, torch.Tensor]:
-    return torch.ops._C_custom_ar.allocate_shared_buffer_and_handle(size)
-
-
-def open_mem_handle(mem_handle: torch.Tensor):
-    return torch.ops._C_custom_ar.open_mem_handle(mem_handle)
-
-
-def free_shared_buffer(ptr: int) -> None:
-    torch.ops._C_custom_ar.free_shared_buffer(ptr)
-
-
-def get_flash_mla_metadata(
-    cache_seqlens: torch.Tensor,
-    num_heads_per_head_k: int,
-    num_heads_k: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Arguments:
-        cache_seqlens: (batch_size), dtype torch.int32.
-        num_heads_per_head_k: Equals to seq_len_q * num_heads_q // num_heads_k.
-        num_heads_k: num_heads_k.
-
-    Return:
-        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), dtype torch.int32.
-        num_splits: (batch_size + 1), dtype torch.int32.
-    """
-    return torch.ops._C.get_flash_mla_metadata(cache_seqlens,
-                                               num_heads_per_head_k,
-                                               num_heads_k)
-
-
-def flash_mla_with_kvcache(
-    q: torch.Tensor,
-    k_cache: torch.Tensor,
-    block_table: torch.Tensor,
-    cache_seqlens: torch.Tensor,
-    head_dim_v: int,
-    tile_scheduler_metadata: torch.Tensor,
-    num_splits: torch.Tensor,
-    softmax_scale: Optional[float] = None,
-    causal: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Arguments:
-        q: (batch_size, seq_len_q, num_heads_q, head_dim).
-        k_cache: (num_blocks, page_block_size, num_heads_k, head_dim).
-        block_table: (batch_size, max_num_blocks_per_seq), torch.int32.
-        cache_seqlens: (batch_size), torch.int32.
-        head_dim_v: Head_dim of v.
-        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), torch.int32, return by get_mla_metadata.
-        num_splits: (batch_size + 1), torch.int32, return by get_mla_metadata.
-        softmax_scale: float. The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim).
-        causal: bool. Whether to apply causal attention mask.
-
-    Return:
-        out: (batch_size, seq_len_q, num_heads_q, head_dim_v).
-        softmax_lse: (batch_size, num_heads_q, seq_len_q), torch.float32.
-    """
-    if softmax_scale is None:
-        softmax_scale = q.shape[-1]**(-0.5)
-    out, softmax_lse = torch.ops._C.flash_mla_fwd_kvcache(
-        q,
-        k_cache,
-        None,
-        head_dim_v,
-        cache_seqlens,
-        block_table,
-        softmax_scale,
-        causal,
-        tile_scheduler_metadata,
-        num_splits,
-    )
-    return out, softmax_lse
-
-
-def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
-                       q_pe: torch.Tensor, kv_c_and_k_pe_cache: torch.Tensor,
-                       seq_lens: torch.Tensor, page_table: torch.Tensor,
-                       scale: float) -> torch.Tensor:
-    torch.ops._C.cutlass_mla_decode(out, q_nope, q_pe, kv_c_and_k_pe_cache,
-                                    seq_lens, page_table, scale)
-    return out
+# flash_mla_with_kvcache and cutlass_mla_decode (migrated to custom_ops)
