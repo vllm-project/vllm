@@ -610,11 +610,10 @@ class LLM:
                               desc="Beam search",
                               unit="token",
                               unit_scale=False)
-            warnings.warn(
+            logger.warning(
                 "The progress bar shows the upper bound on token steps and "
                 "may finish early due to stopping conditions. It does not "
                 "reflect instance-level progress.",
-                stacklevel=2,
             )
 
         for _ in token_iter:
