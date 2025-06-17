@@ -42,7 +42,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 
 # Cannot find the following 2 numbers from hf config.
@@ -244,6 +244,13 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
                                         info=FuyuProcessingInfo,
                                         dummy_inputs=FuyuDummyInputsBuilder)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.vision_embed_tokens.": "vision_embed_tokens.",
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+        })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

@@ -29,8 +29,9 @@ from vllm.utils import is_list_of
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import init_vision_tower_for_llava
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper,
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
 
 
@@ -270,6 +271,16 @@ class LlavaNextMultiModalProjector(nn.Module):
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "model.image_newline": "image_newline",
+            "lm_head.": "language_model.lm_head.",
+        })
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -468,4 +479,4 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             # This model doesn't support images for now
             ignore_unexpected_prefixes=["image_newline"],
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
