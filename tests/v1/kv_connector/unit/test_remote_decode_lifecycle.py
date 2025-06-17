@@ -210,8 +210,7 @@ def test_abort():
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert request_id in scheduler.pending_kv_free_req_ids
     assert request_id in scheduler.finished_req_ids
-    blocks = scheduler.kv_cache_manager.single_type_manager.req_to_blocks[
-        request_id]
+    blocks = scheduler.kv_cache_manager.coordinator.get_blocks(request_id)[0]
     for block in blocks:
         assert block.ref_cnt == 1
 
