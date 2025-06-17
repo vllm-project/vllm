@@ -527,7 +527,7 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         conv_state_shape, temporal_state_shape = None, None
 
         intermediate_size = (self.config.mamba_head_dim *
-              self.config.mamba_num_heads)
+                             self.config.mamba_num_heads)
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
