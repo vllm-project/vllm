@@ -502,15 +502,15 @@ def _valid_cutlass_block_scaled_grouped_gemm(hidden_states: torch.Tensor, w1: to
 
 def run_cutlass_block_scaled_fused_experts(
     a: torch.Tensor,
-    w1_q: torch.Tensor,
-    w2_q: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
 ) -> torch.Tensor:
-    w1_q = w1_q.transpose(1, 2)
-    w2_q = w2_q.transpose(1, 2)
+    w1_q = w1.transpose(1, 2)
+    w2_q = w2.transpose(1, 2)
     w1_scale = w1_scale.transpose(1, 2)
     w2_scale = w2_scale.transpose(1, 2)
 
