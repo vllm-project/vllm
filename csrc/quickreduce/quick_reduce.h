@@ -135,59 +135,6 @@ struct DeviceComms {
     }
   }
 
-  template <typename T>
-  bool use_fp_kernel(QuickReduceQuantLevel quant_level, uint32_t msg_size) {
-    if constexpr (std::is_same<T, half>::value) {
-      if (world_size == 2) {
-        return (quant_level == QuickReduceQuantLevel::INT8 and
-                msg_size < 1024 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT6 and
-                msg_size < 512 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT4 and
-                msg_size < 512 * 1024);
-      } else if (world_size == 4) {
-        return (quant_level == QuickReduceQuantLevel::INT8 and
-                msg_size < 8 * 1024 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT6 and
-                msg_size < 2 * 1024 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT4 and
-                msg_size < 1024 * 1024);
-      } else if (world_size == 8) {
-        // TODO need to do kernel benchmarking for TP8
-        return (quant_level == QuickReduceQuantLevel::INT8 and
-                msg_size < 1024 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT6 and
-                msg_size < 512 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT4 and
-                msg_size < 512 * 1024);
-      }
-    } else {
-      if (world_size == 2) {
-        return (quant_level == QuickReduceQuantLevel::INT8 and
-                msg_size < 4 * 1024 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT6 and
-                msg_size < 4 * 1024 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT4 and
-                msg_size < 4 * 1024 * 1024);
-      } else if (world_size == 4) {
-        return (quant_level == QuickReduceQuantLevel::INT8 and
-                msg_size < 32 * 1024 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT6 and
-                msg_size < 32 * 1024 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT4 and
-                msg_size < 32 * 1024 * 1024);
-      } else if (world_size == 8) {
-        // TODO need to do kernel benchmarking for TP8
-        return (quant_level == QuickReduceQuantLevel::INT8 and
-                msg_size < 32 * 1024 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT6 and
-                msg_size < 32 * 1024 * 1024) or
-               (quant_level == QuickReduceQuantLevel::INT4 and
-                msg_size < 32 * 1024 * 1024);
-      }
-    }
-  }
-
   void open_ipc_handles(std::vector<hipIpcMemHandle_t> const& ipc_handles) {
     assert(ipc_handles.size() == all_buffer_ipc_handles.size());
     for (int i = 0; i < world_size; i++) {
@@ -223,9 +170,6 @@ struct DeviceComms {
     uint32_t num_blocks = divceil(msg_size, kTileSize);
     uint32_t grid = min(kMaxNumBlocks, num_blocks);
     auto quant_level_ = static_cast<QuickReduceQuantLevel>(quant_level);
-    if (use_fp_kernel<T>(quant_level_, msg_size)) {
-      quant_level_ = QuickReduceQuantLevel::F16;
-    }
     switch (quant_level_) {
       case QuickReduceQuantLevel::INT8:
         TWOSHOT_DISPATCH(CodecQ8)

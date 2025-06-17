@@ -11,6 +11,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.config import get_current_vllm_config
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
 from vllm.distributed.parallel_state import in_the_same_node_as
@@ -67,14 +68,15 @@ class CustomAllreduce:
     _QR_SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _QR_SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
 
-    # TODO need to do kernel benchmarking for TP8 to get min sizes
+    # TODO: We should set a reasonable range for FP.
+    MB = 1024 * 1024
     _QR_MIN_SIZE = {
-        (torch.float16, 2): 512 * 1024,  # 512KB
-        (torch.float16, 4): 512 * 1024,  # 512KB
-        (torch.float16, 8): 512 * 1024,  # 512KB
-        (torch.bfloat16, 2): 1024 * 1024,  # 1MB
-        (torch.bfloat16, 4): 4 * 1024 * 1024,  # 4MB
-        (torch.bfloat16, 8): 4 * 1024 * 1024,  # 4KB
+        (torch.float16, 2): [16 * MB, 2 * MB, 2 * MB, 1 * MB],
+        (torch.float16, 4): [16 * MB, 64 * MB, 4 * MB, 2 * MB],
+        (torch.float16, 8): [16 * MB, 4 * MB, 4 * MB, 2 * MB],
+        (torch.bfloat16, 2): [16 * MB, 8 * MB, 8 * MB, 8 * MB],
+        (torch.bfloat16, 4): [16 * MB, 128 * MB, 128 * MB, 16 * MB],
+        (torch.bfloat16, 8): [16 * MB, 2048 * MB, 2048 * MB, 2048 * MB],
     }
 
     # max_size: max supported allreduce size
@@ -197,7 +199,8 @@ class CustomAllreduce:
             return
         if not current_platform.is_rocm():
             # First, we only enable quickreduce for MI300 series,
-            # If it's rocm then it must be MI300 series, qr must be available.
+            # If it's rocm then it must be MI300 series because cr is only
+            # available on the mi300 series, qr must be available.
             self._QR_SHOULD_INIT = False
 
             # test P2P capability, this checks software/cudaruntime support
@@ -213,8 +216,10 @@ class CustomAllreduce:
                 return
 
         self.init_custom_allreduce()
+        # self.disabled is used to indicate cr, if the condition
+        # of cr is not satisfied, qr must not be satisfied,
+        # This boolean serves as a uniform identifier for external.
         self.disabled = False
-
         self.init_custom_quick_allreduce()
 
     def init_custom_allreduce(self):
@@ -251,6 +256,10 @@ class CustomAllreduce:
         Initialize a custom quick allreduce implementation for AMD
         based on quick reduce (https://github.com/mk1-project/quickreduce).
         """
+        vllm_config = get_current_vllm_config()
+        dtype = vllm_config.model_config.dtype
+        if dtype not in [torch.float16, torch.bfloat16]:
+            self._QR_SHOULD_INIT = False
         # On RocM bfloat16 kernels are slower than fp16
         # due to slower match operations
         # If environment is not set to 1 we convert input to fp16
@@ -271,11 +280,13 @@ class CustomAllreduce:
                 return
 
             self.qr_quant_level = QuickReduceRegime[regime_str]
-            # These numbers are based on kernel tests.
-            # TODO: We need the full kernel test to guide the
-            # size adjustment here
             self._qr_ptr = ops.init_custom_qr(self.rank, self.world_size)
             self.create_qr_shared_buffer()
+            if dtype == torch.bfloat16 and not self.use_fp16_kernels:
+                logger.info(
+                    "Custom quick allreduce: converting bf16 to fp16 "
+                    "can speed up qr, "
+                    "set envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16=1 to turn on.")
             self.qr_disabled = False
 
     @contextmanager
@@ -322,8 +333,6 @@ class CustomAllreduce:
         inp_size = inp.numel() * inp.element_size()
         # custom quick allreduce requires input byte size to be
         # multiples of 16
-        if inp.dtype not in self._QR_SUPPORTED_DTYPES:
-            return False
         if inp_size % 16 != 0:
             return False
         if not is_weak_contiguous(inp):
@@ -332,8 +341,9 @@ class CustomAllreduce:
         dtype = inp.dtype
         if self.use_fp16_kernels:
             dtype = torch.float16
-        return inp_size > self._QR_MIN_SIZE[(dtype, self.world_size)] and \
-            inp_size <= self.qr_max_size
+        return inp_size <= self.qr_max_size and \
+            inp_size > self._QR_MIN_SIZE[(dtype, self.world_size)]\
+                [self.qr_quant_level.value]
 
     def should_custom_allreduce(self, inp: torch.Tensor):
         if self.disabled:
@@ -412,13 +422,13 @@ class CustomAllreduce:
         return None
 
     def close(self):
-        if not self.cr_disabled and self._cr_ptr:
+        if not self.disabled and self._cr_ptr:
             if ops is not None:
                 ops.dispose(self._cr_ptr)
             self._cr_ptr = 0
             self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
             self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
-            self.cr_disabled = True
+            self.disabled = True
         if not self.qr_disabled and self._qr_ptr:
             if ops is not None:
                 ops.qr_destroy(self._qr_ptr)
