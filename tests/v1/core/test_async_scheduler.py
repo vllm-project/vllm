@@ -7,6 +7,7 @@ import pytest
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
+from vllm.v1.utils import ConstantList
 
 from .utils import create_requests, create_scheduler
 
@@ -140,7 +141,8 @@ def test_prefix_caching_for_prefill_dedup():
     requests = create_requests(num_requests=5,
                                num_tokens=num_prompt_tokens,
                                max_tokens=3,
-                               same_prompt=True)
+                               same_prompt=True,
+                               block_size=BLOCK_SIZE)
     requests_copy = requests.copy()
 
     # Two requests with the same prompt.
@@ -188,7 +190,8 @@ def test_prefix_caching_for_multi_turn():
                                  block_size=BLOCK_SIZE)
     requests = create_requests(num_requests=5,
                                num_tokens=num_prompt_tokens,
-                               max_tokens=num_output_tokens)
+                               max_tokens=num_output_tokens,
+                               block_size=BLOCK_SIZE)
 
     for req in requests:
         scheduler.add_request(req)
@@ -208,14 +211,19 @@ def test_prefix_caching_for_multi_turn():
 
     # Create next-turn requests whose prompts are the full output of the
     # previous turn.
-    next_turn_requests = create_requests(
-        num_requests=5,
-        num_tokens=num_prompt_tokens + num_output_tokens,
-        max_tokens=num_output_tokens,
-    )
+    next_turn_requests = create_requests(num_requests=5,
+                                         num_tokens=num_prompt_tokens +
+                                         num_output_tokens,
+                                         max_tokens=num_output_tokens,
+                                         block_size=BLOCK_SIZE)
     for i, req in enumerate(next_turn_requests):
         req.prompt_token_ids = (requests[i].prompt_token_ids +
                                 list(requests[i].output_token_ids))
+        req._all_token_ids = req.prompt_token_ids.copy()
+        req.all_token_ids = ConstantList(req._all_token_ids)
+        req.block_hashes = []
+        req.block_hashes = req.get_hash_new_full_blocks()
+
     # Schedule the next-turn requests.
     for req in next_turn_requests:
         scheduler.add_request(req)
