@@ -841,14 +841,14 @@ def try_get_optimal_moe_config_list(
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
                                         is_marlin, block_shape)
 
-    return [
+    return (
         config['BLOCK_SIZE_M'],
         config['BLOCK_SIZE_N'],
         config['BLOCK_SIZE_K'],
         config['GROUP_SIZE_M'],
         config.get('num_warps', 4),
         config.get('num_stages', 3 if not current_platform.is_rocm() else 2),
-    ]
+    )
 
 
 direct_register_custom_op(
