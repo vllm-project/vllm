@@ -257,9 +257,11 @@ class CustomAllreduce:
         based on quick reduce (https://github.com/mk1-project/quickreduce).
         """
         vllm_config = get_current_vllm_config()
-        dtype = vllm_config.model_config.dtype
-        if dtype not in [torch.float16, torch.bfloat16]:
-            self._QR_SHOULD_INIT = False
+        # for test mode
+        if vllm_config is not None and hasattr(vllm_config, "model_config"):
+            dtype = vllm_config.model_config.dtype
+            if dtype not in [torch.float16, torch.bfloat16]:
+                self._QR_SHOULD_INIT = False
         # On RocM bfloat16 kernels are slower than fp16
         # due to slower match operations
         # If environment is not set to 1 we convert input to fp16
@@ -329,6 +331,8 @@ class CustomAllreduce:
         Check if quickreduce is available
         """
         if self.qr_disabled:
+            return False
+        if inp.dtype not in self._QR_SUPPORTED_DTYPES:
             return False
         inp_size = inp.numel() * inp.element_size()
         # custom quick allreduce requires input byte size to be
