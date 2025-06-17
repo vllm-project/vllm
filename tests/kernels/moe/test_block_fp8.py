@@ -7,8 +7,8 @@ import itertools
 import pytest
 import torch
 
-from tests.kernels.quant_utils import (native_w8a8_block_matmul,
-                                       native_per_token_group_quant_fp8,
+from tests.kernels.quant_utils import (native_per_token_group_quant_fp8,
+                                       native_w8a8_block_matmul,
                                        per_block_cast_to_fp8)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8, w8a8_block_fp8_matmul)
+    per_token_group_quant_fp8)
 from vllm.platforms import current_platform
 
 dg_available = False
@@ -261,9 +261,8 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     return final_out
 
 
-@pytest.mark.parametrize(
-    "M,N,K,E,topk,seed",
-    itertools.product(M_dg, N, K, E, TOP_KS, SEEDS))
+@pytest.mark.parametrize("M,N,K,E,topk,seed",
+                         itertools.product(M_dg, N, K, E, TOP_KS, SEEDS))
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,

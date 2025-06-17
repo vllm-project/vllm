@@ -3,7 +3,7 @@
 
 import functools
 import importlib.util
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional
 
 import torch
 import torch.nn.functional as F
@@ -15,16 +15,10 @@ from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    FusedMoEConfig,
-    FusedMoEMethodBase,
-    FusedMoeWeightScaleSupported,
-    FusedMoEActivationFormat,
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize,
-    TritonOrDeepGemmExperts,
-    BatchedTritonOrDeepGemmExperts,
-)
+    BatchedTritonOrDeepGemmExperts, FusedMoE, FusedMoEActivationFormat,
+    FusedMoEConfig, FusedMoEMethodBase, FusedMoEPermuteExpertsUnpermute,
+    FusedMoEPrepareAndFinalize, FusedMoeWeightScaleSupported,
+    TritonOrDeepGemmExperts)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -787,8 +781,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
             "Marlin and ROCm AITER are not supported with all2all yet.")
 
-        if prepare_finalize.activation_format == FusedMoEActivationFormat.BatchedExperts:
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+        if (prepare_finalize.activation_format ==
+            FusedMoEActivationFormat.BatchedExperts):
+            max_num_tokens_per_rank = (
+                prepare_finalize.max_num_tokens_per_rank()
+            )
             assert max_num_tokens_per_rank is not None
             logger.debug(
                 "BatchedTritonOrDeepGemmExperts(%s): "
@@ -796,9 +793,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 self.__class__.__name__, max_num_tokens_per_rank,
                 self.quant_config.weight_block_size, False)
             return BatchedTritonOrDeepGemmExperts(
-                max_num_tokens=max_num_tokens_per_rank, # get from prepare_finalize?
-                world_size=prepare_finalize.world_size, # TODO sketchy
-                dp_size=prepare_finalize.dp_size,       # TODO sketchy
+                max_num_tokens=
+                max_num_tokens_per_rank,  # get from prepare_finalize?
+                world_size=prepare_finalize.world_size,  # TODO sketchy
+                dp_size=prepare_finalize.dp_size,  # TODO sketchy
                 use_fp8_w8a8=True,
                 block_shape=self.quant_config.weight_block_size,
                 per_act_token_quant=False,  #?

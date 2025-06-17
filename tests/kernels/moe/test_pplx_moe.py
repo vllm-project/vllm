@@ -18,18 +18,16 @@ try:
 except ImportError:
     has_pplx = False
 
+from tests.kernels.moe.utils import make_test_weights, naive_batched_moe
 from tests.kernels.utils import torch_experts
-from tests.kernels.moe.utils import (make_test_weights, naive_batched_moe)
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe import (
-    override_config,
-    fused_topk)
-from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
+from vllm.model_executor.layers.fused_moe import fused_topk, override_config
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
+from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel)
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
@@ -579,11 +577,14 @@ def _pplx_moe(
 
     with set_current_vllm_config(vllm_config), override_config(moe_config):
         topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
-        torch_output = torch_experts(a, w1, w2, topk_weight, topk_ids, w1_s, w2_s,
-                                     qtype, per_act_token_quant, block_shape)
-        pplx_output = pplx_moe(group_name, pgi.rank, pgi.world_size, dp_size, a,
-                               w1, w2, topk_weight, topk_ids, w1_s, w2_s, qtype,
-                               per_act_token_quant, block_shape)
+        torch_output = torch_experts(a, w1, w2, topk_weight, topk_ids,
+                                     w1_scale=w1_s, w2_scale=w2_s,
+                                     quant_dtype=qtype,
+                                     per_act_token_quant=per_act_token_quant,
+                                     block_shape=block_shape)
+        pplx_output = pplx_moe(group_name, pgi.rank, pgi.world_size, dp_size,
+                               a, w1, w2, topk_weight, topk_ids, w1_s, w2_s,
+                               qtype, per_act_token_quant, block_shape)
         # TODO (bnell): fix + re-enable
         #batched_output = _batched_moe(pgi, dp_size, a, w1, w2, topk_weight,
         #                              topk_ids)
@@ -601,7 +602,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("mnk", PPLX_MOE_COMBOS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.bfloat16]) # torch.float8_e4m3fn, 
+@pytest.mark.parametrize("dtype", [torch.bfloat16])  # torch.float8_e4m3fn,
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
@@ -634,8 +635,11 @@ def test_pplx_moe(
     a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
     score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(
-        e, n, k, quant_dtype=quant_dtype, block_shape=block_shape)
+    _, w1, w1_s, _, w2, w2_s = make_test_weights(e,
+                                                 n,
+                                                 k,
+                                                 quant_dtype=quant_dtype,
+                                                 block_shape=block_shape)
 
     parallel_launch(world_size, _pplx_moe, dp_size, a, w1, w2, score, topk,
                     w1_s, w2_s, quant_dtype, per_act_token_quant, block_shape,

@@ -7,10 +7,10 @@ import itertools
 import pytest
 import torch
 
-from tests.kernels.quant_utils import (native_w8a8_block_matmul,
-                                       per_block_cast_to_fp8,
-                                       native_per_token_group_quant_fp8)
-from vllm.config import VllmConfig, set_current_vllm_config
+from tests.kernels.quant_utils import (native_per_token_group_quant_fp8,
+                                       native_w8a8_block_matmul,
+                                       per_block_cast_to_fp8)
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
@@ -43,7 +43,6 @@ K = [256, 3884, 4096, 13824, 16384]
 BLOCK_SIZE = [[128, 128]]
 OUT_DTYPES = [torch.bfloat16]  # [torch.float32, torch.half, torch.bfloat16]
 SEEDS = [0]
-
 
 # Skip all tests if CUDA is not available
 pytest.importorskip("torch.cuda")

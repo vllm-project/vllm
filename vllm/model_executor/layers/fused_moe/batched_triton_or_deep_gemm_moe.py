@@ -56,8 +56,8 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ) if self.block_shape is None else None
 
         is_fp8_128_block_quantized = (
-            self.use_fp8_w8a8
-            and self.block_shape == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
+            self.use_fp8_w8a8 and self.block_shape
+            == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
 
         self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
             max_num_tokens=self.max_num_tokens,
@@ -70,9 +70,13 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 or self.batched_triton_experts is not None)
 
     @property
-    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
         if self.batched_triton_experts is not None:
-            assert self.batched_deep_gemm_experts is None or self.batched_deep_gemm_experts.activation_formats == self.batched_triton_experts.activation_formats
+            assert (self.batched_deep_gemm_experts is None or
+                    self.batched_deep_gemm_experts.activation_formats ==
+                    self.batched_triton_experts.activation_formats)
             return self.batched_triton_experts.activation_formats
         else:
             assert self.batched_deep_gemm_experts is not None

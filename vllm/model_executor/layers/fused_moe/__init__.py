@@ -7,9 +7,8 @@ from typing import Any, Optional
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEPrepareAndFinalize,
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEActivationFormat)
+    FusedMoEActivationFormat, FusedMoEPermuteExpertsUnpermute,
+    FusedMoEPrepareAndFinalize)
 from vllm.triton_utils import HAS_TRITON
 
 _config: Optional[dict[str, Any]] = None
@@ -44,21 +43,21 @@ if HAS_TRITON:
     # import to register the custom ops
     import vllm.model_executor.layers.fused_moe.fused_marlin_moe  # noqa
     import vllm.model_executor.layers.fused_moe.fused_moe  # noqa
+    from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+        BatchedDeepGemmExperts)
+    from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import ( # noqa: E501
+        BatchedTritonOrDeepGemmExperts)
     from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-        cutlass_moe_fp4, cutlass_moe_fp8, CutlassExpertsFp8)
+        CutlassExpertsFp8, cutlass_moe_fp4, cutlass_moe_fp8)
+    from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+        DeepGemmExperts)
+    from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+        BatchedTritonExperts)
     from vllm.model_executor.layers.fused_moe.fused_moe import (
         TritonExperts, fused_experts, fused_moe, fused_topk,
         get_config_file_name, grouped_topk)
-    from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-        BatchedTritonExperts)
-    from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-        DeepGemmExperts)
-    from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-        BatchedDeepGemmExperts)
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts)
-    from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (
-        BatchedTritonOrDeepGemmExperts)
 
     __all__ += [
         "fused_moe",

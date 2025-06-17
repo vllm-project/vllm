@@ -8,11 +8,7 @@ from typing import Optional, final
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEParallelConfig,
-    FusedMoEQuantConfig,
-    FusedMoEConfig,
-)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.utils import cdiv
 

@@ -38,8 +38,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     # specific hidden sizes.
     SUPPORTED_HIDDEN_SIZES = [2560, 4096, 5120, 7168]
 
-    def __init__(self, buffer: deep_ep.Buffer, max_tokens_per_rank: int,
-                 world_size: int, dp_size: int, use_fp8_dispatch: bool = False):
+    def __init__(self,
+                 buffer: deep_ep.Buffer,
+                 max_tokens_per_rank: int,
+                 world_size: int,
+                 dp_size: int,
+                 use_fp8_dispatch: bool = False):
         super().__init__()
 
         self.buffer = buffer
@@ -97,10 +101,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             #print(f"DYNAMIC")
             _per_act_token_quant = True
         else:
-            _per_act_token_quant = ((block_shape is not None) or
-                                   (a1_scale is not None and a1_scale.numel() != 1)
-                                   or (a2_scale is not None
-                                       and a2_scale.numel() != 1))
+            _per_act_token_quant = (
+                (block_shape is not None)
+                or (a1_scale is not None and a1_scale.numel() != 1)
+                or (a2_scale is not None and a2_scale.numel() != 1))
             #print(f"{block_shape} {a1_scale} {a2_scale}")
 
         # assert per_act_token_quant == (
@@ -108,9 +112,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         #     or (a1_scale is not None and a1_scale.numel() != 1)
         #     or (a2_scale is not None and a2_scale.numel() != 1))
 
-
         # TODO(bnell)
-        assert per_act_token_quant == _per_act_token_quant, f"{per_act_token_quant} == {_per_act_token_quant}"
+        assert per_act_token_quant == _per_act_token_quant, \
+            f"{per_act_token_quant} == {_per_act_token_quant}"
 
         num_experts, max_tokens, hidden_dim = x.size()
 

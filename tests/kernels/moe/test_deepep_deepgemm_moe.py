@@ -28,7 +28,6 @@ from .deepep_utils import ProcessGroupInfo, parallel_launch
 has_deep_ep = importlib.util.find_spec("deep_ep") is not None
 has_deep_gemm = importlib.util.find_spec("deep_gemm") is not None
 
-
 if has_deep_ep:
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
         DeepEPHTPrepareAndFinalize)
@@ -69,8 +68,7 @@ def per_block_cast_to_fp8(
     assert x.dim() == 2
     m, n = x.shape
     x_padded = torch.zeros(
-        (cdiv(m, 128) * 128,
-         cdiv(n, block_size_n) * block_size_n),
+        (cdiv(m, 128) * 128, cdiv(n, block_size_n) * block_size_n),
         dtype=x.dtype,
         device=x.device)
     x_padded[:m, :n] = x

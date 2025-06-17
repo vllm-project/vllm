@@ -219,7 +219,7 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
             FusedMoEQuantConfig(
                 quant_dtype=torch.float8_e4m3fn,
                 per_act_token_quant=per_act_token_quant,
-                per_out_ch_quant = per_out_ch_quant,
+                per_out_ch_quant=per_out_ch_quant,
                 block_shape=block_shape,
             ))
         assert max_experts_per_worker > 0
@@ -228,7 +228,9 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_batched_format = use_batched_format
 
     @property
-    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
         return (mk.FusedMoEActivationFormat.Standard,
                 mk.FusedMoEActivationFormat.Standard)
 
@@ -286,14 +288,11 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         activation_callable = lambda i, o: self.activation(activation, i, o)
         in_dtype = hidden_states.dtype
         run_cutlass_moe_fp8(
-            output, hidden_states, w1, w2, topk_ids,
-            activation_callable, global_num_experts,
-            expert_map, w1_scale, w2_scale, a1q_scale,
-            a2_scale, workspace13, workspace2,
-            expert_num_tokens,
+            output, hidden_states, w1, w2, topk_ids, activation_callable,
+            global_num_experts, expert_map, w1_scale, w2_scale, a1q_scale,
+            a2_scale, workspace13, workspace2, expert_num_tokens,
             self.out_dtype if self.out_dtype is not None else in_dtype,
-            self.per_act_token_quant,
-            self.per_out_ch_quant,
+            self.per_act_token_quant, self.per_out_ch_quant,
             self.use_batched_format)
 
 

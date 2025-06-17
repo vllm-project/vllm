@@ -15,15 +15,9 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    fused_experts,
-    FusedMoE,
-    FusedMoEConfig,
-    FusedMoEMethodBase,
-    FusedMoeWeightScaleSupported,
-    FusedMoEActivationFormat,
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize,
-    CutlassExpertsFp8)
+    CutlassExpertsFp8, FusedMoE, FusedMoEActivationFormat, FusedMoEConfig,
+    FusedMoEMethodBase, FusedMoEPermuteExpertsUnpermute,
+    FusedMoEPrepareAndFinalize, FusedMoeWeightScaleSupported, fused_experts)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -39,13 +33,6 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
-
-if current_platform.is_cuda_alike():
-    from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-        BatchedPrepareAndFinalize)
-    if has_pplx:
-        from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-            PplxPrepareAndFinalize)
 
 logger = init_logger(__name__)
 
@@ -565,7 +552,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
 
-        if prepare_finalize.activation_format == FusedMoEActivationFormat.BatchedExperts:
+        if (prepare_finalize.activation_format ==
+            FusedMoEActivationFormat.BatchedExperts):
             # TODO(bnell): attrs from prepare_finalize sketchy
             max_experts_per_worker = (
                 (moe.num_experts + prepare_finalize.world_size - 1) //

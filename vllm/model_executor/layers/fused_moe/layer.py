@@ -21,8 +21,8 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig, FusedMoEParallelConfig)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel, FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize)
+    FusedMoEActivationFormat, FusedMoEModularKernel,
+    FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -54,6 +54,7 @@ if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
 else:
     fused_moe_pallas = None  # type: ignore
+
 logger = init_logger(__name__)
 
 
@@ -220,17 +221,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             self.rocm_aiter_fused_experts = None  # type: ignore
 
     def select_gemm_impl(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig
-    ) -> FusedMoEPermuteExpertsUnpermute:
+            self, prepare_finalize: FusedMoEPrepareAndFinalize,
+            moe: FusedMoEConfig) -> FusedMoEPermuteExpertsUnpermute:
 
         assert self.fused_experts == fused_experts
 
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
-        if prepare_finalize.activation_format == FusedMoeActivationFormat.BatchedExperts:
+        if (prepare_finalize.activation_format ==
+            FusedMoEActivationFormat.BatchedExperts):
             logger.debug("BatchedTritonExperts %s", self.moe)
             assert self.moe.dp_size == all2all_manager.dp_world_size
             return BatchedTritonExperts(

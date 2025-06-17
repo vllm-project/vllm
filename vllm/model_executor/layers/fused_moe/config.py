@@ -10,13 +10,12 @@ from compressed_tensors.quantization import (QuantizationArgs,
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig
+from vllm.logger import init_logger
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-# Note: this limit is somewhat arbitrary and might be changed later.
-# The size of the activations will be E x MOE_DP_CHUNK_SIZE x hidden_dim.
-MOE_DP_CHUNK_SIZE = 128
+logger = init_logger(__name__)
 
 
 def _get_quant_config_quantization_args(

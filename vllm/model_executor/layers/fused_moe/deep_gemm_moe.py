@@ -6,6 +6,7 @@ from typing import Optional
 
 import torch
 
+import vllm.model_executor.layers.quantization.deepgemm
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -73,11 +74,12 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 quant_dtype=torch.float8_e4m3fn,
                 per_act_token_quant=False,
                 block_shape=deep_gemm_block_shape(),
-            )
-        )
+            ))
 
     @property
-    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
         return (mk.FusedMoEActivationFormat.Standard,
                 mk.FusedMoEActivationFormat.Standard)
 

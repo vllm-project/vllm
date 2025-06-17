@@ -20,7 +20,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     # The Deep Gemm kernels only support block size of 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
-    def __init__(self, max_num_tokens: int, world_size: int, dp_size: int,
+    def __init__(self,
+                 max_num_tokens: int,
+                 world_size: int,
+                 dp_size: int,
                  block_shape: list[int],
                  per_act_token_quant=False):
         """
@@ -41,7 +44,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.dp_size = dp_size
 
     @property
-    def activation_formats(self) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+    def activation_formats(
+        self
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
         return (mk.FusedMoEActivationFormat.BatchedExperts,
                 mk.FusedMoEActivationFormat.BatchedExperts)
 
