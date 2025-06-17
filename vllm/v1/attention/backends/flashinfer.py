@@ -117,7 +117,6 @@ def get_per_layer_parameters(
 
     for key, layer in layers.items():
         impl = layer.impl
-        assert isinstance(impl, FlashInferImpl)
 
         # Infer hyperparameters from the attention layer
         window_size = impl.sliding_window
