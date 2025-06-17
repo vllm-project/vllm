@@ -14,8 +14,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
-from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
-                                         KVCacheBlock, hash_block_tokens)
+from vllm.v1.core.kv_cache_utils import (BlockHashWithGroupId, KVCacheBlock,
+                                         hash_block_tokens)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, SlidingWindowSpec)
 
@@ -112,7 +112,7 @@ def test_prefill(hash_algo):
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
-    assert len(manager.req_to_block_hashes[req0.request_id]) == 3
+    assert len(req0.block_hashes) == 3
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req0, 55,
@@ -141,7 +141,7 @@ def test_prefill(hash_algo):
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
-    assert len(manager.req_to_block_hashes[req1.request_id]) == 3
+    assert len(req1.block_hashes) == 3
     assert computed_blocks.get_block_ids() == ([1, 2, 3], )
     assert num_computed_tokens == 3 * 16
     num_new_tokens = 53 - 3 * 16
@@ -175,7 +175,7 @@ def test_prefill(hash_algo):
     unique_token_ids = [3] * 6
     req2 = make_request("2", common_token_ids + unique_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
-    assert len(manager.req_to_block_hashes[req2.request_id]) == 3
+    assert len(req2.block_hashes) == 3
     assert computed_blocks.get_block_ids() == ([1, 2, 3], )
     assert num_computed_tokens == 3 * 16
     num_new_tokens = 53 - 3 * 16
@@ -231,7 +231,7 @@ def test_prefill_hybrid_model():
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
-    assert len(manager.req_to_block_hashes[req0.request_id]) == 3
+    assert len(req0.block_hashes) == 3
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req0, 55,
@@ -263,7 +263,7 @@ def test_prefill_hybrid_model():
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
-    assert len(manager.req_to_block_hashes[req1.request_id]) == 3
+    assert len(req1.block_hashes) == 3
     assert computed_blocks.get_block_ids() == ([1, 2, 3], [0, 6,
                                                            7], [0, 10, 11])
     assert num_computed_tokens == 3 * 16
@@ -277,7 +277,7 @@ def test_prefill_hybrid_model():
             if block != manager.block_pool.null_block:
                 assert block.ref_cnt == 2
 
-    block_hashes = manager.req_to_block_hashes[req1.request_id]
+    block_hashes = req1.block_hashes
     manager.free(req0)
     manager.free(req1)
 
@@ -292,7 +292,7 @@ def test_prefill_hybrid_model():
             manager.block_pool.cached_block_hash_to_block.pop(
                 hash_with_group_id)
         computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
-        assert len(manager.req_to_block_hashes[req.request_id]) == 3
+        assert len(req.block_hashes) == 3
         assert num_computed_tokens == expect_hit_length * block_size
         for block_per_group in computed_blocks.blocks:
             assert len(block_per_group) == num_computed_tokens // block_size
@@ -369,7 +369,7 @@ def test_prefill_plp():
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids, prompt_logprobs=5)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
-    assert len(manager.req_to_block_hashes[req0.request_id]) == 0
+    assert len(req0.block_hashes) == 0
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req0, 55,
@@ -400,7 +400,7 @@ def test_prefill_plp():
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
-    assert len(manager.req_to_block_hashes[req1.request_id]) == 3
+    assert len(req1.block_hashes) == 3
     assert computed_blocks.get_block_ids() == ([1, 2, 3], )
     assert num_computed_tokens == 3 * 16
     num_new_tokens = 53 - 3 * 16
@@ -436,7 +436,7 @@ def test_prefill_plp():
                         common_token_ids + unique_token_ids,
                         prompt_logprobs=5)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
-    assert len(manager.req_to_block_hashes[req2.request_id]) == 0
+    assert len(req2.block_hashes) == 0
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req2, 55,
@@ -716,12 +716,10 @@ def test_cache_blocks(hash_fn):
 
     # Test that blocks are cached correctly for 2 full blocks from the start.
     blocks = [KVCacheBlock(block_id=i) for i in range(2)]
-    block_hashes: list[BlockHash] = []
 
     block_pool.cache_full_blocks(
         request=req,
         blocks=blocks,
-        block_hashes=block_hashes,
         num_cached_blocks=0,
         num_full_blocks=2,
         block_size=block_size,
@@ -737,7 +735,6 @@ def test_cache_blocks(hash_fn):
     block_pool.cache_full_blocks(
         request=req,
         blocks=blocks,
-        block_hashes=block_hashes,
         num_cached_blocks=2,
         num_full_blocks=3,
         block_size=block_size,
@@ -764,11 +761,9 @@ def test_cache_blocks_multi_group():
 
     # Cache the blocks for group 0.
     blocks = [KVCacheBlock(block_id=i) for i in range(2)]
-    block_hashes: list[BlockHash] = []
     block_pool.cache_full_blocks(
         request=req,
         blocks=blocks,
-        block_hashes=block_hashes,
         num_cached_blocks=0,
         num_full_blocks=2,
         block_size=block_size,
@@ -776,7 +771,7 @@ def test_cache_blocks_multi_group():
         kv_cache_group_id=0,
     )
     assert len(block_pool.cached_block_hash_to_block) == 2
-    assert len(block_hashes) == 2
+    assert len(req.block_hashes) == 2
     assert all([block.block_hash is not None for block in blocks])
 
     # Cache the blocks for group 1.
@@ -784,7 +779,6 @@ def test_cache_blocks_multi_group():
     block_pool.cache_full_blocks(
         request=req,
         blocks=blocks,
-        block_hashes=block_hashes,
         num_cached_blocks=0,
         num_full_blocks=3,
         block_size=block_size,
@@ -792,30 +786,30 @@ def test_cache_blocks_multi_group():
         kv_cache_group_id=1,
     )
     assert len(block_pool.cached_block_hash_to_block) == 5
-    assert len(block_hashes) == 3
+    assert len(req.block_hashes) == 3
     assert all([block.block_hash is not None for block in blocks])
 
     # Block hash 0: hit for group 0 and 1
     # Block hash 1: hit for group 0 and 1
     # Block hash 2: hit for group 1
 
-    assert block_pool.get_cached_block(block_hashes[0],
+    assert block_pool.get_cached_block(req.block_hashes[0],
                                        kv_cache_group_ids=[0]) is not None
-    assert block_pool.get_cached_block(block_hashes[1],
+    assert block_pool.get_cached_block(req.block_hashes[1],
                                        kv_cache_group_ids=[0]) is not None
-    assert block_pool.get_cached_block(block_hashes[2],
+    assert block_pool.get_cached_block(req.block_hashes[2],
                                        kv_cache_group_ids=[0]) is None
-    assert block_pool.get_cached_block(block_hashes[0],
+    assert block_pool.get_cached_block(req.block_hashes[0],
                                        kv_cache_group_ids=[1]) is not None
-    assert block_pool.get_cached_block(block_hashes[1],
+    assert block_pool.get_cached_block(req.block_hashes[1],
                                        kv_cache_group_ids=[1]) is not None
-    assert block_pool.get_cached_block(block_hashes[2],
+    assert block_pool.get_cached_block(req.block_hashes[2],
                                        kv_cache_group_ids=[1]) is not None
-    assert block_pool.get_cached_block(block_hashes[0],
+    assert block_pool.get_cached_block(req.block_hashes[0],
                                        kv_cache_group_ids=[0, 1]) is not None
-    assert block_pool.get_cached_block(block_hashes[1],
+    assert block_pool.get_cached_block(req.block_hashes[1],
                                        kv_cache_group_ids=[0, 1]) is not None
-    assert block_pool.get_cached_block(block_hashes[2],
+    assert block_pool.get_cached_block(req.block_hashes[2],
                                        kv_cache_group_ids=[0, 1]) is None
 
 
@@ -857,7 +851,7 @@ def test_mm_prefix_caching():
     # Completed block should have hashes with extra keys.
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
-    block_hashes = manager.req_to_block_hashes[req0.request_id]
+    block_hashes = req0.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0].extra_keys == ("aaa", )
     assert block_hashes[1].extra_keys == ("aaa", "bbb")
@@ -918,7 +912,7 @@ def test_cache_key_salting():
     # Completed block should have hashes with extra keys.
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
-    block_hashes = manager.req_to_block_hashes[req0.request_id]
+    block_hashes = req0.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0].extra_keys == ("salt1", )
     assert block_hashes[1].extra_keys is None
@@ -956,7 +950,7 @@ def test_cache_key_salting():
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
     assert len(computed_blocks.blocks[0]) == 0
     assert num_computed_tokens == 0
-    block_hashes = manager.req_to_block_hashes[req2.request_id]
+    block_hashes = req2.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0].extra_keys == ("salt2", )
 
@@ -1049,7 +1043,7 @@ def test_reset_prefix_cache():
     all_token_ids = full_block_token_ids + unique_token_ids
     req1 = make_request("1", all_token_ids)
     computed_blocks, _ = manager.get_computed_blocks(req1)
-    assert len(manager.req_to_block_hashes[req1.request_id]) == 3
+    assert len(req1.block_hashes) == 3
     assert len(computed_blocks.blocks[0]) == 3
     blocks = manager.allocate_slots(req1, 7,
                                     len(computed_blocks.blocks[0]) * 16,
@@ -1240,7 +1234,7 @@ def test_eagle_with_sliding_window():
                            len(computed_blocks.blocks[0]) * 16,
                            computed_blocks)
     # record the block hash of the first block in the request for later use
-    block_hash_first_block = manager.req_to_block_hashes[req.request_id][0]
+    block_hash_first_block = req.block_hashes[0]
     assert block_hash_first_block is not None
     manager.free(req)
 

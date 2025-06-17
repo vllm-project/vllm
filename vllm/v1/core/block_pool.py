@@ -97,7 +97,6 @@ class BlockPool:
         self,
         request: Request,
         blocks: list[KVCacheBlock],
-        block_hashes: list[BlockHash],
         num_cached_blocks: int,
         num_full_blocks: int,
         block_size: int,
@@ -127,8 +126,8 @@ class BlockPool:
         if num_cached_blocks == num_full_blocks:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
-        assert len(block_hashes) >= num_cached_blocks
-        new_block_hashes = block_hashes[num_cached_blocks:]
+        assert len(request.block_hashes) >= num_cached_blocks
+        new_block_hashes = request.block_hashes[num_cached_blocks:]
 
         # Update the new blocks with the block hashes through the chain.
         if num_cached_blocks == 0:
@@ -174,7 +173,7 @@ class BlockPool:
                 # Compute the hash of the current block.
                 block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
                                                block_tokens, extra_keys)
-                block_hashes.append(block_hash)
+                request.block_hashes.append(block_hash)
 
             # Update and added the full block to the cache.
             block_hash_with_group_id = BlockHashWithGroupId(
