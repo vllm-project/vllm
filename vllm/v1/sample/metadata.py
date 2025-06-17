@@ -43,7 +43,3 @@ class SamplingMetadata:
     # only due to precision errors); "non-greedy" processors are
     # only applied to random-sampled requests in the batch.
     logitsprocs: LogitsProcessorObjects
-
-    # TODO(andy): Because newest logits processors implementation
-    # does not support TPU yet, the old min_p field is still required
-    min_p: Optional[torch.Tensor] = None

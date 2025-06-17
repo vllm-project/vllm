@@ -10,7 +10,6 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
@@ -20,12 +19,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 from vllm.v1.worker.utils import init_hard_coded_logitsprocs
-
-# TODO(andy): TPU implementation does not support
-# latest logits processor implementation
-is_tpu = current_platform.is_tpu()
-
-_SAMPLING_EPS = 1e-5
 
 
 @dataclass
@@ -148,17 +141,6 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
 
-        if is_tpu:
-            self.min_p = torch.empty((max_num_reqs, ),
-                                     dtype=torch.float32,
-                                     device=device)
-            self.min_p_cpu_tensor = torch.empty((max_num_reqs, ),
-                                                dtype=torch.float32,
-                                                device="cpu",
-                                                pin_memory=pin_memory)
-            self.min_p_cpu = self.min_p_cpu_tensor.numpy()
-            self.min_p_reqs: set[str] = set()
-
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, ),
                                                dtype=torch.float,
@@ -218,20 +200,19 @@ class InputBatch:
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
-        if not is_tpu:
-            # Internal representation of per-step batch state changes.
-            # Should reset each step.
-            self.batch_update = BatchUpdate()
+        # Internal representation of per-step batch state changes.
+        # Should reset each step.
+        self.batch_update = BatchUpdate()
 
-            # Define logits processors. Note that Min-P logitsproc is returned
-            # both on its own as min_p_logitsproc (to support spec decoding
-            # compatibility check) and also as part of logits_procs
-            # TODO(andy): logits processor list should be extensible via engine
-            # constructor argument; for now the list is fixed.
-            self.logitsprocs = init_hard_coded_logitsprocs(
-                pin_memory_available=pin_memory,
-                max_num_reqs=max_num_reqs + 1,
-                device=device)
+        # Define logits processors. Note that Min-P logitsproc is returned
+        # both on its own as min_p_logitsproc (to support spec decoding
+        # compatibility check) and also as part of logits_procs
+        # TODO(andy): logits processor list should be extensible via engine
+        # constructor argument; for now the list is fixed.
+        self.logitsprocs = init_hard_coded_logitsprocs(
+            pin_memory_available=pin_memory,
+            max_num_reqs=max_num_reqs + 1,
+            device=device)
 
         # TODO convert this to LogitsProcessor
         self.has_allowed_token_ids: set[str] = set()
@@ -275,16 +256,8 @@ class InputBatch:
     def add_request(
         self,
         request: "CachedRequestState",
-        req_index: Optional[int] = None,
     ) -> int:
-        if is_tpu:
-            # TODO(andy): update TPU implementation
-            if req_index is None:
-                req_index = self.num_reqs
-            assert req_index < self.max_num_reqs
-        else:
-            # Ignore req_index argument on GPU
-            req_index = self._register_add_request(request)
+        req_index = self._register_add_request(request)
 
         req_id = request.req_id
         if req_index == len(self._req_ids):
@@ -332,10 +305,6 @@ class InputBatch:
         else:
             top_k = self.vocab_size
         self.top_k_cpu[req_index] = top_k
-        if is_tpu:
-            self.min_p_cpu[req_index] = sampling_params.min_p
-            if sampling_params.min_p > _SAMPLING_EPS:
-                self.min_p_reqs.add(req_id)
         self.frequency_penalties_cpu[
             req_index] = sampling_params.frequency_penalty
         if sampling_params.frequency_penalty != 0.0:
@@ -403,9 +372,7 @@ class InputBatch:
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
-        if not is_tpu:
-            # TODO(andy): TPU implementation does not support this path
-            self.batch_update.removed_append(req_index)
+        self.batch_update.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
@@ -413,8 +380,6 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
-        if is_tpu:
-            self.min_p_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -440,10 +405,7 @@ class InputBatch:
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
-        if not is_tpu:
-            # TODO(andy): TPU implementation does not support this path
-            self.batch_update.moved.append(
-                (i1, i2, MoveDirectionalityEnum.SWAP))
+        self.batch_update.moved.append((i1, i2, MoveDirectionalityEnum.SWAP))
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] =\
@@ -473,9 +435,6 @@ class InputBatch:
             self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1]
         self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] =\
             self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
-        if is_tpu:
-            self.min_p_cpu[i1], self.min_p_cpu[i2] =\
-                self.min_p_cpu[i2], self.min_p_cpu[i1]
 
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
@@ -517,11 +476,8 @@ class InputBatch:
           swaps: list of (from,to) swap tuples for moved requests
           empty_req_indices: indices not filled by condensation
         """
-        if is_tpu:
-            assert empty_req_indices is not None
-        else:
-            assert empty_req_indices is None
-            empty_req_indices = self.batch_update.removed
+        assert empty_req_indices is None
+        empty_req_indices = self.batch_update.removed
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.
@@ -538,19 +494,17 @@ class InputBatch:
                 last_req_index -= 1
 
             # Find the smallest empty index.
-            empty_index = (empty_req_indices.pop() if is_tpu else
-                           self.batch_update.peek_removed_if_can())
+            empty_index = self.batch_update.peek_removed_if_can()
             assert empty_index is not None
             if empty_index >= last_req_index:
                 break
 
             # Move active request down into empty request
             # index.
-            if not is_tpu:
-                self.batch_update.pop_removed_if_can()
-                self.batch_update.moved.append(
-                    (last_req_index, empty_index,
-                     MoveDirectionalityEnum.UNIDIRECTIONAL))
+            self.batch_update.pop_removed_if_can()
+            self.batch_update.moved.append(
+                (last_req_index, empty_index,
+                 MoveDirectionalityEnum.UNIDIRECTIONAL))
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
             assert req_id is not None
@@ -581,8 +535,6 @@ class InputBatch:
                 empty_index] = self.presence_penalties_cpu[last_req_index]
             self.repetition_penalties_cpu[
                 empty_index] = self.repetition_penalties_cpu[last_req_index]
-            if is_tpu:
-                self.min_p_cpu[empty_index] = self.min_p_cpu[last_req_index]
             generator = self.generators.pop(last_req_index, None)
             if generator is not None:
                 self.generators[empty_index] = generator
@@ -617,8 +569,7 @@ class InputBatch:
         self.batch_update.reset()
 
     def refresh(self):
-        if not is_tpu:
-            self._commit_logit_procs_state_changes()
+        self._commit_logit_procs_state_changes()
         self.sampling_metadata = self._make_sampling_metadata()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
@@ -632,8 +583,6 @@ class InputBatch:
             copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
         if not self.no_top_k:
             copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
-        if is_tpu and not self.no_min_p:
-            copy_slice(self.min_p_cpu_tensor, self.min_p, num_reqs)
 
         if not self.no_penalties:
             # Since syncing these tensors is expensive only copy them
@@ -666,8 +615,6 @@ class InputBatch:
             all_random=self.all_random,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
-            min_p=None
-            if not is_tpu or self.no_min_p else self.min_p[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
@@ -749,14 +696,6 @@ class InputBatch:
     @property
     def no_top_k(self) -> bool:
         return len(self.top_k_reqs) == 0
-
-    @property
-    def no_min_p(self) -> bool:
-        # TODO(andy): remove this method once
-        # new logits processors implementation
-        # supports TPU
-        assert is_tpu
-        return len(self.min_p_reqs) == 0
 
     @property
     def no_penalties(self) -> bool:
