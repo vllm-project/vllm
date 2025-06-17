@@ -12,7 +12,9 @@ struct CodecBase {
   __quickreduce_device_inline__ CodecBase(int thread, int rank)
       : thread(thread),
         rank(rank),
-        group_leader((threadIdx.x / kThreadGroupSize) * kThreadGroupSize) {}
+        group_leader((threadIdx.x / kThreadGroupSize) * kThreadGroupSize) {
+    set_fp16_ovfl(true);
+  }
 };
 
 // Default full precision codec.
@@ -98,9 +100,7 @@ struct CodecQ4 : public CodecBase {
   static constexpr int kRangeBias = 0x00080008;
 
   __quickreduce_device_inline__ CodecQ4(int thread, int rank)
-      : CodecBase(thread, rank) {
-    set_fp16_ovfl(true);
-  }
+      : CodecBase(thread, rank) {}
 
   __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
                                           const int32x4_t* __restrict__ data) {
@@ -253,9 +253,7 @@ struct CodecQ6 : public CodecBase {
   static constexpr int kRangeBias = 0x00200020;
 
   __quickreduce_device_inline__ CodecQ6(int thread, int rank)
-      : CodecBase(thread, rank) {
-    set_fp16_ovfl(true);
-  }
+      : CodecBase(thread, rank) {}
 
   __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
                                           const int32x4_t* __restrict__ data) {
@@ -431,9 +429,7 @@ struct CodecQ8 : public CodecBase {
   static constexpr int kRangeBias = 0x00800080;
 
   __quickreduce_device_inline__ CodecQ8(int thread, int rank)
-      : CodecBase(thread, rank) {
-    set_fp16_ovfl(true);
-  }
+      : CodecBase(thread, rank) {}
 
   __quickreduce_device_inline__ void send(int32x4_t* __restrict__ send_buffer,
                                           int32x4_t const* __restrict__ data) {
