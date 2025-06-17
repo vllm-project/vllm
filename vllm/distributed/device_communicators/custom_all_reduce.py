@@ -71,11 +71,11 @@ class CustomAllreduce:
     # TODO: We should set a reasonable range for FP.
     MB = 1024 * 1024
     _QR_MIN_SIZE = {
-        (torch.float16, 2): [16 * MB, 2 * MB, 2 * MB, 1 * MB],
-        (torch.float16, 4): [16 * MB, 64 * MB, 4 * MB, 2 * MB],
+        (torch.float16, 2): [1 * MB, 2 * MB, 2 * MB, 1 * MB],
+        (torch.float16, 4): [1 * MB, 64 * MB, 4 * MB, 2 * MB],
         (torch.float16, 8): [16 * MB, 4 * MB, 4 * MB, 2 * MB],
-        (torch.bfloat16, 2): [16 * MB, 8 * MB, 8 * MB, 8 * MB],
-        (torch.bfloat16, 4): [16 * MB, 128 * MB, 128 * MB, 16 * MB],
+        (torch.bfloat16, 2): [2 * MB, 8 * MB, 8 * MB, 8 * MB],
+        (torch.bfloat16, 4): [8 * MB, 128 * MB, 128 * MB, 16 * MB],
         (torch.bfloat16, 8): [16 * MB, 2048 * MB, 2048 * MB, 2048 * MB],
     }
 
@@ -256,40 +256,43 @@ class CustomAllreduce:
         Initialize a custom quick allreduce implementation for AMD
         based on quick reduce (https://github.com/mk1-project/quickreduce).
         """
+        if not self._QR_SHOULD_INIT:
+            return
+        self.use_fp16_kernels = envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16
+        regime_str = envs.VLLM_ROCM_QR_QUANT_REGIME
+        if regime_str not in QuickReduceRegime.__members__:
+            logger.warning(
+                "Custom quick allreduce:",
+                f"Invalid quantization level: {regime_str}. "
+                "Supported levels: "
+                f"{list(QuickReduceRegime.__members__.keys())}")
+            return
+
+        if regime_str == "NONE":
+            logger.debug("Custom quick allreduce is disabled based "
+                         "on env variable VLLM_ROCM_QR_QUANT_REGIME")
+            return
+
         vllm_config = get_current_vllm_config()
-        # for test mode
-        if vllm_config is not None and hasattr(vllm_config, "model_config"):
+        if vllm_config is not None and \
+              hasattr(vllm_config, "model_config") and \
+              hasattr(vllm_config.model_config, "dtype"):
             dtype = vllm_config.model_config.dtype
             if dtype not in [torch.float16, torch.bfloat16]:
                 self._QR_SHOULD_INIT = False
-        # On RocM bfloat16 kernels are slower than fp16
-        # due to slower match operations
-        # If environment is not set to 1 we convert input to fp16
-        self.use_fp16_kernels: bool = envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16
-        regime_str = envs.VLLM_ROCM_QR_QUANT_REGIME
-        if self._QR_SHOULD_INIT:
-            if regime_str not in QuickReduceRegime.__members__:
-                logger.warning(
-                    "Custom quick allreduce:",
-                    f"Invalid quantization level: {regime_str}. "
-                    "Supported levels: "
-                    f"{list(QuickReduceRegime.__members__.keys())}")
-                return
-
-            if regime_str == "NONE":
-                logger.debug("Custom quick allreduce is disabled based "
-                             "on env variable VLLM_ROCM_QR_QUANT_REGIME")
-                return
-
-            self.qr_quant_level = QuickReduceRegime[regime_str]
-            self._qr_ptr = ops.init_custom_qr(self.rank, self.world_size)
-            self.create_qr_shared_buffer()
+            # On RocM bfloat16 kernels are slower than fp16
+            # due to slower match operations
+            # If environment variable is not set to 1 we convert input to fp16
             if dtype == torch.bfloat16 and not self.use_fp16_kernels:
                 logger.info(
                     "Custom quick allreduce: converting bf16 inputs to "
                     "fp16 can improve performance"
                     "set envs.VLLM_ROCM_QR_CAST_BF16_TO_FP16=1 to turn on.")
-            self.qr_disabled = False
+
+        self.qr_quant_level = QuickReduceRegime[regime_str]
+        self._qr_ptr = ops.init_custom_qr(self.rank, self.world_size)
+        self.create_qr_shared_buffer()
+        self.qr_disabled = False
 
     @contextmanager
     def capture(self):
@@ -346,7 +349,7 @@ class CustomAllreduce:
         if self.use_fp16_kernels:
             dtype = torch.float16
         return inp_size <= self.qr_max_size and \
-            inp_size > self._QR_MIN_SIZE[(dtype, self.world_size)]\
+            inp_size >= self._QR_MIN_SIZE[(dtype, self.world_size)]\
                 [self.qr_quant_level.value]
 
     def should_custom_allreduce(self, inp: torch.Tensor):
@@ -369,7 +372,7 @@ class CustomAllreduce:
         return self.should_quick_allreduce(
             inp) or self.should_custom_allreduce(inp)
 
-    def cr_all_reduce(self,
+    def ca_all_reduce(self,
                       inp: torch.Tensor,
                       *,
                       out: torch.Tensor = None,
@@ -411,7 +414,7 @@ class CustomAllreduce:
         if self.should_custom_allreduce(input):
             if self._IS_CAPTURING:
                 if torch.cuda.is_current_stream_capturing():
-                    return self.cr_all_reduce(input, registered=True)
+                    return self.ca_all_reduce(input, registered=True)
                 else:
                     # If warm up, mimic the allocation pattern since custom
                     # allreduce is out-of-place.
@@ -421,7 +424,7 @@ class CustomAllreduce:
                 # incurs a cost of cudaMemcpy, which should be small
                 # (<=1% of overall latency) compared to the performance
                 # gain of using custom kernels
-                return self.cr_all_reduce(input, registered=False)
+                return self.ca_all_reduce(input, registered=False)
 
         return None
 
