@@ -290,5 +290,5 @@ void batched_silu_and_mul(torch::Tensor& out,  // [..., d]
 {
   TORCH_CHECK(out.is_contiguous() && input.is_contiguous());
   TORCH_CHECK(valid_tokens_array.dtype() == torch::kInt32);
-  LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, true);
+  LAUNCH_BATCHED_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, true);
 }
