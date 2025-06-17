@@ -12,8 +12,10 @@ import triton
 import triton.language as tl
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
 @triton.jit
@@ -59,6 +61,7 @@ def kernel_unified_attention_2d(
         scale,  # float32
         k_scale,  # float32
         v_scale,  # float32
+        out_scale,  # float32
         softcap,  # float32
         num_query_heads: tl.constexpr,  # int
         num_queries_per_kv: tl.constexpr,  # int
@@ -85,6 +88,9 @@ def kernel_unified_attention_2d(
         BLOCK_Q: tl.constexpr,  # int
         num_seqs: tl.int32,
         BLOCK_M: tl.constexpr,  # int
+        USE_FP8: tl.constexpr,  # bool
+        FP8_MIN: tl.constexpr = float8_info.min,
+        FP8_MAX: tl.constexpr = float8_info.max,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -240,6 +246,9 @@ def kernel_unified_attention_2d(
 
     # epilogue
     acc = acc / L[:, None]
+    if USE_FP8:
+        acc = acc / tl.load(out_scale)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
     output_offset = (query_offset_0[:, None] * output_stride_0 +
                      query_offset_1[:, None] * output_stride_1 +
@@ -486,6 +495,7 @@ def reduce_segments(
         seq_lens_ptr,  # [num_seqs]
         num_seqs,  # int
         num_query_heads: tl.constexpr,  # int
+        out_scale,  # float32
         output_stride_0: tl.int64,  # int
         output_stride_1: tl.int64,  # int, should be equal to head_size
         block_table_stride: tl.int64,  # int
@@ -495,6 +505,9 @@ def reduce_segments(
         query_start_len_ptr,  # [num_seqs+1]
         BLOCK_Q: tl.constexpr,  # int
         NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
+        USE_FP8: tl.constexpr,  # bool
+        FP8_MIN: tl.constexpr = float8_info.min,
+        FP8_MAX: tl.constexpr = float8_info.max,        
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -550,6 +563,10 @@ def reduce_segments(
     # safely divide by overall_expsum, returning 0.0 if overall_expsum is 0
     acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
 
+    if USE_FP8:
+        acc = acc / tl.load(out_scale)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
+
     # write result
     output_offset = (query_token_idx * output_stride_0 +
                      query_head_idx * output_stride_1 +
@@ -575,6 +592,7 @@ def unified_attention(
     k_descale,
     v_descale,
     alibi_slopes=None,
+    output_scale=None,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -622,6 +640,7 @@ def unified_attention(
             scale=softmax_scale,
             k_scale=k_descale,
             v_scale=v_descale,
+            out_scale=output_scale,
             softcap=softcap,
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
@@ -648,6 +667,7 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
+            USE_FP8=output_scale is not None,
         )
     else:
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
@@ -726,6 +746,7 @@ def unified_attention(
             seq_lens_ptr=seqused_k,
             num_seqs=num_seqs,
             num_query_heads=num_query_heads,
+            out_scale=output_scale,
             output_stride_0=out.stride(0),
             output_stride_1=out.stride(1),
             block_table_stride=block_table.stride(0),
@@ -735,4 +756,5 @@ def unified_attention(
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+            USE_FP8=output_scale is not None,
         )
