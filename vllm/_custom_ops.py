@@ -171,6 +171,7 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
 
 
 # Rule 2: Uses current_platform and importlib (vllm imports)
+# WILL NOT MOVE
 def cutlass_scaled_mm(a: torch.Tensor,
                       b: torch.Tensor,
                       scale_a: torch.Tensor,
@@ -216,7 +217,7 @@ def cutlass_scaled_mm(a: torch.Tensor,
 
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+    custom_ops.cutlass_scaled_mm_op(out, a, b, scale_a, scale_b, bias)
 
     return out
 
