@@ -95,6 +95,24 @@ cutlass_scaled_mm_supports_fp4 = custom_ops.cutlass_scaled_mm_supports_fp4
 cutlass_scaled_fp4_mm = custom_ops.cutlass_scaled_fp4_mm
 cutlass_scaled_mm_supports_fp8 = custom_ops.cutlass_scaled_mm_supports_fp8
 cutlass_scaled_mm_supports_block_fp8 = custom_ops.cutlass_scaled_mm_supports_block_fp8
+cutlass_scaled_mm_azp = custom_ops.cutlass_scaled_mm_azp
+cutlass_sparse_scaled_mm_supported = custom_ops.cutlass_sparse_scaled_mm_supported
+cutlass_group_gemm_supported = custom_ops.cutlass_group_gemm_supported
+cutlass_sparse_compress = custom_ops.cutlass_sparse_compress
+cutlass_scaled_sparse_mm = custom_ops.cutlass_scaled_sparse_mm
+get_cutlass_moe_mm_data = custom_ops.get_cutlass_moe_mm_data
+shuffle_rows = custom_ops.shuffle_rows
+get_cutlass_pplx_moe_mm_data = custom_ops.get_cutlass_pplx_moe_mm_data
+cutlass_moe_mm = custom_ops.cutlass_moe_mm
+cutlass_fp4_moe_mm = custom_ops.cutlass_fp4_moe_mm
+gptq_marlin_repack = custom_ops.gptq_marlin_repack
+awq_marlin_repack = custom_ops.awq_marlin_repack
+gptq_marlin_moe_repack = custom_ops.gptq_marlin_moe_repack
+awq_marlin_moe_repack = custom_ops.awq_marlin_moe_repack
+allspark_repack_weight = custom_ops.allspark_repack_weight
+allspark_w8a16_gemm = custom_ops.allspark_w8a16_gemm
+scaled_int8_quant = custom_ops.scaled_int8_quant
+wvSplitKQ = custom_ops.wvSplitKQ
 
 
 # Rule 3: Does not use torch.ops._C.*
@@ -222,64 +240,6 @@ def cutlass_scaled_mm(a: torch.Tensor,
     return out
 
 
-# Rule 1: Only uses torch.ops._C.*
-cutlass_scaled_mm_azp = custom_ops.cutlass_scaled_mm_azp
-
-
-# Rule 1: Only uses torch.ops._C.*
-cutlass_sparse_scaled_mm_supported = custom_ops.cutlass_sparse_scaled_mm_supported
-
-
-# Rule 1: Only uses torch.ops._C.*
-cutlass_group_gemm_supported = custom_ops.cutlass_group_gemm_supported
-
-# Rule 1: Only uses torch.ops._C.*
-cutlass_sparse_compress = custom_ops.cutlass_sparse_compress
-
-
-# Rule 1: Only uses torch.ops._C.*
-cutlass_scaled_sparse_mm = custom_ops.cutlass_scaled_sparse_mm
-
-
-# Rule 1: Only uses torch.ops._C.*
-get_cutlass_moe_mm_data = custom_ops.get_cutlass_moe_mm_data
-
-
-# Rule 1: Only uses torch.ops._moe_C.*
-shuffle_rows = custom_ops.shuffle_rows
-
-
-# Rule 1: Only uses torch.ops._C.*
-get_cutlass_pplx_moe_mm_data = custom_ops.get_cutlass_pplx_moe_mm_data
-
-
-# Rule 1: Only uses torch.ops._C.*
-cutlass_moe_mm = custom_ops.cutlass_moe_mm
-
-
-# Rule 1: Only uses torch.ops._C.*
-cutlass_fp4_moe_mm = custom_ops.cutlass_fp4_moe_mm
-
-
-# aqlm (migrated to custom_ops)
-
-
-# gptq_marlin
-# Rule 1: Only uses torch.ops._C.*
-gptq_marlin_repack = custom_ops.gptq_marlin_repack
-
-
-# gptq_marlin
-# Rule 1: Only uses torch.ops._C.*
-awq_marlin_repack = custom_ops.awq_marlin_repack
-
-
-# Rule 1: Only uses torch.ops._C.*
-gptq_marlin_moe_repack = custom_ops.gptq_marlin_moe_repack
-
-
-# Rule 1: Only uses torch.ops._C.*
-awq_marlin_moe_repack = custom_ops.awq_marlin_moe_repack
 
 
 # Rule 2: Uses ScalarType (vllm import)
@@ -523,44 +483,6 @@ def scaled_fp8_quant(
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale
-
-
-# gptq allspark
-# Rule 1: Only uses torch.ops._C.*
-allspark_repack_weight = custom_ops.allspark_repack_weight
-
-
-# Rule 1: Only uses torch.ops._C.*
-allspark_w8a16_gemm = custom_ops.allspark_w8a16_gemm
-
-
-# int8
-# Rule 1: Only uses torch.ops._C.*
-scaled_int8_quant = custom_ops.scaled_int8_quant
-
-
-# qqq ops (migrated to custom_ops)
-
-# gguf (migrated to custom_ops)
-
-
-# ggml_mul_mat_a8 (migrated to custom_ops)
-
-
-# ggml_moe functions (migrated to custom_ops)
-
-
-# mamba (migrated to custom_ops)
-
-
-# ROCm skinny gemms (migrated to custom_ops)
-
-
-# Rule 1: Only uses torch.ops._rocm_C.*
-wvSplitKQ = custom_ops.wvSplitKQ
-
-
-# moe (simple functions migrated to custom_ops)
 
 
 # Rule 2: Uses current_platform (vllm import)
