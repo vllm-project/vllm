@@ -337,7 +337,7 @@ class MixtralModel(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+                                                   torch.Tensor]]) -> set[str]:
         if not self.split_qkv:
             stacked_params_mapping = [
                 # (param_name, shard_name, shard_id)
