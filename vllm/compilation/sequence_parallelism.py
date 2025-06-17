@@ -291,200 +291,6 @@ class LastAllReduceRMSNormPattern(_RMSNormOpHelper):
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
-class EmbeddingAllReduceFusedRMSNormStaticFP8Pattern(_FusedRMSNormQuantOpHelper
-                                                     ):
-
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
-        super().__init__(epsilon,
-                         dtype,
-                         device,
-                         fused_rmsnorm_quant_op=torch.ops._C.
-                         rms_norm_static_fp8_quant.default,
-                         fused_add_rmsnorm_quant_op=torch.ops._C.
-                         fused_add_rms_norm_static_fp8_quant.default)
-
-    def get_inputs(self):
-        arg2_1 = torch.empty([16, 4], device=self.device, dtype=self.dtype)
-        mul_6 = torch.tensor([[3, 7, 1, 4, 9, 2, 5, 0]],
-                             device=self.device,
-                             dtype=torch.long)
-        unsqueeze = torch.rand([1, 8, 1], device=self.device,
-                               dtype=self.dtype) > 0.5
-        full_default = torch.zeros([1, 8, 4],
-                                   device=self.device,
-                                   dtype=self.dtype)
-        result = torch.empty([1, 8, 4], device=self.device, dtype=FP8_DTYPE)
-        weight = torch.empty([4], device=self.device, dtype=self.dtype)
-        scale = torch.tensor(1.0, device=self.device, dtype=torch.float32)
-        return [arg2_1, mul_6, unsqueeze, full_default, result, weight, scale]
-
-    def register(self, pm_pass: PatternMatcherPass):
-
-        def pattern(
-            arg2_1: torch.Tensor,
-            mul_6: torch.Tensor,
-            unsqueeze: torch.Tensor,
-            full_default: torch.Tensor,
-            result: torch.Tensor,
-            weight: torch.Tensor,
-            scale: torch.Tensor,
-        ):
-            embedding = torch.ops.aten.embedding.default(arg2_1, mul_6)
-            where = torch.ops.aten.where.self(unsqueeze, full_default,
-                                              embedding)
-            all_reduce = self._all_reduce(where)
-            rmsnorm = self._functional_fused_rmsnorm_quant(
-                result, all_reduce, weight, scale)
-            return rmsnorm[1], all_reduce
-
-        def replacement(
-            arg2_1: torch.Tensor,
-            mul_6: torch.Tensor,
-            unsqueeze: torch.Tensor,
-            full_default: torch.Tensor,
-            result: torch.Tensor,
-            weight: torch.Tensor,
-            scale: torch.Tensor,
-        ):
-            embedding = torch.ops.aten.embedding.default(arg2_1, mul_6)
-            where = torch.ops.aten.where.self(unsqueeze, full_default,
-                                              embedding)
-            reduce_scatter = self._reduce_scatter(where)
-
-            rmsnorm_result = torch.empty_like(reduce_scatter,
-                                              dtype=result.dtype)
-            rmsnorm = self._functional_fused_rmsnorm_quant(
-                rmsnorm_result, reduce_scatter, weight, scale)
-            all_gather = self._all_gather(rmsnorm[1])
-
-            return all_gather, reduce_scatter
-
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
-
-
-class MiddleAllReduceFusedRMSNormStaticFP8Pattern(_FusedRMSNormQuantOpHelper):
-
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
-        super().__init__(epsilon,
-                         dtype,
-                         device,
-                         fused_rmsnorm_quant_op=torch.ops._C.
-                         rms_norm_static_fp8_quant.default,
-                         fused_add_rmsnorm_quant_op=torch.ops._C.
-                         fused_add_rms_norm_static_fp8_quant.default)
-
-    def get_inputs(self):
-        mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-
-        residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        rms_norm_weights = torch.empty([4, 4],
-                                       device=self.device,
-                                       dtype=self.dtype)
-        result = torch.empty([4, 4], device=self.device, dtype=FP8_DTYPE)
-        scale = torch.empty([1, 1], device=self.device, dtype=torch.float32)
-
-        return [
-            result,
-            residual,
-            mm_1,
-            rms_norm_weights,
-            scale,
-        ]
-
-    def register(self, pm_pass: PatternMatcherPass):
-
-        def pattern(
-            result: torch.Tensor,
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            all_reduce = self._all_reduce(mm_1)
-            rmsnorm = self._functional_fused_add_rmsnorm_quant(
-                result, all_reduce, residual, rms_norm_weights, scale)
-            return rmsnorm[1], rmsnorm[2]
-
-        def replacement(
-            result: torch.Tensor,
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            reduce_scatter = self._reduce_scatter(mm_1)
-            rs_result = torch.empty_like(reduce_scatter, dtype=result.dtype)
-            rmsnorm = self._functional_fused_add_rmsnorm_quant(
-                rs_result, reduce_scatter, residual, rms_norm_weights, scale)
-            all_gather = self._all_gather(rmsnorm[1])
-            return all_gather, rmsnorm[2]
-
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
-
-
-class LastAllReduceFusedRMSNormStaticFP8Pattern(_FusedRMSNormQuantOpHelper):
-
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
-        super().__init__(epsilon,
-                         dtype,
-                         device,
-                         fused_rmsnorm_quant_op=torch.ops._C.
-                         rms_norm_static_fp8_quant.default,
-                         fused_add_rmsnorm_quant_op=torch.ops._C.
-                         fused_add_rms_norm_static_fp8_quant.default)
-
-    def get_inputs(self):
-        mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-
-        residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        rms_norm_weights = torch.empty([4, 4],
-                                       device=self.device,
-                                       dtype=self.dtype)
-        result = torch.empty([4, 4], device=self.device, dtype=FP8_DTYPE)
-        scale = torch.empty([1, 1], device=self.device, dtype=torch.float32)
-
-        return [
-            result,
-            residual,
-            mm_1,
-            rms_norm_weights,
-            scale,
-        ]
-
-    def register(self, pm_pass: PatternMatcherPass):
-
-        def pattern(
-            result: torch.Tensor,
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            all_reduce = self._all_reduce(mm_1)
-            rmsnorm = self._functional_fused_add_rmsnorm_quant(
-                result, all_reduce, residual, rms_norm_weights, scale)
-            return rmsnorm[1]
-
-        def replacement(
-            result: torch.Tensor,
-            residual: torch.Tensor,
-            mm_1: torch.Tensor,
-            rms_norm_weights: torch.Tensor,
-            scale: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            reduce_scatter = self._reduce_scatter(mm_1)
-            rs_result = torch.empty_like(reduce_scatter, dtype=result.dtype)
-            rmsnorm = self._functional_fused_add_rmsnorm_quant(
-                rs_result, reduce_scatter, residual, rms_norm_weights, scale)
-            normalized = self._all_gather(rmsnorm[1])
-            return normalized
-
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
-
-
 class EmbeddingAllReduceRMSNormStaticFP8Pattern(_RMSNormQuantOpHelper):
 
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str,
@@ -681,6 +487,24 @@ class LastAllReduceRMSNormStaticFP8Pattern(_RMSNormQuantOpHelper):
 
 
 class SequenceParallelismPass(VllmInductorPass):
+    """
+    This pass enables sequence parallelism for models.
+    It identifies patterns where an AllReduce operation is followed by
+    an RMSNorm (or RMSNorm and then Quantization) operation.
+    These patterns are replaced with a ReduceScatter operation, followed by
+    a local RMSNorm/Quantization, and then an AllGather operation.
+
+    The general transformation is:
+    Input -> AllReduce -> RMSNorm -> Output
+    becomes
+    Input -> ReduceScatter -> RMSNorm -> AllGather -> Output
+
+    While this pass itself does not directly yield performance improvements,
+    it lays the groundwork for subsequent fusion passes, such as
+    GEMM + ReduceScatter and AllGather + GEMM fusions. These fusions can
+    significantly reduce communication overhead and improve overall model
+    performance.
+    """
 
     def __init__(self, config: VllmConfig):
         super().__init__(config)
@@ -700,16 +524,6 @@ class SequenceParallelismPass(VllmInductorPass):
             LastAllReduceRMSNormStaticFP8Pattern(
                 epsilon, self.model_dtype, self.device,
                 fp8_quant_op).register(self.patterns)
-
-            # Fused RMSNorm + Static FP8 patterns
-            EmbeddingAllReduceFusedRMSNormStaticFP8Pattern(
-                epsilon, self.model_dtype, self.device).register(self.patterns)
-
-            MiddleAllReduceFusedRMSNormStaticFP8Pattern(
-                epsilon, self.model_dtype, self.device).register(self.patterns)
-
-            LastAllReduceFusedRMSNormStaticFP8Pattern(
-                epsilon, self.model_dtype, self.device).register(self.patterns)
 
             # Normal RMSNorm patterns
             EmbeddingAllReduceRMSNormPattern(
