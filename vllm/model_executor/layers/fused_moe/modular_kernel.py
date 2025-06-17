@@ -7,8 +7,6 @@ from typing import Optional
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.layers.fused_moe.masked_kernels import (
-    invoke_masked_silu_and_mul)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.utils import cdiv
 
@@ -234,10 +232,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         assert expert_num_tokens.size(0) == E, (
             f"expert_num_tokens.size(0)({expert_num_tokens.size(0)}) != E({E})"
         )
-        assert activation == "silu", "Only silu_and_mul is supported for now."
-        invoke_masked_silu_and_mul(output=output,
-                                   input=input,
-                                   valid_tokens_array=expert_num_tokens)
+        if activation != "silu":
+            raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+        torch.ops._C.batched_silu_and_mul(output, input, expert_num_tokens)
 
     def activation(self, activation: str, output: torch.Tensor,
                    input: torch.Tensor) -> None:
