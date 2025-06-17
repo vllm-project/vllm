@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from vllm.v1.request import RequestStatus
 
+
 def test_request_status_fmt_str():
     """Test that the string representation of RequestStatus is correct."""
     assert f"{RequestStatus.WAITING}" == "WAITING"
