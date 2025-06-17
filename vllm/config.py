@@ -4510,6 +4510,11 @@ class VllmConfig:
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
+        
+        if (self.kv_transfer_config is not None 
+                and self.kv_transfer_config.is_kv_transfer_instance):
+            from collections import defaultdict
+            self.cache_config.transfer_handshake_metadata = defaultdict(dict)
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:

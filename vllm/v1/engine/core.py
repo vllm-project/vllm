@@ -175,9 +175,7 @@ class EngineCore:
         # Collect KV connector xfer metadata from workers
         # (after KV cache registration)
         transfer_handshake_metadata = (
-            self.model_executor.get_kv_connector_handshake_metadata()
-            if self.vllm_config.cache_config.transfer_handshake_metadata else
-            None)
+            self.model_executor.get_kv_connector_handshake_metadata())
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "

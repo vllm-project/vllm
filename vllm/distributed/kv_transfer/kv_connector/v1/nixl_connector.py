@@ -457,16 +457,14 @@ class NixlConnectorWorker:
                     # Remove from futures dict
                     if engine_id in self._handshake_futures:
                         del self._handshake_futures[engine_id]
-                    # The scheduler will retry them on the next cycle and
-                    # they'll be processed normally since the remote agent
-                    # is now registered.
                     if engine_id in self._pending_requests:
                         completed_reqs = self._pending_requests[engine_id]
                         del self._pending_requests[engine_id]
+                        for req_id, meta in completed_reqs:
+                            self._ready_requests.put((req_id, meta))
                         logger.debug(
                             "Handshake completed for engine %s. "
-                            "Cleared %d requests from pending - " \
-                            "scheduler to retry",
+                            "Moved %d requests to ready queue for processing",
                             engine_id, len(completed_reqs))
             except Exception as e:
                 logger.warning("Handshake failed for engine %s: %s", engine_id,
@@ -507,6 +505,10 @@ class NixlConnectorWorker:
             logger.error("Failed to fetch metadata from %s: %s", url, e)
             raise
 
+        if res is None:
+            logger.warning("Remote server returned None metadata, skipping handshake")
+            raise RuntimeError("Remote server returned None metadata")
+
         remote_tp_size = len(res.keys())
         # Default case is that the remote TP size is 1, so we can
         # directly access the metadata.
@@ -525,6 +527,7 @@ class NixlConnectorWorker:
         if metadata_bytes is not None:
             # Reconstruct NixlAgentMetadata from JSON response
             # agent_metadata is base64-encoded binary data, not msgpack
+            tp_data.pop("agent_metadata", None)
             metadata = NixlAgentMetadata(
                 agent_metadata=base64.b64decode(metadata_bytes), **tp_data)
 
@@ -547,6 +550,7 @@ class NixlConnectorWorker:
             logger.warning(
                 "Received None metadata from %s:%s, skipping NIXL handshake",
                 host, port)
+            raise RuntimeError("Remote server does not support NIXL")
 
         logger.debug("NIXL handshake method completed for %s:%s", host, port)
 
@@ -834,12 +838,6 @@ class NixlConnectorWorker:
             finished_recving=done_recving,
             pending_handshake=pending_handshake)
 
-        if not local_result.is_empty():
-            logger.debug(
-                "Rank %s, get_finished: %s requests done sending, "
-                "%s requests done recving, %s pending handshake", self.tp_rank,
-                len(done_sending), len(done_recving), len(pending_handshake))
-
         if self.world_size == 1:
             return local_result
 
@@ -939,26 +937,31 @@ class NixlConnectorWorker:
         return done_req_ids
 
     def _process_ready_requests(self):
-        """Process requests that are ready after handshake completion.
-        
-        Note: With scheduler-based retry logic, this method is simplified
-        as automatic retries are handled by the scheduler.
-        """
-        # Clear any remaining items in the ready queue to prevent memory leaks
+        """Process requests that are ready after handshake completion."""
+        processed_count = 0
         while True:
             try:
-                self._ready_requests.get_nowait()
+                req_id, meta = self._ready_requests.get_nowait()
+                logger.debug("Processing ready request %s for engine %s", 
+                            req_id, meta.remote_engine_id)
+                self._read_blocks(
+                    request_id=req_id,
+                    dst_engine_id=meta.remote_engine_id,
+                    local_block_ids=meta.local_block_ids,
+                    remote_block_ids=meta.remote_block_ids,
+                )
+                processed_count += 1
             except queue.Empty:
                 break
+        
+        if processed_count > 0:
+            logger.debug("Processed %d ready requests", processed_count)
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        logger.debug("start_load_kv called with %d requests",
-                     len(metadata.requests))
-
         for req_id, meta in metadata.requests.items():
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
