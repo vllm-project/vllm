@@ -167,7 +167,6 @@ class OpenAIServingCompletion(OpenAIServing):
                         self.default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
-                streaming_params = request.to_streaming_params()
 
                 self._log_inputs(request_id_item,
                                  request_prompts[i],
@@ -194,7 +193,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     generator = self.engine_client.generate(
                         engine_prompt,
                         sampling_params,
-                        streaming_params,
                         request_id_item,
                         lora_request=lora_request,
                         prompt_adapter_request=prompt_adapter_request,
