@@ -15,9 +15,8 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, per_token_group_quant_fp8)
-from vllm.model_executor.layers.quantization.deepgemm import (
-    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm as
-    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm)
+from vllm.model_executor.layers.quantization.deepgemm import (  # noqa: E501
+    m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm as m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm)
 from vllm.utils import round_up
 
 logger = init_logger(__name__)
