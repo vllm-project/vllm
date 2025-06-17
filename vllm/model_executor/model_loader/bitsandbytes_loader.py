@@ -573,10 +573,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
 def dequantize_dq(quant_states: dict) -> None:
     """
-    When BNB employs DQ, that is, applying a second quantization
-    to the quantization constants—we perform the dequantization of these 
-    constants during weight loading rather than at inference time, thereby 
-    avoiding this computational overhead during inference.
+    When BNB employs Double Quantization, we perform the dequantization of 
+    these constants during weight loading rather than at inference time, 
+    thereby avoiding this computational overhead during inference.
     """
     from bitsandbytes.functional import dequantize_blockwise
     for _, quant_state in quant_states.items():
