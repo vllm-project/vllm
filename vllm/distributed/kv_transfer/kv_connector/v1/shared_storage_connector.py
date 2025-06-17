@@ -78,7 +78,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._block_size = vllm_config.cache_config.block_size
-        self._requests_need_load: dict[str, Request] = {}
+        self._requests_need_load: dict[str, "RequestGenerationState"] = {}
         transfer_config = vllm_config.kv_transfer_config
         self._storage_path = transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp")
@@ -224,7 +224,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: "RequestGenerationState", 
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
         """
@@ -255,11 +255,11 @@ class SharedStorageConnector(KVConnectorBase_V1):
         # Now, first num_tokens_to_check tokens are hit, we need to prepare
         # the metadata for the worker connector to correctly load the KV
         num_tokens_to_check = align_to_block_size(
-            len(request.prompt_token_ids) - 1, self._block_size)
+            len(request.params.prompt_token_ids) - 1, self._block_size)
 
         return num_tokens_to_check - num_computed_tokens, False
 
-    def update_state_after_alloc(self, request: "Request",
+    def update_state_after_alloc(self, request: "RequestGenerationState",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         """
@@ -314,8 +314,11 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # list of token ids (only new tokens). So we look it
                 # up in the actual request object.
                 request = self._requests_need_load[cached_req.req_id]
-                total_tokens = (len(cached_req.new_token_ids) +
-                                cached_req.num_computed_tokens)
+                # NOTE: new_token_ids is not available in CachedRequestData,
+                # use num_computed_tokens as the total since this is a resumed request
+                total_tokens = cached_req.num_computed_tokens
+                
+                # Use all_token_ids from generation state (includes prompt + generated tokens)
                 token_ids = request.all_token_ids[:total_tokens]
 
                 # NOTE(rob): For resumed req, new_block_ids is all
@@ -338,14 +341,14 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
     def _found_match_for_request(
         self,
-        request: "Request",
+        request: "RequestGenerationState",
     ) -> bool:
         """Check if the cache is hit for the request.
         """
         num_tokens_to_check = align_to_block_size(
-            len(request.prompt_token_ids) - 1, self._block_size)
+            len(request.params.prompt_token_ids) - 1, self._block_size)
         foldername = self._generate_foldername_debug(torch.tensor(
-            request.prompt_token_ids)[:num_tokens_to_check],
+            request.params.prompt_token_ids)[:num_tokens_to_check],
                                                      create_folder=False)
         return os.path.exists(foldername)
 

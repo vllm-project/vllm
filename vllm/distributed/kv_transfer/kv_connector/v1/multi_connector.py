@@ -18,7 +18,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
-    from vllm.v1.request import Request
+    from vllm.v1.request import RequestStatus
 
 logger = init_logger(__name__)
 
@@ -176,13 +176,19 @@ class MultiConnector(KVConnectorBase_V1):
 
     def request_finished(
         self,
-        request: "Request",
+        request_id: str,
+        request_status: "RequestStatus",
+        kv_transfer_params: Optional[dict[str, Any]],
+        num_computed_tokens: int,
         blocks: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         async_saves = 0
         kv_txfer_params = None
+        
         for c in self._connectors:
-            async_save, txfer_params = c.request_finished(request, blocks)
+            async_save, txfer_params = c.request_finished(
+                request_id, request_status, kv_transfer_params, num_computed_tokens, blocks
+            )
             if async_save:
                 async_saves += 1
             if txfer_params is not None:
@@ -192,10 +198,12 @@ class MultiConnector(KVConnectorBase_V1):
                     raise RuntimeError(
                         "Only one connector can produce KV transfer params")
                 kv_txfer_params = txfer_params
-        if async_saves > 1:
-            self._extra_async_saves[request.request_id] = async_saves - 1
+            
+        if async_saves > 1 and request_id:
+            self._extra_async_saves[request_id] = async_saves - 1
 
-        # Clean up other state for this request.
-        self._requests_to_connector.pop(request.request_id, None)
+        # Clean up other state for this request
+        if request_id:
+            self._requests_to_connector.pop(request_id, None)
 
         return async_saves > 0, kv_txfer_params

@@ -6,7 +6,8 @@ import signal
 import sys
 import threading
 import time
-from collections import deque
+import asyncio
+from collections import defaultdict, deque
 from collections.abc import Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
@@ -30,15 +31,16 @@ from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
-from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import RequestGenerationState, RequestStatus, RequestSchedulerState, RequestParams
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import EngineHandshakeMetadata, EngineZmqAddresses
@@ -71,6 +73,7 @@ class EngineCore:
                     VLLM_VERSION, vllm_config)
 
         self.log_stats = log_stats
+        self.requests: dict[str, RequestGenerationState] = {}
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -129,6 +132,10 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
+        # The request that are finished in between the previous and the
+        # last time EngineCoreOutputs was sent to the client.
+        self.finished_reqs: dict[str, RequestStatus] = dict()
+
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
@@ -185,17 +192,18 @@ class EngineCore:
             request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
                 request.mm_inputs, request.mm_hashes)
 
-        req = Request.from_engine_core_request(request)
-        if req.use_structured_output:
+        req_params = RequestParams.from_engine_core_request(request)
+        
+        if req_params.use_structured_output:
             # Start grammar compilation asynchronously
-            self.structured_output_manager.grammar_init(req)
+            self.structured_output_manager.grammar_init(req_params)
 
-        if req.kv_transfer_params is not None and (
+        if req_params.kv_transfer_params is not None and (
                 not self.scheduler.get_kv_connector()):
             logger.warning("Got kv_transfer_params, but no KVConnector found. "
                            "Disabling KVTransfer for this request.")
 
-        self.scheduler.add_request(req)
+        self.scheduler.add_request(req_params)
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -206,7 +214,7 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def execute_model(self, scheduler_output: SchedulerOutput):
+    def execute_model(self, scheduler_output: SchedulerOutput) -> Future[ModelRunnerOutput]:
         try:
             return self.model_executor.execute_model(scheduler_output)
         except BaseException as err:
@@ -216,7 +224,7 @@ class EngineCore:
             # Re-raise exception
             raise err
 
-    def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+    async def step(self) -> tuple[Future[dict[int, EngineCoreOutputs]], bool]:
         """Schedule, execute, and make output.
 
         Returns tuple of outputs and a flag indicating whether the model
@@ -229,14 +237,21 @@ class EngineCore:
             return {}, False
         scheduler_output = self.scheduler.schedule()
         model_output = self.execute_model(scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output)  # type: ignore
+        engine_core_outputs_future = \
+            self.scheduler.update_from_output(scheduler_output, model_output)
 
-        return (engine_core_outputs,
+        return (engine_core_outputs_future,
                 scheduler_output.total_num_scheduled_tokens > 0)
+        
+    def sync_step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+        """Synchronous version of step."""
+        async def _sync_step():
+            engine_core_outputs_future, scheduled_batch = await self.step()
+            return await engine_core_outputs_future, scheduled_batch
+        return asyncio.run(_sync_step())
 
-    def step_with_batch_queue(
-            self) -> tuple[Optional[dict[int, EngineCoreOutputs]], bool]:
+    async def step_with_batch_queue(
+            self) -> tuple[Optional[Future[dict[int, EngineCoreOutputs]]], bool]:
         """Schedule and execute batches with the batch queue.
         Note that if nothing to output in this step, None is returned.
 
@@ -275,11 +290,14 @@ class EngineCore:
         # so we need more work.
         if not scheduled_batch and not self.batch_queue.empty():
             future, scheduler_output = self.batch_queue.get_nowait()
-            # Blocking until the first result is available.
-            model_output = future.result()
+            # Await the first result (async)
+            await future
             self.batch_queue.task_done()
-            engine_core_outputs = (self.scheduler.update_from_output(
-                scheduler_output, model_output))
+
+            await self.scheduler.update_from_output(
+                scheduler_output, future)
+            # Process outputs ourselves since scheduler no longer returns them
+            engine_core_outputs = self.process_model_outputs(future)
 
         return engine_core_outputs, scheduled_batch
 
@@ -390,8 +408,7 @@ class EngineCoreProc(EngineCore):
             super().__init__(vllm_config, executor_class, log_stats,
                              executor_fail_callback)
 
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
+        self.step_fn = self.step
 
         # Background Threads and Queues for IO. These enable us to
         # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -553,16 +570,19 @@ class EngineCoreProc(EngineCore):
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
 
-    def _process_engine_step(self) -> bool:
+    async def _process_engine_step(self) -> tuple[bool, asyncio.Task]:
         """Called only when there are unfinished local requests."""
 
         # Step the engine core.
-        outputs, model_executed = self.step_fn()
-        # Put EngineCoreOutputs into the output queue.
-        for output in (outputs.items() if outputs else ()):
-            self.output_queue.put_nowait(output)
+        outputs_future, model_executed = self.step_fn()
+        
+        async def send_output_to_client_task(outputs_future: Future[dict[int, EngineCoreOutputs]]):
+            outputs = await outputs_future
+            # Put EngineCoreOutputs into the output queue.
+            for output in (outputs.items() if outputs else ()):
+                self.output_queue.put_nowait(output)
 
-        return model_executed
+        return model_executed, asyncio.create_task(send_output_to_client_task(outputs_future))
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -846,7 +866,7 @@ class DPEngineCoreProc(EngineCoreProc):
             self.output_queue.put_nowait(
                 (-1, EngineCoreOutputs(scheduler_stats=stats)))
 
-    def run_busy_loop(self):
+    async def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
         # Loop until process is sent a SIGINT or SIGTERM
@@ -855,7 +875,7 @@ class DPEngineCoreProc(EngineCoreProc):
             self._process_input_queue()
 
             # 2) Step the engine core.
-            executed = self._process_engine_step()
+            executed, _ = self._process_engine_step()
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
@@ -950,7 +970,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
         Run the engine core busy loop.
         """
         try:
-            self.run_busy_loop()
+            asyncio.run(self.run_busy_loop())
         except SystemExit:
             logger.debug("EngineCore exiting.")
             raise

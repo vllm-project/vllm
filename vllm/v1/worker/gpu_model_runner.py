@@ -58,7 +58,7 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestGenerationState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
@@ -172,7 +172,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.rejection_sampler = RejectionSampler()
 
         # Request states.
-        self.requests: dict[str, CachedRequestState] = {}
+        self.requests: dict[str, CachedRequestGenerationState] = {}
 
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
@@ -389,7 +389,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 generator = None
 
-            self.requests[req_id] = CachedRequestState(
+            self.requests[req_id] = CachedRequestGenerationState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 mm_inputs=new_req_data.mm_inputs,
@@ -449,17 +449,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Update the cached states.
             num_computed_tokens = req_data.num_computed_tokens
             req_state.num_computed_tokens = num_computed_tokens
-            # Add the sampled token(s) from the previous step (if any).
-            # This doesn't include "unverified" tokens like spec decode tokens.
-            num_new_tokens = (num_computed_tokens +
-                              len(req_data.new_token_ids) -
-                              req_state.num_tokens)
-            if num_new_tokens == 1:
-                # Avoid slicing list in most common case.
-                req_state.output_token_ids.append(req_data.new_token_ids[-1])
-            elif num_new_tokens > 0:
-                req_state.output_token_ids.extend(
-                    req_data.new_token_ids[-num_new_tokens:])
+
             # Update the block IDs.
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
@@ -482,18 +472,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             # Update the persistent batch.
-            self.input_batch.num_computed_tokens_cpu[req_index] = (
-                num_computed_tokens)
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
-            # Add new_token_ids to token_ids_cpu.
-            start_token_index = num_computed_tokens
-            end_token_index = num_computed_tokens + len(req_data.new_token_ids)
-            self.input_batch.token_ids_cpu[
-                req_index,
-                start_token_index:end_token_index] = req_data.new_token_ids
-            self.input_batch.num_tokens_no_spec[req_index] = end_token_index
             # Add spec_token_ids to token_ids_cpu.
+            end_token_index = self.input_batch.num_computed_tokens_cpu[req_index]
+            self.input_batch.num_tokens_no_spec[req_index] = end_token_index
+            
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
                 req_id, ())
             if spec_token_ids:
@@ -1496,6 +1480,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
+
+        for req_id in self.input_batch.req_ids:
+            idx = self.input_batch.req_id_to_index[req_id]
+            num_new_tokens = len(valid_sampled_token_ids[idx])
+            self.input_batch.num_computed_tokens_cpu[idx] += num_new_tokens
+
+            if num_new_tokens == 1:
+                # Avoid slicing list in most common case.
+                req_state.output_token_ids.append(valid_sampled_token_ids[-1])
+            elif num_new_tokens > 0:
+                req_state.output_token_ids.extend(
+                    valid_sampled_token_ids[-num_new_tokens:])
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,

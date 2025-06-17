@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional, Union
+from concurrent.futures import Future
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -10,7 +11,7 @@ if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import ModelRunnerOutput
-    from vllm.v1.request import Request, RequestStatus
+    from vllm.v1.request import RequestStatus, RequestParams
 
 
 class SchedulerInterface(ABC):
@@ -45,8 +46,8 @@ class SchedulerInterface(ABC):
     def update_from_output(
         self,
         scheduler_output: "SchedulerOutput",
-        model_runner_output: "ModelRunnerOutput",
-    ) -> dict[int, "EngineCoreOutputs"]:
+        model_runner_output: Future["ModelRunnerOutput"],
+    ):
         """Update the scheduler state based on the model runner output.
 
         This method is called after the model runner has processed the scheduled
@@ -62,7 +63,7 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_request(self, request: "Request") -> None:
+    def add_request(self, request: "RequestParams") -> None:
         """Add a new request to the scheduler's internal queue.
         
         Args:

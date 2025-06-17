@@ -11,7 +11,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
-from vllm.v1.request import Request
+from vllm.v1.request import RequestGenerationState
 
 logger = init_logger(__name__)
 
@@ -95,7 +95,8 @@ class BlockPool:
 
     def cache_full_blocks(
         self,
-        request: Request,
+        request: "RequestParams",
+        token_ids: Optional[list[int]],
         blocks: list[KVCacheBlock],
         block_hashes: list[BlockHash],
         num_cached_blocks: int,
@@ -141,6 +142,9 @@ class BlockPool:
         parent_block_hash = prev_block_hash_value
         new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events
                                            else None)
+
+        num_new_blocks_cached = 0
+
         for i, blk in enumerate(new_full_blocks):
             assert blk.block_hash is None
 
@@ -152,13 +156,13 @@ class BlockPool:
                 # single_type_managers with the same block_size.
                 # In this case we simply reuse the block hash.
                 block_hash = new_block_hashes[i]
-            else:
+            elif token_ids is not None:
                 # Otherwise compute the block hash and cache it in the request
                 # in case it will be preempted in the future.
                 blk_idx = num_cached_blocks + i
                 start_token_idx = blk_idx * block_size
                 end_token_idx = (blk_idx + 1) * block_size
-                block_tokens = request.all_token_ids[
+                block_tokens = token_ids[
                     start_token_idx:end_token_idx]
                 assert len(block_tokens) == block_size, (
                     f"Expected {block_size} tokens, got "
@@ -175,6 +179,10 @@ class BlockPool:
                 block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
                                                block_tokens, extra_keys)
                 block_hashes.append(block_hash)
+            else:
+                # Cannot cannot compute the block hash since the tokens are
+                # not available so we skip this block.
+                continue
 
             # Update and added the full block to the cache.
             block_hash_with_group_id = BlockHashWithGroupId(
@@ -185,15 +193,15 @@ class BlockPool:
             if new_hashes is not None:
                 new_hashes.append(block_hash.hash_value)
             prev_block_hash_value = block_hash.hash_value
+            num_new_blocks_cached += 1
 
         if self.enable_kv_cache_events:
             self.kv_event_queue.append(
                 BlockStored(
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
-                    token_ids=request.
-                    all_token_ids[num_cached_blocks *
-                                  block_size:num_full_blocks * block_size],
+                    token_ids=request.all_token_ids[num_cached_blocks *
+                                                    block_size:num_full_blocks * block_size],
                     block_size=block_size,
                     lora_id=request.lora_request.id
                     if request.lora_request else None,

@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Callable
+from typing import Callable, Optional
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         SlidingWindowSpec)
-from vllm.v1.request import Request
+from vllm.v1.request import RequestGenerationState
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -127,13 +127,16 @@ class SingleTypeKVCacheManager(ABC):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
+    def cache_blocks(self,         
+                     request: "RequestParams",
+                     token_ids: Optional[list[int]], 
+                     block_hashes: list[BlockHash],
                      num_tokens: int) -> None:
         """
         Cache the blocks for the request.
 
         Args:
-            request: The request.
+            request_id: The request ID.
             block_hashes: The block hashes of the request.
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
@@ -143,6 +146,7 @@ class SingleTypeKVCacheManager(ABC):
 
         self.block_pool.cache_full_blocks(
             request=request,
+            token_ids=token_ids,
             blocks=self.req_to_blocks[request.request_id],
             block_hashes=block_hashes,
             num_cached_blocks=num_cached_blocks,

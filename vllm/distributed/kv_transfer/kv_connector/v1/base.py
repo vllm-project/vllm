@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.request import Request
+    from vllm.v1.request import RequestGenerationState
 
 logger = init_logger(__name__)
 
@@ -208,7 +208,7 @@ class KVConnectorBase_V1(ABC):
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: "RequestGenerationState",
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
         """
@@ -216,7 +216,7 @@ class KVConnectorBase_V1(ABC):
         external KV cache beyond the num_computed_tokens.
         
         Args:
-            request (Request): the request object.
+            request (RequestGenerationState): the request generation state object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
 
@@ -231,7 +231,7 @@ class KVConnectorBase_V1(ABC):
         pass
 
     @abstractmethod
-    def update_state_after_alloc(self, request: "Request",
+    def update_state_after_alloc(self, request: "RequestGenerationState",
                                  blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         """
@@ -244,7 +244,7 @@ class KVConnectorBase_V1(ABC):
         are allocated, after the load/transfer is complete.
 
         Args:
-            request (Request): the request object.
+            request (RequestGenerationState): the request generation state object.
             blocks (KVCacheBlocks): the blocks allocated for the request.
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
@@ -267,8 +267,11 @@ class KVConnectorBase_V1(ABC):
 
     def request_finished(
         self,
-        request: "Request",
-        block_ids: list[int],
+        request_id: str,
+        request_status: "RequestStatus",
+        kv_transfer_params: Optional[dict[str, Any]],
+        num_computed_tokens: int,
+        blocks: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.

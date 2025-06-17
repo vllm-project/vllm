@@ -15,7 +15,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request
+from vllm.v1.request import RequestGenerationState, RequestParams
 
 logger = init_logger(__name__)
 
@@ -280,7 +280,7 @@ class FreeKVCacheBlockQueue:
         return ret
 
 
-def need_extra_keys(request: Request) -> bool:
+def need_extra_keys(request: RequestParams) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
 
     Args:
@@ -298,7 +298,7 @@ def need_extra_keys(request: Request) -> bool:
                                                            is not None)
 
 
-def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
+def _gen_mm_extra_hash_keys(request: RequestParams, start_token_idx: int,
                             end_token_idx: int,
                             start_mm_idx: int) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
@@ -366,7 +366,7 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
+def _gen_lora_extra_hash_keys(request: RequestParams) -> list[int]:
     """Generate extra keys related to LoRA for block hash computation.
 
     Args:
@@ -382,7 +382,7 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
 
 
 def generate_block_hash_extra_keys(
-        request: Request, start_token_idx: int, end_token_idx: int,
+        request: RequestParams, start_token_idx: int, end_token_idx: int,
         start_mm_idx: int) -> tuple[Optional[tuple[Any, ...]], int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
@@ -443,7 +443,8 @@ def hash_block_tokens(
 
 
 def hash_request_tokens(hash_function: Any, block_size: int,
-                        request: Request) -> list[BlockHash]:
+                        token_ids: list[int],
+                        request: RequestParams) -> list[BlockHash]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
@@ -454,7 +455,6 @@ def hash_request_tokens(hash_function: Any, block_size: int,
     Returns:
         The list of computed hash values.
     """
-    token_ids = request.all_token_ids
 
     req_need_extra_keys = need_extra_keys(request)
     req_extra_keys = None

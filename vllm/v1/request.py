@@ -15,9 +15,12 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
 
-
-class Request:
-
+class RequestParams:
+    """
+    "Constant" parameters for a request. This should be static during genera    tion
+     but current this is violated by `structured_output_request` which is 
+     stateful
+    """
     def __init__(
         self,
         request_id: str,
@@ -38,22 +41,21 @@ class Request:
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
+
+        # P/D: Connector-specific KV transfer parameters.
+        kv_params = (None if sampling_params.extra_args is None else
+                     sampling_params.extra_args.get("kv_transfer_params"))
+        self.kv_transfer_params: Optional[dict[str, Any]] = kv_params
+
+        # NOTE(lucas): Note sure if this belongs in "params" since this is
+        # stateful with regards to each generated token.
         self.structured_output_request = structured_output_request
 
-        self.status = (RequestStatus.WAITING_FOR_FSM
-                       if sampling_params.guided_decoding is not None else
-                       RequestStatus.WAITING)
-        self.events: list[EngineCoreEvent] = []
-        self.stop_reason: Union[int, str, None] = None
         assert sampling_params.max_tokens is not None
         self.max_tokens = sampling_params.max_tokens
 
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
-        self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = self.prompt_token_ids.copy()
-        self.spec_token_ids: list[int] = []
-        self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
 
         # Multi-modal related
@@ -63,28 +65,13 @@ class Request:
         self.num_encoder_inputs = len(self.mm_inputs)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
 
-        # P/D: Connector-specific KV transfer parameters.
-        kv_params = (None if sampling_params.extra_args is None else
-                     sampling_params.extra_args.get("kv_transfer_params"))
-        self.kv_transfer_params: Optional[dict[str, Any]] = kv_params
-
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
         if self.mm_hashes:
             assert len(self.mm_inputs) == len(self.mm_hashes)
 
-        # Read-only views
-        # Prevent directly appending to these lists since
-        # they should also be updated simultaneously.
-        self.output_token_ids = ConstantList(self._output_token_ids)
-        self.all_token_ids = ConstantList(self._all_token_ids)
-
-        # State
-        # The number of tokens with prefix cache hits.
-        self.num_cached_tokens = -1
-
     @classmethod
-    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+    def from_engine_core_request(cls, request: EngineCoreRequest) -> "RequestParams":
         if request.mm_inputs is not None:
             assert isinstance(request.mm_inputs, list)
             assert is_list_of(request.mm_inputs, MultiModalKwargs), (
@@ -105,6 +92,50 @@ class Request:
             cache_salt=request.cache_salt,
         )
 
+    def get_num_encoder_tokens(self, input_id: int) -> int:
+        assert input_id < len(self.mm_positions)
+        num_tokens = self.mm_positions[input_id].length
+        return num_tokens
+
+    @property
+    def use_structured_output(self) -> bool:
+        return self.sampling_params.guided_decoding is not None
+
+class RequestGenerationState:
+    """
+    Track the generated tokens for a request.
+    """
+    
+    def __init__(self, params: RequestParams) -> None:
+        # convenience alias
+        self.request_id = params.request_id
+        self.client_index = params.client_index
+        
+        self.params = params
+
+        self.stop_reason: Union[int, str, None] = None
+
+        self._output_token_ids: list[int] = []
+        self._all_token_ids: list[int] = params.prompt_token_ids.copy()
+
+        # Read-only views
+        # Prevent directly appending to these lists since
+        # they should also be updated simultaneously.
+        self.output_token_ids = ConstantList(self._output_token_ids)
+        self.all_token_ids = ConstantList(self._all_token_ids)
+
+    # TODO(lucas) This is a hack to reduce the `.params` additions in the PR we
+    #  should probably remove it
+    def __getattribute__(self, name: str) -> Any:
+        if name == "params":
+            return object.__getattribute__(self, name)
+
+        params = object.__getattribute__(self, "params")
+        if hasattr(params, name):
+            return getattr(params, name)
+
+        return object.__getattribute__(self, name)
+
     def append_output_token_ids(
         self,
         token_ids: Union[int, list[int]],
@@ -121,10 +152,6 @@ class Request:
         return len(self._all_token_ids)
 
     @property
-    def num_tokens_with_spec(self) -> int:
-        return len(self._all_token_ids) + len(self.spec_token_ids)
-
-    @property
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
 
@@ -134,14 +161,58 @@ class Request:
     def get_finished_reason(self) -> Union[FinishReason, None]:
         return RequestStatus.get_finished_reason(self.status)
 
-    def get_num_encoder_tokens(self, input_id: int) -> int:
-        assert input_id < len(self.mm_positions)
-        num_tokens = self.mm_positions[input_id].length
-        return num_tokens
+
+class RequestSchedulerState:
+    """
+    Track the scheduler state for a request. i.e. all the information the 
+     scheduler needs to know to schedule the next tokens for the request.
+    """
+    def __init__(self, params: RequestParams) -> None:
+        # Convenience alias
+        self.request_id = params.request_id
+        
+        self.params = params
+
+        self.status = (RequestStatus.WAITING_FOR_FSM
+                       if params.sampling_params.guided_decoding is not None else
+                       RequestStatus.WAITING)
+        self.spec_token_ids: list[int] = []
+
+        # TODO(lucas): these names match the current names used in the scheduler
+        # but I think these names can be improved
+        # This is the number of tokens that are known (prompt + any generated output tokens)
+        self.num_tokens = params.num_prompt_tokens 
+        # This is the tokens we have a valid KV-cache for
+        self.num_computed_tokens = 0
+
+        self.events: list[EngineCoreEvent] = []
+
+        # State
+        # The number of tokens with prefix cache hits.
+        self.num_cached_tokens = -1
+
+    # TODO(lucas) This is a hack to reduce the `.params` additions in the PR we
+    #  should probably remove it
+    def __getattribute__(self, name: str) -> Any:
+        if name == "params":
+            return object.__getattribute__(self, name)
+
+        params = object.__getattribute__(self, "params")
+        if hasattr(params, name):
+            return getattr(params, name)
+
+        return object.__getattribute__(self, name)
 
     @property
-    def use_structured_output(self) -> bool:
-        return self.sampling_params.guided_decoding is not None
+    def num_tokens_with_spec(self):
+        return self.num_tokens + len(self.spec_token_ids)
+
+    @property
+    def num_output_tokens(self) -> int:
+        return self.num_tokens - self.params.num_prompt_tokens
+
+    def is_finished(self) -> bool:
+        return RequestStatus.is_finished(self.status)
 
     def record_event(
         self,

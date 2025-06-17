@@ -13,7 +13,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          hash_request_tokens)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import RequestStatus, RequestSchedulerState, RequestGenerationState, RequestParams
 
 logger = init_logger(__name__)
 
@@ -130,8 +130,9 @@ class KVCacheManager:
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
 
+    # NOTE(lucas): Will only hash the prompt for now
     def get_computed_blocks(self,
-                            request: Request) -> tuple[KVCacheBlocks, int]:
+                            request: RequestParams) -> tuple[KVCacheBlocks, int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -154,7 +155,9 @@ class KVCacheManager:
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
             block_hashes = hash_request_tokens(self.caching_hash_fn,
-                                               self.block_size, request)
+                                               self.block_size, 
+                                               request.prompt_token_ids,
+                                               request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         if self.log_stats:
@@ -167,45 +170,42 @@ class KVCacheManager:
         # the single last token, because allocate_slots() requires
         # num_computed_tokens to be block-size aligned. Removing this limitation
         # could slightly improve performance in the future.
-        max_cache_hit_length = request.num_tokens - 1
+        max_cache_hit_length = request.num_prompt_tokens - 1
         computed_blocks, num_new_computed_tokens = (
             self.coordinator.find_longest_cache_hit(block_hashes,
                                                     max_cache_hit_length))
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.queries += request.num_tokens
+            self.prefix_cache_stats.queries += request.num_prompt_tokens
             self.prefix_cache_stats.hits += num_new_computed_tokens
 
         return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
     def allocate_slots(
         self,
-        request: Request,
+        request_id: str,
+        num_computed_tokens: int,
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_draft_tokens: int = 0,
         num_lookahead_tokens: int = 0,
-        delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
-        """Add slots for a request with new tokens to append.
+        """
 
         Args:
-            request: The request to allocate slots.
-            num_new_tokens: The number of tokens to allocate, including external
-                tokens. Note that this does not include tokens that have
-                already been computed locally (i.e. new_computed_blocks).
-            num_new_computed_tokens: The number of new computed tokens just
-                hitting the prefix caching, excluding external tokens.
+            request_id: The id of the request to allocate slots for.
+            num_computed_tokens: The number of computed tokens for the request.
+            num_new_tokens: The number of new tokens to allocate slots for.
+            num_new_computed_tokens: The number of new computed tokens hitting 
+                the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed 
                 tokens.
+            num_draft_tokens: The number of speculative draft tokens.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
-            delay_cache_blocks: Whether to skip caching the blocks. This is
-                used by P/D when allocating blocks used in a KV transfer
-                which will complete in a future step.
 
         Blocks layout:
         ```
@@ -239,19 +239,18 @@ class KVCacheManager:
         # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
-        self.coordinator.remove_skipped_blocks(request.request_id,
-                                               request.num_computed_tokens)
+        self.coordinator.remove_skipped_blocks(request_id, num_computed_tokens)
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
-        num_computed_tokens = (request.num_computed_tokens +
+        num_computed_tokens = (num_computed_tokens +
                                num_new_computed_tokens)
         num_tokens_need_slot = min(
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
-            request_id=request.request_id,
+            request_id=request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
         )
@@ -270,27 +269,15 @@ class KVCacheManager:
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
-        self.coordinator.save_new_computed_blocks(request.request_id,
+        self.coordinator.save_new_computed_blocks(request_id,
                                                   new_computed_block_list)
 
         new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot)
-
-        # P/D: delay caching blocks if we have to recv from
-        # remote. Update state for locally cached blocks.
-        if not self.enable_caching or delay_cache_blocks:
-            return KVCacheBlocks(new_blocks)
-
-        # Speculated tokens might be rejected in the future, so we does
-        # not cache any speculated tokens. We only cache blocks with
-        # generated (accepted) tokens.
-        self.coordinator.cache_blocks(
-            request, self.req_to_block_hashes[request.request_id],
-            num_computed_tokens + num_new_tokens - num_draft_tokens)
+            request_id, num_tokens_need_slot)
 
         return KVCacheBlocks(new_blocks)
 
-    def free(self, request: Request) -> None:
+    def free(self, request_id: str) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that he tail blocks are evicted 
         first when caching is enabled.
@@ -298,7 +285,7 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
-        self.coordinator.free(request.request_id)
+        self.coordinator.free(request_id)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -318,7 +305,7 @@ class KVCacheManager:
 
     def get_num_common_prefix_blocks(
         self,
-        request: Request,
+        request: RequestSchedulerState,
         num_running_requests: int,
     ) -> list[int]:
         """Calculate the number of common prefix blocks shared by all requests
@@ -359,13 +346,13 @@ class KVCacheManager:
         return self.coordinator.get_num_common_prefix_blocks(
             request.request_id, num_running_requests)
 
-    def free_block_hashes(self, request: Request) -> None:
+    def free_block_hashes(self, request_id: str) -> None:
         """Discard the block hashes for the request.
 
         NOTE: Unlike `free`, this method should be called only when the request
         is finished, not when it is preempted.
         """
-        self.req_to_block_hashes.pop(request.request_id, None)
+        self.req_to_block_hashes.pop(request_id, None)
 
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
@@ -380,9 +367,9 @@ class KVCacheManager:
         return KVCacheBlocks(
             self.coordinator.get_blocks(request_id)).get_block_ids()
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(self, request: "RequestGenerationState", block_hashes: list[BlockHash],
+                     num_computed_tokens: int) -> None:
         """Cache the blocks for the request."""
-        block_hashes = self.req_to_block_hashes[request.request_id]
         self.coordinator.cache_blocks(request, block_hashes,
                                       num_computed_tokens)
 

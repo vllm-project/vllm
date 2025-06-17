@@ -201,7 +201,7 @@ class LLMEngine:
         n = params.n if isinstance(params, SamplingParams) else 1
 
         if n == 1:
-            # Make a new RequestState and queue.
+            # Make a new RequestGenerationState and queue.
             self.output_processor.add_request(request, prompt_str, None, 0)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
@@ -215,7 +215,7 @@ class LLMEngine:
             child_request.request_id = request_id
             child_request.sampling_params = params
 
-            # Make a new RequestState and queue.
+            # Make a new RequestGenerationState and queue.
             self.output_processor.add_request(child_request, prompt_str,
                                               parent_req, idx)
             # Add the request to EngineCore.

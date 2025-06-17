@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalRegistry
-from vllm.v1.request import Request
+from vllm.v1.request import RequestParams
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, SchedulerConfig
@@ -23,41 +23,41 @@ class EncoderCacheManager:
         # list of [req_id, input_id]
         self.freed: list[tuple[str, int]] = []
 
-    def has_cache(self, request: Request, input_id: int) -> bool:
-        req_id = request.request_id
+    def has_cache(self, request_params: RequestParams, input_id: int) -> bool:
+        req_id = request_params.request_id
         return req_id in self.cached and input_id in self.cached[req_id]
 
-    def can_allocate(self, request: Request, input_id: int) -> bool:
-        num_tokens = request.get_num_encoder_tokens(input_id)
+    def can_allocate(self, request_params: RequestParams, input_id: int) -> bool:
+        num_tokens = request_params.get_num_encoder_tokens(input_id)
         return num_tokens <= self.num_free_slots
 
-    def allocate(self, request: Request, input_id: int) -> None:
-        req_id = request.request_id
+    def allocate(self, request_params: RequestParams, input_id: int) -> None:
+        req_id = request_params.request_id
         if req_id not in self.cached:
             self.cached[req_id] = set()
         self.cached[req_id].add(input_id)
-        self.num_free_slots -= request.get_num_encoder_tokens(input_id)
+        self.num_free_slots -= request_params.get_num_encoder_tokens(input_id)
 
-    def get_cached_input_ids(self, request: Request) -> set[int]:
-        return self.cached.get(request.request_id, set())
+    def get_cached_input_ids(self, request_params: RequestParams) -> set[int]:
+        return self.cached.get(request_params.request_id, set())
 
-    def free_encoder_input(self, request: Request, input_id: int) -> None:
+    def free_encoder_input(self, request_params: RequestParams, input_id: int) -> None:
         """Free a single encoder input id for the request."""
-        req_id = request.request_id
+        req_id = request_params.request_id
         if req_id not in self.cached:
             return
 
         self.cached[req_id].discard(input_id)
         if len(self.cached[req_id]) == 0:
             del self.cached[req_id]
-        self.num_free_slots += request.get_num_encoder_tokens(input_id)
+        self.num_free_slots += request_params.get_num_encoder_tokens(input_id)
         self.freed.append((req_id, input_id))
 
-    def free(self, request: Request) -> None:
+    def free(self, request_params: RequestParams) -> None:
         """Free all cached input ids for the request."""
-        input_ids = self.get_cached_input_ids(request).copy()
+        input_ids = self.get_cached_input_ids(request_params).copy()
         for input_id in input_ids:
-            self.free_encoder_input(request, input_id)
+            self.free_encoder_input(request_params, input_id)
 
     def get_freed_ids(self) -> list[tuple[str, int]]:
         freed = self.freed

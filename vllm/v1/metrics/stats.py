@@ -9,7 +9,7 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
-    from vllm.v1.engine.output_processor import RequestState
+    from vllm.v1.engine.output_processor import RequestGenerationState
 
 
 @dataclass
@@ -48,7 +48,7 @@ class LoRAStats:
 
 
 @dataclass
-class RequestStateStats:
+class RequestGenerationStateStats:
     """Stats that need to be tracked across delta updates."""
 
     num_generation_tokens: int = 0
@@ -100,7 +100,7 @@ class IterationStats:
 
     def update_from_output(self, output: "EngineCoreOutput",
                            engine_core_timestamp: float, is_prefilling: bool,
-                           prompt_len: int, req_stats: RequestStateStats,
+                           prompt_len: int, req_stats: RequestGenerationStateStats,
                            lora_stats: Optional[LoRAStats]):
         num_new_generation_tokens = len(output.new_token_ids)
 
@@ -129,7 +129,7 @@ class IterationStats:
         req_stats.last_token_ts = engine_core_timestamp
 
     def update_from_events(self, req_id: str, events: list["EngineCoreEvent"],
-                           is_prefilling: bool, req_stats: RequestStateStats,
+                           is_prefilling: bool, req_stats: RequestGenerationStateStats,
                            lora_stats: Optional[LoRAStats]):
         # Avoid circular dependency
         from vllm.v1.engine import EngineCoreEventType
@@ -141,15 +141,15 @@ class IterationStats:
             elif event.type == EngineCoreEventType.SCHEDULED:
                 if req_stats.scheduled_ts == 0.0:  # ignore preemptions
                     req_stats.scheduled_ts = event.timestamp
-                LoRARequestStates.scheduled_request(lora_stats, req_id)
+                LoRARequestGenerationStates.scheduled_request(lora_stats, req_id)
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
-                LoRARequestStates.preempted_request(lora_stats, req_id)
+                LoRARequestGenerationStates.preempted_request(lora_stats, req_id)
 
     def update_from_finished_request(self, finish_reason: "FinishReason",
                                      num_prompt_tokens: int,
                                      max_tokens_param: Optional[int],
-                                     req_stats: RequestStateStats):
+                                     req_stats: RequestGenerationStateStats):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
         # Queued interval is from first QUEUED event to first SCHEDULED
@@ -180,30 +180,30 @@ class IterationStats:
         self.finished_requests.append(finished_req)
 
 
-class LoRARequestStates:
+class LoRARequestGenerationStates:
     """Per-LoRA request state stats."""
 
     def __init__(self):
         self.lora_name_to_stats: dict[str, LoRAStats] = {}
 
-    def get_stats(self, req_state: 'RequestState') -> Optional[LoRAStats]:
+    def get_stats(self, req_state: 'RequestGenerationState') -> Optional[LoRAStats]:
         if req_state.lora_name is None:
             return None
         if req_state.lora_name not in self.lora_name_to_stats:
             self.lora_name_to_stats[req_state.lora_name] = LoRAStats()
         return self.lora_name_to_stats[req_state.lora_name]
 
-    def add_request(self, req_state: 'RequestState'):
+    def add_request(self, req_state: 'RequestGenerationState'):
         if (lora_stats := self.get_stats(req_state)) is not None:
             lora_stats.waiting_requests.add(req_state.request_id)
 
-    def finish_request(self, req_state: 'RequestState'):
+    def finish_request(self, req_state: 'RequestGenerationState'):
         if req_state.lora_name is None:
             return
         lora_stats = self.lora_name_to_stats[req_state.lora_name]
         lora_stats.running_requests.remove(req_state.request_id)
 
-    def abort_request(self, req_state: 'RequestState'):
+    def abort_request(self, req_state: 'RequestGenerationState'):
         if req_state.lora_name is None:
             return
         lora_stats = self.lora_name_to_stats[req_state.lora_name]

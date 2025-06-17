@@ -42,7 +42,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestGenerationState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (initialize_kv_cache_for_kv_sharing,
@@ -196,7 +196,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
         # Request states.
-        self.requests: dict[str, CachedRequestState] = {}
+        self.requests: dict[str, CachedRequestGenerationState] = {}
 
         # Initialize input batch early to avoid AttributeError in _update_states
         self.input_batch = InputBatch(
@@ -389,7 +389,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
 
-            self.requests[req_id] = CachedRequestState(
+            self.requests[req_id] = CachedRequestGenerationState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 mm_inputs=new_req_data.mm_inputs,
@@ -890,7 +890,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
-        request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
+        request_seq_lens: list[tuple[int, CachedRequestGenerationState, int]] = []
         discard_sampled_tokens_req_indices = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
