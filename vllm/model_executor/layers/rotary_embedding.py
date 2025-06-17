@@ -28,6 +28,8 @@ from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
+import triton
+import triton.language as tl
 from transformers import PretrainedConfig
 
 from vllm.model_executor.custom_op import CustomOp
@@ -759,6 +761,34 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     return 0.1 * mscale * math.log(scale) + 1.0
 
 
+@triton.jit
+def deepseek_scaling_rotary_emb_kernel_gptj(cos_sin, q, stride1: int,
+                                            stride2: int, stride_cs: int,
+                                            dim1: int, dim2: int, dim3: int,
+                                            BLOCK_SIZE: tl.constexpr):
+    pid0 = tl.program_id(0)
+    pid1 = tl.program_id(1)
+    pid2 = tl.program_id(2)
+    offsets_cs = tl.arange(0, BLOCK_SIZE) + pid2 * BLOCK_SIZE
+    offsets_q = tl.arange(0, BLOCK_SIZE * 2) + pid2 * BLOCK_SIZE * 2
+
+    offsets = pid0 * stride1 + pid1 * stride2 + offsets_q
+    mask = offsets_cs < dim3
+    mask2 = offsets_q < dim3 * 2
+
+    v_cos = tl.load(cos_sin + pid0 * stride_cs + offsets_cs, mask=mask)
+    v_cos2 = tl.interleave(v_cos, v_cos)
+    v_sin = tl.load(cos_sin + pid0 * stride_cs + dim3 + offsets_cs, mask=mask)
+    v_sin2 = tl.interleave(v_sin, v_sin)
+    x12 = tl.load(q + offsets, mask=mask2)
+    x1, x2 = tl.split(x12.reshape([BLOCK_SIZE, 2]))
+    # we are both reading and writing 'q'; make sure all warps are in sync
+    tl.debug_barrier()
+    x12_ = tl.ravel(tl.join(-x2, x1))
+    x12 = x12 * v_cos2 + x12_ * v_sin2
+    tl.store(q + offsets, x12, mask=mask2)
+
+
 class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     """RotaryEmbedding extended with YaRN method.
 
@@ -781,12 +811,14 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         beta_slow: int = 1,
         mscale: float = 1,
         mscale_all_dim: float = 0,
+        reference: bool = False,
     ) -> None:
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
         self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
+        self.reference = reference
         # Get n-d magnitude scaling corrected for interpolation.
         self.mscale = float(
             yarn_get_mscale(self.scaling_factor, float(mscale)) /
@@ -837,30 +869,58 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
-        query_rot = query[..., :self.rotary_dim]
-        key_rot = key[..., :self.rotary_dim]
-        if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim:]
-            key_pass = key[..., self.rotary_dim:]
-
         if self.cos_sin_cache.device != positions.device:
             self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(
                 positions.device)
         cos_sin = self.cos_sin_cache[torch.add(positions, offsets)
                                      if offsets is not None else positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
-        if self.is_neox_style:
-            # NOTE(woosuk): Here we assume that the positions tensor has the
-            # shape [batch_size, seq_len].
-            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
-        else:
-            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
-            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
 
-        rotate_fn = _rotate_neox if self.is_neox_style else _rotate_gptj
-        query_rot = query_rot * cos + rotate_fn(query_rot) * sin
-        key_rot = key_rot * cos + rotate_fn(key_rot) * sin
+        if query.device.type == 'cuda' and not self.is_neox_style \
+            and not self.reference:
+            assert len(query.shape) == 3
+
+            def call(q):
+                BLOCK_SIZE = 64
+                grid = (
+                    q.shape[-3],
+                    q.shape[-2],
+                    triton.cdiv(self.rotary_dim // 2, BLOCK_SIZE),
+                )
+                deepseek_scaling_rotary_emb_kernel_gptj[grid](
+                    cos_sin,
+                    q,
+                    stride1=q.stride()[-3],
+                    stride2=q.stride()[-2],
+                    stride_cs=cos_sin.stride()[-2],
+                    dim1=q.shape[0],
+                    dim2=q.shape[1],
+                    dim3=self.rotary_dim // 2,
+                    BLOCK_SIZE=BLOCK_SIZE,
+                    num_warps=1)
+
+            call(query)
+            call(key)
+            return query, key
+        else:
+            query_rot = query[..., :self.rotary_dim]
+            key_rot = key[..., :self.rotary_dim]
+            if self.rotary_dim < self.head_size:
+                query_pass = query[..., self.rotary_dim:]
+                key_pass = key[..., self.rotary_dim:]
+
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            if self.is_neox_style:
+                # NOTE(woosuk): Here we assume that the positions tensor has the
+                # shape [batch_size, seq_len].
+                cos = cos.repeat(1, 1, 2).unsqueeze(-2)
+                sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+            else:
+                cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
+                sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+
+            rotate_fn = _rotate_neox if self.is_neox_style else _rotate_gptj
+            query_rot = query_rot * cos + rotate_fn(query_rot) * sin
+            key_rot = key_rot * cos + rotate_fn(key_rot) * sin
 
         if self.rotary_dim < self.head_size:
             query = torch.cat((query_rot, query_pass), dim=-1)
