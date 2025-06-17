@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -202,6 +203,12 @@ class MultiConnector(KVConnectorBase_V1):
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
+
+    def take_events(self) -> Optional[list[KVCacheEvent]]:
+        events: list[KVCacheEvent] = []
+        for c in self._connectors:
+            events += c.take_events() or []
+        return events or None
 
     @classmethod
     def get_required_kvcache_layout(
