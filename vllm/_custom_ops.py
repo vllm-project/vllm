@@ -17,20 +17,12 @@ from vllm.scalar_type import ScalarType
 logger = init_logger(__name__)
 
 if not current_platform.is_tpu() and not current_platform.is_hpu():
-    try:
-        import vllm._C
-    except ImportError as e:
-        logger.warning("Failed to import from vllm._C with %r", e)
-
-supports_moe_ops = False
-with contextlib.suppress(ImportError):
-    import vllm._moe_C  # noqa: F401
-
-    supports_moe_ops = True
+    custom_ops.import_vllm_kernels_C()
 
 
 # These are actually defined in vllm_kernels/custom_ops.py
 # but are pasesed through here for backwards compat purposes
+supports_moe_ops = custom_ops.supports_moe_ops
 paged_attention_v1 = custom_ops.paged_attention_v1
 paged_attention_v2 = custom_ops.paged_attention_v2
 paged_attention_rocm = custom_ops.paged_attention_rocm

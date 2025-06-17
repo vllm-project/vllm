@@ -9,16 +9,10 @@ import torch
 import torch.library
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm_kernels.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-if not current_platform.is_tpu() and not current_platform.is_hpu():
-    try:
-        import vllm._C
-    except ImportError as e:
-        logger.warning("Failed to import from vllm._C with %r", e)
 
 supports_moe_ops = False
 with contextlib.suppress(ImportError):
@@ -35,6 +29,15 @@ else:
     except ImportError:
         from torch.library import impl_abstract as register_fake
 
+def import_vllm_kernels_C():
+# TODO: This was originally guarded by the following conditional:
+# if not current_platform.is_tpu() and not current_platform.is_hpu():
+# But moving it to vllm_kernels means we would need to move the entirety
+# of the platform plugins which I'm unsure we want to do right now.
+    try:
+        import vllm_kernels._C
+    except ImportError as e:
+        logger.warning("Failed to import from vllm._C with %r", e)
 
 # page attention ops
 def paged_attention_v1(
