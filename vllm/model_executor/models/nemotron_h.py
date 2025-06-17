@@ -144,7 +144,7 @@ class NemotronHMambaDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             ssm_state_size=config.ssm_state_size,
             conv_kernel_size=config.conv_kernel,
-            intermediate_size=config.expand * config.hidden_size,
+            intermediate_size=config.mamba_head_dim * config.mamba_num_heads,
             use_conv_bias=config.use_conv_bias,
             use_bias=config.use_bias,
             n_groups=config.n_groups,
@@ -527,7 +527,7 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
         conv_state_shape, temporal_state_shape = None, None
 
-        intermediate_size = self.config.expand * hidden_size
+        intermediate_size = self.config.mamba_head_dim * self.config.mamba_num_heads
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
