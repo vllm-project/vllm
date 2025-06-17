@@ -4,7 +4,7 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional
 
 import torch
 
@@ -1052,7 +1052,7 @@ def inplace_fused_experts_fake(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[list[int]] = None) -> None:
+        block_shape: Optional[List[int]] = None) -> None:
     pass
 
 
@@ -1116,7 +1116,7 @@ def outplace_fused_experts_fake(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[list[int]] = None) -> torch.Tensor:
+        block_shape: Optional[List[int]] = None) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
 
