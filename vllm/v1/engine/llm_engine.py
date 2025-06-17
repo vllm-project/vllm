@@ -194,7 +194,8 @@ class LLMEngine:
     ) -> None:
         # Validate the request_id type.
         if not isinstance(request_id, str):
-            raise TypeError(f"request_id must be a string, got {type(request_id)}")
+            raise TypeError(
+                f"request_id must be a string, got {type(request_id)}")
 
         # Process raw inputs into the request.
         prompt_str, request = self.processor.process_inputs(
