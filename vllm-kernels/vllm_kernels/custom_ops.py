@@ -10,7 +10,7 @@ import torch.library
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.scalar_type import ScalarType
+from vllm_kernels.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
