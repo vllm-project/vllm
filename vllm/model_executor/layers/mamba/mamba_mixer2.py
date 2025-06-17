@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional, Union
 
@@ -318,7 +319,7 @@ class MambaMixer2(CustomOp):
             n_groups == 1,  # if there was only one group
         )
         intermediate_settings = (intermediate_size, 0, False)
-        head_setings = (self.num_heads, 0, False)
+        head_settings = (self.num_heads, 0, False)
 
         # - the weight already has a "weight_loader" attribute
         #   which set_weight_attrs will raise if we do not
@@ -371,7 +372,7 @@ class MambaMixer2(CustomOp):
                             intermediate_settings,
                             group_shard_settings,
                             group_shard_settings,
-                            head_setings,  # for dt
+                            head_settings,  # for dt
                         ],
                         self.tp_size,
                         tp_rank,

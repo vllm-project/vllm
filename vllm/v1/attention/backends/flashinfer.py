@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 from __future__ import annotations
 
@@ -17,7 +18,8 @@ from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -201,7 +203,7 @@ class FlashInferMetadata:
                 f" received {self.head_dim}.")
 
 
-class FlashInferMetadataBuilder:
+class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def __init__(self, runner: GPUModelRunner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -398,9 +400,11 @@ class FlashInferMetadataBuilder:
                     kv_data_type=attn_metadata.data_type,
                 )
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
+    def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+
         assert self._num_decodes + self._num_prefills == num_reqs
         assert (self._num_decode_tokens +
                 self._num_prefill_tokens == num_actual_tokens)
@@ -506,7 +510,13 @@ class FlashInferImpl(AttentionImpl):
         blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[int] = None,
+        use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in FlashInfer is not supported yet, it will fall"
+                " back to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -520,8 +530,8 @@ class FlashInferImpl(AttentionImpl):
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         if attn_type != AttentionType.DECODER:
@@ -539,6 +549,7 @@ class FlashInferImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 
@@ -552,6 +563,11 @@ class FlashInferImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashInferImpl")
 
         if attn_metadata is None:
             # Profiling run.
@@ -567,21 +583,25 @@ class FlashInferImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        # Reshape the input keys and values and store them in the cache.
-        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-        # not padded. However, we don't need to do key[:num_actual_tokens] and
-        # value[:num_actual_tokens] because the reshape_and_cache_flash op uses
-        # the slot_mapping's shape to determine the number of actual tokens.
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
-            key,
-            value,
-            kv_cache[:, 0],
-            kv_cache[:, 1],
-            attn_metadata.slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
+
+        if self.kv_sharing_target_layer_name is None:
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+            # not padded. However, we don't need to do key[:num_actual_tokens]
+            # and value[:num_actual_tokens] because the reshape_and_cache_flash
+            # op uses the slot_mapping's shape to determine the number of
+            # actual tokens.
+            torch.ops._C_cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                kv_cache[:, 0],
+                kv_cache[:, 1],
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
         window_left = (self.sliding_window[0]
                        if self.sliding_window is not None else -1)

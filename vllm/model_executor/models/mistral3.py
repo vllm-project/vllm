@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
@@ -494,11 +495,11 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         vision_embeddings = self._process_image_input(image_input)
 
@@ -559,9 +560,8 @@ class Mistral3ForConditionalGeneration(nn.Module, SupportsLoRA,
                 batch.
             pixel_values: The pixels in each input image.
 
-        :::{seealso}
-        {class}`Mistral3ImagePixelInputs`
-        :::
+        Info:
+            [Mistral3ImagePixelInputs][]
         """
         if intermediate_tensors is not None:
             inputs_embeds = None

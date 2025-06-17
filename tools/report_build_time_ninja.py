@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright (c) 2018 The Chromium Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
@@ -115,7 +116,7 @@ def ReadTargets(log, show_all):
             # If ninja.exe is rudely halted then the .ninja_log file may be
             # corrupt. Silently continue.
             continue
-        start, end, _, name, cmdhash = parts  # Ignore restat.
+        start, end, _, name, cmdhash = parts  # Ignore restart.
         # Convert from integral milliseconds to float seconds.
         start = int(start) / 1000.0
         end = int(end) / 1000.0

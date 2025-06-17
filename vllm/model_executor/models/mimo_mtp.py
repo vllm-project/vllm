@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/model_executor/models/deepseek_mtp.py
@@ -250,7 +251,7 @@ class MiMoMTP(nn.Module):
         return loaded_params
 
     def map_model_name_to_mtp_param_name(self, name: str) -> str:
-        import re
+        import regex as re
         name_without_prefix = [
             "token_layernorm", "hidden_layernorm", "input_proj",
             "final_layernorm"

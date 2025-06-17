@@ -36,6 +36,20 @@ pull_request_rules:
       add:
         - frontend
 
+- name: label-llama
+  description: Automatically apply llama label
+  conditions:
+    - or:
+      - files~=^examples/.*llama.*\.py
+      - files~=^tests/.*llama.*\.py
+      - files~=^vllm/entrypoints/openai/tool_parsers/llama.*\.py
+      - files~=^vllm/model_executor/models/.*llama.*\.py
+      - files~=^vllm/transformers_utils/configs/.*llama.*\.py
+  actions:
+    label:
+      add:
+        - llama
+
 - name: label-multi-modality
   description: Automatically apply multi-modality label
   conditions:
@@ -51,6 +65,26 @@ pull_request_rules:
       add:
         - multi-modality
 
+- name: label-rocm
+  description: Automatically apply rocm label
+  conditions:
+    - or:
+      - files~=^csrc/rocm/
+      - files~=^docker/Dockerfile.rocm
+      - files~=^requirements/rocm.*\.txt
+      - files~=^vllm/attention/backends/rocm.*\.py
+      - files~=^vllm/attention/ops/rocm.*\.py
+      - files~=^vllm/model_executor/layers/fused_moe/rocm.*\.py
+      - files~=^vllm/v1/attention/backends/mla/rocm.*\.py
+      - files~=^tests/kernels/.*_rocm.*\.py
+      - files=vllm/platforms/rocm.py
+      - title~=(?i)AMD
+      - title~=(?i)ROCm
+  actions:
+    label:
+      add:
+        - rocm
+
 - name: label-structured-output
   description: Automatically apply structured-output label
   conditions:
@@ -58,7 +92,7 @@ pull_request_rules:
       - files~=^benchmarks/structured_schemas/
       - files=benchmarks/benchmark_serving_structured_output.py
       - files=benchmarks/run_structured_output_benchmark.sh
-      - files=docs/source/features/structured_outputs.md
+      - files=docs/features/structured_outputs.md
       - files=examples/offline_inference/structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
@@ -135,9 +169,7 @@ pull_request_rules:
       - files~=^tests/entrypoints/openai/tool_parsers/
       - files=tests/entrypoints/openai/test_chat_with_tool_reasoning.py
       - files~=^vllm/entrypoints/openai/tool_parsers/
-      - files=docs/source/features/tool_calling.md
-      - files=docs/source/getting_started/examples/openai_chat_completion_client_with_tools.md
-      - files=docs/source/getting_started/examples/chat_with_tools.md
+      - files=docs/features/tool_calling.md
       - files~=^examples/tool_chat_*
       - files=examples/offline_inference/chat_with_tools.py
       - files=examples/online_serving/openai_chat_completion_client_with_tools_required.py

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
@@ -965,7 +966,7 @@ def select_tiling(
 
 class MolmoProcessorWrapper:
     """
-    Wraps {class}`MolmoProcessor` so that it can be called directly.
+    Wraps `MolmoProcessor` so that it can be called directly.
 
     The original definition can be found here:
     https://huggingface.co/allenai/Molmo-7B-D-0924/blob/main/preprocessing_molmo.py
@@ -1472,11 +1473,11 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         return self._process_image_input(image_input)
 

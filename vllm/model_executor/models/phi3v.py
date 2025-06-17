@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 The vLLM team.
 # Copyright 2024 Microsoft and the HuggingFace Inc. team. All rights reserved.
@@ -14,10 +15,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal, Optional, TypedDict, Union
 
+import regex as re
 import torch
 import torch.nn as nn
 from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
@@ -654,11 +655,11 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
@@ -668,7 +669,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.image_token_id)

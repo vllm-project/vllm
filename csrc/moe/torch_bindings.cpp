@@ -66,7 +66,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   m.def(
       "moe_permute(Tensor input, Tensor topk_weight, Tensor! topk_ids,"
-      "Tensor token_expert_indicies, Tensor? expert_map, int n_expert,"
+      "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
       "int n_local_expert,"
       "int topk, int? align_block_size,Tensor! permuted_input, Tensor! "
       "expert_first_token_offset, Tensor! src_row_id2dst_row_id_map, Tensor! "
@@ -77,7 +77,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor topk_ids,Tensor src_row_id2dst_row_id_map, Tensor "
       "expert_first_token_offset, int n_expert, int n_local_expert,int "
       "topk, Tensor! hidden_states)->()");
-  // conditionally compiled so impl registration is in source file
+
+  m.def("moe_permute_unpermute_supported() -> bool");
+  m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
+
+  // Row shuffle for MoE
+  m.def(
+      "shuffle_rows(Tensor input_tensor, Tensor dst2src_map, Tensor! "
+      "output_tensor) -> ()");
+  m.impl("shuffle_rows", torch::kCUDA, &shuffle_rows);
 
 #endif
 }

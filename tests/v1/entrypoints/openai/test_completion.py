@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from typing import Optional
 
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import regex as re
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer

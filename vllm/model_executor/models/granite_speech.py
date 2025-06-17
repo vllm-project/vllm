@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -705,10 +706,11 @@ class GraniteSpeechForConditionalGeneration(
     def get_multimodal_embeddings(
         self,
         **kwargs: object,
-    ) -> Optional[MultiModalEmbeddings]:
+    ) -> MultiModalEmbeddings:
         """Compute the audio embeddings if audio inputs are present."""
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
+            return []
             return None
         audio_features = self._process_audio_input(audio_input)
         return audio_features

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
 import time
@@ -10,10 +11,10 @@ from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Literal, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union, cast, overload
+from typing import Set, Type, Union, cast
 
 import torch
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
@@ -57,8 +58,7 @@ from vllm.transformers_utils.tokenizer_group import (
     TokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import (Counter, Device, deprecate_kwargs,
-                        resolve_obj_by_qualname, weak_bind)
+from vllm.utils import Counter, Device, resolve_obj_by_qualname, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.model_runner_base import InputProcessingError
 
@@ -130,26 +130,16 @@ class LLMEngine:
     iteration-level scheduling and efficient memory management to maximize the
     serving throughput.
 
-    The {class}`~vllm.LLM` class wraps this class for offline batched inference
-    and the {class}`AsyncLLMEngine` class wraps this class for online serving.
+    The [`LLM`][vllm.LLM] class wraps this class for offline batched inference
+    and the [`AsyncLLMEngine`][vllm.engine.async_llm_engine.AsyncLLMEngine]
+    class wraps this class for online serving.
 
-    The config arguments are derived from {class}`~vllm.EngineArgs`. (See
-    {ref}`engine-args`)
+    The config arguments are derived from [`EngineArgs`][vllm.EngineArgs].
 
     Args:
-        model_config: The configuration related to the LLM model.
-        cache_config: The configuration related to the KV cache memory
-            management.
-        parallel_config: The configuration related to distributed execution.
-        scheduler_config: The configuration related to the request scheduler.
-        device_config: The configuration related to the device.
-        lora_config (Optional): The configuration related to serving multi-LoRA.
-        speculative_config (Optional): The configuration related to speculative
-            decoding.
+        vllm_config: The configuration for initializing and running vLLM.
         executor_class: The model executor class for managing distributed
             execution.
-        prompt_adapter_config (Optional): The configuration related to serving
-            prompt adapters.
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
     """
@@ -638,7 +628,6 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         self.model_executor.stop_remote_worker_execution_loop()
 
-    @overload
     def add_request(
         self,
         request_id: str,
@@ -651,42 +640,6 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
-        ...
-
-    @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
-    def add_request(
-        self,
-        request_id: str,
-        *,
-        inputs: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
-    ) -> None:
-        ...
-
-    @deprecate_kwargs(
-        "inputs",
-        additional_message="Please use the 'prompt' parameter instead.",
-    )
-    def add_request(
-            self,
-            request_id: str,
-            prompt: Optional[PromptType] = None,
-            params: Optional[Union[SamplingParams, PoolingParams]] = None,
-            arrival_time: Optional[float] = None,
-            lora_request: Optional[LoRARequest] = None,
-            tokenization_kwargs: Optional[dict[str, Any]] = None,
-            trace_headers: Optional[Mapping[str, str]] = None,
-            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-            priority: int = 0,
-            *,
-            inputs: Optional[PromptType] = None,  # DEPRECATED
-    ) -> None:
         """Add a request to the engine's request pool.
 
         The request is added to the request pool and will be processed by the
@@ -695,11 +648,12 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            prompt: The prompt to the LLM. See {class}`~vllm.inputs.PromptType`
+            prompt: The prompt to the LLM. See
+                [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each input.
             params: Parameters for sampling or pooling.
-                {class}`~vllm.SamplingParams` for text generation.
-                {class}`~vllm.PoolingParams` for pooling.
+                [SamplingParams][vllm.SamplingParams] for text generation.
+                [PoolingParams][vllm.PoolingParams] for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
             lora_request: The LoRA request to add.
@@ -711,10 +665,11 @@ class LLMEngine:
         Details:
             - Set arrival_time to the current time if it is None.
             - Set prompt_token_ids to the encoded prompt if it is None.
-            - Create `n` number of {class}`~vllm.Sequence` objects.
-            - Create a {class}`~vllm.SequenceGroup` object
-              from the list of {class}`~vllm.Sequence`.
-            - Add the {class}`~vllm.SequenceGroup` object to the scheduler.
+            - Create `n` number of [Sequence][vllm.Sequence] objects.
+            - Create a [SequenceGroup][vllm.SequenceGroup] object
+              from the list of [Sequence][vllm.Sequence].
+            - Add the [SequenceGroup][vllm.SequenceGroup] object to the
+              scheduler.
 
         Example:
             >>> # initialize engine
@@ -732,10 +687,6 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
-        if inputs is not None:
-            prompt = inputs
-        assert prompt is not None and params is not None
-
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
@@ -861,9 +812,7 @@ class LLMEngine:
             request_id: The ID(s) of the request to abort.
 
         Details:
-            - Refer to the
-              {meth}`~vllm.core.scheduler.Scheduler.abort_seq_group`
-              from class {class}`~vllm.core.scheduler.Scheduler`.
+            - Refer to [vllm.core.scheduler.Scheduler.abort_seq_group][].
 
         Example:
             >>> # initialize engine and add a request with request_id
@@ -1263,12 +1212,10 @@ class LLMEngine:
     def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
-        :::{figure} https://i.imgur.com/sv2HssD.png
-        :alt: Overview of the step function
-        :align: center
-
-        Overview of the step function.
-        :::
+        <figure markdown="span">
+        ![Overview of the step function](https://i.imgur.com/sv2HssD.png)
+        <figcaption>Overview of the step function</figcaption>
+        </figure>
 
         Details:
         - Step 1: Schedules the sequences to be executed in the next
@@ -1662,6 +1609,20 @@ class LLMEngine:
         gpu_prefix_cache_hit_rate = self.scheduler[
             0].get_prefix_cache_hit_rate(Device.GPU)
 
+        # Exchange the uasge and cache hit stats between gpu and cpu when
+        # running on cpu because the cpu_worker.py intentionally reports the
+        # number of cpu blocks as gpu blocks in favor of cache management.
+        if self.device_config.device_type == "cpu":
+            num_total_gpu, num_total_cpu = num_total_cpu, num_total_gpu
+            gpu_cache_usage_sys, cpu_cache_usage_sys = (
+                cpu_cache_usage_sys,
+                gpu_cache_usage_sys,
+            )
+            gpu_prefix_cache_hit_rate, cpu_prefix_cache_hit_rate = (
+                cpu_prefix_cache_hit_rate,
+                gpu_prefix_cache_hit_rate,
+            )
+
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
@@ -1678,9 +1639,6 @@ class LLMEngine:
         time_inference_requests: List[float] = []
         time_prefill_requests: List[float] = []
         time_decode_requests: List[float] = []
-        time_in_queue_requests: List[float] = []
-        model_forward_time_requests: List[float] = []
-        model_execute_time_requests: List[float] = []
         #   Metadata
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
@@ -1788,15 +1746,6 @@ class LLMEngine:
                             now - seq_group.metrics.first_token_time)
                         time_inference_requests.append(
                             now - seq_group.metrics.first_scheduled_time)
-                    if seq_group.metrics.time_in_queue is not None:
-                        time_in_queue_requests.append(
-                            seq_group.metrics.time_in_queue)
-                    if seq_group.metrics.model_forward_time is not None:
-                        model_forward_time_requests.append(
-                            seq_group.metrics.model_forward_time)
-                    if seq_group.metrics.model_execute_time is not None:
-                        model_execute_time_requests.append(
-                            seq_group.metrics.model_execute_time * 1000)
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))
@@ -1865,9 +1814,6 @@ class LLMEngine:
             time_inference_requests=time_inference_requests,
             time_prefill_requests=time_prefill_requests,
             time_decode_requests=time_decode_requests,
-            time_in_queue_requests=time_in_queue_requests,
-            model_forward_time_requests=model_forward_time_requests,
-            model_execute_time_requests=model_execute_time_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,

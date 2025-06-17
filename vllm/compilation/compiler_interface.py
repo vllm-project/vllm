@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import copy
 import hashlib
@@ -12,6 +13,7 @@ import torch._inductor.compile_fx
 import torch.fx as fx
 
 import vllm.envs as envs
+from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.utils import is_torch_equal_or_newer
 
@@ -26,11 +28,22 @@ class CompilerInterface:
     # This is a class-level attribute.
     name: str
 
-    def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
+    def initialize_cache(self,
+                         cache_dir: str,
+                         disable_cache: bool = False,
+                         prefix: str = ""):
         """
         when the vLLM process uses `cache_dir` as the cache directory,
         the compiler should initialize itself with the cache directory,
         e.g. by re-directing its own cache directory to a sub-directory.
+
+        prefix can be used in combination with cache_dir to figure out the base
+        cache directory, e.g. there're multiple parts of model being compiled,
+        but we want to share the same cache directory for all of them.
+
+        e.g.
+        cache_dir = "/path/to/dir/backbone", prefix = "backbone"
+        cache_dir = "/path/to/dir/eagle_head", prefix = "eagle_head"
         """
         pass
 
@@ -39,7 +52,8 @@ class CompilerInterface:
         Gather all the relevant information from the vLLM config,
         to compute a hash so that we can cache the compiled model.
 
-        See {meth}`VllmConfig.compute_hash` to check what information
+        See [`VllmConfig.compute_hash`][vllm.config.VllmConfig.compute_hash]
+        to check what information
         is already considered by default. This function should only
         consider the information that is specific to the compiler.
         """
@@ -153,7 +167,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
     This is not on by default yet, but we plan to turn it on by default for
     PyTorch 2.8.
 
-    Use VLLM_TEST_STANDALONE_COMPILE to toggle this on or off.
+    Use VLLM_USE_STANDALONE_COMPILE to toggle this on or off.
     """
     name = "inductor_standalone"
 
@@ -163,7 +177,10 @@ class InductorStandaloneAdaptor(CompilerInterface):
                                usedforsecurity=False).hexdigest()[:10]
         return hash_str
 
-    def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
+    def initialize_cache(self,
+                         cache_dir: str,
+                         disable_cache: bool = False,
+                         prefix: str = ""):
         self.cache_dir = cache_dir
 
     def compile(
@@ -174,6 +191,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
+        compilation_counter.num_inductor_compiles += 1
         current_config = {}
         if compiler_config is not None:
             current_config.update(compiler_config)
@@ -238,18 +256,23 @@ class InductorAdaptor(CompilerInterface):
                                usedforsecurity=False).hexdigest()[:10]
         return hash_str
 
-    def initialize_cache(self, cache_dir: str, disable_cache: bool = False):
+    def initialize_cache(self,
+                         cache_dir: str,
+                         disable_cache: bool = False,
+                         prefix: str = ""):
         self.cache_dir = cache_dir
+        self.prefix = prefix
+        self.base_cache_dir = cache_dir[:-len(prefix)] if prefix else cache_dir
         if disable_cache:
             return
         # redirect the cache directory to a sub-directory
         # set flags so that Inductor and Triton store their cache
         # in the cache_dir, then users only need to copy the cache_dir
         # to another machine to reuse the cache.
-        inductor_cache = os.path.join(cache_dir, "inductor_cache")
+        inductor_cache = os.path.join(self.base_cache_dir, "inductor_cache")
         os.makedirs(inductor_cache, exist_ok=True)
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
-        triton_cache = os.path.join(cache_dir, "triton_cache")
+        triton_cache = os.path.join(self.base_cache_dir, "triton_cache")
         os.makedirs(triton_cache, exist_ok=True)
         os.environ["TRITON_CACHE_DIR"] = triton_cache
 
@@ -261,6 +284,7 @@ class InductorAdaptor(CompilerInterface):
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
+        compilation_counter.num_inductor_compiles += 1
         from torch._inductor.compile_fx import compile_fx
         current_config = {}
         if compiler_config is not None:
@@ -293,14 +317,14 @@ class InductorAdaptor(CompilerInterface):
                 nonlocal file_path
                 compiled_fn = inductor_compiled_graph.current_callable
                 file_path = compiled_fn.__code__.co_filename  # noqa
-                if not file_path.startswith(self.cache_dir):
+                if not file_path.startswith(self.base_cache_dir):
                     # hooked in the align_inputs_from_check_idxs function
                     # in torch/_inductor/utils.py
                     for cell in compiled_fn.__closure__:
                         if not callable(cell.cell_contents):
                             continue
                         if cell.cell_contents.__code__.co_filename.startswith(
-                                self.cache_dir):
+                                self.base_cache_dir):
                             # this is the real file path compiled from Inductor
                             file_path = cell.cell_contents.__code__.co_filename
                             break
@@ -320,14 +344,15 @@ class InductorAdaptor(CompilerInterface):
                     nonlocal file_path
                     compiled_fn = inductor_compiled_graph.current_callable
                     file_path = compiled_fn.__code__.co_filename  # noqa
-                    if not file_path.startswith(self.cache_dir):
+                    if not file_path.startswith(self.base_cache_dir):
                         # hooked in the align_inputs_from_check_idxs function
                         # in torch/_inductor/utils.py
                         for cell in compiled_fn.__closure__:
                             if not callable(cell.cell_contents):
                                 continue
                             code = cell.cell_contents.__code__
-                            if code.co_filename.startswith(self.cache_dir):
+                            if code.co_filename.startswith(
+                                    self.base_cache_dir):
                                 # this is the real file path
                                 # compiled from Inductor
                                 file_path = code.co_filename
@@ -411,8 +436,14 @@ class InductorAdaptor(CompilerInterface):
         # compilation cache. So turn off the checks if we disable the
         # compilation cache.
         if not envs.VLLM_DISABLE_COMPILE_CACHE:
-            assert hash_str is not None, (
-                "failed to get the hash of the compiled graph")
+            if hash_str is None:
+                raise RuntimeError(
+                    "vLLM failed to compile the model. The most "
+                    "likely reason for this is that a previous compilation "
+                    "failed, leading to a corrupted compilation artifact. "
+                    "We recommend trying to "
+                    "remove ~/.cache/vllm/torch_compile_cache and try again "
+                    "to see the real issue. ")
             assert file_path is not None, (
                 "failed to get the file path of the compiled graph")
         return compiled_graph, (hash_str, file_path)
@@ -527,6 +558,7 @@ class EagerAdaptor(CompilerInterface):
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
+        compilation_counter.num_eager_compiles += 1
         # we don't need to compile the graph, just return the graph itself.
         # It does not support caching, return None for the handle.
         return graph, None

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
 from typing import Optional
@@ -51,10 +52,7 @@ class Medusa(nn.Module):
        needs to have truncated_vocab_size (=k) as an attribute."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        if hasattr(vllm_config, 'draft_model_config'):
-            config = vllm_config.draft_model_config.hf_config
-        else:
-            config = vllm_config.model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_config
         super().__init__()
         self.config = config
         self.blocks = nn.ModuleList([

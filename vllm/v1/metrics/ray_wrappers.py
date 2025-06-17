@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from typing import Optional, Union
 
@@ -29,6 +30,16 @@ class RayPrometheusMetric:
                     labelskwargs[k] = str(v)
 
             self.metric.set_default_tags(labelskwargs)
+
+        if labels:
+            if len(labels) != len(self.metric._tag_keys):
+                raise ValueError(
+                    "Number of labels must match the number of tag keys. "
+                    f"Expected {len(self.metric._tag_keys)}, got {len(labels)}"
+                )
+
+            self.metric.set_default_tags(
+                dict(zip(self.metric._tag_keys, labels)))
 
         return self
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://huggingface.co/Qwen/Qwen-VL/blob/main/modeling_qwen.py
@@ -7,12 +8,12 @@
 
 import copy
 import math
-import re
 import unicodedata
 from collections.abc import Collection, Mapping, Sequence, Set
 from functools import lru_cache, partial
 from typing import Callable, Literal, Optional, TypedDict, Union
 
+import regex as re
 import torch
 from torch import nn
 from torchvision import transforms
@@ -382,7 +383,8 @@ def _get_tokenizer_without_image_pad(
         tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
     """
     The logic of adding image pad tokens should only be applied in
-    {class}`QwenVLProcessor`, so they are patched out here.
+    [`QwenVLProcessor`][vllm.model_executor.models.qwen_vl.QwenVLProcessor],
+    so they are patched out here.
 
     The definition of the wrapped tokenizer can be found here:
     https://huggingface.co/Qwen/Qwen-VL/blob/main/tokenization_qwen.py
@@ -736,11 +738,11 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
     def get_language_model(self) -> torch.nn.Module:
         return self.transformer
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
