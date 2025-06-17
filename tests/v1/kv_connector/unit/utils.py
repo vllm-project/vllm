@@ -34,7 +34,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # KVCache Manager.
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                req_to_blocks) == 0
-    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                num_cached_block) == 0
     num_free_blocks = (

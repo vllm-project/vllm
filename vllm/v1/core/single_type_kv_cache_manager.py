@@ -6,10 +6,10 @@ from typing import Callable
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         MambaSpec, SlidingWindowSpec)
-from vllm.v1.request import Request
+from vllm.v1.request import BlockHash, Request
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -128,14 +128,12 @@ class SingleTypeKVCacheManager(ABC):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
-                     num_tokens: int) -> None:
+    def cache_blocks(self, request: Request, num_tokens: int) -> None:
         """
         Cache the blocks for the request.
 
         Args:
             request: The request.
-            block_hashes: The block hashes of the request.
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
         """
@@ -145,7 +143,6 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
-            block_hashes=block_hashes,
             num_cached_blocks=num_cached_blocks,
             num_full_blocks=num_full_blocks,
             block_size=self.block_size,
