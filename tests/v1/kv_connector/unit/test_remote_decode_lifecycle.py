@@ -222,6 +222,10 @@ def test_abort():
 
     # SIMULATE ABORT.
     scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+    # Connector aborts request, and marks request_id as sent so it can be freed
+    model_runner_output = create_model_runner_output(
+        reqs=[], finished_sending=[request_id])
+    scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
 
     # SIMULATE ABORT on empty scheduler (should be allowed).
