@@ -3,7 +3,6 @@
 """
 KV cache helper for store.
 """
-
 import torch
 
 import vllm.envs as envs
@@ -94,15 +93,17 @@ class model_aware_kv_ops_helper:
 
 
 def get_kv_connector_cache_layout():
+    # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
+    # used for faster transfer.
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
-    if vllm_config.model_config is None:
-        logger.warning("Unable to detect current VLLM config. " \
+    if vllm_config.model_config is None or kv_config is None:
+        logger.warning_once("Unable to detect current VLLM config. " \
         "Defaulting to NHD kv cache layout.")
     else:
         use_mla = vllm_config.model_config.use_mla
         if not use_mla and kv_config.kv_connector == "NixlConnector":
-            logger.info("NixlConnector detected. Setting KV cache " \
+            logger.info_once("NixlConnector detected. Setting KV cache " \
             "layout to HND for better xfer performance.")
             return "HND"
     return "NHD"
