@@ -13,12 +13,14 @@ from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.platforms import current_platform
 
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
 MAX_PROMPT_SIZE = 100
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+    f"{current_platform.device_type}:{i}"
+    for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 MAX_NUM_PROMPT_TOKENS = 64
 

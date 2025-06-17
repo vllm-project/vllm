@@ -19,10 +19,11 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.platforms import current_platform
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
-DEVICE = "cuda"
+DEVICE = current_platform.device_name
 
 
 def initialize_kv_cache(runner: GPUModelRunner):

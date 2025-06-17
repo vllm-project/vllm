@@ -10,8 +10,9 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
                                               RejectionSampler)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.platforms import current_platform
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_name
 
 
 @pytest.fixture

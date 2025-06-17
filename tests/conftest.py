@@ -1085,7 +1085,8 @@ def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
 
-    return cuda_device_count_stateless()
+    from vllm.platforms import current_platform
+    return current_platform.device_count()
 
 
 temp_dir = tempfile.gettempdir()

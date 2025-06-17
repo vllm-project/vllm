@@ -18,7 +18,7 @@ from typing_extensions import ParamSpec
 import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import import_pynvml
+from vllm.utils import import_pynvml, cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -390,6 +390,9 @@ class CudaPlatformBase(Platform):
         pg._register_backend(device, backend_type, backend_class)
         return pg
 
+    @classmethod
+    def device_count(cls) -> int:
+        return cuda_device_count_stateless()
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,

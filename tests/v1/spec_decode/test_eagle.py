@@ -11,6 +11,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          VllmConfig)
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.platforms import current_platform
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
@@ -41,12 +42,12 @@ def _create_proposer(method: str, k: int) -> EagleProposer:
     vllm_config = VllmConfig(model_config=model_config,
                              cache_config=CacheConfig(),
                              speculative_config=speculative_config,
-                             device_config=DeviceConfig(device="cuda"),
+                             device_config=DeviceConfig(device=current_platform.device_name),
                              parallel_config=ParallelConfig(),
                              load_config=LoadConfig(),
                              scheduler_config=SchedulerConfig())
 
-    return EagleProposer(vllm_config=vllm_config, device='cuda')
+    return EagleProposer(vllm_config=vllm_config, device=current_platform.device_name)
 
 
 def test_prepare_inputs():
@@ -59,7 +60,7 @@ def test_prepare_inputs():
                     a, a + 1, ..., a + b - n2 - 1,
                     a + b, a + b + 1, ..., a + b + c - n3 - 1]
     """
-    device = torch.device('cuda')
+    device = torch.device(current_platform.device_name)
 
     # a = 4, b = 7, c = 5
     # n1 = 1, n2 = 3, n3 = 2
@@ -198,7 +199,7 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
 def test_propose(num_speculative_tokens):
     # Use GPU device
-    device = torch.device('cuda')
+    device = torch.device(current_platform.device_name)
 
     # Setup test parameters
     batch_size = 2
