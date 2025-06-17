@@ -206,6 +206,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
                                and not self.model_config.enforce_eager)
+        logger.info(f"self.use_cuda_graph {self.use_cuda_graph}")
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
@@ -702,7 +703,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if num_pad_tokens < scheduler_output.total_num_scheduled_tokens:
                     self.pad_out_ubatch_first_stage(ubatch_slices, num_pad_tokens)
                 else:
-                    assert False
                     # We bail out of ubatching here. This accounts for the case where 
                     # the padding would result in an "empty" second ubatch.
                     # TODO: just make the second ubatch a dummy ubatch
@@ -711,13 +711,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         
         # Note that if we are attempting to ubatch by this point then we know that no 
         # DP ranks are doing dummy runs
-        # if ubatch_slices:
-        #     should_ubatch = self.should_ubatch(False if ubatch_bailout else True)
-        #     if not should_ubatch:
-        #         logger.info("SUCCESSFULLY BAILED OUT")
-        #         num_pad_tokens = 0
-        #         num_tokens_after_padding = None
-        #         ubatch_slices = None
+        if ubatch_slices:
+            should_ubatch = self.should_ubatch(False if ubatch_bailout else True)
+            if not should_ubatch:
+                logger.info("SUCCESSFULLY BAILED OUT")
+                num_pad_tokens = 0
+                num_tokens_after_padding = None
+                ubatch_slices = None
 
         
         # This AR is only necessary in the case described above where 
@@ -2150,6 +2150,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # For profiling runs we dont want microbatching but for
         # dp dummy runs we do.
         allow_microbatching: bool = False,
+    # Maybe return a cudagraph here
     ) -> torch.Tensor:
 
         should_microbatch = False
@@ -2402,19 +2403,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
+        logger.info("CAPTURE MODEL START")
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
             skip_attn = not self.vllm_config.compilation_config.full_cuda_graph
+            allow_microbatching = self.parallel_config.enable_microbatching
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens, skip_attn=skip_attn)
+                    self._dummy_run(num_tokens, skip_attn=skip_attn, 
+                                    allow_microbatching=allow_microbatching)
                 # print("CUDAGRAPH CAPTURE START")
-                self._dummy_run(num_tokens, skip_attn=skip_attn)
+                self._dummy_run(num_tokens, skip_attn=skip_attn, 
+                                allow_microbatching=allow_microbatching)
                 # print("CUDAGRAPH CAPTURE END")
 
+        logger.info("CAPTURE MODEL END")
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
