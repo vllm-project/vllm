@@ -8,6 +8,8 @@ from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
+                                         init_none_hash)
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -112,6 +114,9 @@ def create_scheduler(
     )
 
 
+_none_hash_initialized = False
+
+
 def create_requests(
     num_requests: int,
     num_tokens: int = 10,
@@ -120,7 +125,14 @@ def create_requests(
     stop_token_ids: Optional[list[int]] = None,
     prompt_logprobs: Optional[int] = None,
     same_prompt: bool = False,
+    block_size: int = 16,
 ) -> list[Request]:
+    global _none_hash_initialized
+    if not _none_hash_initialized:
+        init_none_hash(hash)
+        _none_hash_initialized = True
+
+    block_hasher = get_request_block_hasher(block_size, hash)
     sampling_params = SamplingParams(ignore_eos=False,
                                      max_tokens=max_tokens,
                                      stop_token_ids=stop_token_ids,
@@ -130,9 +142,11 @@ def create_requests(
         if mm_positions is not None:
             mm_position = mm_positions[i]
             mm_inputs = [MultiModalKwargs({})] * len(mm_position)
+            mm_hashes = ["hash"] * len(mm_position)
         else:
             mm_position = None
             mm_inputs = None
+            mm_hashes = None
         prompt_token_ids = ([0] * num_tokens if same_prompt else [i] *
                             num_tokens)
         request = Request(
@@ -142,8 +156,9 @@ def create_requests(
             pooling_params=None,
             multi_modal_inputs=mm_inputs,
             multi_modal_placeholders=mm_position,
-            multi_modal_hashes=None,
+            multi_modal_hashes=mm_hashes,
             eos_token_id=EOS_TOKEN_ID,
+            block_hasher=block_hasher,
         )
         requests.append(request)
     return requests
