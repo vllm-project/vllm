@@ -22,9 +22,16 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkW4A4MXFp4MoEMethod)
 from vllm.platforms import current_platform
 
+from typing import List
+
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
         importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
+
+if QUARK_MXFP4_AVAILABLE:
+    from quark.torch.quantization.config.config import FP4PerGroupSpec
+    from quark.torch.export.nn.modules.realquantizer import StaticScaledRealQuantizer
+    from quark.torch.kernel import mx as mx_kernel
 
 try:
     huggingface_hub.list_repo_refs(
@@ -206,3 +213,76 @@ def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
             ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
     del os.environ["VLLM_USE_TRITON_FLASH_ATTN"]
+
+@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
+                    reason="amd-quark>=0.9 is not available")
+@pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: List[int]):
+    torch.manual_seed(0)
+
+    hidden_size = 64 * 32
+    inp = (torch.rand(1, hidden_size, dtype=float_dtype, device="cuda") - 0.5) * 2
+    for i in range(hidden_size // 32):
+        inp[:, i * 32: (i + 1) * 32] = inp[:, i * 32: (i + 1) * 32] * scalings[i % len(scalings)]
+    
+    inp_kernel = inp.clone()
+    inp_kernel_clone = inp_kernel.clone()
+
+    res_hip = mx_kernel.qdq_mxfp4_hip(inp_kernel_clone, "even")
+    res_torch = mx_kernel.qdq_mxfp4_torch(inp_kernel, "even")
+
+    for i in range(hidden_size // 32):
+        assert torch.all(torch.isfinite(res_hip[:, i * 32: (i + 1) * 32]))
+        assert torch.all(torch.isfinite(res_torch[:, i * 32: (i + 1) * 32]))
+        
+        torch.testing.assert_close(res_hip[:, i * 32 : (i + 1) * 32], res_torch[:, i * 32 : (i + 1) * 32])
+
+
+@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
+                    reason="amd-quark>=0.9 is not available")
+@pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+def test_mxfp4_dequant_kernel_match_quark(float_dtype: torch.dtype, scalings: List[int]):
+    qspec = FP4PerGroupSpec(
+        ch_axis=-1,
+        group_size=32,
+        scale_format="e8m0",
+        scale_calculation_mode="even",
+        is_dynamic=False,
+    ).to_quantization_spec()
+
+    weight_quantizer = StaticScaledRealQuantizer(
+        qspec=qspec,
+        quantizer=None,
+        reorder=False,
+        real_quantized=True,
+        float_dtype=float_dtype,
+        device="cuda",
+    )
+
+    observer = qspec.observer_cls(qspec, device="cuda")
+
+    hidden_size = 512
+    shape = (11008, hidden_size)
+
+    w = (torch.rand(shape, device="cuda", dtype=float_dtype) - 0.5) * 2
+
+    # Make it so that different groups have different scales.
+    for i in range(hidden_size // 32):
+        w[:, i * 32: (i + 1) * 32] = w[:, i * 32: (i + 1) * 32] * scalings[i % len(scalings)]
+
+    observer(w)
+    scale, _ = observer._calculate_qparams()
+    weight_quantizer.scale = scale
+
+    w_mxfp4 = weight_quantizer.to_real_quantize_params(w).to("cuda")
+    weight_quantizer.maybe_convert_and_transpose_scale()
+
+    scale = weight_quantizer.scale
+
+    out_hip = mx_kernel.dq_mxfp4_hip(w_mxfp4, scale, float_dtype)
+
+    out_torch = mx_kernel.dq_mxfp4_torch(w_mxfp4, scale, float_dtype)
+
+    assert torch.equal(out_hip, out_torch)
