@@ -27,7 +27,7 @@ class NewRequestData:
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
     sampling_params: SamplingParams
-    block_ids: list[list[int]]
+    block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
 
@@ -35,7 +35,7 @@ class NewRequestData:
     def from_request(
         cls,
         request: Request,
-        block_ids: list[list[int]],
+        block_ids: tuple[list[int], ...],
     ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
@@ -86,7 +86,7 @@ class CachedRequestData:
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: bool
     new_token_ids: list[int]
-    new_block_ids: list[list[int]]
+    new_block_ids: tuple[list[int], ...]
     num_computed_tokens: int
 
     @classmethod
@@ -95,7 +95,7 @@ class CachedRequestData:
         request: Request,
         resumed_from_preemption: bool,
         new_token_ids: list[int],
-        new_block_ids: list[list[int]],
+        new_block_ids: tuple[list[int], ...],
     ) -> CachedRequestData:
         return cls(
             req_id=request.request_id,

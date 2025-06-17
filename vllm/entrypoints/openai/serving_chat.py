@@ -689,7 +689,21 @@ class OpenAIServingChat(OpenAIServing):
                                     current_token_ids,
                                     output.token_ids,
                                 ))
-
+                            # When encountering think end id in prompt_token_ids
+                            # i.e {"enable_thinking": False},
+                            # set reasoning status to end.
+                            # Remove the text and token ids related
+                            # to 'reasoning_content'.
+                            if res.prompt_token_ids and \
+                                reasoning_parser.is_reasoning_end(
+                                    list(res.prompt_token_ids)):
+                                reasoning_end_arr[i] = True
+                                current_token_ids = list(output.token_ids)
+                                if delta_message and delta_message.content:
+                                    current_text = delta_message.content
+                                    delta_message.content = None
+                                else:
+                                    current_text = ""
                             # When encountering think end id in delta_token_ids,
                             # set reasoning status to end.
                             # Remove the text and token ids related
@@ -859,7 +873,7 @@ class OpenAIServingChat(OpenAIServing):
                             total_tokens=num_prompt_tokens + completion_tokens,
                         )
 
-                    data = chunk.model_dump_json(exclude_none=True)
+                    data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
 
             # once the final token is handled, if stream_options.include_usage
