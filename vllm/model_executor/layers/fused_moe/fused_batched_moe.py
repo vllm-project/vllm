@@ -318,8 +318,8 @@ def invoke_moe_batched_triton_kernel(
         expert_num_tokens: torch.Tensor,  # [E]
         compute_type: tl.dtype,
         # Quantization data
-        A_scale: torch.Tensor, # Optional
-        B_scale: torch.Tensor, # Optional
+        A_scale: Optional[torch.Tensor],
+        B_scale: Optional[torch.Tensor],
         B_zp: torch.Tensor,
         # Quantization schemes
         use_fp8_w8a8: bool,
@@ -453,26 +453,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             dtype=b_type,
             device=a1.device)
 
-        if quant_config.quant_dtype is not None:
-            if quant_config.block_shape is not None:
-                _, block_k = quant_config.block_shape
-                k_tiles = (hidden_dim + block_k - 1) // block_k
-                scale_shape = (num_local_experts, self.max_num_tokens, k_tiles)
-            else:
-                if quant_config.per_act_token_quant:
-                    num = self.max_num_tokens
-                else:
-                    num = 1
-                scale_shape = (num_local_experts, num, 1)
+        b_a1_scale = None
 
-            #print(f"SCALE_SHAPE {block_shape} {b_a1.shape} {scale_shape}")
-
-            b_a1_scale = torch.zeros(scale_shape,
-                                     dtype=torch.float32,
-                                     device=a1.device)
-        else:
-            assert a1_scale is None
-            b_a1_scale = None
+        assert quant_config.quant_dtype is None, "quantization NYI"
 
         first_expert = num_local_experts * self.rank
         last_expert = first_expert + num_local_experts
@@ -480,34 +463,8 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         for expert_id in range(first_expert, last_expert):
             topks = torch.any(topk_ids == expert_id, dim=1).flatten()
             rows = torch.count_nonzero(topks.flatten())
-            rhs = a1[:topks.numel()][topks]
             idx = expert_id - first_expert
-            if quant_config.quant_dtype is not None:
-                if a1_scale is not None:
-                    assert False, "NYI"
-                    rhs_a1_scale = a1_scale[:topks.numel()][topks]
-                else:
-                    rhs_a1_scale = None
-                b_a1[idx, :rows, :], b_s = moe_kernel_quantize_input(
-                    rhs,
-                    rhs_a1_scale,
-                    quant_config.quant_dtype,
-                    quant_config.per_act_token_quant,
-                    quant_config.block_shape,
-                )
-                assert b_s is not None
-                if (quant_config.block_shape is None
-                        and not quant_config.per_act_token_quant):
-                    print(f"SCALE {idx}, {b_a1_scale[idx, :].shape} {b_s.shape}")
-                    b_a1_scale[idx, :] = b_s
-                else:
-                    #print(f"XXXXX rhs={rhs.shape} b_s={b_s.shape}")
-                    assert rows == b_s.shape[0] and b_a1_scale.shape[
-                        -1] == b_s.shape[-1]
-                    b_a1_scale[idx, :rows] = b_s
-            else:
-                b_a1[idx, :rows, :] = rhs
-
+            b_a1[idx, :rows, :] = a1[:topks.numel()][topks]
             tokens_per_expert[idx] = rows
 
         assert b_a1_scale is None or b_a1_scale.ndim == 3

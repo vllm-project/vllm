@@ -67,8 +67,6 @@ class BatchedMMTensors:
                                           device="cuda",
                                           dtype=torch.int32)
 
-
-
         return BatchedMMTensors(A, B, C, num_expert_tokens)
 
 
@@ -111,9 +109,7 @@ def ref_impl(
                          [32, 64, 128, 192, 224, 256, 512])
 @pytest.mark.parametrize("K", [128, 256, 1024])
 @pytest.mark.parametrize("N", [128, 256, 512, 1024])
-@pytest.mark.parametrize(
-    "dtype",
-    [torch.float8_e4m3fn, torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("block_shape", [None])
 @pytest.mark.parametrize("per_act_token_quant", [False])
 def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
@@ -223,7 +219,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
 @pytest.mark.parametrize("k", [128, 512, 1024, 2048])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("per_act_token_quant", [False])
 @pytest.mark.parametrize("block_shape", [None])
 def test_fused_moe_batched_experts(
