@@ -794,7 +794,6 @@ class AsyncMPClient(MPClient):
                     request_type: EngineCoreRequestType,
                     request: Any,
                     engine: Optional[CoreEngine] = None) -> Awaitable[Any]:
-        self.ensure_alive()
         if engine is None:
             engine = self.core_engine
 
@@ -1059,7 +1058,7 @@ class DPAsyncMPClient(AsyncMPClient):
                 self.reqs_in_flight.pop(req_id, None)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
-        if not request_ids:
+        if not request_ids or self.resources.engine_dead:
             return
 
         if len(request_ids) == 1:
@@ -1077,9 +1076,8 @@ class DPAsyncMPClient(AsyncMPClient):
 
     async def _abort_requests(self, request_ids: list[str],
                               engine: CoreEngine) -> None:
-        if not self.resources.engine_dead:
-            await self._send_input(EngineCoreRequestType.ABORT, request_ids,
-                                   engine)
+        await self._send_input(EngineCoreRequestType.ABORT, request_ids,
+                               engine)
 
 
 class RayDPClient(DPAsyncMPClient):
