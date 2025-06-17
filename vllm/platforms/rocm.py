@@ -28,7 +28,7 @@ except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
 
 try:
-    import vllm._C  # noqa: F401
+    import vllm_kernels._C  # noqa: F401
 except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 
