@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import random
 
 import pytest
@@ -86,7 +87,7 @@ def graph_allreduce(
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def eager_allreduce(
+def eager_custom_allreduce(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
     pp_size,
@@ -111,19 +112,51 @@ def eager_allreduce(
         inp = torch.ones(sz, dtype=torch.float32, device=device)
         out = inp
         for _ in range(num_communication):
-            out = fa.all_reduce(out, registered=False)
+            out = fa.ca_all_reduce(out, registered=False)
         torch.testing.assert_close(out, inp * (tp_size**num_communication))
 
         inp = torch.ones(sz * 4, dtype=torch.bfloat16, device=device)
         out = inp
         for _ in range(num_communication):
-            out = fa.all_reduce(out, registered=False)
+            out = fa.ca_all_reduce(out, registered=False)
         torch.testing.assert_close(out, inp * (tp_size**num_communication))
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def eager_quickreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        os.environ["VLLM_ROCM_QR_QUANT_REGIME"] = "FP"
+        device = torch.device(f"cuda:{rank}")
+        torch.cuda.set_device(device)
+        init_test_distributed_environment(tp_size, pp_size, rank,
+                                          distributed_init_port)
+
+        sz = 1024 * 1024
+        fa = get_tp_group().device_communicator.ca_comm
+        inp = torch.ones(sz, dtype=torch.float16, device=device)
+        out = inp
+        out = fa.qr_all_reduce(out)
+        torch.testing.assert_close(out, inp * tp_size)
+
+        sz = 1024 * 1024
+        inp = torch.ones(sz * 4, dtype=torch.bfloat16, device=device)
+        out = inp
+        out = fa.qr_all_reduce(out)
+        torch.testing.assert_close(out, inp * tp_size)
 
 
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
-@pytest.mark.parametrize("test_target", [eager_allreduce, graph_allreduce])
+@pytest.mark.parametrize(
+    "test_target",
+    [eager_custom_allreduce, graph_allreduce, eager_quickreduce])
 def test_custom_allreduce(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
