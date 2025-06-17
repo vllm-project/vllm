@@ -25,8 +25,8 @@ if not current_platform.is_tpu() and not current_platform.is_hpu():
 supports_moe_ops = False
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
-    supports_moe_ops = True
 
+    supports_moe_ops = True
 
 
 # These are actually defined in vllm_kernels/custom_ops.py
@@ -37,7 +37,9 @@ paged_attention_rocm = custom_ops.paged_attention_rocm
 mla_decode_kvcache_cpu = custom_ops.mla_decode_kvcache_cpu
 merge_attn_states = custom_ops.merge_attn_states
 convert_vertical_slash_indexes = custom_ops.convert_vertical_slash_indexes
-convert_vertical_slash_indexes_mergehead = custom_ops.convert_vertical_slash_indexes_mergehead
+convert_vertical_slash_indexes_mergehead = (
+    custom_ops.convert_vertical_slash_indexes_mergehead
+)
 rotary_embedding = custom_ops.rotary_embedding
 rms_norm = custom_ops.rms_norm
 fused_add_rms_norm = custom_ops.fused_add_rms_norm
@@ -77,7 +79,9 @@ swap_blocks = custom_ops.swap_blocks
 convert_fp8 = custom_ops.convert_fp8
 gather_cache = custom_ops.gather_cache
 get_device_attribute = custom_ops.get_device_attribute
-get_max_shared_memory_per_block_device_attribute = custom_ops.get_max_shared_memory_per_block_device_attribute
+get_max_shared_memory_per_block_device_attribute = (
+    custom_ops.get_max_shared_memory_per_block_device_attribute
+)
 init_custom_ar = custom_ops.init_custom_ar
 all_reduce = custom_ops.all_reduce
 dispose = custom_ops.dispose
@@ -94,9 +98,13 @@ cutlass_mla_decode = custom_ops.cutlass_mla_decode
 cutlass_scaled_mm_supports_fp4 = custom_ops.cutlass_scaled_mm_supports_fp4
 cutlass_scaled_fp4_mm = custom_ops.cutlass_scaled_fp4_mm
 cutlass_scaled_mm_supports_fp8 = custom_ops.cutlass_scaled_mm_supports_fp8
-cutlass_scaled_mm_supports_block_fp8 = custom_ops.cutlass_scaled_mm_supports_block_fp8
+cutlass_scaled_mm_supports_block_fp8 = (
+    custom_ops.cutlass_scaled_mm_supports_block_fp8
+)
 cutlass_scaled_mm_azp = custom_ops.cutlass_scaled_mm_azp
-cutlass_sparse_scaled_mm_supported = custom_ops.cutlass_sparse_scaled_mm_supported
+cutlass_sparse_scaled_mm_supported = (
+    custom_ops.cutlass_sparse_scaled_mm_supported
+)
 cutlass_group_gemm_supported = custom_ops.cutlass_group_gemm_supported
 cutlass_sparse_compress = custom_ops.cutlass_sparse_compress
 cutlass_scaled_sparse_mm = custom_ops.cutlass_scaled_sparse_mm
@@ -115,24 +123,30 @@ scaled_int8_quant = custom_ops.scaled_int8_quant
 wvSplitKQ = custom_ops.wvSplitKQ
 
 
-# Rule 3: Does not use torch.ops._C.*
 def apply_repetition_penalties_torch(
-        logits: torch.Tensor, prompt_mask: torch.Tensor,
-        output_mask: torch.Tensor, repetition_penalties: torch.Tensor) -> None:
+    logits: torch.Tensor,
+    prompt_mask: torch.Tensor,
+    output_mask: torch.Tensor,
+    repetition_penalties: torch.Tensor,
+) -> None:
     repetition_penalties = repetition_penalties.unsqueeze(dim=1).repeat(
-        1, logits.size(1))
+        1, logits.size(1)
+    )
     # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
-    penalties = torch.where(prompt_mask | output_mask, repetition_penalties,
-                            1.0)
+    penalties = torch.where(
+        prompt_mask | output_mask, repetition_penalties, 1.0
+    )
     # If logits are positive, divide by penalty, otherwise multiply by penalty.
     scaling = torch.where(logits > 0, 1.0 / penalties, penalties)
     logits *= scaling
 
 
-# Rule 2: Uses current_platform and custom_ops (vllm imports)
-def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
-                               output_mask: torch.Tensor,
-                               repetition_penalties: torch.Tensor) -> None:
+def apply_repetition_penalties(
+    logits: torch.Tensor,
+    prompt_mask: torch.Tensor,
+    output_mask: torch.Tensor,
+    repetition_penalties: torch.Tensor,
+) -> None:
     """Apply repetition penalties to logits in-place.
 
     Args:
@@ -142,60 +156,58 @@ def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
         repetition_penalties: The repetition penalties of shape (num_seqs, ).
     """
     if current_platform.is_cuda() and logits.is_contiguous():
-        custom_ops.apply_repetition_penalties_cuda(logits, prompt_mask,
-                                                   output_mask,
-                                                   repetition_penalties)
+        custom_ops.apply_repetition_penalties_cuda(
+            logits, prompt_mask, output_mask, repetition_penalties
+        )
     else:
-        apply_repetition_penalties_torch(logits, prompt_mask, output_mask,
-                                         repetition_penalties)
+        apply_repetition_penalties_torch(
+            logits, prompt_mask, output_mask, repetition_penalties
+        )
 
 
-# Rule 2: Uses envs.VLLM_USE_TRITON_AWQ and custom_ops (vllm imports)
-def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
-                   zeros: torch.Tensor, split_k_iters: int, thx: int,
-                   thy: int) -> torch.Tensor:
+def awq_dequantize(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    zeros: torch.Tensor,
+    split_k_iters: int,
+    thx: int,
+    thy: int,
+) -> torch.Tensor:
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
-            awq_dequantize_triton)
+            awq_dequantize_triton,
+        )
+
         return awq_dequantize_triton(qweight, scales, zeros)
-    return custom_ops.awq_dequantize(qweight, scales, zeros, split_k_iters,
-                                     thx, thy)
+    return custom_ops.awq_dequantize(
+        qweight, scales, zeros, split_k_iters, thx, thy
+    )
 
 
-# Rule 2: Uses envs.VLLM_USE_TRITON_AWQ and custom_ops (vllm imports)
-def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
-             scales: torch.Tensor, split_k_iters: int) -> torch.Tensor:
+def awq_gemm(
+    input: torch.Tensor,
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    split_k_iters: int,
+) -> torch.Tensor:
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
-            awq_gemm_triton)
+            awq_gemm_triton,
+        )
+
         return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
     return custom_ops.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
-
-# TODO: Migrate the rest of the functions in here to utilize things from `vllm_kernels.custom_ops`
-#       Rules for the migration:
-#           1. If a function is simple (i.e. only utilizes torch.ops._C.*) then prefer to structure it like so:
-#               paged_attention_v1 = custom_ops.paged_attention_v1
-#           2. If a function utilizes anything from the main vllm (like current_platform or ScalarType) prefer
-#               to write wrapper functions, similar to what we're doing with awq_gemm
-#               a. Make changes in `vllm-kernels/vllm_kernels/custom_ops.py` if you need to to make it easier on yourself
-#           3. If a function does not use torch.ops._C.* then leave it alone
-#           4. Don't assume you have to do everything at once, write down the list of functions you need to
-#               migrate and do them (at most) 3 at a time and try to validate you made the write moves
-#           5. Prefer to make the most minimal of changes possible
-
-
-
-
-# Rule 2: Uses current_platform and importlib (vllm imports)
-# WILL NOT MOVE
-def cutlass_scaled_mm(a: torch.Tensor,
-                      b: torch.Tensor,
-                      scale_a: torch.Tensor,
-                      scale_b: torch.Tensor,
-                      out_dtype: torch.dtype,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+def cutlass_scaled_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """
     `cutlass_scaled_mm` implements a fused version of
         `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
@@ -218,18 +230,20 @@ def cutlass_scaled_mm(a: torch.Tensor,
         scale_a.shape * [1, 128] == a.shape
         scale_b.shape * [128, 128] == b.shape
     """
-    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
-    assert bias is None or bias.shape[0] == b.shape[
-        1] and bias.dtype == out_dtype
+    assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
+    assert (
+        bias is None or bias.shape[0] == b.shape[1] and bias.dtype == out_dtype
+    )
 
     m = a.shape[0]
     n = b.shape[1]
 
-    cutlass_compatible_b = (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    cutlass_compatible_b = b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0
     if current_platform.is_rocm() or not cutlass_compatible_b:
         triton_scaled_mm_module = importlib.import_module(
             "vllm.model_executor.layers.quantization.compressed_tensors."
-            "triton_scaled_mm")
+            "triton_scaled_mm"
+        )
         triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
         return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
@@ -240,83 +254,15 @@ def cutlass_scaled_mm(a: torch.Tensor,
     return out
 
 
+gptq_marlin_gemm = custom_ops.gptq_marlin_gemm
+machete_supported_schedules = custom_ops.machete_supported_schedules
+machete_mm = custom_ops.machete_mm
+machete_prepack_B = custom_ops.machete_prepack_B
 
 
-# Rule 2: Uses ScalarType (vllm import)
-def gptq_marlin_gemm(a: torch.Tensor,
-                     c: Optional[torch.Tensor],
-                     b_q_weight: torch.Tensor,
-                     b_scales: torch.Tensor,
-                     global_scale: Optional[torch.Tensor],
-                     b_zeros: Optional[torch.Tensor],
-                     g_idx: Optional[torch.Tensor],
-                     perm: Optional[torch.Tensor],
-                     workspace: torch.Tensor,
-                     b_q_type: ScalarType,
-                     size_m: int,
-                     size_n: int,
-                     size_k: int,
-                     is_k_full: bool = True,
-                     use_atomic_add: bool = False,
-                     use_fp32_reduce: bool = False,
-                     is_zp_float: bool = False) -> torch.Tensor:
-    return torch.ops._C.gptq_marlin_gemm(a, c, b_q_weight, b_scales,
-                                         global_scale, b_zeros, g_idx, perm,
-                                         workspace, b_q_type.id, size_m,
-                                         size_n, size_k, is_k_full,
-                                         use_atomic_add, use_fp32_reduce,
-                                         is_zp_float)
-
-
-# machete
-# Rule 2: Uses ScalarType (vllm import)
-def machete_supported_schedules(
-        a_type: torch.dtype,
-        b_type: ScalarType,
-        group_scales_type: Optional[torch.dtype],
-        group_zeros_type: Optional[torch.dtype] = None,
-        channel_scales_type: Optional[torch.dtype] = None,
-        token_scales_type: Optional[torch.dtype] = None,
-        out_type: Optional[torch.dtype] = None) -> list[str]:
-    return torch.ops._C.machete_supported_schedules(
-        a_type, b_type.id, group_scales_type, group_zeros_type,
-        channel_scales_type, token_scales_type, out_type)
-
-
-# Rule 2: Uses ScalarType (vllm import)
-def machete_mm(
-        a: torch.Tensor,
-        # b_q Should be the tensor returned by machete_prepack_B
-        b_q: torch.Tensor,
-        b_type: ScalarType,
-        out_type: Optional[torch.dtype] = None,
-        b_group_scales: Optional[torch.Tensor] = None,
-        b_group_zeros: Optional[torch.Tensor] = None,
-        b_group_size: Optional[int] = None,
-        b_channel_scales: Optional[torch.Tensor] = None,
-        a_token_scales: Optional[torch.Tensor] = None,
-        schedule: Optional[str] = None) -> torch.Tensor:
-    return torch.ops._C.machete_mm(a, b_q, b_type.id, out_type, b_group_scales,
-                                   b_group_zeros, b_group_size,
-                                   b_channel_scales, a_token_scales, schedule)
-
-
-# Rule 2: Uses ScalarType (vllm import)
-def machete_prepack_B(
-        b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
-        group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
-    return torch.ops._C.machete_prepack_B(b_q_weight, a_type, b_type.id,
-                                          group_scales_type)
-
-
-# permute_cols (migrated to custom_ops)
-
-
-# fp4
-# Rule 2: Uses current_platform (vllm import)
 def scaled_fp4_quant(
-        input: torch.Tensor,
-        input_global_scale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    input: torch.Tensor, input_global_scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale.
 
@@ -336,39 +282,7 @@ def scaled_fp4_quant(
             in the sizzled layout.
     """
     assert not current_platform.is_rocm()
-    assert input.ndim >= 1, (
-        f'input.ndim needs to be >= 1, but got {input.ndim}.')
-    other_dims = 1 if input.ndim == 1 else -1
-    input = input.reshape(other_dims, input.shape[-1])
-    m, n = input.shape
-    block_size = 16
-    device = input.device
-
-    assert n % block_size == 0, (
-        f'last dim has to be multiple of 16, but got {n}.')
-    assert input.dtype in (torch.float16, torch.bfloat16), (
-        f'input.dtype needs to be fp16 or bf16 but got {input.dtype}.')
-
-    # Two fp4 values will be packed into an uint8.
-    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
-
-    # We use the rounded values to store the swizzled values. Due to the
-    # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
-    # So, we first pad the scales to multiples of 128 and 4. Then, the scales
-    # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
-    # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
-    round_up = lambda x, y: (x + y - 1) // y * y
-    rounded_m = round_up(m, 128)
-    scale_n = n // block_size
-    rounded_n = round_up(scale_n, 4)
-    output_scale = torch.empty((rounded_m, rounded_n // 4),
-                               device=device,
-                               dtype=torch.int32)
-
-    torch.ops._C.scaled_fp4_quant(output, input, output_scale,
-                                  input_global_scale)
-    output_scale = output_scale.view(torch.float8_e4m3fn)
-    return output, output_scale
+    return custom_ops.scaled_fp4_quant(input, input_global_scale)
 
 
 # Rule 2: Uses current_platform and envs (vllm imports)
@@ -392,42 +306,15 @@ def scaled_fp4_experts_quant(
         output_scales: The blockscale tensor in FP8-E4M3
     """
     assert not current_platform.is_rocm()
-    assert input_tensor.ndim == 2, (
-        f'input.ndim needs to be == 2, but got {input_tensor.ndim}.')
-
-    # Control the maximum number of tokens per expert supported by the
-    # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
-    # from running out of memory. This value can also be increased to support
-    # larger models.
-    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
-    m_numtopk, k = input_tensor.shape
-
-    assert (m_numtopk <= MAX_TOKENS_PER_EXPERT * topk), (
-        f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
-        f"{MAX_TOKENS_PER_EXPERT})"
-        f" for cutlass_moe_fp4, observed m_numtopk = {m_numtopk}. Use"
-        f" VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE to set this value.")
-    scales_k = k // 16
-    padded_k = (scales_k + (4 - 1)) // 4
-
-    # output is uint8 and packed fp4 values
-    output = torch.empty(m_numtopk,
-                         k // 2,
-                         device=input_tensor.device,
-                         dtype=torch.uint8)
-    output_scales = torch.empty(MAX_TOKENS_PER_EXPERT * topk,
-                                padded_k,
-                                dtype=torch.int32,
-                                device=input_tensor.device)
-    torch.ops._C.scaled_fp4_experts_quant(output, output_scales, input_tensor,
-                                          input_global_scale, expert_offsets,
-                                          blockscale_offsets)
-    output_scales = output_scales.view(torch.float8_e4m3fn)
-    return output, output_scales
+    return custom_ops.scaled_fp4_experts_quant(
+        input_tensor,
+        input_global_scale,
+        expert_offsets,
+        blockscale_offsets,
+        topk,
+    )
 
 
-# fp8
-# Rule 2: Uses current_platform (vllm import)
 def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
@@ -458,76 +345,54 @@ def scaled_fp8_quant(
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
             scaling factor.
     """
-    # This code assumes batch_dim and num_tokens are flattened
-    assert (input.ndim == 2)
-    shape: Union[tuple[int, int], torch.Size] = input.shape
     # For ROCm on MI300, the output fp8 dtype is torch.float_e3m3fnuz
     out_dtype: torch.dtype = current_platform.fp8_dtype()
-    if num_token_padding:
-        shape = (max(num_token_padding, input.shape[0]), shape[1])
-    output = torch.empty(shape, device=input.device, dtype=out_dtype)
-
-    if scale is None:
-        if use_per_token_if_dynamic:
-            scale = torch.empty((shape[0], 1),
-                                device=input.device,
-                                dtype=torch.float32)
-            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale, scale_ub)
-        else:
-            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
-    else:
-        # num_token_padding not implemented for this case
-        assert (scale.numel() == 1 or num_token_padding is None)
-        torch.ops._C.static_scaled_fp8_quant(output, input, scale)
-
-    return output, scale
+    return custom_ops.scaled_fp8_quant(
+        input,
+        out_dtype,
+        scale,
+        num_token_padding,
+        scale_ub,
+        use_per_token_if_dynamic,
+    )
 
 
-# Rule 2: Uses current_platform (vllm import)
-def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
-                   b_qweight: torch.Tensor, b_scales: torch.Tensor,
-                   b_qzeros: Optional[torch.Tensor],
-                   topk_weights: Optional[torch.Tensor],
-                   sorted_token_ids: torch.Tensor, experts_ids: torch.Tensor,
-                   num_tokens_post_pad: torch.Tensor, top_k: int,
-                   BLOCK_SIZE_M: int, BLOCK_SIZE_N: int, BLOCK_SIZE_K: int,
-                   bit: int) -> torch.Tensor:
+def moe_wna16_gemm(
+    input: torch.Tensor,
+    output: torch.Tensor,
+    b_qweight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: Optional[torch.Tensor],
+    topk_weights: Optional[torch.Tensor],
+    sorted_token_ids: torch.Tensor,
+    experts_ids: torch.Tensor,
+    num_tokens_post_pad: torch.Tensor,
+    top_k: int,
+    BLOCK_SIZE_M: int,
+    BLOCK_SIZE_N: int,
+    BLOCK_SIZE_K: int,
+    bit: int,
+) -> torch.Tensor:
     if not current_platform.is_cuda():
         raise NotImplementedError(
             "The optimized moe_wna16_gemm kernel is only "
-            "available on CUDA platforms")
-    torch.ops._moe_C.moe_wna16_gemm(input, output, b_qweight, b_scales,
-                                    b_qzeros, topk_weights, sorted_token_ids,
-                                    experts_ids, num_tokens_post_pad, top_k,
-                                    BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
-                                    bit)
+            "available on CUDA platforms"
+        )
+    return custom_ops.moe_wna16_gemm(
+        input,
+        output,
+        b_qweight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        experts_ids,
+        num_tokens_post_pad,
+        top_k,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+    )
 
 
-# topk_softmax (migrated to custom_ops)
-
-
-# Rule 2: Uses ScalarType (vllm import)
-def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
-                          b_qweight: torch.Tensor, b_scales: torch.Tensor,
-                          global_scale: Optional[torch.Tensor],
-                          b_qzeros: Optional[torch.Tensor],
-                          g_idx: Optional[torch.Tensor],
-                          perm: Optional[torch.Tensor],
-                          workspace: torch.Tensor,
-                          sorted_token_ids: torch.Tensor,
-                          expert_ids: torch.Tensor,
-                          num_tokens_past_padded: torch.Tensor,
-                          topk_weights: torch.Tensor, moe_block_size: int,
-                          top_k: int, mul_topk_weights: bool, is_ep: bool,
-                          b_q_type: ScalarType, size_m: int, size_n: int,
-                          size_k: int, is_k_full: bool, use_atomic_add: bool,
-                          use_fp32_reduce: bool,
-                          is_zp_float: bool) -> torch.Tensor:
-    return torch.ops._moe_C.moe_wna16_marlin_gemm(
-        input, output, b_qweight, b_scales, global_scale, b_qzeros, g_idx,
-        perm, workspace, sorted_token_ids, expert_ids, num_tokens_past_padded,
-        topk_weights, moe_block_size, top_k, mul_topk_weights, is_ep,
-        b_q_type.id, size_m, size_n, size_k, is_k_full, use_atomic_add,
-        use_fp32_reduce, is_zp_float)
+moe_wna16_marlin_gemm = custom_ops.moe_wna16_marlin_gemm

@@ -1042,7 +1042,6 @@ def scaled_fp4_quant(
             two values are packed into a uint8 and float8_e4m3 scaling factors
             in the sizzled layout.
     """
-    assert not current_platform.is_rocm()
     assert input.ndim >= 1, (
         f'input.ndim needs to be >= 1, but got {input.ndim}.')
     other_dims = 1 if input.ndim == 1 else -1
@@ -1097,7 +1096,6 @@ def scaled_fp4_experts_quant(
         output: The quantized tensor in FP4
         output_scales: The blockscale tensor in FP8-E4M3
     """
-    assert not current_platform.is_rocm()
     assert input_tensor.ndim == 2, (
         f'input.ndim needs to be == 2, but got {input_tensor.ndim}.')
 
@@ -1135,6 +1133,7 @@ def scaled_fp4_experts_quant(
 # fp8
 def scaled_fp8_quant(
     input: torch.Tensor,
+    out_dtype: torch.dtype = None,
     scale: Optional[torch.Tensor] = None,
     num_token_padding: Optional[int] = None,
     scale_ub: Optional[torch.Tensor] = None,
@@ -1167,7 +1166,6 @@ def scaled_fp8_quant(
     assert (input.ndim == 2)
     shape: Union[tuple[int, int], torch.Size] = input.shape
     # For ROCm on MI300, the output fp8 dtype is torch.float_e3m3fnuz
-    out_dtype: torch.dtype = current_platform.fp8_dtype()
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=out_dtype)
@@ -1449,10 +1447,6 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
                    num_tokens_post_pad: torch.Tensor, top_k: int,
                    BLOCK_SIZE_M: int, BLOCK_SIZE_N: int, BLOCK_SIZE_K: int,
                    bit: int) -> torch.Tensor:
-    if not current_platform.is_cuda():
-        raise NotImplementedError(
-            "The optimized moe_wna16_gemm kernel is only "
-            "available on CUDA platforms")
     torch.ops._moe_C.moe_wna16_gemm(input, output, b_qweight, b_scales,
                                     b_qzeros, topk_weights, sorted_token_ids,
                                     experts_ids, num_tokens_post_pad, top_k,
