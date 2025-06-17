@@ -1771,7 +1771,6 @@ def setup_server(args):
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
     if args.uds:
-        sock_addr = (args.uds, args.port)
         sock = create_server_unix_socket(args.uds)
     else:
         sock_addr = (args.host or "", args.port)
@@ -1787,13 +1786,13 @@ def setup_server(args):
 
     signal.signal(signal.SIGTERM, signal_handler)
 
-    addr, port = sock_addr
-    is_ssl = args.ssl_keyfile and args.ssl_certfile
-    host_part = f"[{addr}]" if is_valid_ipv6_address(
-        addr) else addr or "0.0.0.0"
     if args.uds:
         listen_address = f"unix:{args.uds}"
     else:
+        addr, port = sock_addr
+        is_ssl = args.ssl_keyfile and args.ssl_certfile
+        host_part = f"[{addr}]" if is_valid_ipv6_address(
+            addr) else addr or "0.0.0.0"
         listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
     return listen_address, sock
 
