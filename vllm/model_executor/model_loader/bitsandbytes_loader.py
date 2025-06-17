@@ -545,6 +545,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for param_name, param in param_dict.items():
             if param_name in stacked_quant_state_dict:
                 quant_states = stacked_quant_state_dict[param_name]
+                # Dequantize double quantized values during weight loading.
                 dequantize_dq(quant_states)
                 set_weight_attrs(param, {"bnb_quant_state": quant_states})
 
