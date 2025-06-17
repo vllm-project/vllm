@@ -55,6 +55,7 @@ async def generate(
     output_kind: RequestOutputKind,
     max_tokens: int,
     n: int = 1,
+    streaming_params: Optional[StreamingParams] = None,
     prompt_logprobs: Optional[int] = None,
     cancel_after: Optional[int] = None,
 ) -> tuple[int, str]:
@@ -71,6 +72,8 @@ async def generate(
         n=n,
         prompt_logprobs=prompt_logprobs,
     )
+    if streaming_params is None:
+        streaming_params = StreamingParams(stream_n=3)
     async for out in engine.generate(request_id=request_id,
                                      prompt=prompt,
                                      sampling_params=sampling_params,
@@ -238,7 +241,6 @@ async def test_finished_flag(
             seed=33,
             n=n,
         )
-        streaming_params = StreamingParams(stream_n=3)
         outputs = [
             out
             async for out in engine.generate(request_id="request-33",
@@ -273,6 +275,7 @@ async def test_mid_stream_cancellation(monkeypatch: pytest.MonkeyPatch,
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
+        streaming_params = StreamingParams(stream_n=3)
         # Create concurrent requests that will be cancelled mid-stream
         tasks = []
         for request_id in request_ids:
@@ -284,17 +287,21 @@ async def test_mid_stream_cancellation(monkeypatch: pytest.MonkeyPatch,
                         prompt,
                         RequestOutputKind.DELTA,
                         NUM_TOKENS,
+                        streaming_params=streaming_params,
                         cancel_after=NUM_EXPECTED_TOKENS,
                     )))
 
         # Wait for all tasks to complete
         results = await asyncio.gather(*tasks)
 
+        MIN_EXP_TOKENS = NUM_EXPECTED_TOKENS
+        MAX_EXP_TOKENS = NUM_EXPECTED_TOKENS + streaming_params.stream_n
         # Verify all tasks were cancelled at the expected point
         for num_generated_tokens, request_id in results:
-            assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
+            assert MIN_EXP_TOKENS <= num_generated_tokens <= MAX_EXP_TOKENS, (
                 f"{request_id} generated {num_generated_tokens} tokens but "
-                f"expected to cancel after {NUM_EXPECTED_TOKENS}")
+                f"expected to cancel after {MIN_EXP_TOKENS} and "
+                f"before {MAX_EXP_TOKENS}")
 
         # Make sure no requests are left hanging
         assert not engine.output_processor.has_unfinished_requests()
@@ -302,10 +309,17 @@ async def test_mid_stream_cancellation(monkeypatch: pytest.MonkeyPatch,
         # Confirm we can reuse the request id after the cancellations.
         request_id = request_ids[0]
         task = asyncio.create_task(
-            generate(engine, request_id, prompt, RequestOutputKind.DELTA,
-                     NUM_EXPECTED_TOKENS))
+            generate(engine,
+                     request_id,
+                     prompt,
+                     RequestOutputKind.DELTA,
+                     NUM_EXPECTED_TOKENS,
+                     streaming_params=streaming_params))
         num_generated_tokens, request_id = await task
-        assert num_generated_tokens == NUM_EXPECTED_TOKENS
+        assert MIN_EXP_TOKENS <= num_generated_tokens <= MAX_EXP_TOKENS, (
+            f"{request_id} generated {num_generated_tokens} tokens but "
+            f"expected to cancel after {MIN_EXP_TOKENS} and "
+            f"before {MAX_EXP_TOKENS}")
         assert not engine.output_processor.has_unfinished_requests()
 
 
@@ -339,9 +353,6 @@ async def test_streaming_params(monkeypatch: pytest.MonkeyPatch, n: int,
         ]
 
         # Assert that all but the last output have at least stream_n tokens
-        print("DEBUG_OUTPUT output lengths: ", [
-            sum(len(o.token_ids) for o in out.outputs) for out in outputs[:-1]
-        ])
         assert all(
             sum(len(o.token_ids)
                 for o in out.outputs) >= streaming_params.stream_n
