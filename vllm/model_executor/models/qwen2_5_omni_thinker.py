@@ -846,7 +846,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         multimodal_embeddings: Optional[NestedTensors] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if len(multimodal_embeddings) == 0:
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
         for embeddings, modality in multimodal_embeddings:
