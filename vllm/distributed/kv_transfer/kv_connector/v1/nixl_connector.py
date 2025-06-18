@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
 GET_META_MSG = b"get_meta_msg"
-REQS_TIMEOUT = 180  # TODO add to vllm.envs
 
 logger = init_logger(__name__)
 
@@ -797,7 +796,7 @@ class NixlConnectorWorker:
             if finish_time == -1:
                 # Request just finished, start timeout.
                 self._reqs_to_send[req_id] = now
-            elif now - finish_time >= REQS_TIMEOUT:
+            elif now - finish_time >= envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT:
                 # Timeout exceed, abort request and clear.
                 aborted_req_ids.add(req_id)
 
