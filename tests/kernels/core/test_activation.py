@@ -127,7 +127,7 @@ def test_activation(
 
 BATCH_SIZES = [1, 13, 26, 32]
 NUM_TOKENS = [7, 37, 64, 4096]
-D = [128, 256, 384, 512, 1024, 13824]
+D = [128, 256, 384, 512, 1024, 1536, 13824]
 
 
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
