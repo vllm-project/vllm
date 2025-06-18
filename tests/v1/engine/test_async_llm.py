@@ -370,21 +370,24 @@ async def test_check_health(monkeypatch: pytest.MonkeyPatch):
     and raises EngineDeadError when the engine is dead.
     """
     from unittest.mock import patch
+
     from vllm.v1.engine.exceptions import EngineDeadError
-    
+
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
 
         engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
 
-        # Test 1: Healthy engine should not raise any exception  
+        # Test 1: Healthy engine should not raise any exception
         await engine.check_health()
 
         # Test 2: Mock the errored property to simulate a dead engine
-        with patch.object(type(engine), 'errored', new_callable=lambda: property(lambda self: True)):
-            with pytest.raises(EngineDeadError):
-                await engine.check_health()
+        with patch.object(type(engine),
+                          'errored',
+                          new_callable=lambda: property(lambda self: True)
+                          ), pytest.raises(EngineDeadError):
+            await engine.check_health()
 
         # Test 3: Verify healthy engine still works after mock
         await engine.check_health()
