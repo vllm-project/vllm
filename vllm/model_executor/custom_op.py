@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Optional
+
 import torch.nn as nn
 
 from vllm.config import get_current_vllm_config
@@ -181,7 +183,7 @@ class CustomOp(nn.Module):
     # - @UnquantizedFusedMoEMethod.register_oot()
     #   class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod)
     @classmethod
-    def register_oot(cls, name: str = None):
+    def register_oot(cls, name: Optional[str] = None):
 
         def decorator(op_cls):
             reg_name = name if name is not None else cls.__name__
