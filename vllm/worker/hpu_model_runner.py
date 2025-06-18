@@ -2758,13 +2758,17 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if profile := os.environ.get('VLLM_PT_PROFILE', None):
             phase, bs, seq_len, graph = profile.split('_')
             is_prompt = phase == 'prompt'
-            cfg = (int(bs), int(seq_len), 0, is_prompt)
+            ctx = 0
+            if not is_prompt:
+                ctx = int(seq_len)
+                seq_len = '1'
+            cfg = (int(bs), int(seq_len), ctx, is_prompt)
             graphs = graph == 't'
             if graphs:
                 self.graphed_buckets.add(cfg)
             self.warmup_scenario(int(bs),
                                  int(seq_len),
-                                 0,
+                                 ctx,
                                  is_prompt,
                                  kv_caches,
                                  is_pt_profiler_run=True)
