@@ -4,11 +4,16 @@ from typing import Optional
 
 import torch
 
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 
-@CustomOp.register("RotaryEmbedding", is_oot_custom_op=True)
+# Register CustomRotaryEmbedding to CustomOP.
+# Using either way as below works
+# Example 1:
+# - @CustomOp.register_oot("RotaryEmbedding")
+# Example 2:
+# - @RotaryEmbedding.register_oot()
+@RotaryEmbedding.register_oot()
 class DummyRotaryEmbedding(RotaryEmbedding):
     """Original rotary positional embedding."""
 
