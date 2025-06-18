@@ -419,44 +419,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        # Extract aLoRA batch metadata from forward context
-        alora_metadata = get_forward_context().alora_metadata
-        k_offsets = alora_metadata.k_offsets
-        query_start_locs = alora_metadata.query_start_locs
+        lora_output: Optional[
+            torch.Tensor] = self.punica_wrapper.add_lora_linear(
+                output, x, self.lora_a_stacked, self.lora_b_stacked,
+                self.lora_bias_stacked, 1.0, self.output_slices)
+        if not current_platform.can_update_inplace():
+            output = lora_output
 
-        # Build the 1D “save‐prefix” mask:
-        T = output.size(0)  # total tokens
-        starts = query_start_locs[:-1]  # starts and end index of each request
-        ends = query_start_locs[1:]
-        lengths = ends - starts  # request lengths
-        kept_lens = lengths - k_offsets
-        kept_lens = torch.clamp(
-            kept_lens,
-            min=0)  # portion of request to keep as base model weights
-
-        device = output.device
-        # Create the alora mask
-        delta = torch.zeros(T + 1, device=device, dtype=output.dtype)
-        ends_for_scatter = starts + kept_lens
-        pos_vals = kept_lens.sign().to(output.dtype)
-        neg_vals = -pos_vals
-        delta.scatter_add_(0, starts, pos_vals)
-        delta.scatter_add_(0, ends_for_scatter, neg_vals)
-        cums = torch.cumsum(delta[:-1], dim=0)
-        mask1d = cums > 0  # shape [T], bool
-        mask2d = mask1d.unsqueeze(1).to(output.dtype)
-
-        # Clone base layer output before running LoRA
-        orig_out = output.clone()
-
-        # Apply LoRA in‐place on `output`:
-        self.punica_wrapper.add_lora_linear(output, x, self.lora_a_stacked,
-                                            self.lora_b_stacked,
-                                            self.lora_bias_stacked, 1.0,
-                                            self.output_slices)
-        # Apply alora mask
-        final_output = orig_out.mul(mask2d) + output.mul(1.0 - mask2d)
-        return final_output
+        return output
 
     @property
     def weight(self) -> torch.Tensor:
@@ -1314,3 +1284,57 @@ class LinearScalingRotaryEmbeddingWithLoRA(BaseLayerWithLoRA):
 
     def extra_repr(self) -> str:
         return self.base_layer.extra_repr()
+
+
+class ActivatedLoRAMixin:
+
+    def apply(self,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+
+        # In transformers backend, x and output have extra batch dimension like
+        # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
+        # therefore we need to flatten the batch dimensions.
+        if x.ndim == 3 and output.ndim == 3:
+            output = output.flatten(0, 1)
+            x = x.flatten(0, 1)
+
+        # Extract aLoRA batch metadata from forward context
+        alora_metadata = get_forward_context().alora_metadata
+        k_offsets = alora_metadata.k_offsets
+        query_start_locs = alora_metadata.query_start_locs
+
+        # Build the 1D “save‐prefix” mask:
+        T = output.size(0)  # total tokens
+        starts = query_start_locs[:-1]  # starts and end index of each request
+        ends = query_start_locs[1:]
+        lengths = ends - starts  # request lengths
+        kept_lens = lengths - k_offsets
+        kept_lens = torch.clamp(
+            kept_lens,
+            min=0)  # portion of request to keep as base model weights
+
+        device = output.device
+        # Create the alora mask
+        delta = torch.zeros(T + 1, device=device, dtype=output.dtype)
+        ends_for_scatter = starts + kept_lens
+        pos_vals = kept_lens.sign().to(output.dtype)
+        neg_vals = -pos_vals
+        delta.scatter_add_(0, starts, pos_vals)
+        delta.scatter_add_(0, ends_for_scatter, neg_vals)
+        cums = torch.cumsum(delta[:-1], dim=0)
+        mask1d = cums > 0  # shape [T], bool
+        mask2d = mask1d.unsqueeze(1).to(output.dtype)
+
+        # Clone base layer output before running LoRA
+        orig_out = output.clone()
+
+        # Apply LoRA in‐place on `output`:
+        self.punica_wrapper.add_lora_linear(output, x, self.lora_a_stacked,
+                                            self.lora_b_stacked,
+                                            self.lora_bias_stacked, 1.0,
+                                            self.output_slices)
+        # Apply alora mask
+        final_output = orig_out.mul(mask2d) + output.mul(1.0 - mask2d)
+        return final_output

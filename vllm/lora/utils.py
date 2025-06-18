@@ -21,7 +21,8 @@ from vllm.lora.fully_sharded_layers import (
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+from vllm.lora.layers import (ActivatedLoRAMixin, BaseLayerWithLoRA,
+                              ColumnParallelLinearWithLoRA,
                               LinearScalingRotaryEmbeddingWithLoRA,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
@@ -67,6 +68,14 @@ def from_layer(layer: nn.Module,
                                       lora_config=lora_config,
                                       packed_modules_list=packed_modules_list,
                                       model_config=model_config):
+
+            # inject a-LoRA behaviour
+            if (lora_config.activated_lora_enabled
+                    and lora_cls is MergedQKVParallelLinearWithLoRA):
+                lora_cls = type(
+                    lora_cls.__name__.replace("LoRA", "ActivatedLoRA"),
+                    (ActivatedLoRAMixin, lora_cls), {})
+
             instance_layer = lora_cls(layer)
             instance_layer.create_lora_weights(max_loras, lora_config,
                                                model_config)
