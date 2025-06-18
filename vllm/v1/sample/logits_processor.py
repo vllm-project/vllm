@@ -21,9 +21,6 @@ class MoveDirectionalityEnum(Enum):
 # (index, params, output_tok_ids) for new
 # requests added to the batch.
 AddedRequestType = tuple[int, SamplingParams, list[int]]
-# (a, b) batch indices of any requests
-# swapped within the batch.
-SwappedRequestType = tuple[int, int]
 # (from, to) batch indices of any requests
 # moved within the batch.
 MovedRequestType = tuple[int, int, MoveDirectionalityEnum]
@@ -324,19 +321,20 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             for a_index, b_index, direct in batch_update.moved:
                 if direct == MoveDirectionalityEnum.UNIDIRECTIONAL:
                     if (a_entry := self.min_toks.pop(a_index, None)) is None:
-                        if self.min_toks.pop(b_index,None) is not None:
-                            needs_update=True
+                        if self.min_toks.pop(b_index, None) is not None:
+                            needs_update = True
                     else:
                         self.min_toks[b_index] = a_entry
-                        needs_update=True
+                        needs_update = True
                 else:
                     a_entry = self.min_toks.pop(a_index, None)
-                    if (b_entry := self.min_toks.pop(b_index, None)) is not None:
-                        self.min_toks[a_index]=b_entry
-                        needs_update=True
+                    if (b_entry := self.min_toks.pop(b_index,
+                                                     None)) is not None:
+                        self.min_toks[a_index] = b_entry
+                        needs_update = True
                     if a_entry is not None:
-                        self.min_toks[b_index]=a_entry
-                        needs_update=True
+                        self.min_toks[b_index] = a_entry
+                        needs_update = True
 
         if self.min_toks:
             # Check for any requests that have attained their min tokens.
