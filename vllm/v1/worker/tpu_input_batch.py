@@ -1,56 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Datastructures defining a GPU input batch
+# Datastructures defining a TPU input batch
 
-from dataclasses import dataclass
 from typing import Optional, cast
 
 import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
 _SAMPLING_EPS = 1e-5
-
-
-@dataclass
-class CachedRequestState:
-
-    req_id: str
-    prompt_token_ids: list[int]
-    mm_inputs: list[MultiModalKwargs]
-    mm_positions: list[PlaceholderRange]
-    sampling_params: SamplingParams
-    generator: Optional[torch.Generator]
-
-    block_ids: tuple[list[int], ...]
-    num_computed_tokens: int
-    output_token_ids: list[int]
-
-    mrope_positions: Optional[torch.Tensor] = None
-    mrope_position_delta: Optional[int] = None
-
-    lora_request: Optional[LoRARequest] = None
-
-    def __post_init__(self):
-        self.num_prompt_tokens = len(self.prompt_token_ids)
-
-    @property
-    def num_tokens(self) -> int:
-        return self.num_prompt_tokens + len(self.output_token_ids)
-
-    def get_token_id(self, idx: int) -> int:
-        if idx < self.num_prompt_tokens:
-            return self.prompt_token_ids[idx]
-        else:
-            return self.output_token_ids[idx - self.num_prompt_tokens]
 
 
 class InputBatch:
@@ -222,9 +186,6 @@ class InputBatch:
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
-
-        # This is updated each time the batch constituents change.
-        self.sampling_metadata = self._make_sampling_metadata()
 
     @property
     def req_ids(self) -> list[str]:
@@ -538,69 +499,6 @@ class InputBatch:
         # Trim lists to the batch size.
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
-
-    def refresh_sampling_metadata(self):
-        self.sampling_metadata = self._make_sampling_metadata()
-
-    def _make_sampling_metadata(self) -> SamplingMetadata:
-        num_reqs = self.num_reqs
-        if not self.all_greedy:
-            temperature = copy_slice(self.temperature_cpu_tensor,
-                                     self.temperature, num_reqs)
-        else:
-            temperature = None
-        if not self.no_top_p:
-            copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
-        if not self.no_top_k:
-            copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
-        if not self.no_min_p:
-            copy_slice(self.min_p_cpu_tensor, self.min_p, num_reqs)
-
-        if not self.no_penalties:
-            # Since syncing these tensors is expensive only copy them
-            # if necessary i.e. if there are requests which require
-            # penalties to be applied during sampling.
-            copy_slice(self.frequency_penalties_cpu_tensor,
-                       self.frequency_penalties, num_reqs)
-            copy_slice(self.presence_penalties_cpu_tensor,
-                       self.presence_penalties, num_reqs)
-            copy_slice(self.repetition_penalties_cpu_tensor,
-                       self.repetition_penalties, num_reqs)
-
-            # The prompt tokens are used only for applying penalties during
-            # the sampling process. Hence copy these tensors only when
-            # there are requests which need penalties to be applied.
-            prompt_token_ids = self._make_prompt_token_ids_tensor()
-        else:
-            prompt_token_ids = None
-
-        allowed_token_ids_mask: Optional[torch.Tensor] = None
-        if not self.no_allowed_token_ids:
-            assert self.allowed_token_ids_mask is not None
-            copy_slice(self.allowed_token_ids_mask_cpu_tensor,
-                       self.allowed_token_ids_mask, num_reqs)
-            allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
-
-        return SamplingMetadata(
-            temperature=temperature,
-            all_greedy=self.all_greedy,
-            all_random=self.all_random,
-            top_p=None if self.no_top_p else self.top_p[:num_reqs],
-            top_k=None if self.no_top_k else self.top_k[:num_reqs],
-            min_p=None if self.no_min_p else self.min_p[:num_reqs],
-            generators=self.generators,
-            max_num_logprobs=self.max_num_logprobs,
-            prompt_token_ids=prompt_token_ids,
-            frequency_penalties=self.frequency_penalties[:num_reqs],
-            presence_penalties=self.presence_penalties[:num_reqs],
-            repetition_penalties=self.repetition_penalties[:num_reqs],
-            output_token_ids=cast(list[list[int]], self.req_output_token_ids),
-            min_tokens=self.min_tokens,
-            no_penalties=self.no_penalties,
-            logit_bias=self.logit_bias[:num_reqs],
-            allowed_token_ids_mask=allowed_token_ids_mask,
-            bad_words_token_ids=self.bad_words_token_ids,
-        )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
         max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
