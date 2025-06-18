@@ -407,8 +407,9 @@ def jitcache(
     relaxed safety checks still hold for the particular application.
 
     The :code:`JitCache` checks which compiled version of a kernel to use
-    based on the mandatory :code:`check_keys` list. The developer needs to
-    select these arguments based on her/his knowledge of the application.
+    based on the mandatory :code:`check_keys` and :code:`check_specialization`
+    lists. The developer needs to select these arguments based on her/his
+    knowledge of the application.
 
     If a :code:`CacheLock` is provided, then the :code:`JitCache` adds new
     entries to the cache as long es the lock is unlocked. Once the CacheLock
@@ -422,6 +423,11 @@ def jitcache(
     :param check_keys: The list of tl.constexpr that are used to index
                        the cache. Only types int, bool, float are supported.
     :type check_keys: list[str]
+    :param check_specialization: The list of *non-constants* of type integer
+                                 that are subject to specialization
+                                 (e.g. values of the parameter could be 1 or
+                                 could be dividable by 16).
+    :type check_specialization: list[str]
     :param cache_lock: The CacheLock used for this JitCache.
     :type cache_lock: CacheLock
     :param cache_launch_grid: Indicate if the launch grid size is static and
