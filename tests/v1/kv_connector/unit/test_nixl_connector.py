@@ -9,10 +9,13 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker)
 from vllm.forward_context import ForwardContext
+from vllm.llm_engine.llm_engine import LLM
+from vllm.llm_engine.scheduler.scheduler import SamplingParams
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
@@ -371,3 +374,64 @@ class TestNixlHandshake:
                 if cnt_finished_reqs == total_reqs:
                     return
         raise TimeoutError("Took too long to complete async handshake.")
+
+
+def test_abort_timeout_on_prefiller(monkeypatch):
+    """
+    Test lifecycle of an aborted Remote Prefill request hitting the timeout.
+    -----> P 
+            |  {process request}
+     <-\--- |  {result is NOT delivered, eg proxy is down}
+            |
+            |
+            |  {eventually free blocks}
+    """
+    model_name = "Qwen/Qwen3-0.6B"
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_both",
+    )
+    timeout = 6
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
+    llm = LLM(
+        model=model_name,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+        kv_transfer_config=kv_transfer_config,
+    )
+    remote_prefill_opts = {
+        "do_remote_decode": True,
+        "do_remote_prefill": False,
+        "remote_engine_id": None,
+        "remote_block_ids": None,
+        "remote_host": None,
+        "remote_port": None,
+    }
+    # Simulate sidecar request
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=1,
+        extra_args={"kv_transfer_params": remote_prefill_opts})
+    scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+
+    padding = "Just making this request a little longer so that we're sure "
+    "we're not hitting the small-request lower bound beneath which we don't "
+    "actually trigger the whole kv transfer, but rather just recompute the "
+    "blocks on D."
+    _ = llm.generate([f"What is the capital of Japan? {padding}"],
+                     sampling_params)
+
+    # Request finished but not freed
+    assert '0' in scheduler.pending_kv_free_req_ids
+    # Some other request
+    _ = llm.generate([f"What is the capital of Italy? {padding}"],
+                     sampling_params)
+    assert scheduler.pending_kv_free_req_ids == {"0", "1"}
+
+    # Wait for timeout and trigger another scheduler loop
+    time.sleep(timeout)
+    _ = llm.generate([f"What is the capital of France? {padding}"],
+                     sampling_params)
+    # Request-0 times out and is cleared!
+    assert '0' not in scheduler.pending_kv_free_req_ids
