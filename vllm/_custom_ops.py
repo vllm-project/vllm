@@ -1524,15 +1524,6 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                                           num_tokens_post_pad)
 
 
-def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
-                             block_size: int, sorted_token_ids: torch.Tensor,
-                             experts_ids: torch.Tensor,
-                             num_tokens_post_pad: torch.Tensor) -> None:
-    torch.ops._moe_C.sgl_moe_align_block_size(topk_ids, num_experts,
-                                              block_size, sorted_token_ids,
-                                              experts_ids, num_tokens_post_pad)
-
-
 def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
                    b_qweight: torch.Tensor, b_scales: torch.Tensor,
                    b_qzeros: Optional[torch.Tensor],
