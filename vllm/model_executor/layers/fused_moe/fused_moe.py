@@ -810,9 +810,9 @@ def get_default_config(
     return config
 
 
-def try_get_optimal_moe_config_list(
-    w1_shape: list[int],
-    w2_shape: list[int],
+def try_get_optimal_moe_config(
+    w1_shape: tuple[int, ...],
+    w2_shape: tuple[int, ...],
     top_k: int,
     dtype: Optional[str],
     M: int,
@@ -840,58 +840,6 @@ def try_get_optimal_moe_config_list(
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
                                         is_marlin, block_shape)
-
-    return (
-        config.get('BLOCK_SIZE_M', 0),
-        config.get('BLOCK_SIZE_N', 0),
-        config.get('BLOCK_SIZE_K', 0),
-        config.get('GROUP_SIZE_M', 0),
-        config.get('num_warps', 0),
-        config.get('num_stages', 0),
-    )
-
-
-direct_register_custom_op(
-    op_name="try_get_optimal_moe_config_list",
-    op_func=try_get_optimal_moe_config_list,
-    mutates_args=[],
-    dispatch_key="",
-)
-
-
-def try_get_optimal_moe_config(
-    w1_shape: list[int],
-    w2_shape: list[int],
-    top_k: int,
-    dtype: Optional[str],
-    M: int,
-    is_marlin: bool = False,
-    block_shape: Optional[list[int]] = None,
-) -> dict[str, int]:
-    values = torch.ops.vllm.try_get_optimal_moe_config_list(
-        w1_shape,
-        w2_shape,
-        top_k,
-        dtype,
-        M,
-        is_marlin,
-        block_shape,
-    )
-
-    config: dict[str, int] = dict()
-
-    keys = [
-        "BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "GROUP_SIZE_M",
-        "num_warps", "num_stages"
-    ]
-
-    assert len(keys) == len(values)
-
-    config = dict()
-    for k, v in zip(keys, values):
-        if v != 0:
-            config[k] = v
-
     return config
 
 
