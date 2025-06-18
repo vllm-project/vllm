@@ -66,8 +66,8 @@ class ModelOptFp8Config(QuantizationConfig):
         return ["hf_quant_config.json"]
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                user_quant) -> Optional[QuantizationMethods]:
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         """Detect if this ModelOpt config should be used based on
         quantization config."""
 
@@ -255,8 +255,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
-    ) -> Optional[QuantizationMethods]:
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
         """Detect if this ModelOpt FP4 config should be used based on
         quantization config."""
         if hf_quant_cfg is None:
@@ -310,9 +309,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
             elif isinstance(kv_cache_quant_algo_raw, str):
                 kv_cache_quant_algo = kv_cache_quant_algo_raw
             else:
-                raise ValueError(
-                    f"kv_cache_quant_algo must be a string, got "
-                    f"{type(kv_cache_quant_algo_raw)}")
+                raise ValueError(f"kv_cache_quant_algo must be a string, got "
+                                 f"{type(kv_cache_quant_algo_raw)}")
 
             # Handle group_size with proper type validation
             group_size_raw = quant_config.get("group_size")
@@ -324,15 +322,13 @@ class ModelOptNvFp4Config(QuantizationConfig):
                 try:
                     group_size = int(group_size_raw)
                 except (ValueError, TypeError):
-                    raise ValueError(
-                        f"group_size must be an integer, got "
-                        f"{type(group_size_raw)}") from None
+                    raise ValueError(f"group_size must be an integer, got "
+                                     f"{type(group_size_raw)}") from None
 
             exclude_modules = quant_config.get("exclude_modules", [])
             if not isinstance(exclude_modules, list):
-                raise ValueError(
-                    f"exclude_modules must be a list, got "
-                    f"{type(exclude_modules)}")
+                raise ValueError(f"exclude_modules must be a list, got "
+                                 f"{type(exclude_modules)}")
         else:
             # Compressed-tensors style format:
             # {"quant_algo": "...", "quant_library": "modelopt"}
@@ -346,9 +342,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
             elif isinstance(kv_cache_quant_algo_raw, str):
                 kv_cache_quant_algo = kv_cache_quant_algo_raw
             else:
-                raise ValueError(
-                    f"kv_cache_quant_algo must be a string, got "
-                    f"{type(kv_cache_quant_algo_raw)}")
+                raise ValueError(f"kv_cache_quant_algo must be a string, got "
+                                 f"{type(kv_cache_quant_algo_raw)}")
 
             # Handle group_size with proper type validation
             group_size_raw = config.get("group_size")
@@ -360,15 +355,13 @@ class ModelOptNvFp4Config(QuantizationConfig):
                 try:
                     group_size = int(group_size_raw)
                 except (ValueError, TypeError):
-                    raise ValueError(
-                        f"group_size must be an integer, got "
-                        f"{type(group_size_raw)}") from None
+                    raise ValueError(f"group_size must be an integer, got "
+                                     f"{type(group_size_raw)}") from None
 
             exclude_modules = config.get("exclude_modules", [])
             if not isinstance(exclude_modules, list):
-                raise ValueError(
-                    f"exclude_modules must be a list, got "
-                    f"{type(exclude_modules)}")
+                raise ValueError(f"exclude_modules must be a list, got "
+                                 f"{type(exclude_modules)}")
 
         if quant_method not in QUANT_ALGOS:
             raise ValueError(
@@ -382,10 +375,12 @@ class ModelOptNvFp4Config(QuantizationConfig):
         if is_checkpoint_nvfp4_serialized and "quantization" in config:
             # Check if required fields are present in the quantization config
             quant_config = config["quantization"]
-            required_fields = ["group_size", "kv_cache_quant_algo",
-                              "exclude_modules"]
-            missing_fields = [field for field in required_fields
-                             if field not in quant_config]
+            required_fields = [
+                "group_size", "kv_cache_quant_algo", "exclude_modules"
+            ]
+            missing_fields = [
+                field for field in required_fields if field not in quant_config
+            ]
             if missing_fields:
                 raise ValueError(
                     f"NVFP4 quantization requires the following fields in "
