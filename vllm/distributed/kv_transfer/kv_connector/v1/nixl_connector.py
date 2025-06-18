@@ -826,6 +826,19 @@ class NixlConnectorWorker:
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
 
+        # Handle timeout
+        # now = time.perf_counter()
+        # for req_id, finish_time in self._reqs_to_send.items():
+        #     if finish_time == -1:
+        #         # Request just finished, start timeout.
+        #         self._reqs_to_send[req_id] = now
+        #     elif now - finish_time >= envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT:
+        #         # Timeout exceed, abort request and clear.
+        #         aborted_req_ids.add(req_id)
+        # if req_id in self._done_sending_count:
+        # self._done_sending_count[req_id] += self.world_size
+        # del self._reqs_to_send[req_id]
+
         if self.world_size == 1:
             return done_sending, done_recving
 

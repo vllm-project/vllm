@@ -138,6 +138,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: str = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
+    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
 
 
 def get_default_cache_root():
@@ -953,7 +954,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # generations on machines < 100 for compressed-tensors
     # models
     "VLLM_USE_NVFP4_CT_EMULATIONS":
-    lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0")))
+    lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))),
+
+    # Time (in seconds) after which the KV cache on the producer side is
+    # automatically cleared if no READ notification is received from the
+    # consumer. This is only applicable when using NixlConnector in a
+    # disaggregated decode-prefill setup.
+    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
+    lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120"))
 }
 
 # --8<-- [end:env-vars-definition]
