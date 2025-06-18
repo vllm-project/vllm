@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
-import io
-import math
-import time
 from collections.abc import AsyncGenerator
 from typing import Optional, Union
 
-import numpy as np
 from fastapi import Request
 
 from vllm.config import ModelConfig
@@ -68,12 +63,12 @@ class OpenAIServingTranscription(OpenAISpeechToText):
 
     async def transcription_stream_generator(
             self, request: TranscriptionRequest,
-            result_generator: AsyncGenerator[RequestOutput, None],
+            result_generator: list[AsyncGenerator[RequestOutput, None]],
             request_id: str, request_metadata: RequestResponseMetadata,
             audio_duration_s: float) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
-            result_generator=result_generator,
+            list_result_generator=result_generator,
             request_id=request_id,
             request_metadata=request_metadata,
             audio_duration_s=audio_duration_s,
@@ -126,12 +121,12 @@ class OpenAIServingTranslation(OpenAISpeechToText):
 
     async def translation_stream_generator(
             self, request: TranslationRequest,
-            result_generator: AsyncGenerator[RequestOutput, None],
+            result_generator: list[AsyncGenerator[RequestOutput, None]],
             request_id: str, request_metadata: RequestResponseMetadata,
             audio_duration_s: float) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
-            result_generator=result_generator,
+            list_result_generator=result_generator,
             request_id=request_id,
             request_metadata=request_metadata,
             audio_duration_s=audio_duration_s,
