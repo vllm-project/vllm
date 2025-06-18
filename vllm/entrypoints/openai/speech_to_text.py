@@ -214,12 +214,14 @@ class OpenAISpeechToText(OpenAIServing):
             raise ValueError("Maximum file size exceeded.")
 
         with io.BytesIO(audio_data) as bytes_:
-            y, sr = librosa.load(bytes_)
+            # NOTE resample to model SR here for efficiency. This is also a
+            # pre-requisite for chunking, as it assumes Whisper SR.
+            y, sr = librosa.load(bytes_, sr=self.model_sr)
 
         duration = librosa.get_duration(y=y, sr=sr)
         chunks = [y] if duration < 30 else self._split_audio(y, sr)
         prompts = []
-        for i, chunk in enumerate(chunks):
+        for chunk in chunks:
             prompt = {
                 "encoder_prompt": {
                     "prompt": "",
@@ -230,7 +232,6 @@ class OpenAISpeechToText(OpenAIServing):
                 "decoder_prompt":
                 (f"<|startoftranscript|>{lang_token}"
                  f"<|{self.task_type}|><|notimestamps|>{request.prompt}")
-                if i == 0 else ""
             }
             prompts.append(cast(PromptType, prompt))
         return prompts, duration
