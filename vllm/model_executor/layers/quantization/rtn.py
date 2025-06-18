@@ -201,7 +201,7 @@ class RTNLinearMethod(LinearMethodBase):
 
         weight = rtn_dequantize(qweight, scale)
         out = F.linear(x, weight)
-
+        del weight
         if bias is not None:
             out.add_(bias)
 
