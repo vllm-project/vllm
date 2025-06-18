@@ -10,8 +10,6 @@ vLLM contains pre-compiled C++ and CUDA (12.8) binaries.
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
 
-### Create a new Python environment
-
 !!! note
     PyTorch installed via `conda` will statically link `NCCL` library, which can cause issues when vLLM tries to use `NCCL`. See <gh-issue:8420> for more details.
 
