@@ -173,7 +173,9 @@ def validate_structured_output_request_outlines(params: SamplingParams):
             try:
                 schema = json.dumps(gd_params.json)
             except Exception as e:
-                raise ValueError(f"Error serializing guided decoding jsonschema: {e}") from e
+                raise ValueError(
+                    f"Error serializing guided decoding jsonschema: {e}"
+                ) from e
         pattern = json_schema.build_regex_from_schema(schema)
         validate_regex_is_buildable(pattern)
     elif gd_params.choice:
