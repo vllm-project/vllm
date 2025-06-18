@@ -203,7 +203,7 @@ class NixlConnectorScheduler:
         # to avoid memory leks from unpulled blocks.
         self._reqs_need_abort: set[int] = set()
 
-    def abort_request(self, req_id: str) -> bool:
+    def abort_request(self, req_id: str) -> None:
         self._reqs_need_abort.add(req_id)
 
     def get_num_new_matched_tokens(

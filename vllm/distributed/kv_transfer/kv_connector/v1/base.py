@@ -205,7 +205,7 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
-    def abort_request(self, req_id: str) -> bool:
+    def abort_request(self, req_id: str) -> None:
         """Abort send or recv in the KVConnector."""
         return
 
