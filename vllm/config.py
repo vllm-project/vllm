@@ -904,10 +904,17 @@ class ModelConfig:
         quant_cfg = self._parse_quant_hf_config()
 
         if quant_cfg is not None:
-            quant_method = quant_cfg.get("quant_method", "").lower()
-            quant_method = quant_method.replace("compressed_tensors",
-                                                "compressed-tensors")
-            quant_cfg["quant_method"] = quant_method
+            # Support both 'quant_library' (preferred) and 'quant_method' (backward compatibility)
+            quant_library = quant_cfg.get("quant_library", "").lower()
+            if not quant_library:
+
+                quant_library = quant_cfg.get("quant_method", "").lower()
+
+            # Normalize library names
+            quant_library = quant_library.replace("compressed_tensors", "compressed-tensors")
+
+            quant_cfg["quant_method"] = quant_library
+            quant_method = quant_library
 
             # Quantization methods which are overrides (i.e. they have a
             # `override_quantization_method` method) must be checked in order

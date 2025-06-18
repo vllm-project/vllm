@@ -70,6 +70,29 @@ class ModelOptFp8Config(QuantizationConfig):
         return ["hf_quant_config.json"]
 
     @classmethod
+    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
+        """Detect if this ModelOpt config should be used based on quantization config."""
+        if hf_quant_cfg is None:
+            return None
+
+        quant_library = hf_quant_cfg.get("quant_library", "").lower()
+        if not quant_library:
+            quant_library = hf_quant_cfg.get("quant_method", "").lower()
+
+        if quant_library == "modelopt":
+            # Look for ModelOpt-specific config structure
+            if "quantization" in hf_quant_cfg:
+                quant_config = hf_quant_cfg["quantization"]
+                quant_algo = quant_config.get("quant_algo", "")
+                if "FP8" in quant_algo:
+                    return "modelopt"
+            # Also check for compressed-tensors style config with modelopt
+            elif any("FP8" in str(v).upper() for v in hf_quant_cfg.values() if isinstance(v, (str, dict))):
+                return "modelopt"
+
+        return None
+
+    @classmethod
     def from_config(cls, config: dict[str, Any]) -> "ModelOptFp8Config":
         quant_config = cls.get_from_keys(config, ["quantization"])
         quant_method = quant_config["quant_algo"]
@@ -458,6 +481,29 @@ class ModelOptNvFp4Config(QuantizationConfig):
     @classmethod
     def get_config_filenames(cls) -> list[str]:
         return ["hf_quant_config.json"]
+
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
+        """Detect if this ModelOpt FP4 config should be used based on quantization config."""
+        if hf_quant_cfg is None:
+            return None
+
+        quant_library = hf_quant_cfg.get("quant_library", "").lower()
+        if not quant_library:
+            quant_library = hf_quant_cfg.get("quant_method", "").lower()
+
+        if quant_library == "modelopt":
+            # Look for ModelOpt-specific config structure
+            if "quantization" in hf_quant_cfg:
+                quant_config = hf_quant_cfg["quantization"]
+                quant_algo = quant_config.get("quant_algo", "")
+                if "NVFP4" in quant_algo:
+                    return "modelopt_fp4"
+            # Also check for compressed-tensors style config with modelopt FP4
+            elif any("FP4" in str(v).upper() for v in hf_quant_cfg.values() if isinstance(v, (str, dict))):
+                return "modelopt_fp4"
+
+        return None
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "ModelOptNvFp4Config":
