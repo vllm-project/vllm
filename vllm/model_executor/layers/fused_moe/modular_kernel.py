@@ -507,8 +507,3 @@ class FusedMoEModularKernel(torch.nn.Module):
                                        topk_ids, apply_router_weight_on_input)
 
         return output
-
-    def compile(self, *args, **kwargs) -> None:
-        print(f"ARGS {args}")
-        print(f"KWARGS {kwargs}")
-        #super().compile(*args, **kwargs)

@@ -206,7 +206,11 @@ def test_fused_moe(
         padding=padding,
     )
 
+    # Note: for now use_compile will error out if the problem size is
+    # large enough to trigger chunking. I'm leaving the flag and
+    # setup code in case we are able to revisit this later.
     use_compile = False
+
     use_cudagraph = (n >= 1024 and k >= 1024
                      and current_platform.is_cuda_alike())
 

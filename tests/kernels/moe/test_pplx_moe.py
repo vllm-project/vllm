@@ -447,6 +447,9 @@ def pplx_moe(
     w1_chunk = chunk_by_rank(w1, rank, world_size).to(device)
     w2_chunk = chunk_by_rank(w2, rank, world_size).to(device)
 
+    # Note: for now use_compile will error out if the problem size is
+    # large enough to trigger chunking. I'm leaving the flag and
+    # setup code in case we are able to revisit this later.
     if use_compile:
         _fused_experts = torch.compile(fused_experts,
                                        backend='inductor',
