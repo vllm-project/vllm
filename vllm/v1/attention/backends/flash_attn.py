@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import numpy as np
 import torch
@@ -16,18 +16,16 @@ from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
                                            get_flash_attn_version)
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.utils import (
-    get_kv_connector_cache_layout)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              get_kv_cache_layout)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if current_platform.is_cuda():
@@ -76,16 +74,15 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_kv_cache_stride_order() -> tuple[int, ...]:
-        # NOTE When running disaggregated PD with NIXL, HND layout is used for
-        # faster transfer. `stride_order` indicates the permutation that gets
+        # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
-        cache_layout = get_kv_connector_cache_layout()
+        cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD":
             stride_order = (0, 1, 2, 3, 4)
         elif cache_layout == "HND":
             stride_order = (0, 1, 3, 2, 4)
         else:
-            raise ValueError("Unknown cache layout format %s.", cache_layout)
+            raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
 
 
@@ -308,7 +305,9 @@ def _get_sliding_window_configs(
     return sliding_window_configs
 
 
-class FlashAttentionMetadataBuilder:
+class FlashAttentionMetadataBuilder(
+        AttentionMetadataBuilder[FlashAttentionMetadata]):
+    full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() == 3
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -338,9 +337,13 @@ class FlashAttentionMetadataBuilder:
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return False
+    def build(
+        self, common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata
+    ) -> FlashAttentionMetadata:
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
 
     def build_slice(
         self,
@@ -353,7 +356,7 @@ class FlashAttentionMetadataBuilder:
         num_reqs = req_slice.stop - req_slice.start
         num_tokens = token_slice.stop - token_slice.start
 
-        max_seq_len = self.runner.seq_lens_np[req_slice].max()
+        max_seq_len = int(self.runner.seq_lens_np[req_slice].max())
         query_start_loc = slice_query_start_locs(
             common_attn_metadata.query_start_loc, req_slice)
         seq_lens = common_attn_metadata.seq_lens[req_slice]
@@ -502,9 +505,13 @@ class FlashAttentionMetadataBuilder:
         )
         return attn_metadata
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+    def build(
+        self, common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata
+    ) -> FlashAttentionMetadata:
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
         return self.build_slice(
             req_slice=slice(0, num_reqs),
             token_slice=slice(0, num_actual_tokens),
@@ -512,6 +519,11 @@ class FlashAttentionMetadataBuilder:
             common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
         )
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        # Full CUDA Graph always supported (FA2 support checked separately)
+        return True
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False  #use_cascade_attention(*args, **kwargs)
@@ -555,7 +567,6 @@ class FlashAttentionImpl(AttentionImpl):
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         support_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
@@ -586,6 +597,7 @@ class FlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -602,6 +614,11 @@ class FlashAttentionImpl(AttentionImpl):
               We use torch's .expand() to avoid duplicating values
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashAttentionImpl")
 
         if attn_metadata is None:
             # Profiling run.

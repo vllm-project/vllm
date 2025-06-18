@@ -93,6 +93,11 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
@@ -101,7 +106,10 @@ class TPUWorker:
         # fix this. It will be removed after the bug in XLA compiler is fixed.
         os.environ["LIBTPU_INIT_ARGS"] = (
             os.environ.get("LIBTPU_INIT_ARGS", "") +
-            " --xla_tpu_force_1d_allreduce_at_chunk_count=1")
+            " --xla_tpu_force_1d_allreduce_at_chunk_count=1"
+            " --xla_jf_conv_input_fusion=False")
+        # --xla_jf_conv_input_fusion=False is used to improve the perf of
+        # quantized matmul.
         torch.set_grad_enabled(False)
         torch.set_default_dtype(self.model_config.dtype)
 

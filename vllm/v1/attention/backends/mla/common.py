@@ -207,7 +207,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
-from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
                                               slice_query_start_locs)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
@@ -330,7 +331,7 @@ class MLACommonMetadata(Generic[D]):
 M = TypeVar("M", bound=MLACommonMetadata)
 
 
-class MLACommonMetadataBuilder(Generic[M]):
+class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -486,6 +487,12 @@ class MLACommonMetadataBuilder(Generic[M]):
         block_table_tensor = block_table.get_device_tensor()[req_slice]
         slot_mapping = block_table.slot_mapping_cpu[token_slice].to(
             device, non_blocking=True).long()
+        # block_table_tensor = block_table.get_device_tensor()[:num_reqs]
+        # block_table.slot_mapping[:num_actual_tokens].copy_(
+        #     block_table.slot_mapping_cpu[:num_actual_tokens],
+        #     non_blocking=True)
+        # block_table.slot_mapping[num_actual_tokens:].fill_(-1)
+        # slot_mapping = block_table.slot_mapping[:num_actual_tokens]
 
         query_start_loc = slice_query_start_locs(
             common_attn_metadata.query_start_loc, req_slice)
@@ -597,9 +604,13 @@ class MLACommonMetadataBuilder(Generic[M]):
             decode=decode_metadata,
         )
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+    def build(self, common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata) -> M:
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
+        assert self._num_decodes + self._num_prefills == num_reqs
         return self.build_slice(
             req_slice=slice(0, num_reqs),
             token_slice=slice(0, num_actual_tokens),
@@ -608,8 +619,32 @@ class MLACommonMetadataBuilder(Generic[M]):
             common_attn_metadata=common_attn_metadata,
         )
 
+    def build_for_cudagraph_capture(
+            self, common_attn_metadata: CommonAttentionMetadata) -> M:
+        """
+        This method builds the metadata for full cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with MLA.
+        """
+        m = common_attn_metadata
+        assert m.num_reqs == m.num_actual_tokens, \
+            "MLA only supports decode-only full CUDAGraph capture. " \
+            "Make sure all cudagraph capture sizes <= max_num_seq."
+
+        m.max_query_len = 1  # decode-only
+
+        # Update state usually set in reorder_batch.
+        self._num_decodes = m.num_reqs
+        self._num_decode_tokens = m.num_actual_tokens
+        self._num_prefills = 0
+        self._num_prefill_tokens = 0
+        return self.build(0, m)
+
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        return common_attn_metadata.max_query_len == 1
 
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
@@ -909,9 +944,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         kv_cache: torch.Tensor,
         attn_metadata: M,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for MLACommonImpl")
 
         if attn_metadata is None:
             # The zero fill is required when used with DP + EP

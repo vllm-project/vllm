@@ -117,6 +117,7 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
+    skip_cuda_graphs: bool = False
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -134,7 +135,8 @@ def create_forward_context(attn_metadata: Any,
                            vllm_config: VllmConfig,
                            virtual_engine: int = 0,
                            num_tokens: Optional[int] = None,
-                           num_tokens_across_dp: Optional[torch.Tensor] = None):
+                           num_tokens_across_dp: Optional[torch.Tensor] = None,
+                           skip_cuda_graphs: bool = False):
     dp_metadata: Optional[DPMetadata] = None
     if vllm_config.parallel_config.data_parallel_size > 1 and (
             attn_metadata is not None or num_tokens is not None):
@@ -146,7 +148,8 @@ def create_forward_context(attn_metadata: Any,
                           static_forward_context,
                           virtual_engine=virtual_engine,
                           attn_metadata=attn_metadata,
-                          dp_metadata=dp_metadata)
+                          dp_metadata=dp_metadata,
+                          skip_cuda_graphs=skip_cuda_graphs)
 
 
 @contextmanager
@@ -165,11 +168,14 @@ def override_forward_context(forward_context: Optional[ForwardContext]):
 
 
 @contextmanager
-def set_forward_context(attn_metadata: Any,
-                        vllm_config: VllmConfig,
-                        virtual_engine: int = 0,
-                        num_tokens: Optional[int] = None,
-                        num_tokens_across_dp: Optional[torch.Tensor] = None):
+def set_forward_context(
+    attn_metadata: Any,
+    vllm_config: VllmConfig,
+    virtual_engine: int = 0,
+    num_tokens: Optional[int] = None,
+    num_tokens_across_dp: Optional[torch.Tensor] = None,
+    skip_cuda_graphs: bool = False,
+):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -181,7 +187,8 @@ def set_forward_context(attn_metadata: Any,
 
     forward_context = create_forward_context(attn_metadata, vllm_config,
                                              virtual_engine, num_tokens, 
-                                             num_tokens_across_dp)
+                                             num_tokens_across_dp,
+                                             skip_cuda_graphs)
 
     try:
         with override_forward_context(forward_context):
