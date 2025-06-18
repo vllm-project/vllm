@@ -574,7 +574,8 @@ def dequantize_dq(quant_states: dict) -> None:
     """
     When BNB employs Double Quantization, we perform the dequantization of 
     these constants during weight loading rather than at inference time, 
-    thereby avoiding this computational overhead during inference.
+    thereby avoiding this computational overhead during inference. This comes 
+    at the cost of increased memory usage.
     """
     from bitsandbytes.functional import dequantize_blockwise
     for _, quant_state in quant_states.items():
