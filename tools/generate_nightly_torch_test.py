@@ -13,7 +13,9 @@ except PyTorch-related.
 input_file = "requirements/test.in"
 output_file = "requirements/nightly_torch_test.txt"
 
-keywords = ["torch", "torchaudio", "torchvision", "mamba_ssm"]
+# white list of packages that are not compatible with PyTorch nightly directly
+# with pip install.
+white_list = ["torch", "torchaudio", "torchvision", "mamba_ssm"]
 
 with open(input_file) as f:
     lines = f.readlines()
@@ -28,7 +30,7 @@ for line in lines:
             continue
         skip_next = False
 
-    if any(k in line.lower() for k in keywords):
+    if any(k in line.lower() for k in white_list):
         skip_next = True
         continue
 
