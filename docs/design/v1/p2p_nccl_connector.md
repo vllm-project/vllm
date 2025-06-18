@@ -314,24 +314,24 @@ pgrep python | xargs kill -9 && pkill -f python
 
 # Test data
 
-## **Scenario 1**: 1K input & 1K output tokens, E2E P99 latency ~20s  
-- **1P5D (6×A800) vs vLLM (1×A800)**:  
-  - Throughput ↑7.2% (1085 → 6979/6)  
-  - ITL (P99) ↓81.3% (120ms → 22.9ms) 
+## **Scenario 1**: 1K input & 1K output tokens, E2E P99 latency ~20s
+- **1P5D (6×A800) vs vLLM (1×A800)**:
+  - Throughput ↑7.2% (1085 → 6979/6)
+  - ITL (P99) ↓81.3% (120ms → 22.9ms)
   - TTFT (P99) ↑26.8% (175ms → 222ms) 
-  - TPOT: No change  
+  - TPOT: No change
 
-- **1P6D (7×A800) vs vLLM (1×A800)**:  
-  - Throughput ↑9.6% (1085 → 8329/7)  
-  - ITL (P99) ↓81.0% (120ms → 22.7ms) 
-  - TTFT (P99) ↑210% (175ms →543ms) 
-  - TPOT: No change  
+- **1P6D (7×A800) vs vLLM (1×A800)**:
+  - Throughput ↑9.6% (1085 → 8329/7)
+  - ITL (P99) ↓81.0% (120ms → 22.7ms)
+  - TTFT (P99) ↑210% (175ms →543ms)
+  - TPOT: No change
 
-## **Scenario 2**: 1K input & 200 output tokens, E2E P99 latency ~4s  
-- **1P1D (2×A800) vs vLLM (1×A800)**:  
-  - Throughput ↑37.4% (537 → 1476/2)  
-  - ITL (P99) ↓81.8% (127ms → 23.1ms) 
-  - TTFT (P99) ↑41.8% (160ms → 227ms) 
+## **Scenario 2**: 1K input & 200 output tokens, E2E P99 latency ~4s
+- **1P1D (2×A800) vs vLLM (1×A800)**:
+  - Throughput ↑37.4% (537 → 1476/2)
+  - ITL (P99) ↓81.8% (127ms → 23.1ms)
+  - TTFT (P99) ↑41.8% (160ms → 227ms)
   - TPOT: No change
 
 ![testdata](https://github.com/user-attachments/assets/f791bfc7-9f3d-4e5c-9171-a42f9f4da627)
