@@ -182,7 +182,7 @@ struct CodecQ4 : public CodecBase {
         for (int i = 0; i < 4; i++) {
           if constexpr (std::is_same<T, half>::value) {
             int32_t q4 = ((qw >> (i * 4)) & kMask000F) | kHalf2_1024;
-            w[i] = packed_add<half>(w[i], kHalf2_1032);
+            w[i] = packed_add<half>(q4, kHalf2_1032);
           } else {
             int32_t int16_2 = (qw >> (i * 4)) & kMask000F;
             int16_t low = static_cast<int16_t>(int16_2 & 0xFFFF);
