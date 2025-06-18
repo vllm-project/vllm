@@ -72,22 +72,8 @@ class TestSetCudaContext:
                         reason="CUDA not available")
     def test_set_cuda_context_invalid_device_type(self):
         """Test error handling for invalid device type."""
-
-        def test_invalid_device():
-            try:
-                current_platform.set_device(torch.device('cpu'))
-                return False, "Should have raised ValueError"
-            except ValueError as e:
-                return (True,
-                        "Success") if "Expected a cuda device" in str(e) else (
-                            False, f"Wrong error: {e}")
-            except Exception as e:
-                return False, f"Wrong exception: {type(e).__name__}: {e}"
-
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(test_invalid_device)
-            success, message = future.result(timeout=10)
-        assert success, message
+        with pytest.raises(ValueError, match="Expected a cuda device"):
+            current_platform.set_device(torch.device('cpu'))
 
 
 if __name__ == "__main__":
