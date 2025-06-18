@@ -866,10 +866,11 @@ class CompletionRequest(OpenAIBaseModel):
         "min_p": 0.0,
     }
 
-    def to_beam_search_params(self,
-                              max_tokens: int,
-                              default_sampling_params: Optional[dict] = None
-                              ) -> BeamSearchParams:
+    def to_beam_search_params(
+        self,
+        max_tokens: int,
+        default_sampling_params: Optional[dict] = None,
+    ) -> BeamSearchParams:
 
         if default_sampling_params is None:
             default_sampling_params = {}
