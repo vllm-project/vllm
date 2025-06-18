@@ -16,7 +16,7 @@ from tests.v1.sample.utils import (LogitsprocsTestFakes, create_fake_logits,
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
-from vllm.v1.sample.logits_processor import BatchUpdate, MoveDirectionalityEnum
+from vllm.v1.sample.logits_processor import BatchUpdate, MoveDirectionality
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.utils import (STR_LOGITS_BIAS_LOGITPROC_ID,
                                   STR_MIN_P_LOGITPROC_ID,
@@ -435,7 +435,7 @@ def _generate_fake_step_update(
         persistent_batch[first_empty_index] = persistent_batch[
             last_nonempty_index]
         batch_update.moved.append((last_nonempty_index, first_empty_index,
-                                   MoveDirectionalityEnum.UNIDIRECTIONAL))
+                                   MoveDirectionality.UNIDIRECTIONAL))
 
         last_nonempty_index -= 1
 
@@ -454,7 +454,7 @@ def _generate_fake_step_update(
         swaps = [
             tuple(sorted([idxs[2 * i], idxs[2 * i + 1]])) for i in range(k)
         ]
-        batch_update.moved.extend([(sw[0], sw[1], MoveDirectionalityEnum.SWAP)
+        batch_update.moved.extend([(sw[0], sw[1], MoveDirectionality.SWAP)
                                    for sw in swaps])
         for adx, bdx in swaps:
             persistent_batch[adx], persistent_batch[bdx] = persistent_batch[

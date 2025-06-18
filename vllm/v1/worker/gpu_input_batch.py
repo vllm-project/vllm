@@ -14,7 +14,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.logits_processor import (BatchUpdate, MinPLogitsProcessor,
-                                             MoveDirectionalityEnum)
+                                             MoveDirectionality)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
@@ -405,7 +405,7 @@ class InputBatch:
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
-        self.batch_update.moved.append((i1, i2, MoveDirectionalityEnum.SWAP))
+        self.batch_update.moved.append((i1, i2, MoveDirectionality.SWAP))
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] =\
@@ -461,7 +461,7 @@ class InputBatch:
 
     def _register_move_request(self, from_idx: int, to_idx: int) -> None:
         self.batch_update.moved.append(
-            (from_idx, to_idx, MoveDirectionalityEnum.UNIDIRECTIONAL))
+            (from_idx, to_idx, MoveDirectionality.UNIDIRECTIONAL))
 
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
@@ -501,9 +501,8 @@ class InputBatch:
             # Move active request down into empty request
             # index.
             self.batch_update.pop_removed_if_can()
-            self.batch_update.moved.append(
-                (last_req_index, empty_index,
-                 MoveDirectionalityEnum.UNIDIRECTIONAL))
+            self.batch_update.moved.append((last_req_index, empty_index,
+                                            MoveDirectionality.UNIDIRECTIONAL))
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
             assert req_id is not None

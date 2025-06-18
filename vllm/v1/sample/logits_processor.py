@@ -13,17 +13,19 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class MoveDirectionalityEnum(Enum):
+class MoveDirectionality(Enum):
+    # One-way i1->i2 req move within batch
     UNIDIRECTIONAL = 0
+    # Two-way i1<->i2 req swap within batch
     SWAP = 1
 
 
-# (index, params, output_tok_ids) for new
+# (index, params, output_tok_ids) tuples for new
 # requests added to the batch.
 AddedRequest = tuple[int, SamplingParams, list[int]]
-# (from, to) batch indices of any requests
-# moved within the batch.
-MovedRequest = tuple[int, int, MoveDirectionalityEnum]
+# (index 1, index 2, directionality) tuples representing
+# one-way moves or two-way swaps of requests in batch
+MovedRequest = tuple[int, int, MoveDirectionality]
 # Batch indices of any removed requests.
 RemovedRequest = int
 
@@ -181,7 +183,7 @@ class MinPLogitsProcessor(LogitsProcessor):
                 needs_update |= change
                 if change:
                     self.min_p_cpu[bdx] = min_p_a
-                    if direct == MoveDirectionalityEnum.SWAP:
+                    if direct == MoveDirectionality.SWAP:
                         self.min_p_cpu[adx] = min_p_b
 
         # Update tensors if needed.
@@ -246,7 +248,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
             # Process moved requests, unidirectional (a->b) and swap (a<->b)
             for a_index, b_index, direct in batch_update.moved:
                 a_entry = self.biases.pop(a_index, None)
-                if direct == MoveDirectionalityEnum.SWAP and (
+                if direct == MoveDirectionality.SWAP and (
                         b_entry := self.biases.pop(b_index, None)) is not None:
                     needs_update = True
                     self.biases[a_index] = b_entry
@@ -319,7 +321,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             # Process moved requests, unidirectional (a->b) and
             # swapped (a<->b)
             for a_index, b_index, direct in batch_update.moved:
-                if direct == MoveDirectionalityEnum.UNIDIRECTIONAL:
+                if direct == MoveDirectionality.UNIDIRECTIONAL:
                     if (a_entry := self.min_toks.pop(a_index, None)) is None:
                         if self.min_toks.pop(b_index, None) is not None:
                             needs_update = True
