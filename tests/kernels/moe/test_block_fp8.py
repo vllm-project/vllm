@@ -318,9 +318,13 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
         w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
         w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
 
-    use_compile = (chunk_size < M and N >= 1024 and K >= 1024
-                   and current_platform.is_cuda_alike())
-    use_cudagraph = use_compile
+    # Note: for now use_compile will error out if the problem size is
+    # large enough to trigger chunking. I'm leaving the flag and
+    # setup code in case we are able to revisit this later.
+    use_compile = False
+
+    use_cudagraph = (chunk_size < M and N >= 1024 and K >= 1024
+                     and current_platform.is_cuda_alike())
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):
@@ -338,6 +342,9 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
             deep_gemm_moe_fp8_fn = torch.compile(deep_gemm_moe_fp8,
                                                  backend="inductor",
                                                  fullgraph=True)
+            torch._dynamo.mark_dynamic(a, 0)
+            torch._dynamo.mark_dynamic(topk_weights, 0)
+            torch._dynamo.mark_dynamic(topk_ids, 0)
         else:
             deep_gemm_moe_fp8_fn = deep_gemm_moe_fp8
 
