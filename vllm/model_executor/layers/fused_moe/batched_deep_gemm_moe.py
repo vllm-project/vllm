@@ -251,7 +251,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert hidden_states.ndim == 3
         assert(w1_zp is None and w2_zp is None)
         assert(a2_scale is None)
-        assert(expert_map is None)
 
         a1q = hidden_states
         _, N, K = w1.size()
