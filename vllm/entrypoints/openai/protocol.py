@@ -529,8 +529,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structural_tag=self.structural_tag,
         )
 
-        if "kv_transfer_params" not in self.vllm_xargs:
-            self.vllm_xargs["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -562,7 +560,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             # Pass in `extra_body` args and kv transfer params
-            extra_args=self.vllm_xargs,
+            extra_args={**({"kv_transfer_params": self.kv_transfer_params}
+                            if self.kv_transfer_params else {}),
+                            **self.vllm_xargs,
+                         }
         )
 
     def _get_guided_json_from_tool(
@@ -983,8 +984,6 @@ class CompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
         )
 
-        if "kv_transfer_params" not in self.vllm_xargs:
-            self.vllm_xargs["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -1015,7 +1014,10 @@ class CompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             # Pass in `extra_body` args and kv transfer params
-            extra_args=self.vllm_xargs,
+            extra_args={**({"kv_transfer_params": self.kv_transfer_params}
+                            if self.kv_transfer_params else {}),
+                            **self.vllm_xargs
+                         }
             )
 
     @model_validator(mode="before")
