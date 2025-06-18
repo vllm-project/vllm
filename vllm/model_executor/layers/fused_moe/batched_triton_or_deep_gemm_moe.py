@@ -40,6 +40,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.dp_size = dp_size
+        self.allow_deep_gemm = allow_deep_gemm
 
         # BatchedTritonKernel doesn't support block quantization
         # at the moment.
@@ -56,7 +57,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ) if self.block_shape is None else None
 
         is_fp8_128_block_quantized = (
-            self.use_fp8_w8a8 and self.block_shape
+            use_fp8_w8a8 and self.block_shape
             == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
 
         self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
