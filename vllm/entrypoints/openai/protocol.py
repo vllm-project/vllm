@@ -532,12 +532,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structural_tag=self.structural_tag,
         )
 
-        extra_args: Optional[dict[
-            str, Any]] = self.vllm_xargs if self.vllm_xargs else {}
+        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
-        extra_args = extra_args or None
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -568,7 +566,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
-            extra_args=extra_args,
+            extra_args=extra_args or None,
         )
 
     def _get_guided_json_from_tool(
@@ -996,7 +994,6 @@ class CompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
-        extra_args = extra_args or None
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -1026,7 +1023,7 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            extra_args=extra_args,
+            extra_args=extra_args or None,
             )
 
     @model_validator(mode="before")
