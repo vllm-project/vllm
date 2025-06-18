@@ -468,6 +468,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         logger.info("_reinit_workers_ray")
 
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
+        self.vllm_config.parallel_config.data_parallel_master_port = 50000
 
         logger.info("Before reinit_device")
         self._run_workers("reinit_device", new_dp_size)
@@ -487,6 +488,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
     def reinit_dp_states(self, new_dp_size: int):
         logger.info("Reinitializing dp states")
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
+        self.vllm_config.parallel_config.data_parallel_master_port = 50000
         self._run_workers("reinit_dp_states", new_dp_size)
 
     def _driver_execute_model(

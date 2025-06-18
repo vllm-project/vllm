@@ -991,6 +991,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
             stateless_destroy_torch_distributed_process_group)
         stateless_destroy_torch_distributed_process_group(self.dp_group)
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
+        self.vllm_config.parallel_config.data_parallel_master_port = 50000
         self.dp_group = stateless_init_torch_distributed_process_group(
             self.vllm_config.parallel_config.data_parallel_master_ip,
             self.vllm_config.parallel_config.data_parallel_master_port,
@@ -1025,6 +1026,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
     
     def reinit_dp_states(self, new_dp_size: int):
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
+        self.vllm_config.parallel_config.data_parallel_master_port = 50000
         self.dp_group = stateless_init_torch_distributed_process_group(
             self.vllm_config.parallel_config.data_parallel_master_ip,
             self.vllm_config.parallel_config.data_parallel_master_port,

@@ -475,7 +475,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         ) is not None
         if use_batched_experts:
             logger.debug("BatchedTritonExperts %s", self.moe)
-            assert self.moe.dp_size == all2all_manager.dp_world_size
+            assert self.moe.dp_size == all2all_manager.dp_world_size, (
+                f"dp_size: {self.moe.dp_size} != dp_world_size: {all2all_manager.dp_world_size}"
+            )
             experts = BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
                 world_size=all2all_manager.world_size,

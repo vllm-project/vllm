@@ -396,6 +396,7 @@ class CoreEngineActorManager:
                                      upscale_local_dp_ranks):
             dp_vllm_config = copy.deepcopy(vllm_config)
             dp_vllm_config.parallel_config.data_parallel_size = new_dp_size
+            dp_vllm_config.parallel_config.data_parallel_master_port = 50000
             # assumes this is on head node and all existing DP ranks are local
             actor = ray.remote(DPEngineCoreActor).options(
                 scheduling_strategy=PlacementGroupSchedulingStrategy(

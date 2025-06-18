@@ -190,6 +190,9 @@ class Worker(WorkerBase):
         import time
         start_reinit_dp_states = time.time()
         self.vllm_config.parallel_config.data_parallel_size = new_dp_size
+        self.model_runner.vllm_config.parallel_config.data_parallel_size = new_dp_size
+        self.vllm_config.parallel_config.data_parallel_master_port = 50000
+        self.model_runner.vllm_config.parallel_config.data_parallel_master_port = 50000
         with set_current_vllm_config(self.vllm_config):
             reinit_worker_distributed_environment(self.vllm_config, self.rank,
                                                   self.distributed_init_method,
