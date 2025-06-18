@@ -757,7 +757,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
-            print(new_req_data.lora_request)
             if (new_req_data.lora_request is not None and
                     new_req_data.lora_request.invocation_tokens is not None):
                 tokens = new_req_data.lora_request.invocation_tokens
