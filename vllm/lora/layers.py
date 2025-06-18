@@ -875,7 +875,8 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         return (type(source_layer) is QKVParallelLinear
-                and len(packed_modules_list) == 3)
+                and len(packed_modules_list) == 3
+                and not lora_config.activated_lora_enabled)
 
 
 #TODO: Implement this
@@ -1286,7 +1287,8 @@ class LinearScalingRotaryEmbeddingWithLoRA(BaseLayerWithLoRA):
         return self.base_layer.extra_repr()
 
 
-class ActivatedLoRAMixin:
+class MergedQKVParallelLinearWithActivatedLoRA(MergedQKVParallelLinearWithLoRA
+                                               ):
 
     def apply(self,
               x: torch.Tensor,
@@ -1338,3 +1340,16 @@ class ActivatedLoRAMixin:
         # Apply alora mask
         final_output = orig_out.mul(mask2d) + output.mul(1.0 - mask2d)
         return final_output
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        """Returns True if the layer can be replaced by this LoRA layer."""
+        return (type(source_layer) is QKVParallelLinear
+                and len(packed_modules_list) == 3
+                and lora_config.activated_lora_enabled)
