@@ -29,6 +29,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import (DPMetadata, get_forward_context,
                                   set_forward_context)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -38,12 +39,14 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
-                        check_use_alibi, is_pin_memory_available)
+                        check_use_alibi, get_dtype_size,
+                        is_pin_memory_available)
+from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheSpec,
+                                        KVCacheConfig, KVCacheSpec, MambaSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
@@ -2093,28 +2096,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            if not isinstance(kv_cache_spec, AttentionSpec):
-                raise NotImplementedError(
-                    "Only AttentionSpec is supported for now.")
-            attn_backend_i = get_attn_backend(
-                kv_cache_spec.head_size,
-                self.dtype,
-                kv_cache_spec.dtype,
-                kv_cache_spec.block_size,
-                self.model_config.is_attention_free,
-                use_mla=kv_cache_spec.use_mla,
-            )
-            if attn_backend_i is None:
-                error_msg = (
-                    f"Error with get_attn_backend: {kv_cache_spec.head_size=}, "
-                    f"{self.dtype=}, {kv_cache_spec.dtype=}, "
-                    f"{kv_cache_spec.block_size=}, "
-                    f"{self.model_config.is_attention_free=}, "
-                    f"{kv_cache_spec.use_mla=}")
-                logger.error(error_msg)
-                raise NotImplementedError(
-                    "Non-Attention backend is not supported by V1 "
-                    "GPUModelRunner.")
+            if isinstance(kv_cache_spec, AttentionSpec):
+                attn_backend_i = get_attn_backend(
+                    kv_cache_spec.head_size,
+                    self.dtype,
+                    kv_cache_spec.dtype,
+                    kv_cache_spec.block_size,
+                    self.model_config.is_attention_free,
+                    use_mla=kv_cache_spec.use_mla,
+                )
+                if attn_backend_i is None:
+                    error_msg = (f"Error with get_attn_backend: "
+                                 f"{kv_cache_spec.head_size=}, "
+                                 f"{self.dtype=}, {kv_cache_spec.dtype=}, "
+                                 f"{kv_cache_spec.block_size=}, "
+                                 f"{self.model_config.is_attention_free=}, "
+                                 f"{kv_cache_spec.use_mla=}")
+                    logger.error(error_msg)
+                    raise NotImplementedError(
+                        "Non-Attention backend is not supported by V1 "
+                        "GPUModelRunner.")
+            elif isinstance(kv_cache_spec, MambaSpec):
+                attn_backend_i = Mamba2AttentionBackend
+            else:
+                raise ValueError(
+                    f"Unknown KV cache spec type: {type(kv_cache_spec)}")
 
             block_table_i = self.input_batch.block_table[i]
             attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
@@ -2242,6 +2248,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     kv_caches[layer_name] = kv_cache_raw_tensors[
                         layer_name].view(dtype).view(kv_cache_shape).permute(
                             *inv_order)
+                elif isinstance(kv_cache_spec, MambaSpec):
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    dtype = kv_cache_spec.dtype
+                    state_tensors = []
+                    start_pos = 0
+                    for shape in kv_cache_spec.shapes:
+                        target_shape = (num_blocks, *shape)
+                        size_in_bytes = np.prod(shape) * get_dtype_size(
+                            dtype) * num_blocks
+                        tensor = raw_tensor[start_pos:start_pos +
+                                            size_in_bytes]
+                        tensor = tensor.view(dtype).view(target_shape)
+                        state_tensors.append(tensor)
+                        start_pos += size_in_bytes
+                    assert start_pos == raw_tensor.numel()
+                    kv_caches[layer_name] = tuple(state_tensors)
                 else:
                     raise NotImplementedError
         return kv_caches
@@ -2307,11 +2329,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             format. Layers that do not need KV cache are not included.
         """
 
-        layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-        for layer_name, attn_module in layers.items():
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        for layer_name, attn_module in attn_layers.items():
             if (kv_tgt_layer :=
                     attn_module.kv_sharing_target_layer_name) is not None:
                 # The layer doesn't need its own KV cache and will use that of
@@ -2351,4 +2373,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
 
+        mamba_layers = get_layers_from_vllm_config(self.vllm_config,
+                                                   MambaMixer2)
+        if len(mamba_layers) > 0:
+            if self.vllm_config.speculative_config is not None:
+                raise NotImplementedError(
+                    "Mamba with speculative decoding is not supported yet.")
+            if not self.vllm_config.model_config.enforce_eager:
+                raise NotImplementedError(
+                    "Mamba with cuda graph is not supported yet.")
+            if self.vllm_config.cache_config.enable_prefix_caching:
+                raise NotImplementedError(
+                    "Prefix caching is not supported for Mamba yet.")
+            max_model_len = self.vllm_config.model_config.max_model_len
+            # Set block_size to max_model_len, so that mamba model will always
+            # have only one block in the KV cache.
+            for layer_name, mamba_module in mamba_layers.items():
+                kv_cache_spec[layer_name] = MambaSpec(
+                    shapes=mamba_module.get_state_shape(),
+                    dtype=self.kv_cache_dtype,
+                    block_size=max_model_len)
         return kv_cache_spec
