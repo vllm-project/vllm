@@ -1305,12 +1305,12 @@ class MergedQKVParallelLinearWithActivatedLoRA(MergedQKVParallelLinearWithLoRA
         # Extract aLoRA batch metadata from forward context
         alora_metadata = get_forward_context().alora_metadata
         k_offsets = alora_metadata.k_offsets
-        query_start_locs = alora_metadata.query_start_locs
+        query_start_loc = alora_metadata.query_start_loc
 
         # Build the 1D “save‐prefix” mask:
         T = output.size(0)  # total tokens
-        starts = query_start_locs[:-1]  # starts and end index of each request
-        ends = query_start_locs[1:]
+        starts = query_start_loc[:-1]  # starts and end index of each request
+        ends = query_start_loc[1:]
         lengths = ends - starts  # request lengths
         kept_lens = lengths - k_offsets
         kept_lens = torch.clamp(

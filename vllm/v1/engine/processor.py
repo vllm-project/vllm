@@ -330,20 +330,42 @@ class Processor:
         # Tokenize aLoRA invocation sequence if applicable.
         if lora_request is not None:
 
+            # tpa: can we get this from PeftHelper somehow?
             # Load in adapter config file
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
             lora_config_path = os.path.join(lora_path, "adapter_config.json")
             with open(lora_config_path) as f:
                 config = json.load(f)
 
-            if "invocation_string" in config:  # check if aLoRA
+            if "invocation_string" in config:
+
                 invocation_tokens = self.input_preprocessor._tokenize_prompt(
                     config["invocation_string"],
                     lora_request=lora_request,
                     tokenization_kwargs=tokenization_kwargs)
-                # Make it an aLoRA request
-                # (in future, this will happen upstream)
-                lora_request.invocation_tokens = invocation_tokens
+
+                invocation_start = -1
+                n = len(invocation_tokens)
+                token_ids = decoder_inputs["prompt_token_ids"]
+
+                if n > 0 and len(token_ids) >= n:
+                    # scan backward for the last match
+                    # (faster than full forward scan+max)
+                    for idx in range(len(token_ids) - n, -1, -1):
+                        if token_ids[idx:idx + n] == invocation_tokens:
+                            # weights activated 1 token after start
+                            invocation_start = idx + 1
+                            break
+
+                if invocation_start == -1:
+                    raise ValueError(
+                        "Invocation sequence not found in prompt "
+                        f"for request '{request_id}'. aLoRA models require the "
+                        "invocation tokens to be present in the input.")
+
+                lora_request.invocation_start = invocation_start
+                lora_request.k_offset = len(token_ids) - invocation_start
+
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=decoder_inputs["prompt_token_ids"],

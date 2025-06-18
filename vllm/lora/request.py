@@ -33,7 +33,7 @@ class LoRARequest(
     long_lora_max_len: Optional[int] = None
     base_model_name: Optional[str] = msgspec.field(default=None)
     tensorizer_config_dict: Optional[dict] = None
-    invocation_tokens: Optional[list[int]] = None
+    invocation_start: Optional[int] = None
     k_offset: Optional[int] = None
 
     def __post_init__(self):
