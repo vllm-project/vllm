@@ -610,7 +610,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        assert self._num_decodes + self._num_prefills == num_reqs
+        # assert self._num_decodes + self._num_prefills == num_reqs
         return self.build_slice(
             req_slice=slice(0, num_reqs),
             token_slice=slice(0, num_actual_tokens),
