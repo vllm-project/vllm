@@ -15,11 +15,12 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    DeltaMessage, ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
+    DeltaMessage, ErrorResponse, RequestResponseMetadata,
     TranscriptionResponse, TranscriptionResponseStreamChoice,
-    TranscriptionStreamResponse, TranslationRequest, TranslationResponse,
+    TranscriptionStreamResponse, TranslationResponse,
     TranslationResponseStreamChoice, TranslationStreamResponse, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    SpeechToTextRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -187,7 +188,7 @@ class OpenAISpeechToText(OpenAIServing):
 
     async def _preprocess_speech_to_text(
         self,
-        request: Union[TranscriptionRequest, TranslationRequest],
+        request: SpeechToTextRequest,
         audio_data: bytes,
     ) -> tuple[list[PromptType], float]:
         # Validate request
@@ -219,7 +220,7 @@ class OpenAISpeechToText(OpenAIServing):
             y, sr = librosa.load(bytes_, sr=self.model_sr)
 
         duration = librosa.get_duration(y=y, sr=sr)
-        chunks = [y] if duration < 30 else self._split_audio(y, sr)
+        chunks = [y] if duration < 30 else self._split_audio(y, int(sr))
         prompts = []
         for chunk in chunks:
             prompt = {
@@ -239,9 +240,10 @@ class OpenAISpeechToText(OpenAIServing):
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
-        request: Union[TranscriptionRequest, TranslationRequest],
+        request: SpeechToTextRequest,
         raw_request: Request,
-        response_class: Union[TranscriptionResponse, TranslationResponse],
+        response_class: Union[type[TranscriptionResponse],
+                              type[TranslationResponse]],
         stream_generator_method: Callable,
     ) -> Union[Union[TranscriptionResponse, TranslationResponse],
                AsyncGenerator[str, None], ErrorResponse]:
@@ -339,16 +341,17 @@ class OpenAISpeechToText(OpenAIServing):
 
     async def _speech_to_text_stream_generator(
         self,
-        request: Union[TranscriptionRequest, TranslationRequest],
+        request: SpeechToTextRequest,
         list_result_generator: list[AsyncGenerator[RequestOutput, None]],
         request_id: str,
         request_metadata: RequestResponseMetadata,
         audio_duration_s: float,
         chunk_object_type: str,
-        response_stream_choice_class: Union[TranscriptionResponseStreamChoice,
-                                            TranslationResponseStreamChoice],
-        stream_response_class: Union[TranscriptionStreamResponse,
-                                     TranslationStreamResponse],
+        response_stream_choice_class: Union[
+            type[TranscriptionResponseStreamChoice],
+            type[TranslationResponseStreamChoice]],
+        stream_response_class: Union[type[TranscriptionStreamResponse],
+                                     type[TranslationStreamResponse]],
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
