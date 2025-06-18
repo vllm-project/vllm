@@ -2285,7 +2285,7 @@ Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
-    device: SkipValidation[Union[Device, torch.device]] = "auto"
+    device: SkipValidation[Optional[Union[Device, torch.device]]] = "auto"
     """Device type for vLLM execution.
     This parameter is deprecated and will be
     removed in a future release.
@@ -2327,7 +2327,10 @@ class DeviceConfig:
                     "to turn on verbose logging to help debug the issue.")
         else:
             # Device type is assigned explicitly
-            self.device_type = self.device
+            if isinstance(self.device, str):
+                self.device_type = self.device
+            elif isinstance(self.device, torch.device):
+                self.device_type = self.device.type
 
         # Some device types require processing inputs on CPU
         if self.device_type in ["neuron"]:
