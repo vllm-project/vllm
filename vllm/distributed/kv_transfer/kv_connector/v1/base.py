@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.request import Request
+    from vllm.v1.request import RequestState
 
 logger = init_logger(__name__)
 
@@ -267,7 +267,7 @@ class KVConnectorBase_V1(ABC):
 
     def request_finished(
         self,
-        request: "Request",
+        request: "RequestState",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """

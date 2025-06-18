@@ -32,7 +32,7 @@ class EncoderCacheManager:
         return num_tokens <= self.num_free_slots
 
     def allocate(self, request_params: RequestParams, input_id: int) -> None:
-        req_id = request.request_id
+        req_id = request_params.request_id
         if req_id not in self.cached:
             self.cached[req_id] = set()
         self.cached[req_id].add(input_id)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-from concurrent.futures import Future
+from asyncio import Future
 from typing import Optional
 from unittest.mock import Mock
 
@@ -12,6 +12,8 @@ from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
+from vllm.executor.executor_base import ExecutorBase
+from vllm.v1.engine.core import EngineCore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -23,15 +25,27 @@ from vllm.v1.structured_output import StructuredOutputManager
 EOS_TOKEN_ID = 50256
 
 
-def async_update_from_output(scheduler: Scheduler, scheduler_output: SchedulerOutput, model_runner_output: ModelRunnerOutput):
+def scheduler_update_from_output(
+    scheduler: Scheduler, 
+    scheduler_output: SchedulerOutput, 
+    model_runner_output: ModelRunnerOutput
+):
     """Helper to run async update_from_output in tests."""
-    # Create a completed future
-    loop = asyncio.get_event_loop()
-    future = loop.create_future()
-    future.set_result(model_runner_output)
-    
+    async def _run_update_from_output():
+        future = Future()
+        # Make the model runner output available imediately 
+        future.set_result(model_runner_output)
+        return await scheduler.update_from_output(scheduler_output, future)
+        
     # Run the async method
-    return loop.run_until_complete(scheduler.update_from_output(scheduler_output, future))
+    return asyncio.run(_run_update_from_output()) 
+
+def core_process_model_outputs(
+    core_engine: EngineCore, 
+    scheduler_output: SchedulerOutput, 
+    model_runner_output: ModelRunnerOutput
+):
+    core_engine.step()
 
 
 def create_scheduler(
@@ -126,6 +140,13 @@ def create_scheduler(
     )
 
 
+def create_core_engine(scheduler: Scheduler):
+    return EngineCore(
+        vllm_config=scheduler.vllm_config,
+        scheduler=scheduler,
+        log_stats=True,
+    )
+
 def create_requests(num_requests: int,
                     num_tokens: int = 10,
                     mm_positions: Optional[list[PlaceholderRange]] = None,
@@ -205,8 +226,8 @@ def test_schedule(enable_prefix_caching: Optional[bool],
     scheduler = create_scheduler(enable_prefix_caching=enable_prefix_caching)
     requests = create_requests(num_requests=10,
                                prompt_logprobs=prompt_logprobs)
-    for request in requests:
-        scheduler.add_request(request)
+    for request_params in requests:
+        scheduler.add_request(request_params)
 
     # Test initial scheduling
     output = scheduler.schedule()
@@ -220,8 +241,8 @@ def test_schedule(enable_prefix_caching: Optional[bool],
     # Verify requests moved from waiting to running
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == len(requests)
-    for i, request in enumerate(requests):
-        assert scheduler.running[i] == request
+    for i, request_params in enumerate(requests):
+        assert scheduler.running[i].params == request_params
 
 
 def test_schedule_multimodal_requests():
@@ -298,7 +319,7 @@ def test_schedule_partial_requests():
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    async_update_from_output(scheduler, output, model_runner_output)
+    scheduler_update_from_output(scheduler, output, model_runner_output)
 
     # Schedule the next step.
     # Only the first and second requests are scheduled.
@@ -348,7 +369,7 @@ def test_no_mm_input_chunking():
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    async_update_from_output(scheduler, output, model_runner_output)
+    scheduler_update_from_output(scheduler, output, model_runner_output)
 
     output = scheduler.schedule()
     assert len(scheduler.running) == 1
@@ -411,7 +432,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    async_update_from_output(scheduler, output, model_runner_output)
+    scheduler_update_from_output(scheduler, output, model_runner_output)
 
     # Schedule the next step. All three requests are running.
     # Processed the remaining prefills of the first and second requests.
@@ -435,7 +456,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    async_update_from_output(scheduler, output1, model_runner_output)
+    scheduler_update_from_output(scheduler, output1, model_runner_output)
     output2 = scheduler.schedule()
     assert len(scheduler.running) == 3
     assert len(output2.scheduled_new_reqs) == 0
@@ -453,110 +474,113 @@ def test_stop_via_update_from_output():
 
     # Test case 1: Stop on EOS token
     requests = create_requests(num_requests=2, max_tokens=10)
-    for req in requests:
-        req.num_computed_tokens = req.num_tokens
-        scheduler.requests[req.request_id] = req
-        scheduler.running.append(req)
+    for req_params in requests:
+        req_state = SchedulerRequestState(req_params)
+        req_state.num_computed_tokens = req_state.num_tokens
+        scheduler.requests[req_params.request_id] = req_state
+        scheduler.running.append(req_state)
 
-    scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                       scheduled_cached_reqs=[],
-                                       num_scheduled_tokens={
-                                           requests[0].request_id: 1,
-                                           requests[1].request_id: 2
-                                       },
-                                       total_num_scheduled_tokens=3,
-                                       scheduled_encoder_inputs={},
-                                       scheduled_spec_decode_tokens={
-                                           requests[0].request_id: [],
-                                           requests[1].request_id: [10]
-                                       },
-                                       num_common_prefix_blocks=0,
-                                       finished_req_ids=set(),
-                                       free_encoder_input_ids=[],
-                                       structured_output_request_ids={},
-                                       grammar_bitmask=None)
+    # TODO(lucas): new tests; stop tokens no longer handled by the scheduler
+    # scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
+    #                                    scheduled_cached_reqs=[],
+    #                                    num_scheduled_tokens={
+    #                                        requests[0].request_id: 1,
+    #                                        requests[1].request_id: 2
+    #                                    },
+    #                                    total_num_scheduled_tokens=3,
+    #                                    scheduled_encoder_inputs={},
+    #                                    scheduled_spec_decode_tokens={
+    #                                        requests[0].request_id: [],
+    #                                        requests[1].request_id: [10]
+    #                                    },
+    #                                    num_common_prefix_blocks=0,
+    #                                    finished_req_ids=set(),
+    #                                    free_encoder_input_ids=[],
+    #                                    structured_output_request_ids={},
+    #                                    grammar_bitmask=None)
 
-    model_output = ModelRunnerOutput(
-        req_ids=[req.request_id for req in requests],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(requests)
-        },
-        sampled_token_ids=[[EOS_TOKEN_ID],
-                           [10,
-                            11]],  # First request hits EOS, second continues
-        spec_token_ids=None,
-        logprobs=None,
-        prompt_logprobs_dict={})
+    # model_output = ModelRunnerOutput(
+    #     req_ids=[req.request_id for req in requests],
+    #     req_id_to_index={
+    #         req.request_id: i
+    #         for i, req in enumerate(requests)
+    #     },
+    #     sampled_token_ids=[[EOS_TOKEN_ID],
+    #                        [10,
+    #                         11]],  # First request hits EOS, second continues
+    #     spec_token_ids=None,
+    #     logprobs=None,
+    #     prompt_logprobs_dict={})
 
-    async_update_from_output(scheduler, scheduler_output, model_output)
+    # scheduler_update_from_output(scheduler, scheduler_output, model_output)
 
-    # Verify first request stopped, second continues
-    assert len(scheduler.running) == 1
-    assert scheduler.running[0].request_id == requests[1].request_id
-    assert requests[0].status == RequestStatus.FINISHED_STOPPED
-    assert requests[0].request_id in scheduler.finished_req_ids
-    assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID]
-    assert list(requests[1].output_token_ids) == [10, 11]
+    # # Verify first request stopped, second continues
+    # assert len(scheduler.running) == 1
+    # assert scheduler.running[0].request_id == requests[1].request_id
+    # assert requests[0].status == RequestStatus.FINISHED_STOPPED
+    # assert requests[0].request_id in scheduler.finished_req_ids
+    # assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID]
+    # assert list(requests[1].output_token_ids) == [10, 11]
 
-    # Test case 2: Stop on custom stop token
-    scheduler = create_scheduler(num_speculative_tokens=2)
-    requests = create_requests(num_requests=2,
-                               max_tokens=10,
-                               stop_token_ids=[42, 43])
-    for req in requests:
-        req.num_computed_tokens = req.num_tokens
-        scheduler.requests[req.request_id] = req
-        scheduler.running.append(req)
+    # # Test case 2: Stop on custom stop token
+    # scheduler = create_scheduler(num_speculative_tokens=2)
+    # requests = create_requests(num_requests=2,
+    #                            max_tokens=10,
+    #                            stop_token_ids=[42, 43])
+    # for req in requests:
+    #     req.num_computed_tokens = req.num_tokens
+    #     scheduler.requests[req.request_id] = req
+    #     scheduler.running.append(req)
 
-    scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                       scheduled_cached_reqs=[],
-                                       num_scheduled_tokens={
-                                           requests[0].request_id: 3,
-                                           requests[1].request_id: 2
-                                       },
-                                       total_num_scheduled_tokens=5,
-                                       scheduled_encoder_inputs={},
-                                       scheduled_spec_decode_tokens={
-                                           requests[0].request_id: [10, 42],
-                                           requests[1].request_id: [13]
-                                       },
-                                       num_common_prefix_blocks=0,
-                                       finished_req_ids=set(),
-                                       free_encoder_input_ids=[],
-                                       structured_output_request_ids={},
-                                       grammar_bitmask=None)
+    # scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
+    #                                    scheduled_cached_reqs=[],
+    #                                    num_scheduled_tokens={
+    #                                        requests[0].request_id: 3,
+    #                                        requests[1].request_id: 2
+    #                                    },
+    #                                    total_num_scheduled_tokens=5,
+    #                                    scheduled_encoder_inputs={},
+    #                                    scheduled_spec_decode_tokens={
+    #                                        requests[0].request_id: [10, 42],
+    #                                        requests[1].request_id: [13]
+    #                                    },
+    #                                    num_common_prefix_blocks=0,
+    #                                    finished_req_ids=set(),
+    #                                    free_encoder_input_ids=[],
+    #                                    structured_output_request_ids={},
+    #                                    grammar_bitmask=None)
 
-    model_output = ModelRunnerOutput(
-        req_ids=[req.request_id for req in requests],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(requests)
-        },
-        sampled_token_ids=[[10, 42, 12],
-                           [13, 14]],  # First request hits stop token
-        spec_token_ids=None,
-        logprobs=None,
-        prompt_logprobs_dict={})
+    # model_output = ModelRunnerOutput(
+    #     req_ids=[req.request_id for req in requests],
+    #     req_id_to_index={
+    #         req.request_id: i
+    #         for i, req in enumerate(requests)
+    #     },
+    #     sampled_token_ids=[[10, 42, 12],
+    #                        [13, 14]],  # First request hits stop token
+    #     spec_token_ids=None,
+    #     logprobs=None,
+    #     prompt_logprobs_dict={})
 
-    async_update_from_output(scheduler, scheduler_output, model_output)
+    # scheduler_update_from_output(scheduler, scheduler_output, model_output)
 
-    # Verify first request stopped on custom token
-    assert len(scheduler.running) == 1
-    assert scheduler.running[0].request_id == requests[1].request_id
-    assert requests[0].status == RequestStatus.FINISHED_STOPPED
-    assert requests[0].stop_reason == 42
-    assert requests[0].request_id in scheduler.finished_req_ids
-    assert list(requests[0].output_token_ids) == [10, 42]
-    assert list(requests[1].output_token_ids) == [13, 14]
+    # # Verify first request stopped on custom token
+    # assert len(scheduler.running) == 1
+    # assert scheduler.running[0].request_id == requests[1].request_id
+    # assert requests[0].status == RequestStatus.FINISHED_STOPPED
+    # assert requests[0].stop_reason == 42
+    # assert requests[0].request_id in scheduler.finished_req_ids
+    # assert list(requests[0].output_token_ids) == [10, 42]
+    # assert list(requests[1].output_token_ids) == [13, 14]
 
     # Test case 3: Stop on max tokens
     scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=2, max_tokens=2)
-    for req in requests:
-        req.num_computed_tokens = req.num_tokens
-        scheduler.requests[req.request_id] = req
-        scheduler.running.append(req)
+    for req_params in requests:
+        req_state = SchedulerRequestState(req_params)
+        req_state.num_computed_tokens = req_state.num_tokens
+        scheduler.requests[req_params.request_id] = req_state
+        scheduler.running.append(req_state)
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -588,54 +612,55 @@ def test_stop_via_update_from_output():
         logprobs=None,
         prompt_logprobs_dict={})
 
-    async_update_from_output(scheduler, scheduler_output, model_output)
+    scheduler_update_from_output(scheduler, scheduler_output, model_output)
 
     # Verify first request stopped due to length
     assert len(scheduler.running) == 1
     assert scheduler.running[0].request_id == requests[1].request_id
-    assert requests[0].status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert scheduler.requests[requests[0].request_id].status == RequestStatus.FINISHED_LENGTH_CAPPED
     assert requests[0].request_id in scheduler.finished_req_ids
     assert list(requests[0].output_token_ids) == [10, 11
                                                   ]  # Truncated to max_tokens
     assert list(requests[1].output_token_ids) == [13]
 
-    # Test case 4: Ignore EOS flag
-    scheduler = create_scheduler(num_speculative_tokens=2)
-    requests = create_requests(num_requests=1, max_tokens=10)
-    requests[0].sampling_params.ignore_eos = True
-    requests[0].num_computed_tokens = requests[0].num_tokens
-    scheduler.requests[requests[0].request_id] = requests[0]
-    scheduler.running.append(requests[0])
+    # TODO(lucas): new tests; stop tokens no longer handled by the scheduler
+    # # Test case 4: Ignore EOS flag
+    # scheduler = create_scheduler(num_speculative_tokens=2)
+    # requests = create_requests(num_requests=1, max_tokens=10)
+    # requests[0].sampling_params.ignore_eos = True
+    # requests[0].num_computed_tokens = requests[0].num_tokens
+    # scheduler.requests[requests[0].request_id] = requests[0]
+    # scheduler.running.append(requests[0])
 
-    scheduler_output = SchedulerOutput(
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=[],
-        num_scheduled_tokens={requests[0].request_id: 3},
-        total_num_scheduled_tokens=3,
-        scheduled_encoder_inputs={},
-        scheduled_spec_decode_tokens={
-            requests[0].request_id: [EOS_TOKEN_ID, 10]
-        },
-        num_common_prefix_blocks=0,
-        finished_req_ids=set(),
-        free_encoder_input_ids=[],
-        structured_output_request_ids={},
-        grammar_bitmask=None)
+    # scheduler_output = SchedulerOutput(
+    #     scheduled_new_reqs=[],
+    #     scheduled_cached_reqs=[],
+    #     num_scheduled_tokens={requests[0].request_id: 3},
+    #     total_num_scheduled_tokens=3,
+    #     scheduled_encoder_inputs={},
+    #     scheduled_spec_decode_tokens={
+    #         requests[0].request_id: [EOS_TOKEN_ID, 10]
+    #     },
+    #     num_common_prefix_blocks=0,
+    #     finished_req_ids=set(),
+    #     free_encoder_input_ids=[],
+    #     structured_output_request_ids={},
+    #     grammar_bitmask=None)
 
-    model_output = ModelRunnerOutput(
-        req_ids=[requests[0].request_id],
-        req_id_to_index={requests[0].request_id: 0},
-        sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
-        spec_token_ids=None,
-        logprobs=None,
-        prompt_logprobs_dict={})
+    # model_output = ModelRunnerOutput(
+    #     req_ids=[requests[0].request_id],
+    #     req_id_to_index={requests[0].request_id: 0},
+    #     sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
+    #     spec_token_ids=None,
+    #     logprobs=None,
+    #     prompt_logprobs_dict={})
 
-    async_update_from_output(scheduler, scheduler_output, model_output)
+    # scheduler_update_from_output(scheduler, scheduler_output, model_output)
 
-    # Verify request continues past EOS
-    assert len(scheduler.running) == 1
-    assert not requests[0].is_finished()
-    assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID, 10, 11]
+    # # Verify request continues past EOS
+    # assert len(scheduler.running) == 1
+    # assert not requests[0].is_finished()
+    # assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID, 10, 11]
 
 
 @pytest.mark.parametrize("enable_prefix_caching, prompt_logprobs", [
@@ -678,7 +703,7 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    async_update_from_output(scheduler, scheduler_output0, model_runner_output)
+    scheduler_update_from_output(scheduler, scheduler_output0, model_runner_output)
 
     # Schedule the next step.
     # The first request can be scheduled again while the second
@@ -695,7 +720,7 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    async_update_from_output(scheduler, scheduler_output1, model_runner_output)
+    scheduler_update_from_output(scheduler, scheduler_output1, model_runner_output)
 
 
 # Note - these test cases mirror some of those in test_rejection_sampler.py
@@ -745,8 +770,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    engine_core_outputs = scheduler.update_from_output(output,
-                                                       model_runner_output)
+    
+    spec_decoding_stats = scheduler_update_from_output(scheduler, output, model_runner_output)
 
     for i in range(len(requests)):
         running_req = scheduler.running[i]
@@ -758,8 +783,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert running_req.num_tokens_with_spec == 2 + len(spec_tokens[i])
 
     # No draft or accepted tokens counted yet
-    assert not engine_core_outputs or (
-        engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None)
+    assert spec_decoding_stats is None
 
     # Schedule the speculated tokens for validation
     output = scheduler.schedule()
@@ -784,16 +808,14 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    engine_core_outputs = scheduler.update_from_output(output,
-                                                       model_runner_output)
 
-    scheduler_stats = engine_core_outputs[0].scheduler_stats \
-        if engine_core_outputs else None
+    spec_decoding_stats = scheduler_update_from_output(scheduler, output, model_runner_output)
+
     if expected[0] == 0:
-        assert scheduler_stats.spec_decoding_stats is None
+        assert spec_decoding_stats is None
     else:
-        assert scheduler_stats.spec_decoding_stats is not None
-        stats = scheduler_stats.spec_decoding_stats
+        assert spec_decoding_stats is not None
+        stats = spec_decoding_stats
         assert stats.num_drafts == expected[0]
         assert stats.num_draft_tokens == expected[1]
         assert stats.num_accepted_tokens == expected[2]
@@ -850,7 +872,7 @@ def _step_until_done(
     """Loop over schedule(), update_from_output() until finished."""
 
     all_finished = False
-    _ = async_update_from_output(scheduler, output, model_runner_output)
+    scheduler_update_from_output(scheduler, output, model_runner_output)
     while not all_finished:
         # Schedule + a few iterations until stopping.
         output = scheduler.schedule()
@@ -859,7 +881,7 @@ def _step_until_done(
             # We should be in the decode phase now.
             assert num_scheduled_tokens == 1
         assert len(output.kv_connector_metadata.requests) == 0
-        async_update_from_output(scheduler, output, model_runner_output)
+        scheduler_update_from_output(scheduler, output, model_runner_output)
         # Check if all requests are finished by looking at scheduler state
         all_done = len(scheduler.running) == 0
         all_finished = all_done
@@ -876,6 +898,8 @@ def test_kv_connector_basic():
         enable_prefix_caching=True,
         use_kv_connector=True,
     )
+    core = create_core_engine(scheduler)
+    
     NUM_TOTAL_BLOCKS = (
         scheduler.kv_cache_manager.block_pool.get_num_free_blocks())
     BLOCK_SIZE = scheduler.cache_config.block_size
@@ -897,7 +921,7 @@ def test_kv_connector_basic():
     req_ids = []
     req_to_index = {}
     for i, request in enumerate(requests):
-        scheduler.add_request(request)
+        core.add_request(request)
         req_ids.append(request.request_id)
         req_to_index[request.request_id] = i
 
@@ -1109,7 +1133,7 @@ def test_kv_connector_handles_preemption():
         num_requests=2,
         expected_num_scheduled_tokens=NUM_TOKENS - NUM_MATCHED_NEW_TOKENS)
     assert len(scheduler.running) == 2
-    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
 
     # All can be scheduled - 2nd token.
     output = scheduler.schedule()
@@ -1119,7 +1143,7 @@ def test_kv_connector_handles_preemption():
         num_requests=0,
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 2
-    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
 
     # This will generate a new block and cause a preemption - 3rd token.
     output = scheduler.schedule()
@@ -1130,7 +1154,7 @@ def test_kv_connector_handles_preemption():
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
-    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
 
@@ -1143,7 +1167,7 @@ def test_kv_connector_handles_preemption():
         expected_num_scheduled_tokens=1)
     assert len(scheduler.waiting) == 1
     assert len(scheduler.running) == 1
-    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 1
     # All memory should be freed since nothing is running.
@@ -1163,7 +1187,7 @@ def test_kv_connector_handles_preemption():
     )
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
-    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
 
@@ -1175,7 +1199,7 @@ def test_kv_connector_handles_preemption():
         num_requests=0,
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 1
-    _ = async_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 0
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
@@ -1247,7 +1271,7 @@ def test_memory_leak():
         scheduler.add_request(request)
         scheduler_output = scheduler.schedule()
         model_runner_output = make_output(scheduler)
-        async_update_from_output(scheduler, scheduler_output, model_runner_output)
+        scheduler_update_from_output(scheduler, scheduler_output, model_runner_output)
 
     # Iterate until done.
     while True:
@@ -1255,7 +1279,7 @@ def test_memory_leak():
         if len(scheduler.running) == 0:
             break
         model_runner_output = make_output(scheduler)
-        async_update_from_output(scheduler, scheduler_output, model_runner_output)
+        scheduler_update_from_output(scheduler, scheduler_output, model_runner_output)
 
     # Confirm no memory leak.
     assert_scheduler_empty(scheduler)

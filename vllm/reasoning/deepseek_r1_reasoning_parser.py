@@ -44,8 +44,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 "DeepSeek R1 reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        return self.end_token_id in input_ids
+    def is_reasoning_end(self, generated_token_ids: list[int]) -> bool:
+        return self.end_token_id in generated_token_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """

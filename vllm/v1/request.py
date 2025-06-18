@@ -36,6 +36,9 @@ class RequestParams:
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
+
+        # NOTE(lucas): Note sure if this belongs in "params" since this is
+        # stateful with regards to each generated token.
         self.structured_output_request = structured_output_request
 
         assert sampling_params.max_tokens is not None
@@ -170,6 +173,10 @@ class SchedulerRequestState:
     @property
     def num_tokens_with_spec(self):
         return self.num_tokens + len(self.spec_token_ids)
+
+    @property
+    def num_output_tokens(self) -> int:
+        return self.num_tokens - self.params.num_prompt_tokens
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)

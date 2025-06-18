@@ -132,6 +132,10 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
+        # The request that are finished in between the previous and the
+        # last time EngineCoreOutputs was sent to the client.
+        self.finished_reqs: dict[str, RequestStatus] = dict()
+
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
@@ -175,6 +179,19 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
+    def _connector_finished(
+            self, request: RequestState) -> tuple[bool, Optional[dict[str, Any]]]:
+        """
+        Invoke the KV connector request_finished() method if applicable.
+
+        Returns optional kv transfer parameters to be included with the
+        request outputs.
+        """
+        assert self.connector is not None
+        (block_ids, ) = self.scheduler.kv_cache_manager.get_block_ids(request.request_id)
+        return self.scheduler.connector.request_finished(
+            request, block_ids)
+
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
 
@@ -194,7 +211,7 @@ class EngineCore:
         
         if req_params.use_structured_output:
             # Start grammar compilation asynchronously
-            self.structured_output_manager.grammar_init(req)
+            self.structured_output_manager.grammar_init(req_params)
 
         if req_state.kv_transfer_params is not None and (
                 not self.scheduler.get_kv_connector()):
@@ -281,11 +298,6 @@ class EngineCore:
                         kv_transfer_params=kv_transfer_params,
                         num_cached_tokens=request.num_cached_tokens,
                     ))
-                    
-        # KV Connector: update state for finished KV Transfers.
-        if hasattr(self.scheduler, '_update_from_kv_xfer_finished'):
-            self.scheduler._update_from_kv_xfer_finished(model_runner_output)
-
         
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -294,18 +306,18 @@ class EngineCore:
             for client_index, outs in outputs.items()
         }
 
-        finished_req_ids = getattr(self.scheduler, 'finished_req_ids_dict', None)
-        if finished_req_ids:
+        finished_reqs = self.finished_reqs
+        if finished_reqs:
             # Include ids of requests that finished since last outputs
             # were sent.
-            for client_index, finished_set in finished_req_ids.items():
+            for client_index, finished_set in finished_reqs.keys():
                 # Set finished request set in EngineCoreOutputs for this client.
                 if (eco := engine_core_outputs.get(client_index)) is not None:
                     eco.finished_requests = finished_set
                 else:
                     engine_core_outputs[client_index] = EngineCoreOutputs(
                         finished_requests=finished_set)
-            finished_req_ids.clear()
+            finished_reqs.clear()
 
         if engine_core_outputs:
             # Return stats to only one of the front-ends.
@@ -314,8 +326,10 @@ class EngineCore:
 
         return engine_core_outputs 
 
-    def process_model_outputs(self, model_runner_output_future: Future[ModelRunnerOutput]) -> Future[dict[int, EngineCoreOutputs]]:
-        return asyncio.ensure_future(self._process_model_output_tasks(model_runner_output_future))
+    async def process_model_outputs(self, scheduler_output: SchedulerOutput, model_output: Future[ModelRunnerOutput]) -> Future[dict[int, EngineCoreOutputs]]:
+        # Update the scheduler and cue up post-processing of the model outputs
+        await self.scheduler.update_from_output(scheduler_output, model_output)
+        return asyncio.ensure_future(self._process_model_output_tasks(model_output))
 
     def _process_model_outputs_sync(self, model_runner_output_future: Future[ModelRunnerOutput], scheduler_output: SchedulerOutput) -> dict[int, EngineCoreOutputs]:
         """Synchronous version of model output processing for batch queue path."""
@@ -335,14 +349,18 @@ class EngineCore:
             return {}, False
         scheduler_output = self.scheduler.schedule()
         model_output = self.execute_model(scheduler_output)
+        engine_core_outputs_future = self.process_model_outputs(
+            scheduler_output,model_output)
 
-        # Wait for the scheduler to complete its update, if the scheduler cannot
-        # update immediately (asynchronously), it will wait for the model to
-        # finish and then update.
-        await self.scheduler.update_from_output(scheduler_output, model_output)
-
-        return (self.process_model_outputs(model_output),
+        return (engine_core_outputs_future,
                 scheduler_output.total_num_scheduled_tokens > 0)
+        
+    def sync_step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
+        """Synchronous version of step."""
+        async def _sync_step():
+            engine_core_outputs_future, scheduled_batch = await self.step()
+            return await engine_core_outputs_future, scheduled_batch
+        return asyncio.run(_sync_step())
 
     async def step_with_batch_queue(
             self) -> tuple[Optional[Future[dict[int, EngineCoreOutputs]]], bool]:

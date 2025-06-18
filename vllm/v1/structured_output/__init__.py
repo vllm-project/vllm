@@ -190,25 +190,25 @@ class StructuredOutputManager:
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
 
-    def should_advance(self, request: RequestState) -> bool:
-        if not request.params.use_structured_output:
+    def should_advance(self, generated_token_ids: list[int], request_params: RequestParams) -> bool:
+        if not request_params.use_structured_output:
             return False
 
         # To determine whether we can advance the FSM.
         # Supports thinking usage where we skip the reasoning components.
         if TYPE_CHECKING:
-            assert request.params.structured_output_request is not None
-            assert request.params.structured_output_request.grammar is not None
+            assert request_params.structured_output_request is not None
+            assert request_params.structured_output_request.grammar is not None
         # by default, we should always advance
         # for cases that doesn't uses thinking mode.
         if self.reasoner is not None:
-            structured_req = request.params.structured_output_request
+            structured_req = request_params.structured_output_request
 
             if structured_req.reasoning_ended:
                 return True
 
             # Check if reasoning ends in *this* step
-            if self.reasoner.is_reasoning_end(request.all_token_ids):
+            if self.reasoner.is_reasoning_end(generated_token_ids):
                 # Reasoning just ended, so we shouldn't advanced til
                 # next pass
                 structured_req.reasoning_ended = True
