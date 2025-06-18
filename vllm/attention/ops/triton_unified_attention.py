@@ -30,24 +30,6 @@ def apply_softcap(S, x):
     return x * (p1 - p2) / (p1 + p2)
 
 
-@jitcache(
-    check_keys=[],
-    check_specialization=["num_seqs"],
-    assume_const=[
-        "scale",
-        "k_scale",
-        "v_scale",
-        "query_stride_1",
-        "output_stride_1",
-        "stride_k_cache_0",
-        "stride_k_cache_1",
-        "stride_k_cache_2",
-        "stride_k_cache_4",
-        "stride_v_cache_0",
-        "stride_v_cache_1",
-        "stride_v_cache_2",
-    ],
-)
 @triton.jit
 def find_seq_idx(query_start_len_ptr, target_idx, num_seqs,
                  BLOCK_Q: tl.constexpr, use_q_block_mode: tl.constexpr):
@@ -66,6 +48,24 @@ def find_seq_idx(query_start_len_ptr, target_idx, num_seqs,
     return left - 1
 
 
+@jitcache(
+    check_keys=[],
+    check_specialization=["num_seqs"],
+    assume_const=[
+        "scale",
+        "k_scale",
+        "v_scale",
+        "query_stride_1",
+        "output_stride_1",
+        "stride_k_cache_0",
+        "stride_k_cache_1",
+        "stride_k_cache_2",
+        "stride_k_cache_4",
+        "stride_v_cache_0",
+        "stride_v_cache_1",
+        "stride_v_cache_2",
+    ],
+)
 @triton.jit
 def kernel_unified_attention_2d(
         output_ptr,  # [num_tokens, num_query_heads, head_size]
