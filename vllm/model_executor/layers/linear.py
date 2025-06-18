@@ -230,7 +230,8 @@ class LinearBase(torch.nn.Module):
     ):
         super().__init__()
 
-        # tpa -- find out why this is needed
+        # lets torch.compile know that forward_context needs to be
+        # considered as an input to the layer (copied from attention)
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
