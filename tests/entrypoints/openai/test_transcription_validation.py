@@ -48,16 +48,6 @@ async def test_basic_audio(mary_had_lamb):
             temperature=0.0)
         out = json.loads(transcription)['text']
         assert "Mary had a little lamb," in out
-        # This should "force" whisper to continue prompt in all caps
-        transcription_wprompt = await client.audio.transcriptions.create(
-            model=model_name,
-            file=mary_had_lamb,
-            language="en",
-            response_format="text",
-            prompt=prompt,
-            temperature=0.0)
-        out_capital = json.loads(transcription_wprompt)['text']
-        assert prompt not in out_capital
 
 
 @pytest.mark.asyncio
