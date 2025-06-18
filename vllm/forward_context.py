@@ -44,8 +44,30 @@ class DPMetadata:
                                          device="cpu",
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
+        # logger.info("STARTING AR num_tokens_across_dp")
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
+        # logger.info("finishing num_tokens_across_dp")
         return num_tokens_tensor
+
+    @staticmethod
+    def should_ubatch_across_dp(should_ubatch: bool, dp_size: int, dp_rank: int) -> bool:
+        should_ubatch_across_dp = [0] * dp_size
+        should_ubatch_across_dp[dp_rank] = 1 if should_ubatch else 0
+        should_ubatch_tensor = torch.tensor(should_ubatch_across_dp,
+                                         device="cpu",
+                                         dtype=torch.int32)
+        from vllm.distributed.parallel_state import get_dp_group
+        # logger.info(f"should_ubatch_tensor before ar {should_ubatch_tensor}")
+        dist.all_reduce(should_ubatch_tensor, group=get_dp_group().cpu_group)
+        # logger.info(f"should_ubatch_tensor after ar {should_ubatch_tensor}")
+
+        # If there's an incorrect ordering of ARs across DP ranks, this tensor 
+        # can end up containing the number of padded tokens for a DP rank
+        assert torch.all(should_ubatch_tensor <= 1)
+
+        result: bool = bool(torch.all(should_ubatch_tensor == 1).item())
+        # print(f"FINISHING AR should_ubatch_across_dp {result} {should_ubatch_tensor}")
+        return result
 
     @staticmethod
     def make(
@@ -69,6 +91,7 @@ class DPMetadata:
 
         # If num_tokens_across_dp is None, it will be computed by all_reduce
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
+        # print(f"num_tokens_across_dp {num_tokens_across_dp} batchsize {batchsize}")
         assert (num_tokens_across_dp is None
                 or num_tokens_across_dp[dp_rank] == batchsize)
         if num_tokens_across_dp is None:
@@ -108,6 +131,42 @@ def get_forward_context() -> ForwardContext:
     return _forward_context
 
 
+def create_forward_context(attn_metadata: Any,
+                           vllm_config: VllmConfig,
+                           virtual_engine: int = 0,
+                           num_tokens: Optional[int] = None,
+                           num_tokens_across_dp: Optional[torch.Tensor] = None,
+                           skip_cuda_graphs: bool = False):
+    dp_metadata: Optional[DPMetadata] = None
+    if vllm_config.parallel_config.data_parallel_size > 1 and (
+            attn_metadata is not None or num_tokens is not None):
+        dp_metadata = DPMetadata.make(vllm_config.parallel_config,
+                                      attn_metadata, num_tokens or 0,
+                                      num_tokens_across_dp)
+
+    return ForwardContext(no_compile_layers=vllm_config.compilation_config.
+                          static_forward_context,
+                          virtual_engine=virtual_engine,
+                          attn_metadata=attn_metadata,
+                          dp_metadata=dp_metadata,
+                          skip_cuda_graphs=skip_cuda_graphs)
+
+
+@contextmanager
+def override_forward_context(forward_context: Optional[ForwardContext]):
+    """A context manager that overrides the current forward context.
+    This is used to override the forward context for a specific
+    forward pass.
+    """
+    global _forward_context
+    prev_context = _forward_context
+    _forward_context = forward_context
+    try:
+        yield
+    finally:
+        _forward_context = prev_context
+
+
 @contextmanager
 def set_forward_context(
     attn_metadata: Any,
@@ -125,26 +184,15 @@ def set_forward_context(
     need_to_track_batchsize = track_batchsize and attn_metadata is not None
     if need_to_track_batchsize:
         forward_start_time = time.perf_counter()
-    dp_metadata: Optional[DPMetadata] = None
-    if vllm_config.parallel_config.data_parallel_size > 1 and (
-            attn_metadata is not None or num_tokens is not None):
-        dp_metadata = DPMetadata.make(vllm_config.parallel_config,
-                                      attn_metadata, num_tokens or 0,
-                                      num_tokens_across_dp)
 
-    global _forward_context
-    prev_context = _forward_context
-    _forward_context = ForwardContext(
-        no_compile_layers=vllm_config.compilation_config.
-        static_forward_context,
-        virtual_engine=virtual_engine,
-        attn_metadata=attn_metadata,
-        dp_metadata=dp_metadata,
-        skip_cuda_graphs=skip_cuda_graphs,
-    )
+    forward_context = create_forward_context(attn_metadata, vllm_config,
+                                             virtual_engine, num_tokens, 
+                                             num_tokens_across_dp,
+                                             skip_cuda_graphs)
 
     try:
-        yield
+        with override_forward_context(forward_context):
+            yield
     finally:
         global last_logging_time, batchsize_logging_interval
         if need_to_track_batchsize:
@@ -181,5 +229,3 @@ def set_forward_context(
                     logger.info(("Batchsize forward time stats "
                                  "(batchsize, count, median_time(ms)): %s"),
                                 forward_stats)
-
-        _forward_context = prev_context

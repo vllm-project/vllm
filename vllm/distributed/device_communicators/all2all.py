@@ -101,13 +101,23 @@ class PPLXAll2AllManager(All2AllManagerBase):
             logger.debug("PPLX NVSHMEM UID = %s", uid)
             nvshmem_init(uid, self.rank, self.world_size)
 
-        self.handle_cache = Cache()
+        # self.handle_cache = Cache()
+        self.handle_caches = [Cache(), Cache()]
 
     def get_handle(self, kwargs):
         import pplx_kernels as pplx
-        return self.handle_cache.get_or_create(
+        return self.handle_caches[0].get_or_create(
             kwargs, pplx.AllToAll.internode
             if self.internode else pplx.AllToAll.intranode)
+    
+    def get_handles(self, kwargs):
+        import pplx_kernels as pplx
+        first_handle = self.handle_caches[0].get_or_create(kwargs, pplx.AllToAll.internode
+            if self.internode else pplx.AllToAll.intranode)
+        second_handle = self.handle_caches[1].get_or_create(kwargs, pplx.AllToAll.internode
+            if self.internode else pplx.AllToAll.intranode)
+        return [first_handle, second_handle]
+
 
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
@@ -117,9 +127,10 @@ class PPLXAll2AllManager(All2AllManagerBase):
         raise NotImplementedError
 
     def destroy(self):
-        with self.handle_cache._lock:
-            for _, handle in self.handle_cache._cache.items():
-                handle.destroy()
+        for handle_cache in self.handle_caches:
+            with handle_cache._lock:
+                for _, handle in handle_cache._cache.items():
+                    handle.destroy()
 
         if self.internode:
             from pplx_kernels.nvshmem import nvshmem_finalize

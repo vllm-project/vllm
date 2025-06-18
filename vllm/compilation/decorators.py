@@ -170,6 +170,7 @@ def _support_torch_compile(
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
         if self.do_not_compile or torch.compiler.is_compiling():
+            # logger.info("SKIPPING COMPILATION")
             return self.forward(*args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked

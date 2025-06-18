@@ -31,6 +31,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op
+from vllm.v1.worker.ubatching import get_current_ubatch_context
+
 
 has_pplx = importlib.util.find_spec("pplx_kernels") is not None
 has_deepep = importlib.util.find_spec("deep_ep") is not None
@@ -332,13 +334,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 all_to_all_args[
                     "group_name"] = all2all_manager.cpu_group.group_name
 
-            handle = all2all_manager.get_handle(all_to_all_args)
+            handles = all2all_manager.get_handles(all_to_all_args)
 
             input_activations = get_quant_config_input_activations(
                 quant_config)
 
             prepare_finalize = PplxPrepareAndFinalize(
-                handle,
+                handles,
                 max_num_tokens=moe.max_num_tokens,
                 world_size=all2all_manager.world_size,
                 rank=all2all_manager.rank,
@@ -953,12 +955,12 @@ class FusedMoE(torch.nn.Module):
                 or self.moe_parallel_config.use_deepep_ll_kernels):
             act_dtype = vllm_config.model_config.dtype
             self.batched_hidden_states = torch.zeros(
-                (envs.VLLM_MOE_DP_CHUNK_SIZE, self.hidden_size),
+                (2, envs.VLLM_MOE_DP_CHUNK_SIZE, self.hidden_size),
                 dtype=act_dtype,
                 device=torch.cuda.current_device())
 
             self.batched_router_logits = torch.zeros(
-                (envs.VLLM_MOE_DP_CHUNK_SIZE, self.global_num_experts),
+                (2, envs.VLLM_MOE_DP_CHUNK_SIZE, self.global_num_experts),
                 dtype=act_dtype,
                 device=torch.cuda.current_device())
 
@@ -1377,15 +1379,19 @@ class FusedMoE(torch.nn.Module):
             chunk_size = chunk_end - chunk_start
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
+            
+            ubatch_ctx = get_current_ubatch_context()
+            ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
+            batch_buffer_idx = 0 if ubatch_id == -1 else ubatch_id
+            batched_hidden_states = self.batched_hidden_states[batch_buffer_idx, :]
+            batched_router_logits = self.batched_router_logits[batch_buffer_idx, :]
 
-            assert (self.batched_hidden_states.size(0)  # type: ignore
+            assert (batched_hidden_states.size(0)  # type: ignore
                     >= chunk_size)
-            assert (self.batched_router_logits.size(0)  # type: ignore 
+            assert (batched_router_logits.size(0)  # type: ignore 
                     >= chunk_size)
-            staged_hidden_states = self.batched_hidden_states[:
-                                                              chunk_size, :]  # type: ignore
-            staged_router_logits = self.batched_router_logits[:
-                                                              chunk_size, :]  # type: ignore
+            staged_hidden_states = batched_hidden_states[:chunk_size, :]  # type: ignore
+            staged_router_logits = batched_router_logits[:chunk_size, :]  # type: ignore
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 

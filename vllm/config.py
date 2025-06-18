@@ -1770,6 +1770,18 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    enable_microbatching: bool = False
+    """Enable microbatching for the model executor."""
+
+    always_microbatch_if_enabled: bool = True
+    """Always microbatch if microbatching is enabled. Easier to sync between
+       dp workers."""
+
+    microbatching_token_threshold: int = 4
+    """The threshold for microbatching. If the number of tokens in the
+    request is greater than this threshold, microbatching will be used.
+    Otherwise, the request will be processed in a single batch."""
+
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
     """This parameter is deprecated and will be removed in a future release.
     Please remove it from your configs"""
@@ -4500,6 +4512,15 @@ class VllmConfig:
                 "full_cuda_graph is not supported with "
                 "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
+
+        if self.parallel_config.enable_microbatching and \
+            self.compilation_config.level >= CompilationLevel.PIECEWISE:
+            # Microbatching is not supported with piecewise compilation yet.
+            #  More specifically piecewise cuda-graphs
+            logger.warning_once(
+                "Piecewise compilation is not supported with "
+                "microbatching. Disabling piecewiseching compilation.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         if (self.kv_events_config is not None
                 and self.kv_events_config.enable_kv_cache_events

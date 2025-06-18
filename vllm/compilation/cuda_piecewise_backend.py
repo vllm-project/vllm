@@ -106,6 +106,7 @@ class CUDAPiecewiseBackend:
             end_monitoring_torch_compile(self.vllm_config)
 
     def __call__(self, *args) -> Any:
+        # logger.info("CUDA BACKEND CALL")
         if not self.first_run_finished:
             self.first_run_finished = True
             self.check_for_ending_compilation()

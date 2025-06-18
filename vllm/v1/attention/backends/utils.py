@@ -98,6 +98,13 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         return False
 
 
+def slice_query_start_locs(
+    query_start_loc: torch.Tensor,
+    req_slice: slice,
+) -> torch.Tensor:
+    return query_start_loc[req_slice.start: req_slice.stop + 1] -\
+        query_start_loc[req_slice.start]
+
 def validate_kv_sharing_target(current_layer_name, target_layer_name,
                                static_forward_context):
     error_msg = (f"Specified KV sharing target layer for {current_layer_name} "
