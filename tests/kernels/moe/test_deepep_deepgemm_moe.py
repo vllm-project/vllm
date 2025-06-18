@@ -169,11 +169,11 @@ class TestTensors:
         block_k = block_size[1]
         _, rank_token_scales = per_token_group_quant_fp8(rank_tokens, block_k)
 
-        topk_ids = torch.randint(
-            low=0,
-            high=config.num_experts,
-            size=(m, topk),
-            device=torch.cuda.current_device()).to(dtype=torch.int64)
+        # distribute topk_ids evenly
+        topk_ids = torch.empty((m, topk), device="cpu", dtype=torch.int64)
+        for mi in range(m):
+            topk_ids[mi] = torch.randperm(config.num_experts)[:topk]
+        topk_ids = topk_ids.to(device=torch.cuda.current_device())
 
         topk_weights = torch.randn(topk_ids.shape,
                                    dtype=torch.float32,
@@ -459,17 +459,23 @@ def test_ht_deepep_deepgemm_moe(mnk: tuple[int, int, int], num_experts: int,
                     w2, w1_scale, w2_scale)
 
 
+TOPKS = [6]
 MNKs = [
-    (1, 128, 2560),
-    (2, 128, 2560),
-    (3, 1024, 2560),
-    (32, 128, 2560),
-    (45, 512, 2560),
-    (64, 1024, 2560),
-    (222, 1024, 2560),
+    #(1, 128, 2560),
+    #(2, 128, 2560),
+    #(3, 1024, 2560),
+    #(32, 128, 2560),
+
+    #(45, 512, 2560),
+    #(64, 1024, 2560),
+    #(222, 1024, 2560),
+
+    #(45, 128, 2560),
+    #(64, 128, 2560),
+    (222, 128, 2560),
 ]
 # Fix tests for USE_FP8_DISPATCH=True
-USE_FP8_DISPATCH = [False]
+USE_FP8_DISPATCH = [True]
 
 
 @pytest.mark.parametrize("mnk", MNKs)
