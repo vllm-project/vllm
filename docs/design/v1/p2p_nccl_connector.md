@@ -318,7 +318,7 @@ pgrep python | xargs kill -9 && pkill -f python
 - **1P5D (6×A800) vs vLLM (1×A800)**:
   - Throughput ↑7.2% (1085 → 6979/6)
   - ITL (P99) ↓81.3% (120ms → 22.9ms)
-  - TTFT (P99) ↑26.8% (175ms → 222ms) 
+  - TTFT (P99) ↑26.8% (175ms → 222ms)
   - TPOT: No change
 
 - **1P6D (7×A800) vs vLLM (1×A800)**:
