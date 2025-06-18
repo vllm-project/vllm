@@ -386,6 +386,7 @@ class Qwen3MoeModel(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        # Skip loading extra parameters for GPTQ/modelopt models.
         ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale",
                            ".v_scale", "_v_scale", ".weight_scale",
                            "_weight_scale", ".input_scale", "_input_scale")
@@ -415,7 +416,7 @@ class Qwen3MoeModel(nn.Module):
                     continue
                 name = name.replace(weight_name, param_name)
 
-                # Skip loading extra bias for GPTQ/modelopt models.
+                # Skip loading extra parameters for GPTQ/modelopt models.
                 if name.endswith(ignore_suffixes) and name not in params_dict:
                     continue
 
@@ -438,7 +439,7 @@ class Qwen3MoeModel(nn.Module):
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
-                    # Skip loading extra bias for GPTQ/modelopt models.
+                    # Skip loading extra parameters for GPTQ/modelopt models.
                     if name.endswith(
                             ignore_suffixes) and name not in params_dict:
                         continue
@@ -451,7 +452,7 @@ class Qwen3MoeModel(nn.Module):
                                   expert_id=expert_id)
                     break
                 else:
-                    # Skip loading extra bias for GPTQ/modelopt models.
+                    # Skip loading extra parameters for GPTQ/modelopt models.
                     if name.endswith(
                             ignore_suffixes) and name not in params_dict:
                         continue
