@@ -13,8 +13,7 @@ from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.sample.logits_processor import (BatchUpdate, MinPLogitsProcessor,
-                                             MoveDirectionality)
+from vllm.v1.sample.logits_processor import BatchUpdate, MoveDirectionality
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
@@ -666,14 +665,6 @@ class InputBatch:
             self.lora_id_to_lora_request.values())
 
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
-
-    def get_min_p_by_req_id(self, req_id: str) -> float:
-        assert req_id in self.req_id_to_index
-        min_p_logitsproc = self.logitsprocs.get_logitsproc_by_id("min_p")
-        assert min_p_logitsproc is not None and isinstance(
-            min_p_logitsproc, MinPLogitsProcessor)
-        return min_p_logitsproc.get_min_p_by_index(
-            self.req_id_to_index[req_id])
 
     @property
     def num_reqs(self) -> int:
