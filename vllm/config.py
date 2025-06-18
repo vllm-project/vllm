@@ -911,8 +911,8 @@ class ModelConfig:
                 quant_library = quant_cfg.get("quant_method", "").lower()
 
             # Normalize library names
-            quant_library = quant_library.replace("compressed_tensors",
-                                                  "compressed-tensors")
+            quant_library = quant_library.replace(
+                "compressed_tensors", "compressed-tensors")
 
             quant_cfg["quant_method"] = quant_library
             quant_method = quant_library

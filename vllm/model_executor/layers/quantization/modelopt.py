@@ -71,7 +71,7 @@ class ModelOptFp8Config(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+                                     user_quant) -> Optional[QuantizationMethods]:
         """Detect if this ModelOpt config should be used based on quantization config."""
         if hf_quant_cfg is None:
             return None
@@ -88,7 +88,8 @@ class ModelOptFp8Config(QuantizationConfig):
                 if "FP8" in quant_algo:
                     return "modelopt"
             # Also check for compressed-tensors style config with modelopt
-            elif any("FP8" in str(v).upper() for v in hf_quant_cfg.values()
+            elif any("FP8" in str(v).upper()
+                     for v in hf_quant_cfg.values()
                      if isinstance(v, (str, dict))):
                 return "modelopt"
 
@@ -110,10 +111,11 @@ class ModelOptFp8Config(QuantizationConfig):
             exclude_modules = config.get("exclude_modules")
 
         if quant_method not in QUANT_ALGOS:
-            raise ValueError(f"ModelOpt currently only supports: {QUANT_ALGOS}"
-                             " quantizations in vLLM. Please check the "
-                             "`hf_quant_config.json` file for your model's "
-                             "quant configuration.")
+            raise ValueError(
+                f"ModelOpt currently only supports: {QUANT_ALGOS} "
+                "quantizations in vLLM. Please check the "
+                "`hf_quant_config.json` file for your model's "
+                "quant configuration.")
         is_checkpoint_fp8_serialized = ("FP8" in quant_method)
 
         return cls(is_checkpoint_fp8_serialized, kv_cache_quant_method,
@@ -492,7 +494,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
+                                     user_quant) -> Optional[QuantizationMethods]:
         """Detect if this ModelOpt FP4 config should be used based on quantization config."""
         if hf_quant_cfg is None:
             return None
@@ -509,7 +511,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
                 if "NVFP4" in quant_algo:
                     return "modelopt_fp4"
             # Also check for compressed-tensors style config with modelopt FP4
-            elif any("FP4" in str(v).upper() for v in hf_quant_cfg.values()
+            elif any("FP4" in str(v).upper()
+                     for v in hf_quant_cfg.values()
                      if isinstance(v, (str, dict))):
                 return "modelopt_fp4"
 
@@ -533,19 +536,21 @@ class ModelOptNvFp4Config(QuantizationConfig):
             exclude_modules = config.get("exclude_modules", [])
 
         if quant_method not in QUANT_ALGOS:
-            raise ValueError(f"ModelOpt currently only supports: {QUANT_ALGOS}"
-                             " quantizations in vLLM. Please check the "
-                             "`hf_quant_config.json` file for your model's "
-                             "quant configuration.")
+            raise ValueError(
+                f"ModelOpt currently only supports: {QUANT_ALGOS} "
+                "quantizations in vLLM. Please check the "
+                "`hf_quant_config.json` file for your model's "
+                "quant configuration.")
         is_checkpoint_nvfp4_serialized = ("NVFP4" in quant_method)
 
         # For FP4, these fields are required
-        if is_checkpoint_nvfp4_serialized and "quantization" in config:
-            if ("group_size" and "kv_cache_quant_algo"
-                    and "exclude_modules") not in config["quantization"]:
-                raise ValueError("NVFP4 quantization requires group size and "
-                                 "kv_cache_quant_algo specified in "
-                                 "hf_quant_config.json")
+        if (is_checkpoint_nvfp4_serialized and "quantization" in config
+            and ("group_size" and "kv_cache_quant_algo"
+                 and "exclude_modules") not in config["quantization"]):
+            raise ValueError(
+                "NVFP4 quantization requires group size and "
+                "kv_cache_quant_algo specified in "
+                "hf_quant_config.json")
 
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
                    exclude_modules, group_size)
