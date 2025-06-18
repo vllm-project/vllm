@@ -66,7 +66,8 @@ class ModelOptFp8Config(QuantizationConfig):
         return ["hf_quant_config.json"]
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
         """Detect if this ModelOpt config should be used based on quantization config."""
         if hf_quant_cfg is None:
             return None
@@ -83,7 +84,8 @@ class ModelOptFp8Config(QuantizationConfig):
                 if "FP8" in quant_algo:
                     return "modelopt"
             # Also check for compressed-tensors style config with modelopt
-            elif any("FP8" in str(v).upper() for v in hf_quant_cfg.values() if isinstance(v, (str, dict))):
+            elif any("FP8" in str(v).upper() for v in hf_quant_cfg.values()
+                     if isinstance(v, (str, dict))):
                 return "modelopt"
 
         return None
@@ -239,7 +241,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
         return ["hf_quant_config.json"]
 
     @classmethod
-    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
         """Detect if this ModelOpt FP4 config should be used based on quantization config."""
         if hf_quant_cfg is None:
             return None
@@ -256,7 +259,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
                 if "NVFP4" in quant_algo:
                     return "modelopt_fp4"
             # Also check for compressed-tensors style config with modelopt FP4
-            elif any("FP4" in str(v).upper() for v in hf_quant_cfg.values() if isinstance(v, (str, dict))):
+            elif any("FP4" in str(v).upper() for v in hf_quant_cfg.values()
+                     if isinstance(v, (str, dict))):
                 return "modelopt_fp4"
 
         return None
