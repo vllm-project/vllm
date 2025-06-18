@@ -1355,10 +1355,15 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No Mamba or Encoder-Decoder so far.
+        # No Encoder-Decoder, not all Mamba so far.
         if not model_config.is_v1_compatible:
             _raise_or_fallback(feature_name=model_config.architectures,
                                recommend_to_remove=False)
+            return False
+
+        # V1 mamba models are unoptimized.
+        if model_config.has_inner_state and _warn_or_fallback(
+                feature_name="Mamba"):
             return False
 
         # No Concurrent Partial Prefills so far.
