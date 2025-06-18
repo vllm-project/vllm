@@ -176,14 +176,13 @@ class CustomOp(nn.Module):
     # For OOT custom ops:
     #   if in-tree layer class is registered with an oot_custom_op layer,
     #   the oot_custom_op layer will be used instead.
-    # Example 1:
-    # - @CustomOp.register_oot("UnquantizedFusedMoEMethod")
+    # Example:
+    # - @UnquantizedFusedMoEMethod.register_oot
     #   class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod)
-    # Example 2:
-    # - @UnquantizedFusedMoEMethod.register_oot()
-    #   class HPUUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod)
+    # or
+    # - @CustomOP.register_oot(name="UnquantizedFusedMoEMethod")
     @classmethod
-    def register_oot(cls, name: Optional[str] = None):
+    def register_oot(cls, _decorated_op_cls=None, name: Optional[str] = None):
 
         def decorator(op_cls):
             reg_name = name if name is not None else cls.__name__
@@ -193,4 +192,17 @@ class CustomOp(nn.Module):
             cls.op_registry_oot[reg_name] = op_cls
             return op_cls
 
-        return decorator
+        if _decorated_op_cls is None:
+            # Called with parentheses: @CustomOP.register_oot()
+            # or @CustomOP.register_oot(name="...")
+            # So, _decorated_op_cls is None.
+            # We return the actual decorator function.
+            return decorator
+        elif isinstance(_decorated_op_cls, type):  # Check if it's a class
+            # Called without parentheses: @CustomOP.register_oot
+            # The first argument is the class itself.
+            # We call the 'decorator' function immediately with the class.
+            return decorator(_decorated_op_cls)
+        else:
+            # Handle other unexpected cases if necessary
+            raise TypeError("Decorator can only be applied to classes.")
