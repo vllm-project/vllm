@@ -326,12 +326,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional kwargs to pass to the template renderer. "
-                     "Will be accessible by the chat template."),
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the chat template."),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional kwargs to pass to the HF processor."),
+        description=("Additional keyword args to pass to the HF processor."),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -416,10 +417,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
-        description=
-        ("Dict of arbitrary additional kwargs with string or numeric values. "
-         "Can be used by custom sampling implementations, plugins, etc. Not "
-         "used by any in-tree sampling implementations."),
+        description=(
+            "Dict of arbitrary additional keyword args with string or numeric "
+            "values. Can be used by custom sampling implementations, plugins, "
+            "etc. Not used by any in-tree sampling implementations."),
     )
 
     # --8<-- [end:chat-completion-extra-params]
@@ -531,6 +532,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structural_tag=self.structural_tag,
         )
 
+        extra_args = self.vllm_xargs if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            # Pass in kv_transfer_params via extra_args
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
+        extra_args = extra_args or None
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -561,11 +567,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
-            # Pass in `extra_body` args and kv transfer params
-            extra_args={**({"kv_transfer_params": self.kv_transfer_params}
-                            if self.kv_transfer_params else {}),
-                            **(self.vllm_xargs if self.vllm_xargs else {})
-                         }
+            extra_args=extra_args,
         )
 
     def _get_guided_json_from_tool(
@@ -885,10 +887,10 @@ class CompletionRequest(OpenAIBaseModel):
 
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
-        description=
-        ("Dict of arbitrary additional kwargs with string or numeric values. "
-         "Can be used by custom sampling implementations, plugins, etc. Not "
-         "used by any in-tree sampling implementations."),
+        description=(
+            "Dict of arbitrary additional keyword args with string or numeric "
+            "values. Can be used by custom sampling implementations, plugins, "
+            "etc. Not used by any in-tree sampling implementations."),
     )
 
     # --8<-- [end:completion-extra-params]
@@ -988,6 +990,11 @@ class CompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
         )
 
+        extra_args = self.vllm_xargs if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            # Pass in kv_transfer_params via extra_args
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
+        extra_args = extra_args or None
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -1017,11 +1024,7 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            # Pass in `extra_body` args and kv transfer params
-            extra_args={**({"kv_transfer_params": self.kv_transfer_params}
-                            if self.kv_transfer_params else {}),
-                            **(self.vllm_xargs if self.vllm_xargs else {})
-                         }
+            extra_args=extra_args,
             )
 
     @model_validator(mode="before")
@@ -1141,12 +1144,13 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional kwargs to pass to the template renderer. "
-                     "Will be accessible by the chat template."),
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the chat template."),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional kwargs to pass to the HF processor."),
+        description=("Additional keyword args to pass to the HF processor."),
     )
     priority: int = Field(
         default=0,
@@ -1647,12 +1651,13 @@ class TokenizeChatRequest(OpenAIBaseModel):
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional kwargs to pass to the template renderer. "
-                     "Will be accessible by the chat template."),
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the chat template."),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional kwargs to pass to the HF processor."),
+        description=("Additional keyword args to pass to the HF processor."),
     )
     tools: Optional[list[ChatCompletionToolsParam]] = Field(
         default=None,
@@ -1763,10 +1768,10 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
-        description=
-        ("Dict of arbitrary additional kwargs with string or numeric values. "
-         "Can be used by custom sampling implementations, plugins, etc. Not "
-         "used by any in-tree sampling implementations."),
+        description=(
+            "Dict of arbitrary additional keyword args with string or numeric "
+            "values. Can be used by custom sampling implementations, plugins, "
+            "etc. Not used by any in-tree sampling implementations."),
     )
     # --8<-- [end:transcription-extra-params]
 
