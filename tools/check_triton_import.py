@@ -16,6 +16,8 @@ ALLOWED_LINES = {
 
 
 def is_forbidden_import(line: str) -> bool:
+    if "# triton-import-ok" in line:
+        return False
     stripped = line.strip()
     return bool(
         FORBIDDEN_IMPORT_RE.match(stripped)) and stripped not in ALLOWED_LINES
