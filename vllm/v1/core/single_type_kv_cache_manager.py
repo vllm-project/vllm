@@ -414,7 +414,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "chunked local attention groups")
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
-            local_attention_start_idx = ((max_length - 1) //
+            local_attention_start_idx = (max_length //
                                          kv_cache_spec.attention_chunk_size *
                                          kv_cache_spec.attention_chunk_size)
         else:
@@ -450,12 +450,12 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         # chunked attention window and skipped
         # during the attention computation.
 
-        # (N-1) // chunk_size * chunk_size
+        # N // chunk_size * chunk_size
         # [chunk 0][chunk 1]local_attention_start_idx ... current
 
         local_attention_start_idx = (
-            num_computed_tokens -
-            1) // self.attention_chunk_size * self.attention_chunk_size
+            num_computed_tokens
+        ) // self.attention_chunk_size * self.attention_chunk_size
         # 1024-> 0, 1025-> 1024
         first_useful_block_idx = local_attention_start_idx // self.block_size
         # block size =128, 0 -> block 0, 1024 -> block 8, 372 -> block 2

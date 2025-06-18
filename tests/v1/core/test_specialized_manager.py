@@ -74,7 +74,7 @@ def test_chunked_local_attention_possible_cached_prefix():
 
     run_one_case([True], 0, 1)
     run_one_case([True], 1, 1)
-    run_one_case([True, False], 0, 1)
+    run_one_case([True, False], 0, 2)
     run_one_case([True, False], 1, 2)
     run_one_case([True, True], 0, 2)
     run_one_case([True, True], 1, 2)
@@ -82,14 +82,16 @@ def test_chunked_local_attention_possible_cached_prefix():
     run_one_case([True, True, False], 1, 2)
     run_one_case([True, True, True], 0, 3)
     run_one_case([True, True, True], 1, 3)
-    run_one_case([True, True, True, False], 0, 3)
+    run_one_case([True, True, True, False], 0, 4)
     run_one_case([True, True, True, False], 1, 4)
+    run_one_case([random.choice([True, False])] * 8 + [True], 1, 9)
+    run_one_case([random.choice([True, False])] * 8 + [False], 1, 8)
     run_one_case([random.choice([True, False])] * 8 + [True, True], 1, 10)
-    run_one_case([random.choice([True, False])] * 8 + [True, False], 0, 9)
+    run_one_case([random.choice([True, False])] * 8 + [True, False], 0, 10)
     run_one_case([random.choice([True, False])] * 8 + [True, False], 1, 10)
-    run_one_case([random.choice([True, False])] * 8 + [False, True], 0, 8)
+    run_one_case([random.choice([True, False])] * 8 + [False, True], 0, 10)
     run_one_case([random.choice([True, False])] * 8 + [False, True], 1, 10)
-    run_one_case([random.choice([True, False])] * 8 + [False, False], 0, 8)
+    run_one_case([random.choice([True, False])] * 8 + [False, False], 0, 10)
     run_one_case([random.choice([True, False])] * 8 + [False, False], 1, 10)
 
 
@@ -198,23 +200,18 @@ def test_chunked_local_attention_remove_skipped_blocks():
     manager.remove_skipped_blocks("test", 0)
     assert_block_id(block_table, original_block_ids)
 
-    # 4 tokens are computed. no token is out of the local attention window.
+    # For 4th token (0-indexed), token 0-3 is out of the local attention window.
     manager.remove_skipped_blocks("test", 4)
-    assert_block_id(block_table, original_block_ids)
+    assert_block_id(block_table, [null_block_id] * 2)
 
-    # 5 tokens are computed. token 0 is out of the local attention window.
-    # no block can be removed.
-    manager.remove_skipped_blocks("test", 5)
-    assert_block_id(block_table, [null_block_id])
-
-    # 6 tokens are computed. token 4 - 5 are in local attention window,
+    # For 6th token (0-indexed), token 4 - 6 are in local attention window,
     # token 0 - 3 are out, 2 blocks can be removed.
     manager.remove_skipped_blocks("test", 6)
     assert_block_id(block_table, [null_block_id] * 2 + original_block_ids[2:])
-    # 11 tokens are computed. token 8 - 11 are in local attention window,
-    # token 0-7 are out, 4 block can be removed.
-    manager.remove_skipped_blocks("test", 11)
-    assert_block_id(block_table, [null_block_id] * 4 + original_block_ids[4:])
+    # For 12th token (0-indexed),
+    # token 0-11 are out, 6 block can be removed.
+    manager.remove_skipped_blocks("test", 12)
+    assert_block_id(block_table, [null_block_id] * 6)
 
 
 def test_sliding_window_remove_skipped_blocks():
