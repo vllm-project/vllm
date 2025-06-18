@@ -649,15 +649,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
-        super().__init__(
-            FusedMoEQuantConfig.make(
-                use_fp8_w8a8=use_fp8_w8a8,
-                use_int8_w8a8=use_int8_w8a8,
-                use_int8_w8a16=use_int8_w8a16,
-                use_int4_w4a16=use_int4_w4a16,
-                per_act_token_quant=per_act_token_quant,
-                block_shape=block_shape,
-            ))
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.dp_size = dp_size

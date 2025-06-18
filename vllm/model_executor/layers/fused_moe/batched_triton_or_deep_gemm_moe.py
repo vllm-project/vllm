@@ -62,12 +62,8 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             max_num_tokens=self.max_num_tokens,
             world_size=self.world_size,
             dp_size=self.dp_size,
-            block_shape=self.block_shape,
+            block_shape=self.block_shape,  # type: ignore[arg-type]
         ) if self.allow_deep_gemm else None
-
-        assert (self.batched_triton_experts is not None
-                or (self.allow_deep_gemm
-                    and self.batched_deep_gemm_experts is not None))
 
         assert (self.batched_deep_gemm_experts is not None
                 or self.batched_triton_experts is not None)
