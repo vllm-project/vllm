@@ -69,6 +69,25 @@ stages:
         command: >-
           export VLLM_CONTIGUOUS_PA=false && 
           cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1 -a
+  - name: test_gsm8k_small_models_merged_prefill
+    steps:
+      - name: v0_gsm8k_small_g2_tp2_merged_prefill
+        flavor: g2
+        command: >-
+          export VLLM_USE_V1=0 export VLLM_MERGED_PREFILL=true &&
+          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
+      # V1 tests require running with TP=2 due to a bug
+      # v1_gsm8k_small_g2_tp2_merged_prefill fails due to acc mismatch on 250 samples. Commented out for now
+      # - name: v1_gsm8k_small_g2_tp2_merged_prefill
+      #   flavor: g2.s
+      #   command: >-
+      #     export VLLM_USE_V1=1 export VLLM_MERGED_PREFILL=true &&
+      #     cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2
+      - name: v1_gsm8k_small_g2_tp2_merged_prefill_apc
+        flavor: g2.s
+        command: >-
+          export VLLM_USE_V1=1 export VLLM_MERGED_PREFILL=true &&
+          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 2 -a
   - name: test_gsm8k_large_models
     steps:
       - name: v0_gsm8k_large_g3_tp2_part1
