@@ -534,7 +534,8 @@ class WorkerWrapperBase:
     def update_environment_variables(self, envs_list: List[Dict[str,
                                                                 str]]) -> None:
         envs = envs_list[self.rpc_rank]
-        key = 'CUDA_VISIBLE_DEVICES'
+        from vllm.platforms import current_platform
+        key = current_platform.device_control_env_var
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
             # suppress the warning in `update_environment_variables`

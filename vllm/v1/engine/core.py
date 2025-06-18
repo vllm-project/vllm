@@ -922,7 +922,9 @@ class DPEngineCoreActor(DPEngineCoreProc):
         # Ray sets CUDA_VISIBLE_DEVICES to empty string,
         # we clean this up to be able to properly initialize
         # data parallel groups.
-        del os.environ['CUDA_VISIBLE_DEVICES']
+        from vllm.platforms import current_platform
+        device_control_env_var = current_platform.device_control_env_var
+        del os.environ[device_control_env_var]
 
         super().__init__(vllm_config, on_head_node, "", executor_class,
                          log_stats)
