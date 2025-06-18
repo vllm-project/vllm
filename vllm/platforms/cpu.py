@@ -269,3 +269,11 @@ class CpuPlatform(Platform):
         model configuration.
         """
         return True
+
+    @classmethod
+    def default_v1(cls, model_config) -> bool:
+        """Returns whether the current platform can use v1 by default for the
+        supplied model configuration.
+        """
+        return cls.supports_v1(
+            model_config) and cls.get_cpu_architecture() == CpuArchEnum.X86
