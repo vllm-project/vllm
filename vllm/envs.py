@@ -109,6 +109,7 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
+    VLLM_USE_CUTLASS_MOE_FP8: bool = False
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
 
 
@@ -717,6 +718,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # It can be changed with this variable if needed for some reason.
     "VLLM_XGRAMMAR_CACHE_MB":
     lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
+
+    # Flag to control if vllm should use CUTLASS kernel for MoE FP8
+    "VLLM_USE_CUTLASS_MOE_FP8":
+    lambda: (os.environ.get("VLLM_USE_CUTLASS_MOE_FP8", "False").lower() in
+                 ("true", "1")),
 
     # Control the threshold for msgspec to use 'zero copy' for
     # serialization/deserialization of tensors. Tensors below
