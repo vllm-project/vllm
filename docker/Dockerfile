@@ -244,7 +244,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 
 # If we need to build FlashInfer wheel before its release:
 # $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a'
+# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
 # $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
 # $ cd flashinfer
 # $ git checkout v0.2.6.post1
