@@ -15,7 +15,7 @@ HAS_TRITON = (
 )
 if HAS_TRITON:
     try:
-        from triton.backends import backends  # triton-import-ok
+        from triton.backends import backends
 
         # It's generally expected that x.driver exists and has
         # an is_active method.
