@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
 import logging
-from typing import Optional
 
 import torch
 
@@ -76,30 +75,10 @@ def w8a8_block_fp8_matmul_deepgemm_fake(
     return C
 
 
-def m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm(
-    a: torch.Tensor,
-    a_scale: Optional[torch.Tensor],
-    b: torch.Tensor,
-    b_scale: Optional[torch.Tensor],
-    output: torch.Tensor,
-    expert_ids: torch.Tensor,
-) -> None:
-    import deep_gemm as dg
-    dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous((a, a_scale), (b, b_scale),
-                                                 output, expert_ids)
-
-
 direct_register_custom_op(
     op_name="w8a8_block_fp8_matmul_deepgemm",
     op_func=w8a8_block_fp8_matmul_deepgemm,
     mutates_args=[],
     fake_impl=w8a8_block_fp8_matmul_deepgemm_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
-direct_register_custom_op(
-    op_name="m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm",
-    op_func=m_grouped_gemm_fp8_fp8_bf16_nt_contiguous_deepgemm,
-    mutates_args=["output"],
     dispatch_key=current_platform.dispatch_key,
 )

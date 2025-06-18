@@ -29,10 +29,10 @@ MNK_FACTORS = [
     (224, 1024, 1536),
     (224, 3072, 1024),
     (224, 3072, 1536),
+    (32768, 1024, 1024),
     # These sizes trigger wrong answers.
-    # (7232, 2048, 5120),
-    # (32768, 1024, 1024),
-    # (40000, 2048, 5120),
+    #(7232, 2048, 5120),
+    #(40000, 2048, 5120),
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(
