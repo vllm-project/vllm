@@ -418,9 +418,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
         description=(
-            "Dict of arbitrary additional keyword args with string or numeric "
-            "values. Can be used by custom sampling implementations, plugins, "
-            "etc. Not used by any in-tree sampling implementations."),
+            "Additional request parameters with string or "
+            "numeric values, used by custom extensions."),
     )
 
     # --8<-- [end:chat-completion-extra-params]
