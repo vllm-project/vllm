@@ -332,7 +332,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional keyword args to pass to the HF processor."),
+        description=("Additional kwargs to pass to the HF processor."),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -417,9 +417,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
-        description=(
-            "Additional request parameters with string or "
-            "numeric values, used by custom extensions."),
+        description=("Additional request parameters with string or "
+                     "numeric values, used by custom extensions."),
     )
 
     # --8<-- [end:chat-completion-extra-params]
@@ -885,10 +884,8 @@ class CompletionRequest(OpenAIBaseModel):
 
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
-        description=(
-            "Dict of arbitrary additional keyword args with string or numeric "
-            "values. Can be used by custom sampling implementations, plugins, "
-            "etc. Not used by any in-tree sampling implementations."),
+        description=("Additional request parameters with string or "
+                     "numeric values, used by custom extensions."),
     )
 
     # --8<-- [end:completion-extra-params]
@@ -1147,7 +1144,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional keyword args to pass to the HF processor."),
+        description=("Additional kwargs to pass to the HF processor."),
     )
     priority: int = Field(
         default=0,
@@ -1654,7 +1651,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional keyword args to pass to the HF processor."),
+        description=("Additional kwargs to pass to the HF processor."),
     )
     tools: Optional[list[ChatCompletionToolsParam]] = Field(
         default=None,
@@ -1765,10 +1762,8 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
-        description=(
-            "Dict of arbitrary additional keyword args with string or numeric "
-            "values. Can be used by custom sampling implementations, plugins, "
-            "etc. Not used by any in-tree sampling implementations."),
+        description=("Additional request parameters with string or "
+                     "numeric values, used by custom extensions."),
     )
     # --8<-- [end:transcription-extra-params]
 
