@@ -1018,7 +1018,8 @@ class EngineArgs:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
-        device_config = DeviceConfig(device=current_platform.device_type)
+        device_config = DeviceConfig(
+            device=cast(Device, current_platform.device_type))
         model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
@@ -1302,7 +1303,7 @@ class EngineArgs:
         # Skip this check if we are running on a non-GPU platform,
         # or if the device capability is not available
         # (e.g. in a Ray actor without GPUs).
-        from vllm.platforms import CpuArchEnum, current_platform
+        from vllm.platforms import current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
@@ -1444,14 +1445,10 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
             return False
 
-        # Non-[CUDA, TPU, x86 CPU] may be supported on V1,
-        # but off by default for now.
-        v0_hardware = not any(
-            (current_platform.is_cuda_alike(), current_platform.is_tpu(),
-             (current_platform.is_cpu()
-              and current_platform.get_cpu_architecture() == CpuArchEnum.X86)))
-        if v0_hardware and _warn_or_fallback(  # noqa: SIM103
-                current_platform.device_name):
+        # The platform may be supported on V1, but off by default for now.
+        if not current_platform.default_v1(  # noqa: SIM103
+                model_config=model_config) and _warn_or_fallback(
+                    current_platform.device_name):
             return False
         #############################################################
 
