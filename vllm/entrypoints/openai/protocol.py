@@ -529,6 +529,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structural_tag=self.structural_tag,
         )
 
+        if "kv_transfer_params" not in self.vllm_xargs:
+            self.vllm_xargs["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -560,9 +562,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             # Pass in `extra_body` args and kv transfer params
-            extra_args=({**self.vllm_xargs,
-                         **({"kv_transfer_params": self.kv_transfer_params}
-                            if self.kv_transfer_params else {})})
+            extra_args=self.vllm_xargs,
         )
 
     def _get_guided_json_from_tool(
