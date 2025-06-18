@@ -485,10 +485,6 @@ def prefetch_weight_files(hf_weights_files: list[str]) -> None:
     local_files = hf_weights_files[rank::world_size]
     mmap_files_concurrently(local_files)
 
-    # synchronize across ranks to ensure all files are prefetched
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-
 def mmap_files_concurrently(hf_weights_files: list[str]) -> None:
     if len(hf_weights_files) == 0:
         return
