@@ -63,7 +63,8 @@ $ docker run -it \
              vllm-xpu-env
 ```
 
-## Supported features
+# --8<-- [end:build-image-from-source]
+# --8<-- [start:supported-features]
 
 XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. We require Ray as the distributed runtime backend. For example, a reference execution like following:
 
@@ -78,4 +79,6 @@ python -m vllm.entrypoints.openai.api_server \
 ```
 
 By default, a ray instance will be launched automatically if no existing one is detected in the system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the <gh-file:examples/online_serving/run_cluster.sh> helper script.
+
+# --8<-- [end:supported-features]
 # --8<-- [end:extra-information]
