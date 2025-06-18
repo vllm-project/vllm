@@ -1018,7 +1018,8 @@ class EngineArgs:
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
-        device_config = DeviceConfig(device=current_platform.device_type)
+        device_config = DeviceConfig(
+            device=cast(Device, current_platform.device_type))
         model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
@@ -1302,7 +1303,7 @@ class EngineArgs:
         # Skip this check if we are running on a non-GPU platform,
         # or if the device capability is not available
         # (e.g. in a Ray actor without GPUs).
-        from vllm.platforms import CpuArchEnum, current_platform
+        from vllm.platforms import current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
@@ -1444,14 +1445,10 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
             return False
 
-        # Non-[CUDA, TPU, x86 CPU] may be supported on V1,
-        # but off by default for now.
-        v0_hardware = not any(
-            (current_platform.is_cuda_alike(), current_platform.is_tpu(),
-             (current_platform.is_cpu()
-              and current_platform.get_cpu_architecture() == CpuArchEnum.X86)))
-        if v0_hardware and _warn_or_fallback(  # noqa: SIM103
-                current_platform.device_name):
+        # The platform may be supported on V1, but off by default for now.
+        if not current_platform.default_v1(  # noqa: SIM103
+                model_config=model_config) and _warn_or_fallback(
+                    current_platform.device_name):
             return False
         #############################################################
 
@@ -1562,14 +1559,20 @@ class EngineArgs:
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
             }
-            default_max_num_seqs = 1024
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 1024,
+                UsageContext.OPENAI_API_SERVER: 1024,
+            }
         else:
             # TODO(woosuk): Tune the default values for other hardware.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 8192,
                 UsageContext.OPENAI_API_SERVER: 2048,
             }
-            default_max_num_seqs = 256
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 256,
+                UsageContext.OPENAI_API_SERVER: 256,
+            }
 
         # tpu specific default values.
         if current_platform.is_tpu():
@@ -1584,6 +1587,17 @@ class EngineArgs:
                     'V5E': 512,
                     'V5P': 256,
                 }
+            }
+
+        # cpu specific default values.
+        if current_platform.is_cpu():
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 4096,
+                UsageContext.OPENAI_API_SERVER: 2048,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 128,
+                UsageContext.OPENAI_API_SERVER: 32,
             }
 
         use_context_value = usage_context.value if usage_context else None
@@ -1606,8 +1620,9 @@ class EngineArgs:
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
 
-        if self.max_num_seqs is None:
-            self.max_num_seqs = default_max_num_seqs
+        if (self.max_num_seqs is None
+                and usage_context in default_max_num_seqs):
+            self.max_num_seqs = default_max_num_seqs[usage_context]
 
             logger.debug("Setting max_num_seqs to %d for %s usage context.",
                          self.max_num_seqs, use_context_value)

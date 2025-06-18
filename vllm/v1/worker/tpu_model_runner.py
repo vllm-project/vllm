@@ -44,10 +44,10 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.tpu_input_batch import CachedRequestState, InputBatch
 
 from .utils import (initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs)
@@ -417,10 +417,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state.num_computed_tokens = req_data.num_computed_tokens
             if not req_data.resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                for block_ids, new_block_ids in zip(  # type: ignore[call-overload]
-                        req_state.block_ids,
-                        req_data.new_block_ids,
-                        strict=True):
+                for block_ids, new_block_ids in zip(req_state.block_ids,
+                                                    req_data.new_block_ids):
                     block_ids.extend(new_block_ids)
             else:
                 # The request is resumed from preemption.
