@@ -453,12 +453,12 @@ class EngineCoreProc(EngineCore):
             if hasattr(self, 'transfer_handshake_metadata'
                        ) and self.transfer_handshake_metadata:
                 # self.transfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {tp_rank: {dp_rank: metadata}}
+                # Each dict already has structure {dp_rank: {tp_rank: metadata}}
                 # Merge all worker dicts into a single dict
-                content = {}
+                content: dict[str, dict[str, dict[str, Any]]] = {}
                 for worker_dict in self.transfer_handshake_metadata:
                     if worker_dict is not None:
-                        # Deep merge the nested dictionaries instead of overwriting
+                        # Deep merge nested dictionaries instead of overwrite
                         for dp_rank, tp_dict in worker_dict.items():
                             if dp_rank not in content:
                                 content[dp_rank] = {}

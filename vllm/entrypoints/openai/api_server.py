@@ -871,28 +871,29 @@ if envs.VLLM_SERVER_DEV_MODE:
     @router.get("/get_kv_connector_metadata")
     @router.get("/get_kv_connector_metadata/{dp_rank}")
     @router.get("/get_kv_connector_metadata/{dp_rank}/{tp_rank}")
-    async def get_kv_connector_metadata(raw_request: Request, dp_rank: int = None, tp_rank: int = None):
-        kv_connector_metadata = raw_request.app.state.vllm_config.cache_config.transfer_handshake_metadata
-        
-        if kv_connector_metadata is None:
-            return JSONResponse(content=None)
-        
-        # Filter by dp_rank if specified
+    async def get_kv_connector_metadata(raw_request: Request,
+                                        dp_rank: Optional[int] = None,
+                                        tp_rank: Optional[int] = None):
+        kv_meta: Optional[dict[str, dict[str, dict[str, Any]]]] = (
+            raw_request.app.state.vllm_config.cache_config.
+            transfer_handshake_metadata)
+
+        if kv_meta is None:
+            return None
+
         if dp_rank is not None:
-            if dp_rank not in kv_connector_metadata:
-                return JSONResponse(content={})
-            dp_data = kv_connector_metadata[dp_rank]
-            
-            # Filter by tp_rank if also specified
+            if dp_rank not in kv_meta:
+                return {}
+            dp_data = kv_meta[dp_rank]
+
             if tp_rank is not None:
                 if tp_rank not in dp_data:
-                    return JSONResponse(content={})
-                return JSONResponse(content={dp_rank: {tp_rank: dp_data[tp_rank]}})
+                    return {}
+                return {dp_rank: {tp_rank: dp_data[tp_rank]}}
             else:
-                return JSONResponse(content={dp_rank: dp_data})
-        
-        # Return all metadata if no filtering
-        return JSONResponse(content=kv_connector_metadata)
+                return {dp_rank: dp_data}
+
+        return kv_meta
 
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):

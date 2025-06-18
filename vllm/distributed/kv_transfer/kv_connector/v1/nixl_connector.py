@@ -12,7 +12,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request as URLRequest
+from urllib.request import urlopen
 
 import torch
 
@@ -398,7 +399,7 @@ class NixlConnectorWorker:
 
         # Background handshake threads for remote engines
         self._executor = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="nixl-handshake")
+            max_workers=1, thread_name_prefix="nixl-handshake")
         # Thread results for handshake completion tracking
         self._handshake_futures: dict[str, Future] = {}
         self._pending_requests: dict[str, list[tuple[str, ReqMeta]]] = {}
@@ -491,13 +492,17 @@ class NixlConnectorWorker:
 
         # Use the new endpoint scheme to filter by dp_rank and tp_rank
         # Default to dp_rank 0 and use current tp_rank for optimal filtering
-        url = build_uri("http", host, port, path=f"get_kv_connector_metadata/0/{self.tp_rank}")
+        url = build_uri("http",
+                        host,
+                        port,
+                        path=f"get_kv_connector_metadata/0/{self.tp_rank}")
         logger.debug("Querying metadata on path: %s", url)
 
         try:
-            req = Request(url)
+            req = URLRequest(url)
             logger.debug("About to send HTTP request to %s", url)
-            with urlopen(req, timeout=5.0) as response:
+            with urlopen(req,
+                         timeout=envs.VLLM_NIXL_HANDSHAKE_TIMEOUT) as response:
                 logger.debug("Received HTTP response from %s", url)
                 response_data = response.read().decode('utf-8')
                 res = json.loads(response_data)
@@ -507,27 +512,36 @@ class NixlConnectorWorker:
             raise
 
         if res is None:
-            logger.warning("Remote server returned None metadata, skipping handshake")
+            logger.warning(
+                "Remote server returned None metadata, skipping handshake")
             raise RuntimeError("Remote server returned None metadata")
 
-        # With filtered response from new endpoint, we get: {dp_rank: {tp_rank: metadata}}
-        # Since we filtered by dp_rank=0 and tp_rank=self.tp_rank, extract directly
+        # With filtered response from new endpoint, we get:
+        # {dp_rank: {tp_rank: metadata}}
+        # Since we filtered by dp_rank=0 and tp_rank=self.tp_rank,
+        # extract directly.
         if "0" in res and str(self.tp_rank) in res["0"]:
             tp_data = res["0"][str(self.tp_rank)]
             metadata_bytes = tp_data.get("agent_metadata", None)
-            p_remote_rank = self.tp_rank  # Use current tp_rank for filtered response
+            # use current tp_rank for filtered response
+            p_remote_rank = self.tp_rank
         else:
             # Fallback to unfiltered endpoint for heterogeneous TP cases
-            url_fallback = build_uri("http", host, port, path="get_kv_connector_metadata")
-            logger.debug("Using fallback unfiltered endpoint: %s", url_fallback)
-            req = Request(url_fallback)
-            with urlopen(req, timeout=5.0) as response:
+            url_fallback = build_uri("http",
+                                     host,
+                                     port,
+                                     path="get_kv_connector_metadata")
+            logger.debug("Using fallback unfiltered endpoint: %s",
+                         url_fallback)
+            req = URLRequest(url_fallback)
+            with urlopen(req,
+                         timeout=envs.VLLM_NIXL_HANDSHAKE_TIMEOUT) as response:
                 response_data = response.read().decode('utf-8')
                 res = json.loads(response_data)
-            
+
             dp_data = res.get("0", {})
             remote_tp_size = len(dp_data.keys()) if dp_data else 1
-            
+
             # Handle heterogeneous TP mapping
             tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
             p_remote_rank = self.tp_rank // tp_ratio
@@ -952,8 +966,8 @@ class NixlConnectorWorker:
         while True:
             try:
                 req_id, meta = self._ready_requests.get_nowait()
-                logger.debug("Processing ready request %s for engine %s", 
-                            req_id, meta.remote_engine_id)
+                logger.debug("Processing ready request %s for engine %s",
+                             req_id, meta.remote_engine_id)
                 self._read_blocks(
                     request_id=req_id,
                     dst_engine_id=meta.remote_engine_id,
@@ -963,7 +977,7 @@ class NixlConnectorWorker:
                 processed_count += 1
             except queue.Empty:
                 break
-        
+
         if processed_count > 0:
             logger.debug("Processed %d ready requests", processed_count)
 
@@ -972,7 +986,7 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        
+
         for req_id, meta in metadata.requests.items():
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
