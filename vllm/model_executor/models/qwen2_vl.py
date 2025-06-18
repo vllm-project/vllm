@@ -763,7 +763,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
                 size=size,
-                use_fast=kwargs.get("use_fast")),
+                use_fast=kwargs.get("use_fast", True)),
             **kwargs,
         )
 
@@ -808,6 +808,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         size: Optional[dict[str, int]] = None,
         **kwargs: object,
     ) -> Qwen2VLImageProcessor:
+        kwargs["use_fast"] = kwargs.get("use_fast", True)
         return cached_image_processor_from_config(
             self.ctx.model_config,
             **self._get_image_processor_kwargs(min_pixels=min_pixels,
