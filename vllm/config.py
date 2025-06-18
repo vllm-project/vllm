@@ -904,7 +904,7 @@ class ModelConfig:
         quant_cfg = self._parse_quant_hf_config()
 
         if quant_cfg is not None:
-            # Support both 'quant_library' (preferred) and 'quant_method' (backward compatibility)
+            # Support both 'quant_library' (preferred) and 'quant_method'
             quant_library = quant_cfg.get("quant_library", "").lower()
             if not quant_library:
 
