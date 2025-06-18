@@ -492,8 +492,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 raise ValueError("Following weights were not initialized from "
                                  f"checkpoint: {weights_not_loaded}")
 
-        torch.cuda.empty_cache()
-
         param_dict = dict(model.named_parameters())
         stacked_quant_state_dict: dict[str, dict[int, Any]] = {}
         # TODO: Change this lazy import to normal import
@@ -567,7 +565,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 if load_8bit:
                     set_weight_attrs(
                         param, {"matmul_state": [None] * len(quant_states)})
-
+        torch.cuda.empty_cache()
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
 
