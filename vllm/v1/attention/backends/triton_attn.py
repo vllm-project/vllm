@@ -230,7 +230,8 @@ class TritonAttentionImpl(AttentionImpl):
 
     def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
                                      group_shape: tuple[int, int]):
-        return True
+        return dtype == current_platform.fp8_dtype(
+        ) and static and group_shape == (-1, -1)  # per-tensor
 
     def __init__(
         self,
