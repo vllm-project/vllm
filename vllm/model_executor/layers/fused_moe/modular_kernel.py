@@ -88,8 +88,6 @@ def _moe_problem_size(
 
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
-
-
 class FusedMoEPrepareAndFinalize(ABC):
     """
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps

@@ -18,21 +18,20 @@ try:
 except ImportError:
     has_pplx = False
 
-#from tests.kernels.quant_utils import native_w8a8_block_matmul
 from tests.kernels.moe.utils import (make_test_weights, naive_batched_moe,
                                      torch_moe2)
-from tests.pplx_utils import ProcessGroupInfo, parallel_launch
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe import (BatchedTritonExperts,
-                                                  FusedMoEConfig,
-                                                  FusedMoEModularKernel,
-                                                  fused_topk,
-                                                  get_default_config,
-                                                  override_config)
+from vllm.model_executor.layers.fused_moe import override_config
+from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize, NaiveBatchedExperts)
+    BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
 from vllm.platforms import current_platform
 from vllm.utils import round_up
+
+from .deepep_utils import ProcessGroupInfo, parallel_launch
 
 requires_pplx = pytest.mark.skipif(
     not has_pplx,
@@ -542,7 +541,7 @@ def _pplx_moe(
     qtype: Optional[torch.dtype] = None,
     per_act_token_quant: bool = False,
     block_shape: Optional[list[int]] = None,
-    use_internode: bool,
+    use_internode: bool = False,
 ):
     if use_internode:
         uid = nvshmem_get_unique_id(

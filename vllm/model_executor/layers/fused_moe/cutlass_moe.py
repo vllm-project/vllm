@@ -347,11 +347,6 @@ def cutlass_moe_fp8(
         a2_scale.numel() != 1 if a2_scale is not None else False)
     per_out_ch = w1_scale.numel() != w1_q.shape[0]
 
-    out_dtype = a.dtype
-
-    if out_dtype is None:
-        out_dtype = a.dtype
-
     num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(
         0)
 
@@ -359,7 +354,7 @@ def cutlass_moe_fp8(
         MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsFp8(
             max_experts_per_worker=num_experts,
-            out_dtype=out_dtype,
+            out_dtype=a.dtype,
             per_act_token_quant=per_act_token,
             per_out_ch_quant=per_out_ch,
             use_batched_format=False,

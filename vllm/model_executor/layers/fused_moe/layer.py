@@ -93,9 +93,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 block_shape=moe.block_shape,
             )
 
-            logger.debug("All2All %s, %s = %s/%s", moe.quant_dtype,
-                         moe.block_shape, hidden_dim_bytes, hidden_scale_bytes)
-
             all_to_all_args = dict(
                 max_num_tokens=moe.max_num_tokens,
                 num_experts=moe.num_experts,
@@ -223,7 +220,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig
-    ):
+    ) -> FusedMoEPermuteExpertsUnpermute:
+
         assert self.fused_experts == fused_experts
 
         all2all_manager = get_ep_group().device_communicator.all2all_manager
@@ -664,7 +662,6 @@ class FusedMoE(torch.nn.Module):
 
         logger.debug("MODEL DTYPE %s", model_dtype)
 
-        # TODO: put quant info into FusedMoEConifg here
         moe = FusedMoEConfig.make(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,

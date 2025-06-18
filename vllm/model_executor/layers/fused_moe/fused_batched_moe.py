@@ -627,11 +627,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         block_shape: Optional[list[int]] = None,
         per_act_token_quant: bool = False,
     ):
-        super().__init__()
-        assert not use_fp8_w8a8, "NYI"
-        assert not use_int8_w8a8, "NYI"
-        assert not use_int8_w8a16, "NYI"
-        assert not use_int4_w4a16, "NYI"
         super().__init__(
             FusedMoEQuantConfig.make(
                 use_fp8_w8a8=use_fp8_w8a8,
@@ -641,6 +636,10 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 per_act_token_quant=per_act_token_quant,
                 block_shape=block_shape,
             ))
+        assert not use_fp8_w8a8, "NYI"
+        assert not use_int8_w8a8, "NYI"
+        assert not use_int8_w8a16, "NYI"
+        assert not use_int4_w4a16, "NYI"
         self.max_num_tokens = max_num_tokens
         self.world_size = world_size
         self.dp_size = dp_size
@@ -928,7 +927,8 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         intermediate_cache2 = _resize_cache(workspace2,
                                             (E, max_num_tokens, N // 2))
 
-        intermediate_cache1.fill_(0)
+        if self.use_fp8_w8a8:
+            intermediate_cache1.fill_(0)
 
         #print(f"A1_SCALES {a1q_scale.shape}")
 

@@ -581,7 +581,11 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
-    def select_gemm_impl(self, prepare_finalize, moe):
+    def select_gemm_impl(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: MoEConfig,
+    ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             CutlassExpertsFp8)
 

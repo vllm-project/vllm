@@ -106,7 +106,7 @@ def torch_moe2(
     a, a_scale = moe_kernel_quantize_input(a, None, quant_type,
                                            per_act_token_quant, block_shape)
 
-    print(f"XXX {quant_type} {block_shape} {a.shape} {a_scale}")
+    #print(f"XXX {quant_type} {block_shape} {a.shape} {a_scale}")
 
     out = torch.zeros(M * topk,
                       w2.shape[1],

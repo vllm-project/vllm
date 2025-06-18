@@ -150,6 +150,9 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
 
+    config = BatchedMMConfig(dtype, num_experts, max_tokens_per_expert, K, N)
+    tensors = BatchedMMTensors.make_tensors(config)
+
     per_act_token_quant = False
 
     if block_shape is not None and not use_fp8_w8a8:
