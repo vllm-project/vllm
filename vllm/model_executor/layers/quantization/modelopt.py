@@ -66,6 +66,29 @@ class ModelOptFp8Config(QuantizationConfig):
         return ["hf_quant_config.json"]
 
     @classmethod
+    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
+        """Detect if this ModelOpt config should be used based on quantization config."""
+        if hf_quant_cfg is None:
+            return None
+
+        quant_library = hf_quant_cfg.get("quant_library", "").lower()
+        if not quant_library:
+            quant_library = hf_quant_cfg.get("quant_method", "").lower()
+
+        if quant_library == "modelopt":
+            # Look for ModelOpt-specific config structure
+            if "quantization" in hf_quant_cfg:
+                quant_config = hf_quant_cfg["quantization"]
+                quant_algo = quant_config.get("quant_algo", "")
+                if "FP8" in quant_algo:
+                    return "modelopt"
+            # Also check for compressed-tensors style config with modelopt
+            elif any("FP8" in str(v).upper() for v in hf_quant_cfg.values() if isinstance(v, (str, dict))):
+                return "modelopt"
+
+        return None
+
+    @classmethod
     def from_config(cls, config: dict[str, Any]) -> "ModelOptFp8Config":
         quant_config = cls.get_from_keys(config, ["quantization"])
         quant_method = quant_config["quant_algo"]
@@ -91,12 +114,12 @@ class ModelOptFp8Config(QuantizationConfig):
 class ModelOptFp8LinearMethod(LinearMethodBase):
     """Linear method for Model Optimizer static quantization.
     Supports loading FP8 checkpoints with static weight scale and
-    activation scale. Future support might be added for dynamic 
+    activation scale. Future support might be added for dynamic
     scales.
 
     Limitations:
     1. Only support per-tensor quantization due to torch._scaled_mm support.
-    2. Only support float8_e4m3fn datatype 
+    2. Only support float8_e4m3fn datatype
         Args: quant_config: The ModelOpt quantization config.
     """
 
@@ -209,6 +232,29 @@ class ModelOptNvFp4Config(QuantizationConfig):
         return ["hf_quant_config.json"]
 
     @classmethod
+    def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
+        """Detect if this ModelOpt FP4 config should be used based on quantization config."""
+        if hf_quant_cfg is None:
+            return None
+
+        quant_library = hf_quant_cfg.get("quant_library", "").lower()
+        if not quant_library:
+            quant_library = hf_quant_cfg.get("quant_method", "").lower()
+
+        if quant_library == "modelopt":
+            # Look for ModelOpt-specific config structure
+            if "quantization" in hf_quant_cfg:
+                quant_config = hf_quant_cfg["quantization"]
+                quant_algo = quant_config.get("quant_algo", "")
+                if "NVFP4" in quant_algo:
+                    return "modelopt_fp4"
+            # Also check for compressed-tensors style config with modelopt FP4
+            elif any("FP4" in str(v).upper() for v in hf_quant_cfg.values() if isinstance(v, (str, dict))):
+                return "modelopt_fp4"
+
+        return None
+
+    @classmethod
     def from_config(cls, config: dict[str, Any]) -> "ModelOptNvFp4Config":
         quant_config = cls.get_from_keys(config, ["quantization"])
         quant_method = quant_config["quant_algo"]
@@ -273,7 +319,7 @@ class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
 class ModelOptNvFp4LinearMethod(LinearMethodBase):
     """Linear method for Model Optimizer NVFP4.
     Supports loading NVFP4 checkpoints with the following structure:
-    
+
     input_scale: torch.float32, scalar ,
     weight: NVFP4(represented as byte) Shape: [1, X, y/2]
     weight_scale: FP8-E4M3, Shape: [X, Y], aka per block scale,
@@ -454,7 +500,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """
     MoE Method for FP4 Quantization.
-    Args: 
+    Args:
         quant_config: NVFP4 Quant Config
     """
 
