@@ -1000,6 +1000,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         blocksparse_params: Optional[Dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
         # MLA Specific Arguments
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
@@ -1009,6 +1010,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing not supported in V0.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -1316,10 +1319,16 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if output is not None:
             raise NotImplementedError(
                 "output is not yet supported for MLAImplBase")
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for MLAImplBase")
 
         if attn_metadata.is_profile_run and \
             attn_metadata.context_chunk_workspace is not None:

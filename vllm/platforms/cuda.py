@@ -6,7 +6,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from datetime import timedelta
-from functools import wraps
+from functools import cache, wraps
 from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
 import torch
@@ -173,6 +173,7 @@ class CudaPlatformBase(Platform):
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
+        torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.max_memory_allocated(device)
 
@@ -183,6 +184,14 @@ class CudaPlatformBase(Platform):
         if use_mla:
             # TODO(lucas): refactor to  be more concise
             #  we should probably consider factoring out V1 here
+            if selected_backend == _Backend.CUTLASS_MLA_VLLM_V1:
+                if use_v1:
+                    logger.info_once("Using Cutlass MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "cutlass_mla.CutlassMLABackend")
+                else:
+                    logger.warning(
+                        "Cutlass MLA backend is only supported on V1 engine")
             if selected_backend == _Backend.TRITON_MLA or block_size != 64:
                 if use_v1:
                     logger.info_once("Using Triton MLA backend on V1 engine.")
@@ -217,14 +226,41 @@ class CudaPlatformBase(Platform):
             if selected_backend == _Backend.FLASHINFER:
                 logger.info_once("Using FlashInfer backend on V1 engine.")
                 return "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
-            if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+            elif selected_backend == _Backend.FLEX_ATTENTION:
+                logger.info("Using FlexAttenion backend on V1 engine.")
+                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
+            elif selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
                 logger.info_once("Using Triton backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "triton_attn.TritonAttentionBackend")
-            if cls.has_device_capability(80):
+            elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "flash_attn.FlashAttentionBackend")
+
+            # Default backends for V1 engine
+            # Prefer FlashInfer for Blackwell GPUs if installed
+            if cls.is_device_capability(100):
+                try:
+                    import flashinfer  # noqa: F401
+                    logger.info_once(
+                        "Using FlashInfer backend on V1 engine by default for "
+                        "Blackwell (SM 10.0) GPUs.")
+                    return ("vllm.v1.attention.backends."
+                            "flashinfer.FlashInferBackend")
+                except ImportError:
+                    logger.info_once(
+                        "FlashInfer failed to import for V1 engine on "
+                        "Blackwell (SM 10.0) GPUs; it is recommended to "
+                        "install FlashInfer for better performance.")
+                    pass
+            # FlashAttention is the default for SM 8.0+ GPUs
+            elif cls.has_device_capability(80):
+                logger.info_once("Using Flash Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "flash_attn.FlashAttentionBackend")
+
+        # Backends for V0 engine
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
@@ -362,6 +398,7 @@ class CudaPlatformBase(Platform):
 class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
+    @cache
     @with_nvml_context
     def get_device_capability(cls,
                               device_id: int = 0
@@ -459,6 +496,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
 class NonNvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
+    @cache
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
