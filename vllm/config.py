@@ -1515,7 +1515,7 @@ class CacheConfig:
 
     transfer_handshake_metadata: Optional[dict[int, dict[
         int, KVConnectorHandshakeMetadata]]] = field(default=None, init=False)
-    """Metadata for the KV connector handshake."""
+    """Metadata for the KV connector handshake. Structure: dp_rank -> tp_rank -> metadata"""
 
     def compute_hash(self) -> str:
         """

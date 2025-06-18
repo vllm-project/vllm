@@ -543,10 +543,10 @@ def wait_for_engine_startup(
                     eng_index, txfer_metadata)
                 if cache_config.transfer_handshake_metadata is None:
                     cache_config.transfer_handshake_metadata = defaultdict(dict)
-                for tp_rank, dp_dict in txfer_metadata.items():
-                    for dp_rank, metadata in dp_dict.items():
-                        cache_config.transfer_handshake_metadata[tp_rank][
-                            dp_rank] = metadata
+                for dp_rank, tp_dict in txfer_metadata.items():
+                    for tp_rank, metadata in tp_dict.items():
+                        cache_config.transfer_handshake_metadata[dp_rank][
+                            tp_rank] = metadata
 
             start_pending[0 if local else 1] -= 1
             engine.state = CoreEngineState.READY

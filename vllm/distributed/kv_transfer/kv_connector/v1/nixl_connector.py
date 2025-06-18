@@ -489,8 +489,9 @@ class NixlConnectorWorker:
         start_time = time.perf_counter()
         logger.debug("Starting NIXL handshake with %s:%s", host, port)
 
-        # TODO: make the scheme dynamic, and/or implement https on both sides.
-        url = build_uri("http", host, port, path="get_kv_connector_metadata")
+        # Use the new endpoint scheme to filter by dp_rank and tp_rank
+        # Default to dp_rank 0 and use current tp_rank for optimal filtering
+        url = build_uri("http", host, port, path=f"get_kv_connector_metadata/0/{self.tp_rank}")
         logger.debug("Querying metadata on path: %s", url)
 
         try:
@@ -509,20 +510,29 @@ class NixlConnectorWorker:
             logger.warning("Remote server returned None metadata, skipping handshake")
             raise RuntimeError("Remote server returned None metadata")
 
-        remote_tp_size = len(res.keys())
-        # Default case is that the remote TP size is 1, so we can
-        # directly access the metadata.
-        tp_data = res.get(str(self.tp_rank), {}).get("0", {})
-        metadata_bytes = tp_data.get("agent_metadata", None)
-
-        # Handshake only with the other TP remote the current local rank will
-        # pull from. With homogeneous TP it happens to be the same rank_i.
-        tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
-        p_remote_rank = self.tp_rank // tp_ratio
-        if p_remote_rank > 0:
-            metadata_bytes = res.get(str(p_remote_rank),
-                                     {}).get("0",
-                                             {}).get("agent_metadata", None)
+        # With filtered response from new endpoint, we get: {dp_rank: {tp_rank: metadata}}
+        # Since we filtered by dp_rank=0 and tp_rank=self.tp_rank, extract directly
+        if "0" in res and str(self.tp_rank) in res["0"]:
+            tp_data = res["0"][str(self.tp_rank)]
+            metadata_bytes = tp_data.get("agent_metadata", None)
+            p_remote_rank = self.tp_rank  # Use current tp_rank for filtered response
+        else:
+            # Fallback to unfiltered endpoint for heterogeneous TP cases
+            url_fallback = build_uri("http", host, port, path="get_kv_connector_metadata")
+            logger.debug("Using fallback unfiltered endpoint: %s", url_fallback)
+            req = Request(url_fallback)
+            with urlopen(req, timeout=5.0) as response:
+                response_data = response.read().decode('utf-8')
+                res = json.loads(response_data)
+            
+            dp_data = res.get("0", {})
+            remote_tp_size = len(dp_data.keys()) if dp_data else 1
+            
+            # Handle heterogeneous TP mapping
+            tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
+            p_remote_rank = self.tp_rank // tp_ratio
+            tp_data = dp_data.get(str(p_remote_rank), {})
+            metadata_bytes = tp_data.get("agent_metadata", None)
 
         if metadata_bytes is not None:
             # Reconstruct NixlAgentMetadata from JSON response
@@ -962,6 +972,7 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
+        
         for req_id, meta in metadata.requests.items():
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "

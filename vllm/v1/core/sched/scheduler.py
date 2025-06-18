@@ -719,11 +719,7 @@ class Scheduler(SchedulerInterface):
         for request in self.running:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
-            if num_tokens_scheduled == 0:
-                # The request was not scheduled in this step.
-                new_running.append(request)
-                continue
-
+            
             # Check if this request is pending handshake and needs to reschedule
             if (pending_handshake_req_ids
                     and req_id in pending_handshake_req_ids):
@@ -732,6 +728,11 @@ class Scheduler(SchedulerInterface):
                 # Reset computed tokens to force rescheduling from beginning
                 request.num_computed_tokens = 0
                 num_tokens_to_reschedule -= request.num_computed_tokens
+                new_running.append(request)
+                continue
+            
+            if num_tokens_scheduled == 0:
+                # The request was not scheduled in this step.
                 new_running.append(request)
                 continue
 

@@ -458,7 +458,11 @@ class EngineCoreProc(EngineCore):
                 content = {}
                 for worker_dict in self.transfer_handshake_metadata:
                     if worker_dict is not None:
-                        content.update(worker_dict)
+                        # Deep merge the nested dictionaries instead of overwriting
+                        for dp_rank, tp_dict in worker_dict.items():
+                            if dp_rank not in content:
+                                content[dp_rank] = {}
+                            content[dp_rank].update(tp_dict)
                 handshake_message["transfer_handshake_metadata"] = content
 
             handshake_socket.send(msgspec.msgpack.encode(handshake_message))
