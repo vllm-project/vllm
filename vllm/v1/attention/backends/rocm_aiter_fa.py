@@ -193,9 +193,13 @@ class AiterFlashAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
+    def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
+
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
         max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
         total_tokens = int(self.runner.seq_lens_np[:num_reqs].sum())
         query_start_loc = common_attn_metadata.query_start_loc
@@ -283,6 +287,11 @@ class AiterFlashAttentionMetadataBuilder:
             local_attn_metadata=local_attn_metadata,
         )
         return attn_metadata
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        # Full CUDA Graph always supported (FA2 support checked separately)
+        return True
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False
