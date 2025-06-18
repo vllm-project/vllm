@@ -178,8 +178,6 @@ class InputBatch:
             self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: set[str] = set()
 
-        self.prompt_token_ids: Optional[torch.Tensor] = None
-
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs, ),
                                              dtype=np.int32)
@@ -455,7 +453,6 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i2] =\
                 self.allowed_token_ids_mask_cpu_tensor[i2], \
                     self.allowed_token_ids_mask_cpu_tensor[i1]
-
         self.block_table.swap_row(i1, i2)
 
     def _register_move_request(self, from_idx: int, to_idx: int) -> None:

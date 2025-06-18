@@ -39,7 +39,6 @@ class Sampler(nn.Module):
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
-
         # Apply allowed token ids.
         logits = self.apply_allowed_token_ids(logits, sampling_metadata)
         # Apply bad words exclusion.
@@ -113,7 +112,7 @@ class Sampler(nn.Module):
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
 
-        # Apply logits processors only compatible with nongreedy.
+        # Apply logits processors only compatible with nongreedy sampling.
         for processor in sampling_metadata.logitsprocs.nongreedy_list:
             logits = processor.apply(logits)
 
