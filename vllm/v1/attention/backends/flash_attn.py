@@ -743,7 +743,7 @@ def use_cascade_attention(
     if common_prefix_len < 256:
         return False
     # Cascade attention is currently not supported with these variants.
-    if use_alibi or use_sliding_window:
+    if use_alibi or use_sliding_window or use_local_attention:
         return False
     # Too few queries. Probably not worth using cascade attention.
     # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
