@@ -883,7 +883,8 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             assert self.img_context_token_id is not None
             self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
