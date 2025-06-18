@@ -45,6 +45,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -68,11 +69,15 @@ from .interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
 from .llama4 import Llama4ForCausalLM
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    maybe_prefix,
+)
 from .vision import run_dp_sharded_vision_model
 
 
@@ -724,7 +729,12 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
     dummy_inputs=Mllama4DummyInputsBuilder,
 )
 class Llama4ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, MixtureOfExperts, SupportsEagle3
+    nn.Module,
+    SupportsMultiModal,
+    SupportsPP,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsLoRA,
 ):
     merge_by_field_config = True
 
@@ -1113,3 +1123,13 @@ class Llama4ForConditionalGeneration(
         )
 
         return updated_params
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector.",
+            tower_model="vision_model.",
+        )
