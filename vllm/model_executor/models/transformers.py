@@ -821,7 +821,17 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        # NOTE: In v1, inputs_embeds is always generated at model runner from
+        # `get_multimodal_embeddings` and `get_input_embeddings`, this
+        # condition is only for v0 compatibility.
+        if inputs_embeds is None:
+            multimodal_embeds = self.get_multimodal_embeddings(**kwargs)
+            if multimodal_embeds is not None:
+                inputs_embeds = self.get_input_embeddings(input_ids, multimodal_embeds)
+                input_ids = None
+
         model_output = self.model(input_ids, positions, intermediate_tensors,
                                   inputs_embeds)
         return model_output
@@ -850,11 +860,11 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
         pixel_values = pixel_values if pixel_values is not None else kwargs.pop(
             "image_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
-        num_image_patches = kwargs.pop("num_image_patches")
 
         if pixel_values is None and image_embeds is None:
             return None
 
+        num_image_patches = kwargs.pop("num_image_patches")
         if pixel_values is not None:
             if isinstance(pixel_values, torch.Tensor):
                 pixel_values = pixel_values.flatten(0, 1).to(self.dtype)
