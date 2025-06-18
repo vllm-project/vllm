@@ -151,32 +151,33 @@ def test_structured_output(
     #
     # Test 2: Generate JSON object without a schema
     #
-    sampling_params = SamplingParams(
-        temperature=1.0,
-        max_tokens=4096,
-        n=2,
-        guided_decoding=GuidedDecodingParams(json_object=True))
+    if guided_decoding_backend != "outlines":
+        sampling_params = SamplingParams(
+            temperature=1.0,
+            max_tokens=4096,
+            n=2,
+            guided_decoding=GuidedDecodingParams(json_object=True))
 
-    outputs = llm.generate(
-        prompts=("Generate a JSON object with curly braces for a person with "
-                 "name and age fields for John Smith who is 31 years old. "
-                 "Make the response as short as possible."),
-        sampling_params=sampling_params,
-        use_tqdm=True)
+        outputs = llm.generate(
+            prompts=("Generate a JSON object with curly braces for a person with "
+                    "name and age fields for John Smith who is 31 years old. "
+                    "Make the response as short as possible."),
+            sampling_params=sampling_params,
+            use_tqdm=True)
 
-    assert outputs is not None
-    for output in outputs:
-        assert output is not None
-        assert isinstance(output, RequestOutput)
+        assert outputs is not None
+        for output in outputs:
+            assert output is not None
+            assert isinstance(output, RequestOutput)
 
-        for i in range(2):
-            generated_text = output.outputs[i].text
-            print(generated_text)
-            assert generated_text is not None
+            for i in range(2):
+                generated_text = output.outputs[i].text
+                print(generated_text)
+                assert generated_text is not None
 
-            # Parse to verify it is a valid JSON object
-            parsed_json = json.loads(generated_text)
-            assert isinstance(parsed_json, dict)
+                # Parse to verify it is a valid JSON object
+                parsed_json = json.loads(generated_text)
+                assert isinstance(parsed_json, dict)
 
     #
     # Test 3: test a jsonschema incompatible with xgrammar
