@@ -77,6 +77,8 @@ def run_moe_test(
 
     if use_compile:
         moe_fn = torch.compile(moe_fn, backend="inductor", fullgraph=True)
+        torch._dynamo.mark_dynamic(a, 0)
+        torch._dynamo.mark_dynamic(score, 0)
 
     test_output = moe_fn(a,
                          w1,
@@ -204,9 +206,9 @@ def test_fused_moe(
         padding=padding,
     )
 
-    use_compile = (m >= chunk_size and n >= 1024 and k >= 1024
-                   and current_platform.is_cuda_alike())
-    use_cudagraph = use_compile
+    use_compile = False
+    use_cudagraph = (n >= 1024 and k >= 1024
+                     and current_platform.is_cuda_alike())
 
     with set_current_vllm_config(vllm_config):
         baseline_output = runner(torch_moe, iterative_moe)

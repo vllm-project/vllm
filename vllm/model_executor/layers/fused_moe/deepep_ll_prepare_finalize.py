@@ -25,7 +25,7 @@ def dequant_fp8(expert_x_fp8: torch.Tensor,
     expert_x_fp32 = expert_x_fp8.to(torch.float32).view(
         num_experts, -1, DEEPEP_QUANT_BLOCK_SIZE)
     expert_x_scales = expert_x_scales.view(num_experts, -1, 1)
-    return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.shape)
+    return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.size())
 
 
 class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):

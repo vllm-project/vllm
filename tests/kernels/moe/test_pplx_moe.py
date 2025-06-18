@@ -386,7 +386,7 @@ def pplx_moe(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
-    use_compile: bool = True,
+    use_compile: bool = False,
     use_cudagraphs: bool = True,
 ) -> torch.Tensor:
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
@@ -451,6 +451,9 @@ def pplx_moe(
         _fused_experts = torch.compile(fused_experts,
                                        backend='inductor',
                                        fullgraph=True)
+        torch._dynamo.mark_dynamic(a_chunk, 0)
+        torch._dynamo.mark_dynamic(chunk_topk_weight, 0)
+        torch._dynamo.mark_dynamic(chunk_topk_ids, 0)
     else:
         _fused_experts = fused_experts
 
