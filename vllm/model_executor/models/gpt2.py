@@ -40,12 +40,11 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.pooling_metadata import (PoolingMetadata,
-                                                  PoolingTensors)
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import (IntermediateTensors, PoolerOutput,
-                           PoolingSequenceGroupOutput)
+from vllm.sequence import IntermediateTensors, PoolerOutput
 
+from ..layers.pooler import Pooler, PoolingType
 from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -328,65 +327,34 @@ class GPT2ForSequenceClassification(nn.Module):
     is being used for classification.
 
     Attributes:
-        model: An instance of GPT2Model used for forward operations.
+        transformer: An instance of GPT2Model used for forward operations.
         score: A layer for calculating logits.
-        activation: Activation function.
+        _pooler: An instance of Pooler used for pooling operations.
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-
-        self.gpt2 = GPT2Model(vllm_config=vllm_config,
-                              prefix=maybe_prefix(prefix, "gpt2"))
+        self.transformer = GPT2Model(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(prefix, "gpt2"))
         self.score = nn.Linear(config.n_embd, config.num_labels, bias=False)
-        self.activation = nn.Softmax(dim=-1)
+        pooler_config = vllm_config.model_config.pooler_config
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=False,
+            softmax=True)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-
-        self_weights = []
-
-        def weight_filter():
-            for name, weight in weights:
-                if name.startswith("transformer."):
-                    yield (name[len("transformer."):], weight)
-                else:
-                    self_weights.append((name, weight))
-
-        self.gpt2.load_weights(weight_filter())
-
-        params_dict = dict(self.named_parameters())
-
-        for name, loaded_weight in self_weights:
-            if name.startswith("score"):
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
 
     def pooler(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        prompt_lens = PoolingTensors.from_pooling_metadata(
-            pooling_metadata, hidden_states.device).prompt_lens
-
-        offset = 0
-        pooled_data_lst = []
-        for prompt_len in prompt_lens:
-            pooled_data_i = hidden_states[offset:offset + prompt_len]
-            logits = self.score(pooled_data_i)
-            final_shape_tensor = logits[pooled_data_i.shape[0] - 1, :]
-
-            pooled_data_lst.append(final_shape_tensor)
-            offset += prompt_len
-
-        pooled_output = torch.stack(pooled_data_lst)
-
-        scores = self.activation(pooled_output)
-        pooled_outputs = [PoolingSequenceGroupOutput(data) for data in scores]
-        return PoolerOutput(outputs=pooled_outputs)
+        return self._pooler(hidden_states, pooling_metadata)
 
     def forward(
         self,
@@ -395,12 +363,13 @@ class GPT2ForSequenceClassification(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        output = self.gpt2(input_ids=input_ids,
-                           position_ids=positions,
-                           inputs_embeds=inputs_embeds,
-                           intermediate_tensors=intermediate_tensors)
-
-        return output
+        hidden_states = self.transformer(
+            input_ids=input_ids,
+            position_ids=positions,
+            inputs_embeds=inputs_embeds,
+            intermediate_tensors=intermediate_tensors)
+        logits = self.score(hidden_states)
+        return logits
 
 
 def _add_transformer_prefix(
