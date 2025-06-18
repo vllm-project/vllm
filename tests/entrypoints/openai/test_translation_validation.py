@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 # imports for guided decoding tests
 import json
 from unittest.mock import patch
 
+import librosa
+import numpy as np
 import pytest
+import soundfile as sf
 from openai._base_client import AsyncAPIClient
 
 from vllm.assets.audio import AudioAsset
@@ -141,3 +145,28 @@ async def test_stream_options(foscolo):
                 else:
                     continuous = continuous and hasattr(chunk, 'usage')
             assert final and continuous
+
+
+@pytest.mark.asyncio
+async def test_long_audio_request(foscolo):
+    model_name = "openai/whisper-small"
+    server_args = ["--enforce-eager"]
+
+    foscolo.seek(0)
+    audio, sr = librosa.load(foscolo)
+    repeated_audio = np.tile(audio, 2)
+    # Repeated audio to buffer
+    buffer = io.BytesIO()
+    sf.write(buffer, repeated_audio, sr, format='WAV')
+    buffer.seek(0)
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        translation = await client.audio.translations.create(
+            model=model_name,
+            file=buffer,
+            extra_body=dict(language="it"),
+            response_format="text",
+            temperature=0.0)
+        out = json.loads(translation)['text'].strip().lower()
+        # TODO investigate higher model uncertainty in for longer translations.
+        assert out.count("nor will i ever") == 2
