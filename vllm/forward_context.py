@@ -95,6 +95,8 @@ class ForwardContext:
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
     skip_cuda_graphs: bool = False
+    # Set when recording usage histogram
+    expert_usage_histogram: Optional[torch.Tensor] = None
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -116,6 +118,7 @@ def set_forward_context(
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     skip_cuda_graphs: bool = False,
+    expert_usage_histogram: Optional[torch.Tensor] = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -132,6 +135,9 @@ def set_forward_context(
                                       attn_metadata, num_tokens or 0,
                                       num_tokens_across_dp)
 
+    if expert_usage_histogram is not None:
+        expert_usage_histogram.zero_()
+
     global _forward_context
     prev_context = _forward_context
     _forward_context = ForwardContext(
@@ -141,6 +147,7 @@ def set_forward_context(
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
         skip_cuda_graphs=skip_cuda_graphs,
+        expert_usage_histogram=expert_usage_histogram,
     )
 
     try:

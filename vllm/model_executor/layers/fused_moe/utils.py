@@ -4,6 +4,8 @@ from math import prod
 from typing import Optional
 
 import torch
+import triton
+import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -11,6 +13,62 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.utils import cdiv
+
+
+@triton.jit
+def _collect_expert_usage_histogram(
+    topk_experts_ptr,  # [M, K]
+    histogram_ptr,  # [E]
+    M: int,
+    K: tl.constexpr,
+    stride_m: int,
+    stride_k: int,
+    E: tl.constexpr,
+    stride_e: int,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+
+    topk_experts_load_offsets = topk_experts_ptr + pid * stride_m + tl.arange(
+        0, K) * stride_k
+
+    expert_indices = tl.load(topk_experts_load_offsets).cast(dtype=tl.int32)
+
+    expert_usage_histogram_layer = expert_indices.histogram(E)
+
+    histogram_store_offsets = histogram_ptr + tl.arange(0, E) * stride_e
+
+    tl.atomic_add(histogram_store_offsets,
+                  expert_usage_histogram_layer,
+                  mask=tl.arange(0, BLOCK_SIZE) < E)
+
+
+def collect_expert_usage_histogram(
+        topk_experts: torch.Tensor,
+        expert_usage_histogram_layer: torch.Tensor) -> None:
+    assert len(topk_experts.shape) == 2
+    M = topk_experts.shape[0]
+    K = topk_experts.shape[1]
+
+    E = expert_usage_histogram_layer.shape[0]
+
+    block_size = triton.next_power_of_2(E)
+    assert block_size == E  # Don't allow padding
+
+    assert block_size >= K
+    assert block_size >= E
+
+    _collect_expert_usage_histogram[(M, )](
+        topk_experts,
+        expert_usage_histogram_layer,
+        M=M,
+        K=K,
+        stride_m=topk_experts.stride(0),
+        stride_k=topk_experts.stride(1),
+        E=E,
+        stride_e=expert_usage_histogram_layer.stride(0),
+        BLOCK_SIZE=block_size,
+    )
 
 
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:

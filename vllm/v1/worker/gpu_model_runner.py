@@ -299,6 +299,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
+        self.expert_usage_histogram: Optional[torch.Tensor] = None
+
+        if envs.VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM:
+            logger.warning_once(
+                "Collecting expert routing histogram per layer, "
+                "this can affect performance negatively")
+
+            self.expert_usage_histogram = torch.zeros(
+                model_config.get_total_num_hidden_layers(),
+                model_config.get_total_num_experts(),
+                dtype=torch.int32,
+                device=self.device)
+
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
         # means this layer will perform attention using the keys and values
@@ -1344,6 +1357,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
+                expert_usage_histogram=self.expert_usage_histogram,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
@@ -1591,6 +1605,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             spec_token_ids = draft_token_ids.tolist()
 
+        expert_usage_histogram_cpu: Optional[torch.Tensor] = None
+        if self.expert_usage_histogram is not None:
+            expert_usage_histogram_cpu = self.expert_usage_histogram.cpu()
+
         # Clear KVConnector state after all KVs are generated.
         if has_kv_transfer_group():
             get_kv_transfer_group().clear_connector_metadata()
@@ -1606,6 +1624,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             num_nans_in_logits=num_nans_in_logits,
+            expert_usage_histogram_cpu=expert_usage_histogram_cpu,
         )
 
     def kv_connector_no_forward(
@@ -1965,7 +1984,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
-                    num_tokens_across_dp=num_tokens_across_dp):
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    expert_usage_histogram=self.expert_usage_histogram):
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,

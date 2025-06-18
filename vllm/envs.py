@@ -131,6 +131,7 @@ if TYPE_CHECKING:
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_KV_CACHE_LAYOUT: Optional[str] = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
+    VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM: bool = False
 
 
 def get_default_cache_root():
@@ -905,6 +906,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # or bad hardware but it may add compute overhead.
     "VLLM_COMPUTE_NANS_IN_LOGITS":
     lambda: bool(int(os.getenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0"))),
+
+    # Collects expert routing histogram per layer
+    "VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM":
+    lambda: bool(int(os.getenv("VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

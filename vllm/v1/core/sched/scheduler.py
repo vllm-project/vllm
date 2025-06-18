@@ -8,6 +8,8 @@ from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
+import torch
+
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -887,7 +889,9 @@ class Scheduler(SchedulerInterface):
         if engine_core_outputs:
             # Return stats to only one of the front-ends.
             next(iter(engine_core_outputs.values())).scheduler_stats = (
-                self.make_stats(spec_decoding_stats))
+                self.make_stats(
+                    spec_decoding_stats,
+                    model_runner_output.expert_usage_histogram_cpu))
 
         return engine_core_outputs
 
@@ -966,6 +970,7 @@ class Scheduler(SchedulerInterface):
     def make_stats(
         self,
         spec_decoding_stats: Optional[SpecDecodingStats] = None,
+        expert_usage_histogram_cpu: Optional[torch.Tensor] = None,
     ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
@@ -979,6 +984,7 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats=spec_decoding_stats,
             num_corrupted_reqs=sum(req.is_output_corrupted
                                    for req in self.running),
+            expert_usage_histogram_cpu=expert_usage_histogram_cpu,
         )
 
     def make_spec_decoding_stats(

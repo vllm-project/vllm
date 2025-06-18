@@ -9,6 +9,7 @@ from typing import Callable, Optional
 import numpy as np
 import prometheus_client
 
+import vllm.envs as envs
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
@@ -374,6 +375,24 @@ class PrometheusStatLogger(StatLoggerBase):
                 buckets=request_latency_buckets,
                 labelnames=labelnames).labels(*labelvalues)
 
+        if envs.VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM:
+            layer_count = vllm_config.model_config.get_total_num_hidden_layers(
+            )
+            expert_count = vllm_config.model_config.get_total_num_experts()
+
+            moe_expert_selection = self._counter_cls(
+                name="vllm:moe_expert_selection_counter",
+                documentation=
+                "Histogram (actually Counter) of MoE expert selection.",
+                labelnames=labelnames + ['layer', 'expert'])
+
+            self.counter_moe_expert_selection_array = [[
+                moe_expert_selection.labels(
+                    *(labelvalues +
+                      [str(layer_index), str(expert_index)]))
+                for expert_index in range(expert_count)
+            ] for layer_index in range(layer_count)]
+
         #
         # LoRA metrics
         #
@@ -443,6 +462,14 @@ class PrometheusStatLogger(StatLoggerBase):
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
                     scheduler_stats.spec_decoding_stats)
+
+            if scheduler_stats.expert_usage_histogram_cpu is not None:
+                histogram = scheduler_stats.expert_usage_histogram_cpu
+
+                for i in range(histogram.shape[0]):
+                    for j in range(histogram.shape[1]):
+                        self.counter_moe_expert_selection_array[i][j].inc(
+                            histogram[i, j].item())
 
         if iteration_stats is None:
             return

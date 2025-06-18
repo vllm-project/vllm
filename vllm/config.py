@@ -981,7 +981,7 @@ class ModelConfig:
 
             self.enforce_eager = True
 
-    def _verify_with_expert_parallelism(self) -> None:
+    def get_total_num_experts(self) -> int:
         num_expert_names = [
             "moe_num_experts",  # Dbrx
             "num_experts",  # Jamba
@@ -993,7 +993,10 @@ class ModelConfig:
             num_experts = getattr(self.hf_text_config, name, 0)
             if num_experts > 0:
                 break
-        if num_experts < 1:
+        return num_experts
+
+    def _verify_with_expert_parallelism(self) -> None:
+        if self.get_total_num_experts() < 1:
             raise ValueError(
                 "Number of experts in the model must be greater than 0 "
                 "when expert parallelism is enabled.")
@@ -1222,9 +1225,7 @@ class ModelConfig:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
 
-    def get_layers_start_end_indices(
-            self, parallel_config: "ParallelConfig") -> tuple[int, int]:
-        from vllm.distributed.utils import get_pp_indices
+    def get_total_num_hidden_layers(self) -> int:
         if (self.hf_text_config.model_type == "deepseek_mtp"
                 or self.hf_config.model_type == "mimo_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
@@ -1232,6 +1233,13 @@ class ModelConfig:
         else:
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_hidden_layers", 0)
+        return total_num_hidden_layers
+
+    def get_layers_start_end_indices(
+            self, parallel_config: "ParallelConfig") -> tuple[int, int]:
+        from vllm.distributed.utils import get_pp_indices
+        total_num_hidden_layers = self.get_total_num_hidden_layers()
+
         # the layout order is: DP x PP x TP
         pp_rank = (parallel_config.rank // parallel_config.tensor_parallel_size
                    ) % parallel_config.pipeline_parallel_size
