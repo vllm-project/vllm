@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This example shows how to use vLLM for running offline inference with
 multi-image input on vision language models for text generation,
@@ -284,6 +285,106 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_llava(question: str, image_urls: list[str]) -> ModelRequestData:
+    # NOTE: CAUTION! Original Llava models wasn't really trained on multi-image inputs,
+    # it will generate poor response for multi-image inputs!
+    model_name = "llava-hf/llava-1.5-7b-hf"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_llava_next(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "llava-hf/llava-v1.6-mistral-7b-hf"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_llava_onevision(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
         image_data=[fetch_image(url) for url in image_urls],
     )
 
@@ -592,21 +693,21 @@ def load_qwen_vl_chat(question: str, image_urls: list[str]) -> ModelRequestData:
 
 def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     try:
-        from qwen_vl_utils import process_vision_info
+        from qwen_vl_utils import smart_resize
     except ModuleNotFoundError:
         print(
             "WARNING: `qwen-vl-utils` not installed, input images will not "
             "be automatically resized. You can enable this functionality by "
             "`pip install qwen-vl-utils`."
         )
-        process_vision_info = None
+        smart_resize = None
 
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
     # Tested on L40
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=32768 if process_vision_info is None else 4096,
+        max_model_len=32768 if smart_resize is None else 4096,
         max_num_seqs=5,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
@@ -629,10 +730,18 @@ def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    if process_vision_info is None:
+    if smart_resize is None:
         image_data = [fetch_image(url) for url in image_urls]
     else:
-        image_data, _ = process_vision_info(messages)
+
+        def post_process_image(image: Image) -> Image:
+            width, height = image.size
+            resized_height, resized_width = smart_resize(
+                height, width, max_pixels=1024 * 28 * 28
+            )
+            return image.resize((resized_width, resized_height))
+
+        image_data = [post_process_image(fetch_image(url)) for url in image_urls]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -643,20 +752,20 @@ def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
 
 def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     try:
-        from qwen_vl_utils import process_vision_info
+        from qwen_vl_utils import smart_resize
     except ModuleNotFoundError:
         print(
             "WARNING: `qwen-vl-utils` not installed, input images will not "
             "be automatically resized. You can enable this functionality by "
             "`pip install qwen-vl-utils`."
         )
-        process_vision_info = None
+        smart_resize = None
 
     model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
 
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=32768 if process_vision_info is None else 4096,
+        max_model_len=32768 if smart_resize is None else 4096,
         max_num_seqs=5,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
@@ -679,10 +788,38 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    if process_vision_info is None:
+    if smart_resize is None:
         image_data = [fetch_image(url) for url in image_urls]
     else:
-        image_data, _ = process_vision_info(messages, return_video_kwargs=False)
+
+        def post_process_image(image: Image) -> Image:
+            width, height = image.size
+            resized_height, resized_width = smart_resize(
+                height, width, max_pixels=1024 * 28 * 28
+            )
+            return image.resize((resized_width, resized_height))
+
+        image_data = [post_process_image(fetch_image(url)) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
+def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "omni-research/Tarsier-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    prompt = f"USER: {'<image>' * len(image_urls)}\n{question}\n ASSISTANT:"
+    image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -700,6 +837,9 @@ model_example_map = {
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
     "kimi_vl": load_kimi_vl,
+    "llava": load_llava,
+    "llava-next": load_llava_next,
+    "llava-onevision": load_llava_onevision,
     "llama4": load_llama4,
     "mistral3": load_mistral3,
     "mllama": load_mllama,
@@ -712,6 +852,7 @@ model_example_map = {
     "qwen2_vl": load_qwen2_vl,
     "qwen2_5_vl": load_qwen2_5_vl,
     "smolvlm": load_smolvlm,
+    "tarsier": load_tarsier,
 }
 
 

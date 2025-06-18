@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     NixlConnectorMetadata)
@@ -6,7 +7,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
 from .utils import create_request, create_scheduler, create_vllm_config
 
 
-def test_basic_inferface():
+def test_basic_interface():
     """Unit test for basic NixlConnector interface functionality."""
 
     vllm_config = create_vllm_config()
@@ -24,7 +25,7 @@ def test_basic_inferface():
 
     scheduler.add_request(request)
 
-    # Remote Prefill, triggers NixlConnectorMetdata.
+    # Remote Prefill, triggers NixlConnectorMetadata.
     scheduler_output = scheduler.schedule()
     kv_connector_metadata = scheduler_output.kv_connector_metadata
     assert kv_connector_metadata is not None
@@ -35,8 +36,8 @@ def test_basic_inferface():
     req_meta = kv_connector_metadata.requests[request_id]
 
     for block_id, block in zip(
-            req_meta.local_block_ids, scheduler.kv_cache_manager.
-            single_type_manager.req_to_blocks[request_id]):
+            req_meta.local_block_ids, scheduler.kv_cache_manager.coordinator.
+            single_type_managers[0].req_to_blocks[request_id]):
         assert block_id == block.block_id
 
 

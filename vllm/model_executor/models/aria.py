@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Optional, TypedDict, Union
 
@@ -485,6 +486,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     """
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            # mapping for original checkpoint
             "language_model.model": "language_model",
             "language_model.lm_head": "lm_head",
         },
@@ -600,11 +606,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
         multimodal_embeddings = self._process_image_input(image_input)
         return multimodal_embeddings
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
 from collections.abc import Sequence
@@ -332,6 +333,13 @@ class EmbedModelInfo(NamedTuple):
     name: str
     is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
+    architecture: str = ""
+    dtype: str = "auto"
+    enable_test: bool = True
+
+
+class RerankModelInfo(NamedTuple):
+    name: str
     architecture: str = ""
     dtype: str = "auto"
     enable_test: bool = True

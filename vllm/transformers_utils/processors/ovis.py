@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # yapf: disable
 # ruff: noqa: E501
@@ -67,7 +68,7 @@ class OvisProcessor(ProcessorMixin):
     """
 
     attributes = ["image_processor", "tokenizer"]
-    valid_kwargs = ["chat_template", "image_pad_token", "image_segement_len"]
+    valid_kwargs = ["chat_template", "image_pad_token", "image_segment_len"]
 
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "AutoTokenizer"

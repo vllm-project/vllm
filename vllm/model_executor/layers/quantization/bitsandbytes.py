@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Any, Optional
 
@@ -70,9 +71,7 @@ class BitsAndBytesConfig(QuantizationConfig):
 
     @staticmethod
     def get_config_filenames() -> list[str]:
-        return [
-            "adapter_config.json",
-        ]
+        return []
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "BitsAndBytesConfig":

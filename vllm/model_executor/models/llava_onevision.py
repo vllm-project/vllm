@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
@@ -29,8 +30,9 @@ from .llava import LlavaDummyInputsBuilder, init_vision_tower_for_llava
 from .llava_next import (BaseLlavaNextMultiModalProcessor, LlavaNextLikeConfig,
                          LlavaNextProcessingInfo)
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
@@ -426,6 +428,16 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     dummy_inputs=LlavaOnevisionDummyInputsBuilder)
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "model.image_newline": "image_newline",
+            "lm_head.": "language_model.lm_head.",
+        })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -838,11 +850,12 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
             **kwargs)
         if not mm_input_by_modality:
+            return []
             return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
@@ -952,4 +965,4 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

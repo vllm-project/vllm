@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import atexit
 import gc
 import importlib
 import inspect
+import json
 import multiprocessing
 import os
 import signal
@@ -16,7 +18,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from json import JSONDecodeError
 from typing import Annotated, Any, Optional
 
 import prometheus_client
@@ -101,8 +102,6 @@ from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address, set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
-
-TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
@@ -930,7 +929,7 @@ async def invocations(raw_request: Request):
     """
     try:
         body = await raw_request.json()
-    except JSONDecodeError as e:
+    except json.JSONDecodeError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=f"JSON decode error: {e}") from e
 
@@ -1001,6 +1000,18 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
                                 status_code=response.code)
 
         return Response(status_code=200, content=response)
+
+
+def load_log_config(log_config_file: Optional[str]) -> Optional[dict]:
+    if not log_config_file:
+        return None
+    try:
+        with open(log_config_file) as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning("Failed to load log config from file %s: error %s",
+                       log_config_file, e)
+        return None
 
 
 def build_app(args: Namespace) -> FastAPI:
@@ -1324,6 +1335,11 @@ async def run_server_worker(listen_address,
 
     server_index = client_config.get("client_index", 0) if client_config else 0
 
+    # Load logging config for uvicorn if specified
+    log_config = load_log_config(args.log_config_file)
+    if log_config is not None:
+        uvicorn_kwargs['log_config'] = log_config
+
     async with build_async_engine_client(args, client_config) as engine_client:
         app = build_app(args)
 
@@ -1342,7 +1358,7 @@ async def run_server_worker(listen_address,
             # NOTE: When the 'disable_uvicorn_access_log' value is True,
             # no access log will be output.
             access_log=not args.disable_uvicorn_access_log,
-            timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+            timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
             ssl_keyfile=args.ssl_keyfile,
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,

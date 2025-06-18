@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
 
-from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.v1.worker.tpu_input_batch import InputBatch
 
 DEFAULT_SAMPLING_PARAMS = dict(
     temperature=-1.0,

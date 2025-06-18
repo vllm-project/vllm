@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/ovis/modeling_ovis.py
 # Copyright 2023 The vLLM team.
@@ -282,7 +283,7 @@ class OvisProcessingInfo(BaseProcessingInfo):
     def get_image_size_with_most_features(self) -> ImageSize:
         height, width = self.get_hf_processor().get_image_size()
         hs = self.get_hf_config().visual_tokenizer_config.hidden_stride
-        # NOTE(Isotr0py): 9 is `max_partion` hardcoded in original code
+        # NOTE(Isotr0py): 9 is `max_partition` hardcoded in original code
         # https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/modeling_ovis.py#L96
         return ImageSize(width=width * hs * 9, height=height * hs * 9)
 
@@ -498,11 +499,11 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
         return tuple(vision_embeddings)
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         image_features = self._process_image_input(image_input)
 

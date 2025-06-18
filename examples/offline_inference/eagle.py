@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import json
 import os
@@ -136,4 +137,8 @@ def main():
 
 
 if __name__ == "__main__":
+    print(
+        "[WARNING] Use examples/offline_inference/spec_decode.py"
+        " instead of this script."
+    )
     main()

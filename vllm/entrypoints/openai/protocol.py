@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
@@ -270,6 +271,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     prompt_logprobs: Optional[int] = None
+    allowed_token_ids: Optional[list[int]] = None
+    bad_words: list[str] = Field(default_factory=list)
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -548,6 +551,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 else RequestOutputKind.FINAL_ONLY,
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
+            bad_words= self.bad_words,
+            allowed_token_ids=self.allowed_token_ids,
             extra_args=({"kv_transfer_params": self.kv_transfer_params}
                         if self.kv_transfer_params else None))
 
@@ -697,22 +702,26 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
+            correct_usage_message = 'Correct usage: `{"type": "function",' \
+                ' "function": {"name": "my_function"}}`'
             if isinstance(data["tool_choice"], dict):
                 valid_tool = False
-                specified_function = data["tool_choice"].get("function")
-                if not specified_function:
+                function = data["tool_choice"].get("function")
+                if not isinstance(function, dict):
                     raise ValueError(
-                        "Expected field `function` in `tool_choice`."
-                        " Correct usage: `{\"type\": \"function\","
-                        " \"function\": {\"name\": \"my_function\"}}`")
-                specified_function_name = specified_function.get("name")
-                if not specified_function_name:
+                        f"Invalid value for `function`: `{function}` in "
+                        f"`tool_choice`! {correct_usage_message}")
+                if "name" not in function:
+                    raise ValueError(f"Expected field `name` in `function` in "
+                                     f"`tool_choice`! {correct_usage_message}")
+                function_name = function["name"]
+                if not isinstance(function_name,
+                                  str) or len(function_name) == 0:
                     raise ValueError(
-                        "Expected field `name` in `function` in `tool_choice`."
-                        "Correct usage: `{\"type\": \"function\", "
-                        "\"function\": {\"name\": \"my_function\"}}`")
+                        f"Invalid `name` in `function`: `{function_name}`"
+                        f" in `tool_choice`! {correct_usage_message}")
                 for tool in data["tools"]:
-                    if tool["function"]["name"] == specified_function_name:
+                    if tool["function"]["name"] == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
@@ -1481,6 +1490,10 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
+BatchRequestInputBody = Union[ChatCompletionRequest, EmbeddingRequest,
+                              ScoreRequest, RerankRequest]
+
+
 class BatchRequestInput(OpenAIBaseModel):
     """
     The per-line object of the batch input file.
@@ -1501,21 +1514,22 @@ class BatchRequestInput(OpenAIBaseModel):
     url: str
 
     # The parameters of the request.
-    body: Union[ChatCompletionRequest, EmbeddingRequest, ScoreRequest]
+    body: BatchRequestInputBody
 
     @field_validator('body', mode='plain')
     @classmethod
     def check_type_for_url(cls, value: Any, info: ValidationInfo):
         # Use url to disambiguate models
-        url = info.data['url']
+        url: str = info.data["url"]
         if url == "/v1/chat/completions":
             return ChatCompletionRequest.model_validate(value)
         if url == "/v1/embeddings":
             return TypeAdapter(EmbeddingRequest).validate_python(value)
-        if url == "/v1/score":
+        if url.endswith("/score"):
             return ScoreRequest.model_validate(value)
-        return TypeAdapter(Union[ChatCompletionRequest, EmbeddingRequest,
-                                 ScoreRequest]).validate_python(value)
+        if url.endswith("/rerank"):
+            return RerankRequest.model_validate(value)
+        return TypeAdapter(BatchRequestInputBody).validate_python(value)
 
 
 class BatchResponseData(OpenAIBaseModel):
@@ -1527,7 +1541,7 @@ class BatchResponseData(OpenAIBaseModel):
 
     # The body of the response.
     body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
-                         ScoreResponse]] = None
+                         ScoreResponse, RerankResponse]] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -1558,6 +1572,11 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
             "If true (the default), special tokens (e.g. BOS) will be added to "
             "the prompt."),
     )
+    return_token_strs: Optional[bool] = Field(
+        default=False,
+        description=("If true, also return the token strings "
+                     "corresponding to the token ids."),
+    )
 
 
 class TokenizeChatRequest(OpenAIBaseModel):
@@ -1570,6 +1589,11 @@ class TokenizeChatRequest(OpenAIBaseModel):
         ("If true, the generation prompt will be added to the chat template. "
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
+    )
+    return_token_strs: Optional[bool] = Field(
+        default=False,
+        description=("If true, also return the token strings "
+                     "corresponding to the token ids."),
     )
     continue_final_message: bool = Field(
         default=False,
@@ -1628,6 +1652,7 @@ class TokenizeResponse(OpenAIBaseModel):
     count: int
     max_model_len: int
     tokens: list[int]
+    token_strs: Optional[list[str]] = None
 
 
 class DetokenizeRequest(OpenAIBaseModel):

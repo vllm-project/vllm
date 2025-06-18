@@ -1,7 +1,7 @@
 [build-system]
 # Should be mirrored in requirements/build.txt
 requires = [
-    "cmake>=3.26",
+    "cmake>=3.26.1",
     "ninja",
     "packaging>=24.2",
     "setuptools>=77.0.3,<80.0.0",
@@ -136,10 +136,6 @@ exclude = [
     # Ignore triton kernels in ops.
     'vllm/attention/ops/.*\.py$'
 ]
-
-[tool.codespell]
-ignore-words-list = "dout, te, indicies, subtile, ElementE"
-skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora/data/*,build/*,vllm/third_party/*"
 
 [tool.isort]
 skip_glob = [

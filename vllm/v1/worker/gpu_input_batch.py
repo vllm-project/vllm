@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# Datastructures defining an input batch
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Datastructures defining a GPU input batch
 
 from dataclasses import dataclass
 from typing import Optional, cast
@@ -29,7 +30,7 @@ class CachedRequestState:
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 
-    block_ids: list[list[int]]
+    block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     output_token_ids: list[int]
 
@@ -55,14 +56,14 @@ class CachedRequestState:
 class InputBatch:
 
     def __init__(
-        self,
-        max_num_reqs: int,
-        max_model_len: int,
-        max_num_batched_tokens: int,
-        device: torch.device,
-        pin_memory: bool,
-        vocab_size: int,
-        block_size: int,
+            self,
+            max_num_reqs: int,
+            max_model_len: int,
+            max_num_batched_tokens: int,
+            device: torch.device,
+            pin_memory: bool,
+            vocab_size: int,
+            block_sizes: list[int],  # The block_size of each kv cache group
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -104,7 +105,7 @@ class InputBatch:
             max_num_batched_tokens=max_num_batched_tokens,
             pin_memory=pin_memory,
             device=device,
-            block_size=block_size,
+            block_sizes=block_sizes,
         )
 
         # Sampling-related.
@@ -452,6 +453,11 @@ class InputBatch:
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
+        """Move non-empty requests down into lower, empty indices.
+        
+        Args:
+          empty_req_indices: empty batch indices, sorted descending.
+        """
         num_reqs = self.num_reqs
         if num_reqs == 0:
             # The batched states are empty.

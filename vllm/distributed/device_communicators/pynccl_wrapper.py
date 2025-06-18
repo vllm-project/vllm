@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # This file is a pure Python wrapper for the NCCL library.
 # The main purpose is to use NCCL combined with CUDA graph.
@@ -269,6 +270,14 @@ class NCCLLibrary:
         unique_id = ncclUniqueId()
         self.NCCL_CHECK(self._funcs["ncclGetUniqueId"](
             ctypes.byref(unique_id)))
+        return unique_id
+
+    def unique_id_from_bytes(self, data: bytes) -> ncclUniqueId:
+        if len(data) != 128:
+            raise ValueError(
+                f"Expected 128 bytes for ncclUniqueId, got {len(data)} bytes")
+        unique_id = ncclUniqueId()
+        ctypes.memmove(ctypes.addressof(unique_id.internal), data, 128)
         return unique_id
 
     def ncclCommInitRank(self, world_size: int, unique_id: ncclUniqueId,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -169,6 +170,9 @@ class RequestStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
+
+    def __str__(self):
+        return self.name
 
     @staticmethod
     def is_finished(status: "RequestStatus") -> bool:

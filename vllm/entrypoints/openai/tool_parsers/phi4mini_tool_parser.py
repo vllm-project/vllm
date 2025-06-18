@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 from collections.abc import Sequence
@@ -68,8 +69,8 @@ class Phi4MiniJsonToolParser(ToolParser):
                              len(function_call_arr))
             except json.JSONDecodeError as e:
                 logger.error(
-                    "Failed to parse function calls from model output: %s. "
-                    "Error: %s", model_output, str(e))
+                    "Failed to parse function calls from model output. "
+                    "Error: %s", str(e))
 
             tool_calls: list[ToolCall] = [
                 ToolCall(

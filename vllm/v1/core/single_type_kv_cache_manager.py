@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Callable
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashType, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
                                         SlidingWindowSpec)
 from vllm.v1.request import Request
@@ -21,8 +22,7 @@ class SingleTypeKVCacheManager(ABC):
         self,
         kv_cache_spec: KVCacheSpec,
         block_pool: BlockPool,
-        use_eagle: bool,
-        num_kv_cache_groups: int,
+        kv_cache_group_id: int,
         caching_hash_fn: Callable,
     ) -> None:
         """
@@ -30,18 +30,13 @@ class SingleTypeKVCacheManager(ABC):
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
             block_pool: The block pool.
-            use_eagle: Whether to use eagle.
-            num_kv_cache_groups: The number of kv cache groups managed by this 
-                manager.
+            kv_cache_group_id: The id of the kv cache group of this manager.
             caching_hash_fn: The caching hash function.
         """
 
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
-
-        # Needs special handling for find_longest_cache_hit if eagle is enabled
-        self.use_eagle = use_eagle
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -55,8 +50,8 @@ class SingleTypeKVCacheManager(ABC):
         # data for reempted ones.
         self.num_cached_block: dict[str, int] = {}
 
-        self.num_kv_cache_groups = num_kv_cache_groups
         self.caching_hash_fn = caching_hash_fn
+        self.kv_cache_group_id = kv_cache_group_id
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
@@ -82,10 +77,10 @@ class SingleTypeKVCacheManager(ABC):
         # free queue and ref_cnt == 0), it will be changed from a free block
         # to a computed block when the request is allocated, so we also count
         # it as needed to be allocated.
-        num_evictable_computed_blocks = sum(blk.ref_cnt == 0
-                                            for blk in new_computed_blocks)
-        return ((num_new_blocks + num_evictable_computed_blocks) *
-                self.num_kv_cache_groups)
+        num_evictable_computed_blocks = sum(
+            blk.ref_cnt == 0 and not blk.is_null
+            for blk in new_computed_blocks)
+        return num_new_blocks + num_evictable_computed_blocks
 
     def save_new_computed_blocks(
             self, request_id: str,
@@ -128,12 +123,11 @@ class SingleTypeKVCacheManager(ABC):
         if num_new_blocks <= 0:
             return []
         else:
-            new_blocks = self.block_pool.get_new_blocks(
-                num_new_blocks * self.num_kv_cache_groups)
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request, block_hashes: list[BlockHashType],
+    def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
                      num_tokens: int) -> None:
         """
         Cache the blocks for the request.
@@ -154,12 +148,19 @@ class SingleTypeKVCacheManager(ABC):
             num_cached_blocks=num_cached_blocks,
             num_full_blocks=num_full_blocks,
             block_size=self.block_size,
+            kv_cache_group_id=self.kv_cache_group_id,
             hash_fn=self.caching_hash_fn,
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
 
     def free(self, request_id: str) -> None:
+        """
+        Free the blocks for the request.
+
+        Args:
+            request_id: The request ID.
+        """
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
 
@@ -186,12 +187,22 @@ class SingleTypeKVCacheManager(ABC):
 
         raise NotImplementedError
 
+    @classmethod
     @abstractmethod
-    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
-                               max_length: int) -> list[KVCacheBlock]:
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: list[BlockHash],
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+    ) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than 
-        `max_length`. If no cache hit is found, return an empty list. 
+        `max_length`. The prefix should be a common prefix hit for all the 
+        kv cache groups in `kv_cache_group_ids`. If no cache hit is found, 
+        return an empty list. 
         If eagle is enabled, drop the last matched block to force recompute the 
         last block to get the required hidden states for eagle drafting head. 
         Need to be customized for each attention type.
@@ -199,12 +210,20 @@ class SingleTypeKVCacheManager(ABC):
         Args:
             block_hashes: The block hashes of the request.
             max_length: The maximum length of the cache hit prefix.
+            kv_cache_group_ids: The ids of the kv cache groups.
+            block_pool: The block pool.
+            kv_cache_spec: The kv cache spec.
+            use_eagle: Whether to use eagle.
 
         Returns:
-            A list of cached blocks with skipped blocks replaced by null block.
+            A list of cached blocks with skipped blocks replaced by null block
+            for each kv cache group in `kv_cache_group_ids`.
+            Return a list of length `len(kv_cache_group_ids)`, where the i-th
+            element is a list of cached blocks for the i-th kv cache group
+            in `kv_cache_group_ids`.
             For example, sliding window manager should return a list like
-            [NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)] for block size 4 and 
-            sliding window 8. 
+            ([NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)]) for block size 4
+            and sliding window 8 and len(kv_cache_group_ids) = 1.
         """
 
         raise NotImplementedError
@@ -213,11 +232,9 @@ class SingleTypeKVCacheManager(ABC):
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
         """
-        Remove the blocks that are no longer needed from `blocks`. The removed 
-        blocks should be replaced by null_block. Return the removed blocks in 
-        eviction order, where the first returned block should be evicted first.
-        Don't free the removed blocks in this function. Need to be customized 
-        for each attention type.
+        Remove the blocks that are no longer needed from `blocks` and free the 
+        blocks. The removed blocks should be replaced by null_block.
+        Need to be customized for each attention type.
 
         Args:
             request_id: The request ID.
@@ -228,21 +245,34 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
 
-    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
-                               max_length: int) -> list[KVCacheBlock]:
-        computed_blocks: list[KVCacheBlock] = []
-        max_num_blocks = max_length // self.block_size
-        for i in range(max_num_blocks):
-            block_hash = block_hashes[i]
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: list[BlockHash],
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        assert isinstance(kv_cache_spec, FullAttentionSpec), (
+            "FullAttentionManager can only be used for full attention groups")
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in range(len(kv_cache_group_ids)))
+        max_num_blocks = max_length // kv_cache_spec.block_size
+        for i, block_hash in zip(range(max_num_blocks), block_hashes):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
-            if cached_block := self.block_pool.get_cached_block(block_hash):
-                computed_blocks.append(cached_block)
+            if cached_block := block_pool.get_cached_block(
+                    block_hash, kv_cache_group_ids):
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed.append(cached)
             else:
                 break
-        if self.use_eagle and len(computed_blocks) > 0:
-            computed_blocks.pop()
+        if use_eagle and computed_blocks[0]:
+            for computed in computed_blocks:
+                computed.pop()
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
@@ -265,45 +295,58 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 class SlidingWindowManager(SingleTypeKVCacheManager):
 
     def __init__(self, kv_cache_spec: SlidingWindowSpec, block_pool: BlockPool,
-                 use_eagle: bool, **kwargs) -> None:
-        super().__init__(kv_cache_spec, block_pool, use_eagle, **kwargs)
+                 **kwargs) -> None:
+        super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
+        self._null_block = block_pool.null_block
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: list[BlockHash],
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        assert isinstance(kv_cache_spec, SlidingWindowSpec), (
+            "SlidingWindowManager can only be used for sliding window groups")
+
         # The number of contiguous blocks needed for prefix cache hit.
         # -1 since the input token itself is also included in the window
-        self.sliding_window_contiguous_blocks = cdiv(
-            (kv_cache_spec.sliding_window - 1), self.block_size)
-        if self.use_eagle:
+        sliding_window_contiguous_blocks = cdiv(
+            kv_cache_spec.sliding_window - 1, kv_cache_spec.block_size)
+        if use_eagle:
             # Need to drop the last matched block if eagle is enabled. For
             # sliding window layer, we achieve this by increasing the number of
             # contiguous blocks needed for prefix cache hit by one and dropping
             # the last matched block.
-            self.sliding_window_contiguous_blocks += 1
-        self._null_block = block_pool.null_block
+            sliding_window_contiguous_blocks += 1
 
-    def find_longest_cache_hit(self, block_hashes: list[BlockHashType],
-                               max_length: int) -> list[KVCacheBlock]:
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(max_num_blocks) to
         # O(max_num_blocks / sliding_window_contiguous_blocks +
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
-        max_num_blocks = max_length // self.block_size
-        computed_blocks = [self._null_block] * max_num_blocks
+        max_num_blocks = max_length // kv_cache_spec.block_size
+        computed_blocks = tuple([block_pool.null_block] * max_num_blocks
+                                for _ in range(len(kv_cache_group_ids)))
         num_contiguous_blocks = 0
-
         match_found = False
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
-            if cached_block := self.block_pool.get_cached_block(
-                    block_hashes[i]):
-                computed_blocks[i] = cached_block
+            if cached_block := block_pool.get_cached_block(
+                    block_hashes[i], kv_cache_group_ids):
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed[i] = cached
                 num_contiguous_blocks += 1
-                if (num_contiguous_blocks
-                        >= self.sliding_window_contiguous_blocks):
+                if num_contiguous_blocks >= sliding_window_contiguous_blocks:
                     # Trim the trailing blocks.
                     # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
                     # when sliding_window_contiguous_blocks=2.
-                    del computed_blocks[i + num_contiguous_blocks:]
+                    for computed in computed_blocks:
+                        del computed[i + num_contiguous_blocks:]
                     match_found = True
                     break
             else:
@@ -311,9 +354,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         if not match_found:
             # The first `num_contiguous_blocks` is a cache hit even if
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
-            del computed_blocks[num_contiguous_blocks:]
-        if self.use_eagle and len(computed_blocks) > 0:
-            computed_blocks.pop()
+            for computed in computed_blocks:
+                del computed[num_contiguous_blocks:]
+        if use_eagle and computed_blocks[0]:
+            for computed in computed_blocks:
+                computed.pop()
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with Dual chunk flash attention and sparse attention.
 """
 import math
@@ -289,9 +290,12 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         layer_idx: int = -1,
         dual_chunk_attention_config: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -303,7 +307,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                                if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if sliding_window is not None:
             # NOTE(woosuk): flash-attn's sliding window does not work with
@@ -366,6 +369,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: DualChunkFlashAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with DualChunkFlashAttention.
         Args:
@@ -379,6 +384,13 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        assert output is None, "Output tensor not supported for DualChunk"
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashAttentionImpl")
+
         (
             query,
             query_succ,
