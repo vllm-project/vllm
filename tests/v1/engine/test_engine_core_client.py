@@ -522,7 +522,7 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
 
 @create_new_process_for_each_test()
-def test_engine_core_proc_instantiation_no_cuda(
+def test_engine_core_proc_instantiation_no_gpu(
         monkeypatch: pytest.MonkeyPatch):
     """
     Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
