@@ -1151,8 +1151,8 @@ class MRotaryEmbedding(RotaryEmbedding):
         """Get mrope input positions and delta value for GLM4V."""
 
         image_token_id = hf_config.image_token_id
-        vision_start_token_id = hf_config.vision_start_token_id
-        vision_end_token_id = hf_config.vision_end_token_id
+        video_start_token_id = hf_config.video_start_token_id
+        video_end_token_id = hf_config.video_end_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
         llm_pos_ids_list: list = []
 
@@ -1163,9 +1163,9 @@ class MRotaryEmbedding(RotaryEmbedding):
             input_token_type: list[str] = []
             video_check_flg = False
             for token in input_tokens:
-                if token == vision_start_token_id:
+                if token == video_start_token_id:
                     video_check_flg = True
-                elif token == vision_end_token_id:
+                elif token == video_end_token_id:
                     video_check_flg = False
 
                 if (token == image_token_id) and (video_check_flg is False):
