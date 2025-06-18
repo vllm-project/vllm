@@ -562,7 +562,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # Pass in `extra_body` args and kv transfer params
             extra_args={**({"kv_transfer_params": self.kv_transfer_params}
                             if self.kv_transfer_params else {}),
-                            **self.vllm_xargs,
+                            **(self.vllm_xargs if self.vllm_xargs else {})
                          }
         )
 
@@ -788,7 +788,7 @@ class CompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
 
     # Custom args param
-    vllm_xargs: Optional[dict[str, Any]] = Field(
+    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
         description=("Additional kwargs to pass to sampling."),
     )
@@ -1016,7 +1016,7 @@ class CompletionRequest(OpenAIBaseModel):
             # Pass in `extra_body` args and kv transfer params
             extra_args={**({"kv_transfer_params": self.kv_transfer_params}
                             if self.kv_transfer_params else {}),
-                            **self.vllm_xargs
+                            **(self.vllm_xargs if self.vllm_xargs else {})
                          }
             )
 
