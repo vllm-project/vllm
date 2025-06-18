@@ -252,12 +252,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ChatCompletionNamedToolChoiceParam,
     ]] = "none"
 
-    # Custom sampling params
-    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
-        default=None,
-        description=("Additional kwargs to pass to sampling."),
-    )
-
     # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
@@ -419,6 +413,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
+
+    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
+        default=None,
+        description=
+        ("Dict of arbitrary additional kwargs with string or numeric values. "
+         "Can be used by custom sampling implementations, plugins, etc. Not "
+         "used by any in-tree sampling implementations."),
+    )
 
     # --8<-- [end:chat-completion-extra-params]
 
@@ -787,12 +789,6 @@ class CompletionRequest(OpenAIBaseModel):
     top_p: Optional[float] = None
     user: Optional[str] = None
 
-    # Custom args param
-    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
-        default=None,
-        description=("Additional kwargs to pass to sampling."),
-    )
-
     # --8<-- [start:completion-sampling-params]
     use_beam_search: bool = False
     top_k: Optional[int] = None
@@ -886,6 +882,14 @@ class CompletionRequest(OpenAIBaseModel):
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
+
+    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
+        default=None,
+        description=
+        ("Dict of arbitrary additional kwargs with string or numeric values. "
+         "Can be used by custom sampling implementations, plugins, etc. Not "
+         "used by any in-tree sampling implementations."),
+    )
 
     # --8<-- [end:completion-extra-params]
 
@@ -1756,6 +1760,14 @@ class TranscriptionRequest(OpenAIBaseModel):
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
+
+    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
+        default=None,
+        description=
+        ("Dict of arbitrary additional kwargs with string or numeric values. "
+         "Can be used by custom sampling implementations, plugins, etc. Not "
+         "used by any in-tree sampling implementations."),
+    )
     # --8<-- [end:transcription-extra-params]
 
     # --8<-- [start:transcription-sampling-params]
@@ -1802,12 +1814,6 @@ class TranscriptionRequest(OpenAIBaseModel):
         "top_k": 0,
         "min_p": 0.0,
     }
-
-    # Custom sampling params
-    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
-        default=None,
-        description=("Additional kwargs to pass to sampling."),
-    )
 
     def to_sampling_params(
             self,
