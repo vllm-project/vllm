@@ -150,7 +150,7 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
                 size=size,
-                use_fast=kwargs.get("use_fast")),
+                use_fast=kwargs.get("use_fast", True)),
             **kwargs,
         )
         if not hasattr(processor, "audio_token"):
