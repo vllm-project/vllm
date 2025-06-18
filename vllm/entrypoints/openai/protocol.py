@@ -532,7 +532,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structural_tag=self.structural_tag,
         )
 
-        extra_args = self.vllm_xargs if self.vllm_xargs else {}
+        extra_args: Optional[dict[
+            str, Any]] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
@@ -990,7 +991,8 @@ class CompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
         )
 
-        extra_args = self.vllm_xargs if self.vllm_xargs else {}
+        extra_args: Optional[dict[
+            str, Any]] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
