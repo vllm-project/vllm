@@ -6,28 +6,28 @@ set -x
 
 cd /vllm-workspace/
 
-# check the environment
-pip freeze
+rm -rf .venv
 
-echo ">>> uninstall everything from requirements/test.txt"
-grep -vE '^\s*#' requirements/test.txt | cut -d '=' -f 1 | xargs -n 1 pip uninstall -y
+uv venv .venv
+
+source .venv/bin/activate
 
 # check the environment
-pip freeze
+uv pip freeze
 
 echo ">>> Installing nightly torch packages"
-pip install --quiet torch torchvision torchaudio --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu128
+uv pip install --quiet torch torchvision torchaudio --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu128
 
 echo ">>> Capturing torch-related versions before requirements install"
-pip freeze | grep -E '^torch|^torchvision|^torchaudio' | sort > before.txt
+uv pip freeze | grep -E '^torch|^torchvision|^torchaudio' | sort > before.txt
 echo "Before:"
 cat before.txt
 
 echo ">>> Installing requirements/nightly_torch_test.txt"
-pip install --quiet -r requirements/nightly_torch_test.txt
+uv pip install --quiet -r requirements/nightly_torch_test.txt
 
 echo ">>> Capturing torch-related versions after requirements install"
-pip freeze | grep -E '^torch|^torchvision|^torchaudio' | sort > after.txt
+uv pip freeze | grep -E '^torch|^torchvision|^torchaudio' | sort > after.txt
 echo "After:"
 cat after.txt
 
