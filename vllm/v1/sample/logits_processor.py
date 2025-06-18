@@ -20,26 +20,26 @@ class MoveDirectionalityEnum(Enum):
 
 # (index, params, output_tok_ids) for new
 # requests added to the batch.
-AddedRequestType = tuple[int, SamplingParams, list[int]]
+AddedRequest = tuple[int, SamplingParams, list[int]]
 # (from, to) batch indices of any requests
 # moved within the batch.
-MovedRequestType = tuple[int, int, MoveDirectionalityEnum]
+MovedRequest = tuple[int, int, MoveDirectionalityEnum]
 # Batch indices of any removed requests.
-RemovedRequestType = int
+RemovedRequest = int
 
 
 class BatchUpdate:
     # The current number of requests in the batch.
     batch_size: int
-    _removed: list[RemovedRequestType]
+    _removed: list[RemovedRequest]
     _is_removed_sorted: bool
-    moved: list[MovedRequestType]
-    added: list[AddedRequestType]
+    moved: list[MovedRequest]
+    added: list[AddedRequest]
 
     def __init__(self,
-                 removed: Optional[list[RemovedRequestType]] = None,
-                 moved: Optional[list[MovedRequestType]] = None,
-                 added: Optional[list[AddedRequestType]] = None,
+                 removed: Optional[list[RemovedRequest]] = None,
+                 moved: Optional[list[MovedRequest]] = None,
+                 added: Optional[list[AddedRequest]] = None,
                  batch_size: Optional[int] = None) -> None:
         self._removed = removed or []
         self.moved = moved or []
@@ -59,7 +59,7 @@ class BatchUpdate:
             self._is_removed_sorted = True
 
     @property
-    def removed(self) -> list[RemovedRequestType]:
+    def removed(self) -> list[RemovedRequest]:
         self._sort_removed()
         return self._removed
 

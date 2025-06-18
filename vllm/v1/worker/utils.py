@@ -124,7 +124,7 @@ def initialize_kv_cache_for_kv_sharing(
 
 
 @dataclass
-class LogitsProcessorObjects:
+class LogitsProcessorManager:
     """Encapsulates initialized logitsproc objects.
     
     Each logits processor has a unique id.
@@ -165,7 +165,7 @@ class LogitsProcessorObjects:
 
 def init_hard_coded_logitsprocs(
         pin_memory_available: bool, max_num_reqs: int,
-        device: torch.device) -> LogitsProcessorObjects:
+        device: torch.device) -> LogitsProcessorManager:
     min_tokens_logitproc = MinTokensLogitsProcessor(
         pin_memory=pin_memory_available, device=device)
     logit_bias_logitproc = LogitBiasLogitsProcessor(
@@ -175,7 +175,7 @@ def init_hard_coded_logitsprocs(
         device=device,
         # +1 for temporary swap space
         max_num_reqs=max_num_reqs + 1)
-    return LogitsProcessorObjects(
+    return LogitsProcessorManager(
         greedy={
             STR_MIN_TOKENS_LOGITPROC_ID: min_tokens_logitproc,
             STR_LOGITS_BIAS_LOGITPROC_ID: logit_bias_logitproc

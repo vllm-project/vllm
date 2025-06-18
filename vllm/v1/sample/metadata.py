@@ -6,7 +6,7 @@ from typing import Optional
 
 import torch
 
-from vllm.v1.worker.utils import LogitsProcessorObjects
+from vllm.v1.worker.utils import LogitsProcessorManager
 
 
 @dataclass
@@ -42,4 +42,4 @@ class SamplingMetadata:
     # Some logits processors don't affect greedy decoding (or if they do,
     # only due to precision errors); "non-greedy" processors are
     # only applied to random-sampled requests in the batch.
-    logitsprocs: LogitsProcessorObjects
+    logitsprocs: LogitsProcessorManager

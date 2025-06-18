@@ -60,7 +60,7 @@ from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from .utils import (LogitsProcessorObjects, gather_mm_placeholders,
+from .utils import (LogitsProcessorManager, gather_mm_placeholders,
                     initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
@@ -1916,7 +1916,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_token_ids=[[] for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
-            logitsprocs=LogitsProcessorObjects(),
+            logitsprocs=LogitsProcessorManager(),
         )
         try:
             sampler_output = self.sampler(logits=logits,
