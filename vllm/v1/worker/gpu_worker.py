@@ -18,6 +18,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               set_custom_all_reduce)
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           get_kv_transfer_group,
+                                          has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
@@ -235,6 +236,9 @@ class Worker(WorkerBase):
 
     def get_kv_connector_handshake_metadata(self) -> Optional[dict]:
         """Get KV connector metadata from this worker if available."""
+
+        if not has_kv_transfer_group():
+            return None
 
         connector = get_kv_transfer_group()
         if not is_v1_kv_transfer_group(connector):
