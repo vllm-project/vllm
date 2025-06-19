@@ -490,23 +490,14 @@ class NixlConnectorWorker:
         start_time = time.perf_counter()
         logger.debug("Starting NIXL handshake with %s:%s", host, port)
 
-        # Use the new endpoint scheme to filter by dp_rank and tp_rank
-        # Default to dp_rank 0 and use current tp_rank for optimal filtering
-        url = build_uri("http",
-                        host,
-                        port,
-                        path=f"get_kv_connector_metadata/0/{self.tp_rank}")
-        logger.debug("Querying metadata on path: %s", url)
+        url = build_uri("http", host, port, path="get_kv_connector_metadata")
 
         try:
             req = URLRequest(url)
-            logger.debug("About to send HTTP request to %s", url)
             with urlopen(req,
                          timeout=envs.VLLM_NIXL_HANDSHAKE_TIMEOUT) as response:
-                logger.debug("Received HTTP response from %s", url)
                 response_data = response.read().decode('utf-8')
                 res = json.loads(response_data)
-                logger.debug("NIXL handshake response: %s", res)
         except (URLError, HTTPError) as e:
             logger.error("Failed to fetch metadata from %s: %s", url, e)
             raise
@@ -516,65 +507,50 @@ class NixlConnectorWorker:
                 "Remote server returned None metadata, skipping handshake")
             raise RuntimeError("Remote server returned None metadata")
 
-        # With filtered response from new endpoint, we get:
-        # {dp_rank: {tp_rank: metadata}}
-        # Since we filtered by dp_rank=0 and tp_rank=self.tp_rank,
-        # extract directly.
-        if "0" in res and str(self.tp_rank) in res["0"]:
-            tp_data = res["0"][str(self.tp_rank)]
-            metadata_bytes = tp_data.get("agent_metadata", None)
-            # use current tp_rank for filtered response
-            p_remote_rank = self.tp_rank
-        else:
-            # Fallback to unfiltered endpoint for heterogeneous TP cases
-            url_fallback = build_uri("http",
-                                     host,
-                                     port,
-                                     path="get_kv_connector_metadata")
-            logger.debug("Using fallback unfiltered endpoint: %s",
-                         url_fallback)
-            req = URLRequest(url_fallback)
-            with urlopen(req,
-                         timeout=envs.VLLM_NIXL_HANDSHAKE_TIMEOUT) as response:
-                response_data = response.read().decode('utf-8')
-                res = json.loads(response_data)
+        # Get dp_rank 0 data (standard for disaggregated prefill-decode)
+        dp_data = res.get("0", {})
+        if not dp_data:
+            raise RuntimeError("No metadata found for dp_rank 0")
 
-            dp_data = res.get("0", {})
-            remote_tp_size = len(dp_data.keys()) if dp_data else 1
+        remote_tp_size = len(dp_data.keys())
+        rank0_data = dp_data.get("0", {})
+        if not rank0_data:
+            raise RuntimeError("No metadata found for remote rank 0")
 
-            # Handle heterogeneous TP mapping
-            tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
-            p_remote_rank = self.tp_rank // tp_ratio
-            tp_data = dp_data.get(str(p_remote_rank), {})
-            metadata_bytes = tp_data.get("agent_metadata", None)
+        metadata_bytes = rank0_data.get("agent_metadata", None)
+        if metadata_bytes is None:
+            raise RuntimeError("No agent metadata found for remote rank 0")
 
-        if metadata_bytes is not None:
-            # Reconstruct NixlAgentMetadata from JSON response
-            # agent_metadata is base64-encoded binary data, not msgpack
-            tp_data.pop("agent_metadata", None)
-            metadata = NixlAgentMetadata(
-                agent_metadata=base64.b64decode(metadata_bytes), **tp_data)
+        rank0_data_copy = rank0_data.copy()
+        rank0_data_copy.pop("agent_metadata", None)
+        rank0_metadata = NixlAgentMetadata(
+            agent_metadata=base64.b64decode(metadata_bytes), **rank0_data_copy)
 
-            # Register Remote agent.
-            logger.debug("About to register remote agent for engine %s",
-                         metadata.engine_id)
-            pre_register = time.perf_counter()
-            self.add_remote_agent(metadata, remote_tp_rank=p_remote_rank)
-            agent_time = time.perf_counter()
-            logger.debug("Finished registering remote agent for engine %s",
-                         metadata.engine_id)
+        pre_register = time.perf_counter()
+        self.add_remote_agent(rank0_metadata, remote_tp_rank=0)
+        tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
+        p_remote_rank = self.tp_rank // tp_ratio
 
-            logger.debug("NIXL handshake: get metadata took: %s",
-                         pre_register - start_time)
-            logger.debug("NIXL handshake: add agent took: %s",
-                         agent_time - pre_register)
-        else:
-            # If metadata_bytes is None, it means the remote agent
-            # is not using NIXL, so we can skip the handshake.
-            logger.warning(
-                "Received None metadata from %s:%s, skipping NIXL handshake",
-                host, port)
-            raise RuntimeError("Remote server does not support NIXL")
+        if p_remote_rank > 0:
+            p_rank_data = dp_data.get(str(p_remote_rank), {})
+            if p_rank_data:
+                p_metadata_bytes = p_rank_data.get("agent_metadata", None)
+                if p_metadata_bytes:
+                    p_rank_data_copy = p_rank_data.copy()
+                    p_rank_data_copy.pop("agent_metadata", None)
+                    p_metadata = NixlAgentMetadata(
+                        agent_metadata=base64.b64decode(p_metadata_bytes),
+                        **p_rank_data_copy)
+                    self.add_remote_agent(p_metadata, remote_tp_rank=p_remote_rank)
+
+        agent_time = time.perf_counter()
+
+        logger.debug("Finished registering remote agent for engine %s",
+                     rank0_metadata.engine_id)
+        logger.debug("NIXL handshake: get metadata took: %s",
+                     pre_register - start_time)
+        logger.debug("NIXL handshake: add agent took: %s",
+                     agent_time - pre_register)
 
         logger.debug("NIXL handshake method completed for %s:%s", host, port)
 
