@@ -27,11 +27,14 @@ The class provides the following primitives:
         wait_for_save() - blocks until all saves are done
 
         get_finished() - called with ids of finished requests, returns
-            ids of requests that have completed async sending/recving.
+            `KVTransferResult` that contains ids of requests that have
+            completed async sending/recving, as well as requests that are
+            pending handshake.
 """
 
 import enum
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -47,6 +50,63 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class KVTransferResult:
+    """Result of KV transfer get_finished() operation."""
+
+    finished_sending: set[str]
+    finished_recving: set[str]
+    pending_handshake: set[str]
+
+    def has_any_finished(self) -> bool:
+        """Check if any requests finished sending or recving."""
+        return bool(self.finished_sending or self.finished_recving)
+
+    def is_empty(self) -> bool:
+        """Check if all sets are empty."""
+        return not (self.has_any_finished() or bool(self.pending_handshake))
+
+    def get_all_finished_req_ids(self) -> set[str]:
+        """Get all request IDs that have finished (sending or receiving)."""
+        return self.finished_sending.union(self.finished_recving)
+
+    def merge(self,
+              other: 'KVTransferResult') -> 'KVTransferResult':
+        """Merge with another result, combining each field separately."""
+        return KVTransferResult(
+            finished_sending=self.finished_sending.union(
+                other.finished_sending),
+            finished_recving=self.finished_recving.union(
+                other.finished_recving),
+            pending_handshake=self.pending_handshake.union(
+                other.pending_handshake))
+
+    @classmethod
+    def empty(cls) -> 'KVTransferResult':
+        """Create an empty result."""
+        return cls(finished_sending=set(),
+                   finished_recving=set(),
+                   pending_handshake=set())
+
+    @classmethod
+    def from_tuple(
+        cls, result_tuple: tuple[set[str], set[str], set[str]]
+    ) -> 'KVTransferResult':
+        """Create from the legacy tuple format for backward compatibility."""
+        finished_sending, finished_recving, pending_handshake = result_tuple
+        return cls(finished_sending=finished_sending,
+                   finished_recving=finished_recving,
+                   pending_handshake=pending_handshake)
+
+    def to_tuple(self) -> tuple[set[str], set[str], set[str]]:
+        """Convert to the legacy tuple format for backward compatibility."""
+        return (
+            self.finished_sending,
+            self.finished_recving,
+            self.pending_handshake,
+        )
 
 
 class KVConnectorRole(enum.Enum):
@@ -187,19 +247,27 @@ class KVConnectorBase_V1(ABC):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> KVTransferResult:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
 
         Returns:
-            ids of requests that have finished asynchronous transfer
-            (requests that previously returned True from request_finished()),
-            tuple of (sending/saving ids, recving/loading ids).
+            KVTransferResult containing sets of finished sending,
+            finished receiving, and pending handshake request IDs.
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        return None, None
+        return KVTransferResult.empty()
+
+    def get_pending_handshake_req_ids(self) -> set[str]:
+        """
+        Get request IDs that are currently pending handshake completion.
+
+        Returns:
+            Set of request IDs waiting for handshake.
+        """
+        return set()
 
     # ==============================
     # Scheduler-side methods
