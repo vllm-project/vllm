@@ -230,12 +230,14 @@ class LinearBase(torch.nn.Module):
     ):
         super().__init__()
 
-        # lets torch.compile know that forward_context needs to be
-        # considered as an input to the layer (copied from attention)
-        compilation_config = get_current_vllm_config().compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
+        vllm_config = get_current_vllm_config()
+        if vllm_config.lora_config.activated_lora_enabled:
+            # lets torch.compile know that forward_context needs to be
+            # considered as an input to the layer (copied from attention)
+            compilation_config = vllm_config.compilation_config
+            if prefix in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            compilation_config.static_forward_context[prefix] = self
 
         # Keep input parameters
         self.input_size = input_size

@@ -28,8 +28,7 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 @dataclass
 class ALoRAMetadata:
-    k_offsets: torch.Tensor
-    query_start_loc: torch.Tensor
+    mask1d: torch.Tensor
 
 
 @dataclass

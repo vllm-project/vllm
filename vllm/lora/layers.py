@@ -1304,29 +1304,8 @@ class MergedQKVParallelLinearWithActivatedLoRA(MergedQKVParallelLinearWithLoRA
 
         # Extract aLoRA batch metadata from forward context
         alora_metadata = get_forward_context().alora_metadata
-        k_offsets = alora_metadata.k_offsets
-        query_start_loc = alora_metadata.query_start_loc
 
-        # Build the 1D “save‐prefix” mask:
-        T = output.size(0)  # total tokens
-        starts = query_start_loc[:-1]  # starts and end index of each request
-        ends = query_start_loc[1:]
-        lengths = ends - starts  # request lengths
-        kept_lens = lengths - k_offsets
-        kept_lens = torch.clamp(
-            kept_lens,
-            min=0)  # portion of request to keep as base model weights
-
-        device = output.device
-        # Create the alora mask
-        delta = torch.zeros(T + 1, device=device, dtype=output.dtype)
-        ends_for_scatter = starts + kept_lens
-        pos_vals = kept_lens.sign().to(output.dtype)
-        neg_vals = -pos_vals
-        delta.scatter_add_(0, starts, pos_vals)
-        delta.scatter_add_(0, ends_for_scatter, neg_vals)
-        cums = torch.cumsum(delta[:-1], dim=0)
-        mask1d = cums > 0  # shape [T], bool
+        mask1d = alora_metadata.mask1d
         mask2d = mask1d.unsqueeze(1).to(output.dtype)
 
         # Clone base layer output before running LoRA

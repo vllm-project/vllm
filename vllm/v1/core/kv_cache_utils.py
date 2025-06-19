@@ -475,8 +475,8 @@ def hash_request_tokens(hash_function: Any, block_size: int,
                 request, start, end, curr_mm_idx)
             # Respect a-LoRA behaviour
             if (request.lora_request is not None
-                    and request.lora_request.k_offset is not None and end
-                    <= (len(token_ids) - request.lora_request.k_offset)):
+                    and request.lora_request.invocation_start is not None
+                    and end <= request.lora_request.invocation_start):
                 # cache is equivalent to base model cache
                 req_extra_keys = None
 

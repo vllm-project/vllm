@@ -229,6 +229,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=torch.int64,
                                         device=self.device)
 
+        if self.lora_config.activated_lora_enabled:
+            self.mask1d = torch.zeros(self.max_num_tokens,
+                                      dtype=torch.int64,
+                                      device=self.device)
+
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -745,21 +750,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Compute a-LoRA metadata
         if self.lora_config.activated_lora_enabled:
-            k_offsets = [1] * (num_reqs)
+            invocation_start = np.empty(shape=(num_reqs, ), dtype=int)
             for req_id in self.input_batch.req_ids:
                 req_index = self.input_batch.req_id_to_index[req_id]
                 cached_lora_request = self.requests[req_id].lora_request
                 if (cached_lora_request is not None
-                        and cached_lora_request.k_offset is not None):
-                    k_offsets[req_index] = cached_lora_request.k_offset
+                        and cached_lora_request.invocation_start is not None):
+                    invocation_start[
+                        req_index] = cached_lora_request.invocation_start
                 else:
-                    k_offsets[req_index] = len(
+                    invocation_start[req_index] = len(
                         self.requests[req_id].prompt_token_ids)
-
-            alora_metadata = ALoRAMetadata(
-                k_offsets=torch.tensor(k_offsets, device=self.device),
-                query_start_loc=query_start_loc.to(torch.int64),
-            )
+            mask1d_cpu = torch.tensor(positions_np
+                                      < invocation_start[req_indices],
+                                      dtype=torch.bool,
+                                      device="cpu")
+            mask1d = self.mask1d[:total_num_scheduled_tokens]
+            mask1d.copy_(mask1d_cpu, non_blocking=True)
+            alora_metadata = ALoRAMetadata(mask1d=mask1d)
         else:
             alora_metadata = None
 
@@ -1895,16 +1903,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens, None, False)
 
+            alora_metadata = None
             if self.lora_config.activated_lora_enabled:
-                k_offsets = torch.tensor([1] * num_reqs, device=self.device)
-                query_start_loc = self.query_start_loc[:num_reqs + 1].to(
-                    torch.int64)
-                alora_metadata = ALoRAMetadata(
-                    k_offsets=k_offsets,
-                    query_start_loc=query_start_loc,
-                )
-            else:
-                alora_metadata = None
+                mask1d = self.mask1d[:num_tokens]
+                alora_metadata = ALoRAMetadata(mask1d=mask1d)
+                # needed to avoid guard failures
+                torch._dynamo.mark_dynamic(alora_metadata.mask1d, 0)
 
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,

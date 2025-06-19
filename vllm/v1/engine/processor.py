@@ -341,7 +341,7 @@ class Processor:
                     lora_request=lora_request,
                     tokenization_kwargs=tokenization_kwargs)
 
-                k_offset = -1
+                invocation_start = -1
                 n = len(invocation_tokens)
                 token_ids = decoder_inputs["prompt_token_ids"]
 
@@ -351,16 +351,16 @@ class Processor:
                     for idx in range(len(token_ids) - n, -1, -1):
                         if token_ids[idx:idx + n] == invocation_tokens:
                             # weights activated 1 token after start
-                            k_offset = len(token_ids) - idx - 1
+                            invocation_start = idx + 1
                             break
 
-                if k_offset == -1:
+                if invocation_start == -1:
                     raise ValueError(
                         "Invocation sequence not found in prompt "
                         f"for request '{request_id}'. aLoRA models require the "
                         "invocation tokens to be present in the input.")
 
-                lora_request.k_offset = k_offset
+                lora_request.invocation_start = invocation_start
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
