@@ -60,7 +60,6 @@ class EngineCore:
                  executor_class: type[Executor],
                  log_stats: bool,
                  executor_fail_callback: Optional[Callable] = None):
-        assert vllm_config.model_config.runner_type != "pooling"
 
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
