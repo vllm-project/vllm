@@ -255,7 +255,7 @@ class CudaPlatformBase(Platform):
                         "install FlashInfer for better performance.")
                     pass
             # FlashAttention is the default for SM 8.0+ GPUs
-            elif cls.has_device_capability(80):
+            if cls.has_device_capability(80):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "flash_attn.FlashAttentionBackend")
