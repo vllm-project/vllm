@@ -938,16 +938,31 @@ class Scheduler(SchedulerInterface):
         else:
             request_ids = set(request_ids)
 
+        running_requests_to_remove = []
+        waiting_requests_to_remove = []
+        valid_requests = []
+
+        # First pass: collect requests to remove from queues
         for req_id in request_ids:
             request = self.requests.get(req_id)
             if request is None:
                 # Invalid request ID.
                 continue
 
+            valid_requests.append(request)
             if request.status == RequestStatus.RUNNING:
-                self.running.remove(request)
+                running_requests_to_remove.append(request)
             else:
-                self.waiting.remove_request(request)
+                waiting_requests_to_remove.append(request)
+
+        # Remove all requests from queues at once for better efficiency
+        for request in running_requests_to_remove:
+            self.running.remove(request)
+        if waiting_requests_to_remove:
+            self.waiting.remove_requests(waiting_requests_to_remove)
+
+        # Second pass: set status and free requests
+        for request in valid_requests:
             request.status = finished_status
             self._free_request(request)
 

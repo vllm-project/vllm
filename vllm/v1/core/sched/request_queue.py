@@ -6,7 +6,7 @@ from __future__ import annotations
 import heapq
 from abc import ABC, abstractmethod
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 from vllm.v1.request import Request
 
@@ -46,6 +46,11 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        """Remove multiple specific requests from the queue."""
+        pass
+
+    @abstractmethod
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
         pass
@@ -58,6 +63,11 @@ class RequestQueue(ABC):
     @abstractmethod
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to the policy."""
+        pass
+
+    @abstractmethod
+    def __reversed__(self) -> Iterator[Request]:
+        """Iterate over the queue in reverse order."""
         pass
 
 
@@ -94,6 +104,17 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
         """Remove a specific request from the queue."""
         self.remove(request)
 
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        """Remove multiple specific requests from the queue."""
+        requests_to_remove = set(requests)
+        filtered_requests = [
+            req for req in self if req not in requests_to_remove
+        ]
+        # deque does not support in-place filtering, so we need to clear
+        # and extend
+        self.clear()
+        self.extend(filtered_requests)
+
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
         return len(self) > 0
@@ -105,6 +126,10 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to FCFS policy."""
         return super().__iter__()
+
+    def __reversed__(self) -> Iterator[Request]:
+        """Iterate over the queue in reverse order."""
+        return super().__reversed__()
 
 
 class PriorityRequestQueue(RequestQueue):
@@ -154,6 +179,13 @@ class PriorityRequestQueue(RequestQueue):
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
         self._heap = [(p, t, r) for p, t, r in self._heap if r != request]
+        heapq.heapify(self._heap)
+
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        """Remove multiple specific requests from the queue."""
+        requests_to_remove = set(requests)
+        self._heap = [(p, t, r) for p, t, r in self._heap
+                      if r not in requests_to_remove]
         heapq.heapify(self._heap)
 
     def __bool__(self) -> bool:
