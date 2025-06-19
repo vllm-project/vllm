@@ -92,21 +92,26 @@ class OpenAIServingCompletion(OpenAIServing):
         """
     Chunkwise beam search hack
     """
+
         async def _process_prefix(request: CompletionRequest):
             og_max_tokens = request.max_tokens
             og_n = request.n
-            request.max_tokens = 1
+            request.max_tokens = 0
             request.n = 1
+            request.echo = True
+            request.stream = False
             res = await self.create_completion(
             request,
             raw_request=raw_request,
         )
             request.max_tokens = og_max_tokens
             request.n = og_n
+            request.echo = False
+            request.stream = True
             return res
     
         res = await _process_prefix(request)
-        input_str_len = len(request.prompt)
+        input_str_len = len(res.choices[0].text)
 
         async def _should_stop(final):
             return final.choices[0].finish_reason == "stop" or final.choices[0].is_filtered
@@ -115,21 +120,27 @@ class OpenAIServingCompletion(OpenAIServing):
         async def _chunk_generator():
             num_chunks = 0
             should_stop = False
+            output = None
 
             # TODO(@tanuj): calc created tokens
             while num_chunks < max_chunks and not should_stop:
                 num_chunks += 1
                 beams = await self.beam_validator.get_n_valid_beams(create_completion=self.create_completion, request=request, raw_request=raw_request)
-                final = await self.beam_scorer.collapse_beams(beams, num_chunks)
+                final = await self.beam_scorer.pick_best_beam(beams)
                 request.prompt = final.choices[0].text
                 should_stop = await _should_stop(final)
                 final.choices[0].text = final.choices[0].text[input_str_len:]
+                output = final.choices[0].text
+                if self.request_logger:
+                    logger.info(f"yielding chunk {num_chunks} text: {final.choices[0].text}")
                 yield f"data: {final.model_dump_json()}\n\n"
             
                 if should_stop:
-                    return
+                    break
         
             yield "data: [DONE]\n\n"
+
+            report_metrics(request, output)
     
         return _chunk_generator()
 
