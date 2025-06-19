@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -192,8 +193,12 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
+        # For page-aligned prefill.
+        PAGE_SIZE = self.cache_config.block_size
+
         # First, schedule the RUNNING requests.
         req_index = 0
+
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
@@ -210,7 +215,19 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(
                 num_new_tokens,
                 self.max_model_len - request.num_computed_tokens)
+            
+            # Make sure prefills are page_aligned
+            if num_new_tokens != 1 and self.scheduler_config.page_aligned_scheduling:
+                assert request.num_computed_tokens + num_new_tokens <= request.num_tokens_with_spec
+                # If it's not the last segment of the prefill, schedule less tokens but page_aligned. It's guaranteed that it doesn't surpass the budget.
+                if request.num_computed_tokens + num_new_tokens < request.num_tokens_with_spec:
+                    num_new_tokens = (num_new_tokens // PAGE_SIZE) * PAGE_SIZE
 
+                # we want to reduce page aligned from the budget, hence the `math.ceil` here.
+                if math.ceil(num_new_tokens / PAGE_SIZE) * PAGE_SIZE > token_budget:
+                    req_index += 1
+                    break
+                
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
             new_encoder_budget = encoder_budget
@@ -280,7 +297,16 @@ class Scheduler(SchedulerInterface):
             req_to_new_block_ids[request.request_id] = (
                 new_blocks.get_block_ids())
             num_scheduled_tokens[request.request_id] = num_new_tokens
-            token_budget -= num_new_tokens
+            
+            
+            # For prefills, reduce page-aligned from the budget.
+            if num_new_tokens != 1 and self.scheduler_config.page_aligned_scheduling:
+                token_budget -= (math.ceil(num_new_tokens / PAGE_SIZE) * PAGE_SIZE)
+            else:
+                token_budget -= num_new_tokens
+            
+            assert token_budget >= 0
+            
             req_index += 1
 
             # Speculative decode related.
@@ -404,6 +430,21 @@ class Scheduler(SchedulerInterface):
                             self.scheduler_config.long_prefill_token_threshold)
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
+                    
+                    # Make sure prefills are page_aligned
+                    if num_new_tokens != 1 and self.scheduler_config.page_aligned_scheduling:
+                        assert num_computed_tokens + num_new_tokens <= request.num_tokens
+                        # If it's not the last segment of the prefill, schedule less tokens but page_aligned. It's guaranteed that it doesn't surpass the budget.
+                        if num_computed_tokens + num_new_tokens < request.num_tokens:
+                            num_new_tokens = (num_new_tokens // PAGE_SIZE) * PAGE_SIZE
+
+                        # we want to reduce page aligned from the budget, hence the `math.ceil` here.
+                        if math.ceil(num_new_tokens / PAGE_SIZE) * PAGE_SIZE > token_budget:
+                            # Not enough budget.
+                            break
+
+                    if num_new_tokens == 0:
+                        break
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
@@ -468,7 +509,12 @@ class Scheduler(SchedulerInterface):
                 req_to_new_block_ids[request.request_id] = (
                     self.kv_cache_manager.get_block_ids(request.request_id))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
-                token_budget -= num_new_tokens
+                # For prefills, reduce page-aligned from the budget.
+                if num_new_tokens != 1 and self.scheduler_config.page_aligned_scheduling:
+                    token_budget -= (math.ceil(num_new_tokens / PAGE_SIZE) * PAGE_SIZE)
+                else:
+                    token_budget -= num_new_tokens
+                assert token_budget >= 0
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
