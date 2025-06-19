@@ -1278,15 +1278,15 @@ class RowParallelLinear(LinearBase):
             self.chunk_size = 5120
         else:
             self.chunk_size = math.ceil(input_.size(0)/3)
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            tp_rank = get_tensor_model_parallel_rank()
-            splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[tp_rank].contiguous()
         num_chunks = (input_.size(0) + self.chunk_size - 1)//self.chunk_size
         if num_chunks <2:
+            if self.input_is_parallel:
+                input_parallel = input_
+            else:
+                tp_rank = get_tensor_model_parallel_rank()
+                splitted_input = split_tensor_along_last_dim(
+                    input_, num_partitions=self.tp_size)
+                input_parallel = splitted_input[tp_rank].contiguous()
             assert self.quant_method is not None
             # Only fuse bias add into GEMM for rank 0 (this ensures that
             # bias will not get added more than once in TP>1 case)
