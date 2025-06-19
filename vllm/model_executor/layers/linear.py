@@ -1291,11 +1291,8 @@ class RowParallelLinear(LinearBase):
             assert self.quant_method is not None
             # Only fuse bias add into GEMM for rank 0 (this ensures that
             # bias will not get added more than once in TP>1 case)
-            bias_ = None if (self.tp_rank > 0 
-                             or self.skip_bias_add) else self.bias
-            output_parallel = self.quant_method.apply(self, 
-                                                      input_parallel,
-                                                      bias=bias_)
+            bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+            output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
             if self.reduce_results and self.tp_size > 1:
                 output = tensor_model_parallel_all_reduce(output_parallel)
             else:
@@ -1305,8 +1302,8 @@ class RowParallelLinear(LinearBase):
           
         output_shape = [input_.size(0), self.output_size]
         output = torch.empty(*output_shape,
-                             dtype = input_.dtype,
-                             device = input_.device)
+                             dtype=input_.dtype,
+                             device=input_.device)
         comm_stream = torch.cuda.Stream()
         compute_events = [
             torch.cuda.Event(enable_timing=False) for _ in range(num_chunks)
@@ -1317,7 +1314,7 @@ class RowParallelLinear(LinearBase):
       
         for i in range(num_chunks):
             chunk_start = i * self.chunk_size
-            chunk_end = min((i+1) * self.chunk_size, input_.size(0))
+            chunk_end = min((i + 1) * self.chunk_size, input_.size(0))
             input_chunk = input_[chunk_start:chunk_end]
             if self.input_is_parallel:
                 input_parallel = input_
@@ -1327,11 +1324,8 @@ class RowParallelLinear(LinearBase):
                     input_chunk, num_partitions=self.tp_size)
                 input_parallel = splitted_input[tp_rank].contiguous()
             assert self.quant_method is not None
-            bias_ = None if (self.tp_rank > 0 
-                             or self.skip_bias_add) else self.bias
-            output_parallel = self.quant_method.apply(self, 
-                                                      input_parallel,
-                                                      bias=bias_)
+            bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+            output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
             compute_events[i].record()
             if self.reduce_results and self.tp_size > 1:
                 with torch.cuda.stream(comm_stream):
@@ -1344,8 +1338,10 @@ class RowParallelLinear(LinearBase):
                 output[chunk_start:chunk_end] = output_parallel
                 if i < num_chunks - 1:
                     torch.cuda.current_stream().wait_event(compute_events[i])
+                  
         if self.reduce_results and self.tp_size > 1:            
             torch.cuda.current_stream().wait_event(comm_events[-1])
+          
         output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:
             return output
