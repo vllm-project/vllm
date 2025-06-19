@@ -20,8 +20,6 @@ white_list = ["torch", "torchaudio", "torchvision", "mamba_ssm"]
 with open(input_file) as f:
     lines = f.readlines()
 
-cleaned = []
-# clean all immediately following indented or empty lines to
 skip_next = False
 
 for line in lines:
@@ -33,8 +31,3 @@ for line in lines:
     if any(k in line.lower() for k in white_list):
         skip_next = True
         continue
-
-    cleaned.append(line)
-
-with open(output_file, "w") as f:
-    f.writelines(cleaned)
