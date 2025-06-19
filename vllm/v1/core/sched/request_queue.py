@@ -30,13 +30,14 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
-    def push_request(self, request: Request) -> None:
-        """Push a request back to the queue (used for skipped requests)."""
+    def prepend_request(self, request: Request) -> None:
+        """Prepend a request to the front of the queue."""
         pass
 
     @abstractmethod
-    def extend_left_requests(self, requests: RequestQueue) -> None:
-        """Extend left with requests from another RequestQueue."""
+    def prepend_requests(self, requests: RequestQueue) -> None:
+        """Prepend all requests from another queue to the front of this
+        queue."""
         pass
 
     @abstractmethod
@@ -80,12 +81,13 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
             raise IndexError("peek from an empty queue")
         return self[0]
 
-    def push_request(self, request: Request) -> None:
-        """Push a request back to the queue (used for skipped requests)."""
+    def prepend_request(self, request: Request) -> None:
+        """Prepend a request to the front of the queue."""
         self.appendleft(request)
 
-    def extend_left_requests(self, requests: RequestQueue) -> None:
-        """Extend left with requests from another RequestQueue."""
+    def prepend_requests(self, requests: RequestQueue) -> None:
+        """Prepend all requests from another queue to the front of this
+        queue."""
         self.extendleft(reversed(list(requests)))
 
     def remove_request(self, request: Request) -> None:
@@ -136,15 +138,17 @@ class PriorityRequestQueue(RequestQueue):
         _, _, request = self._heap[0]
         return request
 
-    def push_request(self, request: Request) -> None:
-        """Push a request back to the queue (used for skipped requests)."""
-        heapq.heappush(self._heap,
-                       (request.priority, request.arrival_time, request))
+    def prepend_request(self, request: Request) -> None:
+        """Prepend a request to the front of the queue."""
+        # Set priority to -1 so these requests stay at the front after heapify.
+        heapq.heappush(self._heap, (-1, request.arrival_time, request))
 
-    def extend_left_requests(self, requests: RequestQueue) -> None:
-        """Extend left with requests from another RequestQueue."""
+    def prepend_requests(self, requests: RequestQueue) -> None:
+        """Prepend all requests from another queue to the front of this
+        queue."""
         for request in requests:
-            # Set priority to -1 so these requests stay at the front.
+            # Set priority to -1 so these requests stay at the front after
+            # heapify.
             heapq.heappush(self._heap, (-1, request.arrival_time, request))
 
     def remove_request(self, request: Request) -> None:

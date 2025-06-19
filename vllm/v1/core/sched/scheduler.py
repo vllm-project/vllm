@@ -275,7 +275,7 @@ class Scheduler(SchedulerInterface):
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
 
-                    self.waiting.push_request(preempted_req)
+                    self.waiting.prepend_request(preempted_req)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
                         # No more request to preempt.
@@ -353,7 +353,7 @@ class Scheduler(SchedulerInterface):
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
                             request.request_id,
                         )
-                        skipped_waiting_requests.push_request(
+                        skipped_waiting_requests.prepend_request(
                             self.waiting.pop_request())
                         continue
 
@@ -364,7 +364,7 @@ class Scheduler(SchedulerInterface):
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
-                        skipped_waiting_requests.push_request(
+                        skipped_waiting_requests.prepend_request(
                             self.waiting.pop_request())
                         continue
 
@@ -374,7 +374,7 @@ class Scheduler(SchedulerInterface):
                     (len(scheduled_loras) == self.lora_config.max_loras and
                      request.lora_request.lora_int_id not in scheduled_loras)):
                     # Scheduling would exceed max_loras, skip.
-                    skipped_waiting_requests.push_request(
+                    skipped_waiting_requests.prepend_request(
                         self.waiting.pop_request())
                     continue
 
@@ -478,7 +478,7 @@ class Scheduler(SchedulerInterface):
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
-                    skipped_waiting_requests.push_request(request)
+                    skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
@@ -520,7 +520,7 @@ class Scheduler(SchedulerInterface):
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
-            self.waiting.extend_left_requests(skipped_waiting_requests)
+            self.waiting.prepend_requests(skipped_waiting_requests)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
