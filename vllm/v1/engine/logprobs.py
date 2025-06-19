@@ -38,6 +38,7 @@ class LogprobsProcessor:
         tokenizer: Optional[AnyTokenizer],
         request: EngineCoreRequest,
     ) -> "LogprobsProcessor":
+        assert request.sampling_params is not None
         num_logprobs = request.sampling_params.logprobs
         num_prompt_logprobs = request.sampling_params.prompt_logprobs
         return cls(

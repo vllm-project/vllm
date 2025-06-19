@@ -273,9 +273,14 @@ class Worker(WorkerBase):
         if get_pp_group().is_last_rank:
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
-            self.model_runner._dummy_sampler_run(
-                hidden_states=self.model_runner._dummy_run(
-                    num_tokens=max_num_reqs))
+
+            hidden_states, last_hidden_states = \
+                self.model_runner._dummy_run(num_tokens=max_num_reqs)
+            if self.model_runner.is_pooling_model:
+                self.model_runner._dummy_pooler_run(hidden_states)
+            else:
+                self.model_runner._dummy_sampler_run(
+                    hidden_states=last_hidden_states)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
