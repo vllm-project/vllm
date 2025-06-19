@@ -2169,6 +2169,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "set -O %s and ensure `use_cudagraph` was not manually set to "
                 "False", CompilationLevel.PIECEWISE)
             return
+        logger.info("Capturing CUDA graphs...")
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
