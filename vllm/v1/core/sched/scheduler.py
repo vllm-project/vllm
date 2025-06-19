@@ -1437,10 +1437,7 @@ class BatchScheduler(Scheduler):
         token_budget = self._estimate_token_budget()
         req_index = 0
         while self.scheduled_queue:
-            if token_budget <= 0:
-                break
-
-            scheduled_request = self.scheduled_queue.popleft()
+            scheduled_request = self.scheduled_queue[0]
 
             req_id = scheduled_request.request_id
             num_new_tokens = scheduled_request.num_new_tokens
@@ -1450,6 +1447,11 @@ class BatchScheduler(Scheduler):
                 scheduled_request.num_scheduled_spec_tokens
             spec_token_ids = scheduled_request.spec_token_ids
             request_data = scheduled_request.request_data
+
+            if num_scheduled_tokens and token_budget < num_new_tokens:
+                break
+
+            self.scheduled_queue.popleft()
 
             # requests in the scheduled_queue can also be preempted or finished.
             if self.requests[req_id].status >= RequestStatus.PREEMPTED:
