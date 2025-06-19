@@ -358,7 +358,7 @@ class NixlConnectorWorker:
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
-        self.kv_caches_base_addr: dict[str, list[int]] = {}
+        self.kv_caches_base_addr: dict[EngineId, list[int]] = {}
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -368,11 +368,11 @@ class NixlConnectorWorker:
         # nixl_prepped_dlist_handle.
         self.src_xfer_side_handle: int = 0
         # Map of engine_id -> nixl_prepped_dlist_handle (int)].
-        self.dst_xfer_side_handles: dict[str, int] = {}
+        self.dst_xfer_side_handles: dict[EngineId, int] = {}
 
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
-        self.dst_num_blocks: dict[str, int] = {}
+        self.dst_num_blocks: dict[EngineId, int] = {}
         self._registered_descs: list[Any] = []
 
         # In progress transfers.
@@ -420,10 +420,10 @@ class NixlConnectorWorker:
         self._use_flashinfer = attn_backend == _Backend.FLASHINFER_VLLM_V1
         logger.debug("Detected attention backend %s", self.backend_name)
 
-        self._tp_size: dict[str, int] = {self.engine_id: self.world_size}
+        self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
-        self.consumer_notification_counts_by_req = defaultdict[str, int](int)
+        self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
 
     def __del__(self):
         """Cleanup background threads on destruction."""
