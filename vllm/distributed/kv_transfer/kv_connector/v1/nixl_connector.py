@@ -392,11 +392,11 @@ class NixlConnectorWorker:
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
         # Background thread for initializing new NIXL handshakes.
         self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="vllm-nixl-handshake")
-        # Thread results for handshake completion tracking
+            max_workers=8, thread_name_prefix="vllm-nixl-handshake")
+        # Thread results for handshake completion tracking.
+        # eng_id -> handshake future
         self._handshake_futures: dict[EngineId, Future] = {}
-        self._pending_requests: dict[EngineId, list[tuple[ReqId, ReqMeta]]] = {}
-        self._ready_requests: queue.Queue[tuple[ReqId, ReqMeta]] = queue.Queue()
+        self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
         self._lock = threading.Lock()
 
         self.vllm_config = vllm_config
@@ -458,51 +458,6 @@ class NixlConnectorWorker:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
-
-    def _start_handshake(self, engine_id: str, host: str, port: int):
-        """Start handshake using ThreadPoolExecutor.
-        
-        This method is non-blocking and submits `_nixl_handshake` to the
-        background thread pool.
-        """
-        if engine_id in self._handshake_futures:
-            return
-
-        logger.debug("Starting handshake for engine %s", engine_id)
-        future = self._executor.submit(self._nixl_handshake, host, port)
-        self._handshake_futures[engine_id] = future
-
-        # Set up callback to handle completion
-        def on_handshake_complete(fut: Future):
-            logger.debug("Handshake callback triggered for engine %s",
-                         engine_id)
-            with self._lock:
-                if engine_id in self._handshake_futures:
-                    # Clean up futures. In case of failure, requests will remain
-                    # pending and be reported to scheduler for retry.
-                    del self._handshake_futures[engine_id]
-                try:
-                    fut.result()  # This will raise if the handshake failed
-                    logger.debug("Handshake succeeded for engine %s", engine_id)
-                    completed_reqs = self._pending_requests.pop(engine_id, None)
-                    if completed_reqs is not None:
-                        for req_id, meta in completed_reqs:
-                            self._ready_requests.put((req_id, meta))
-                        logger.debug(    
-                            "Handshake completed for engine %s. "
-                            "Moved %d requests to ready queue for processing",
-                            engine_id, len(completed_reqs))
-                except Exception as e:
-                    logger.warning("Handshake failed for engine %s: %s", engine_id,
-                                e)
-                    failed_reqs = self._pending_requests.pop(engine_id, None)
-                    if failed_reqs is not None:
-                        logger.warning(
-                            "Handshake failed for engine %s, leaving"
-                            "%d requests pending for scheduler retry",
-                            engine_id, len(failed_reqs))
-
-        future.add_done_callback(on_handshake_complete)
 
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote instance."""
@@ -738,8 +693,7 @@ class NixlConnectorWorker:
         # layout and close outputs.
         assert nixl_agent_meta.attn_backend_name == self.backend_name
 
-        self._remote_agents[engine_id][
-            remote_tp_rank] = self.nixl_wrapper.add_remote_agent(
+        remote_agent_meta = self.nixl_wrapper.add_remote_agent(
                 nixl_agent_meta.agent_metadata)
 
         # Number of D TP workers reading from a single P TP worker. This is
@@ -809,7 +763,10 @@ class NixlConnectorWorker:
             descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
             self.dst_xfer_side_handles[
                 engine_id] = self.nixl_wrapper.prep_xfer_dlist(
-                    self._remote_agents[engine_id][remote_tp_rank], descs)
+                    remote_agent_meta , descs)
+
+        # Only add to _remote_agents dict once we've finished successfully.
+        self._remote_agents[engine_id][remote_tp_rank] = remote_agent_meta
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
@@ -922,26 +879,6 @@ class NixlConnectorWorker:
                 done_req_ids.add(req_id)
                 del transfers[req_id]
         return done_req_ids
-    
-    def _process_ready_requests(self):
-        """Process requests that are ready after handshake completion."""
-        processed_count = 0
-        while True:
-            try:
-                req_id, meta = self._ready_requests.get_nowait()
-                logger.debug("Processing ready request %s for engine %s",
-                             req_id, meta.remote_engine_id)
-                self._read_blocks(
-                    request_id=req_id,
-                    dst_engine_id=meta.remote_engine_id,
-                    local_block_ids=meta.local_block_ids,
-                    remote_block_ids=meta.remote_block_ids,
-                )
-                processed_count += 1
-            except queue.Empty:
-                break
-
-        logger.debug("Processed %d ready requests", processed_count)
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
@@ -949,44 +886,45 @@ class NixlConnectorWorker:
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.requests.items():
+            remote_engine_id = meta.remote_engine_id
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
-                meta.remote_engine_id, len(meta.local_block_ids),
+                remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
-            with self._lock:
-                if meta.remote_engine_id in self._remote_agents:
-                    logger.debug(
-                        "Remote agent available for %s, calling _read_blocks",
-                        meta.remote_engine_id)
-                    self._read_blocks(
-                        request_id=req_id,
-                        dst_engine_id=meta.remote_engine_id,
-                        local_block_ids=meta.local_block_ids,
-                        remote_block_ids=meta.remote_block_ids,
-                    )
-                elif meta.remote_engine_id in self._handshake_futures:
-                    logger.debug(
-                        "Handshake in progress for engine %s, adding"
-                        " request %s to pending", meta.remote_engine_id,
-                        req_id)
-                    if meta.remote_engine_id not in self._pending_requests:
-                        self._pending_requests[meta.remote_engine_id] = []
-                    self._pending_requests[meta.remote_engine_id].append(
-                        (req_id, meta))
-                else:
-                    logger.debug(
-                        "Starting handshake for engine %s and adding"
-                        " request %s to pending", meta.remote_engine_id,
-                        req_id)
-                    if meta.remote_engine_id not in self._pending_requests:
-                        self._pending_requests[meta.remote_engine_id] = []
-                    self._pending_requests[meta.remote_engine_id].append(
-                        (req_id, meta))
-                    self._start_handshake(meta.remote_engine_id,
-                                          meta.remote_host, meta.remote_port)
+            if remote_engine_id not in self._remote_agents:
+                with self._lock:
+                    fut = self._handshake_futures.get(remote_engine_id, None)
+                    if fut is None:
+                        fut = self._executor.submit(
+                            self._nixl_handshake, meta.remote_host,
+                            meta.remote_port)
+                        fut.add_done_callback(
+                            lambda f, eid=remote_engine_id: \
+                            self._handshake_futures.pop(eid))
+                        self._handshake_futures[remote_engine_id] = fut
 
-        self._process_ready_requests()
+                    #TODO(#19777): handle failure state of f in the callback,
+                    # we want to fail the request in this case.
+                    fut.add_done_callback(lambda f, entry=(req_id,meta): \
+                                                self._ready_requests.put(entry))
+            else:
+                self._read_blocks_for_req(req_id, meta)
+
+        # Start transfers for requests whose handshakes have now finished.
+        while not self._ready_requests.empty():
+            self._read_blocks_for_req(*self._ready_requests.get_nowait())
+
+    def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
+        logger.debug(
+            "Remote agent %s available, calling _read_blocks for req %s",
+            meta.remote_engine_id, req_id)
+        self._read_blocks(
+            request_id=req_id,
+            dst_engine_id=meta.remote_engine_id,
+            local_block_ids=meta.local_block_ids,
+            remote_block_ids=meta.remote_block_ids,
+        )
 
     def _read_blocks(
         self,
