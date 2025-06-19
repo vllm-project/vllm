@@ -900,20 +900,17 @@ class NixlConnectorWorker:
         """
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
-            xfer_stats = []
-            for handle, _ in handles:
+            for handle, xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
-                xfer_stats.append(xfer_state)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
+                    done_req_ids.add(req_id)
+                    del transfers[req_id]
                 elif xfer_state == "PROC":
                     continue
                 else:
                     raise RuntimeError("Transfer failed with state %s",
                                        xfer_state)
-            if all(xfer_state == "DONE" for xfer_state in xfer_stats):
-                done_req_ids.add(req_id)
-                del transfers[req_id]
         return done_req_ids
     
     def _process_ready_requests(self):

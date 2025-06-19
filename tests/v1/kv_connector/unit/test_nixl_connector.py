@@ -4,8 +4,8 @@
 from nixl._api import nixl_agent as NixlWrapper
 import time
 import uuid
-from typing import Dict, List, Optional
-from unittest.mock import patch, MagicMock
+from typing import Optional
+from unittest.mock import patch
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     NixlConnector, NixlConnectorMetadata, KVConnectorRole, NixlConnectorWorker, NixlAgentMetadata)
 from vllm.forward_context import ForwardContext
@@ -106,7 +106,7 @@ class FakeNixlWrapper(NixlWrapper):
     def add_remote_agent(self, agent_metadata: bytes) -> str:
         return str(self.AGENT_METADATA)
 
-    def get_new_notifs(self) -> Dict[str, List[bytes]]:
+    def get_new_notifs(self) -> dict[str, list[bytes]]:
         # Used to collect done_sending, which we don't test yet.
         return {}
 
@@ -122,9 +122,9 @@ class FakeNixlWrapper(NixlWrapper):
     def make_prepped_xfer(self,
                           xfer_type: str,
                           local_xfer_side_handle: int,
-                          local_block_descs_ids: List[int],
+                          local_block_descs_ids: list[int],
                           remote_xfer_side_handle: int,
-                          remote_block_descs_ids: List[int],
+                          remote_block_descs_ids: list[int],
                           notif_msg: Optional[bytes] = None) -> int:
         return uuid.uuid4().int
 
@@ -139,7 +139,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
     def _nixl_handshake(self, host: str, port: int):
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(1.8)
-        # These should've been done in register_kv_caches(), called by gpu_model_runner.
+        # These should've been done in register_kv_caches(), called by
+        # gpu_model_runner. Here we just hardcode some dummy values.
         self.slot_size_bytes = 4096
         self.block_len = self.slot_size_bytes * self.block_size
         self.num_blocks = 1
@@ -194,7 +195,8 @@ class TestNixlHandshake:
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
             _after_load = time.perf_counter()
-            assert _after_load - _before_load < 0.1, f"start_load_kv took {_after_load - _before_load} seconds"
+            assert _after_load - _before_load < 0.1, "start_load_kv took " \
+                f"{_after_load - _before_load} seconds"
             time.sleep(0.5)  # backoff for the async handshake to complete.
             connector.bind_connector_metadata(NixlConnectorMetadata())
             _, done_recving = connector.get_finished(finished_req_ids=set())
@@ -241,7 +243,8 @@ class TestNixlHandshake:
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
             _after_load = time.perf_counter()
-            assert _after_load - _before_load < 0.1, f"start_load_kv took {_after_load - _before_load} seconds"
+            assert _after_load - _before_load < 0.1, "start_load_kv took " \
+                f"{_after_load - _before_load} seconds"
             time.sleep(0.5)  # backoff for the async handshake to complete.
             connector.bind_connector_metadata(NixlConnectorMetadata())
             _, done_recving = connector.get_finished(finished_req_ids=set())
