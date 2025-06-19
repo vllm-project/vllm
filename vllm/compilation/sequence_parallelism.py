@@ -19,13 +19,81 @@ from .vllm_inductor_pass import VllmInductorPass
 logger = init_logger(__name__)
 
 
-class _SequenceParallelPatternHelper:
-    """Base helper for sequence parallelism patterns."""
+class _RMSNormAndQuantOpHelper:
+    """Base helper for RMSNorm and RMSNorm + Quantization functionalization."""
 
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
+    def __init__(self,
+                 epsilon: float,
+                 dtype: torch.dtype,
+                 device: str,
+                 quant_op: Optional[torch._ops.OpOverload] = None,
+                 **kwargs):
         self.epsilon = epsilon
         self.dtype = dtype
         self.device = device
+        self.quant_op = quant_op
+
+    def _functional_rmsnorm(self, result_buffer, input_tensor, weight_tensor):
+        return torch.ops.higher_order.auto_functionalized(
+            torch.ops._C.rms_norm.default,
+            result=result_buffer,
+            input=input_tensor,
+            weight=weight_tensor,
+            epsilon=self.epsilon)
+
+    def _functional_fused_add_rmsnorm(self, input_tensor, residual_tensor,
+                                      weight_tensor):
+        return torch.ops.higher_order.auto_functionalized(
+            torch.ops._C.fused_add_rms_norm.default,
+            input=input_tensor,
+            residual=residual_tensor,
+            weight=weight_tensor,
+            epsilon=self.epsilon)
+
+    def _functional_rmsnorm_then_quant(self, rmsnorm_result_buffer,
+                                       quant_result_buffer, input_tensor,
+                                       weight_tensor, scale_tensor):
+        if self.quant_op is None:
+            raise RuntimeError(
+                "_RMSNormAndQuantOpHelper was not initialized with a quant_op."
+            )
+        rmsnorm_out_tuple = self._functional_rmsnorm(rmsnorm_result_buffer,
+                                                     input_tensor,
+                                                     weight_tensor)
+        quant_out_tuple = torch.ops.higher_order.auto_functionalized(
+            self.quant_op,
+            result=quant_result_buffer,
+            input=rmsnorm_out_tuple[1],
+            scale=scale_tensor)
+        return quant_out_tuple
+
+    def _functional_fused_add_rmsnorm_then_quant(self, quant_result_buffer,
+                                                 input_tensor, residual_tensor,
+                                                 weight_tensor, scale_tensor):
+        if self.quant_op is None:
+            raise RuntimeError(
+                "_RMSNormAndQuantOpHelper was not initialized with a quant_op."
+            )
+        fused_add_rmsnorm_out_tuple = self._functional_fused_add_rmsnorm(
+            input_tensor, residual_tensor, weight_tensor)
+        quant_out_tuple = torch.ops.higher_order.auto_functionalized(
+            self.quant_op,
+            result=quant_result_buffer,
+            input=fused_add_rmsnorm_out_tuple[1],
+            scale=scale_tensor)
+        return quant_out_tuple, fused_add_rmsnorm_out_tuple[2]
+
+
+class _SequenceParallelPatternHelper(_RMSNormAndQuantOpHelper):
+    """Helper for sequence parallelism patterns."""
+
+    def __init__(self,
+                 epsilon: float,
+                 dtype: torch.dtype,
+                 device: str,
+                 quant_op: Optional[torch._ops.OpOverload] = None,
+                 **kwargs):
+        super().__init__(epsilon, dtype, device, quant_op=quant_op, **kwargs)
         self.tp_group = get_tp_group()
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -47,102 +115,7 @@ class _SequenceParallelPatternHelper:
             group_name=self.tp_group.unique_name)
 
 
-class _RMSNormOpHelper(_SequenceParallelPatternHelper):
-    """Helper for RMSNorm operations in sequence parallelism patterns."""
-
-    def _functional_rmsnorm(self, result_buffer, input_tensor, weight_tensor):
-        return torch.ops.higher_order.auto_functionalized(
-            torch.ops._C.rms_norm.default,
-            result=result_buffer,
-            input=input_tensor,
-            weight=weight_tensor,
-            epsilon=self.epsilon)
-
-    def _functional_fused_add_rmsnorm(self, input_tensor, residual_tensor,
-                                      weight_tensor):
-        return torch.ops.higher_order.auto_functionalized(
-            torch.ops._C.fused_add_rms_norm.default,
-            input=input_tensor,
-            residual=residual_tensor,
-            weight=weight_tensor,
-            epsilon=self.epsilon)
-
-
-class _RMSNormQuantOpHelper(_SequenceParallelPatternHelper):
-    """Helper for RMSNorm + Quantization operations in sequence parallelism patterns."""  # noqa: E501
-
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str,
-                 quant_op: torch._ops.OpOverload):
-        super().__init__(epsilon, dtype, device)
-        self.quant_op = quant_op
-
-    def _functional_rmsnorm_then_quant(self, rmsnorm_result_buffer,
-                                       quant_result_buffer, input_tensor,
-                                       weight_tensor, scale_tensor):
-        rmsnorm_out_tuple = torch.ops.higher_order.auto_functionalized(
-            torch.ops._C.rms_norm.default,
-            result=rmsnorm_result_buffer,
-            input=input_tensor,
-            weight=weight_tensor,
-            epsilon=self.epsilon)
-        quant_out_tuple = torch.ops.higher_order.auto_functionalized(
-            self.quant_op,
-            result=quant_result_buffer,
-            input=rmsnorm_out_tuple[1],
-            scale=scale_tensor)
-        return quant_out_tuple
-
-    def _functional_fused_add_rmsnorm_then_quant(self, quant_result_buffer,
-                                                 input_tensor, residual_tensor,
-                                                 weight_tensor, scale_tensor):
-        fused_add_rmsnorm_out_tuple = torch.ops.higher_order.auto_functionalized(  # noqa: E501
-            torch.ops._C.fused_add_rms_norm.default,
-            input=input_tensor,
-            residual=residual_tensor,
-            weight=weight_tensor,
-            epsilon=self.epsilon)
-        quant_out_tuple = torch.ops.higher_order.auto_functionalized(
-            self.quant_op,
-            result=quant_result_buffer,
-            input=fused_add_rmsnorm_out_tuple[1],
-            scale=scale_tensor)
-        return quant_out_tuple, fused_add_rmsnorm_out_tuple[2]
-
-
-class _FusedRMSNormQuantOpHelper(_SequenceParallelPatternHelper):
-    """Helper for Fused RMSNorm + Quantization operations in sequence parallelism patterns."""  # noqa: E501
-
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str,
-                 fused_rmsnorm_quant_op: torch._ops.OpOverload,
-                 fused_add_rmsnorm_quant_op: torch._ops.OpOverload):
-        super().__init__(epsilon, dtype, device)
-        self.fused_rmsnorm_quant_op = fused_rmsnorm_quant_op
-        self.fused_add_rmsnorm_quant_op = fused_add_rmsnorm_quant_op
-
-    def _functional_fused_rmsnorm_quant(self, result_buffer, input_tensor,
-                                        weight_tensor, scale_tensor):
-        return torch.ops.higher_order.auto_functionalized(
-            self.fused_rmsnorm_quant_op,
-            result=result_buffer,
-            input=input_tensor,
-            weight=weight_tensor,
-            scale=scale_tensor,
-            epsilon=self.epsilon)
-
-    def _functional_fused_add_rmsnorm_quant(self, result_buffer, input_tensor,
-                                            residual_tensor, weight_tensor,
-                                            scale_tensor):
-        return torch.ops.higher_order.auto_functionalized(
-            self.fused_add_rmsnorm_quant_op,
-            result=result_buffer,
-            input=input_tensor,
-            residual=residual_tensor,
-            weight=weight_tensor,
-            scale=scale_tensor,
-            epsilon=self.epsilon)
-
-
-class EmbeddingAllReduceRMSNormPattern(_RMSNormOpHelper):
+class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
     def get_inputs(self):
         input = torch.empty([1, 8, 4], device=self.device, dtype=self.dtype)
@@ -182,7 +155,7 @@ class EmbeddingAllReduceRMSNormPattern(_RMSNormOpHelper):
                                 pm.fwd_only, pm_pass)
 
 
-class MiddleAllReduceRMSNormPattern(_RMSNormOpHelper):
+class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
     def get_inputs(self):
         mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
@@ -225,7 +198,7 @@ class MiddleAllReduceRMSNormPattern(_RMSNormOpHelper):
                                 pm.fwd_only, pm_pass)
 
 
-class LastAllReduceRMSNormPattern(_RMSNormOpHelper):
+class LastAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
     def get_inputs(self):
         mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
@@ -271,7 +244,7 @@ class LastAllReduceRMSNormPattern(_RMSNormOpHelper):
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
-class EmbeddingAllReduceRMSNormStaticFP8Pattern(_RMSNormQuantOpHelper):
+class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str,
                  op: torch._ops.OpOverload):
@@ -327,7 +300,7 @@ class EmbeddingAllReduceRMSNormStaticFP8Pattern(_RMSNormQuantOpHelper):
                                 pm.fwd_only, pm_pass)
 
 
-class MiddleAllReduceRMSNormStaticFP8Pattern(_RMSNormQuantOpHelper):
+class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str,
                  op: torch._ops.OpOverload):
@@ -385,7 +358,7 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_RMSNormQuantOpHelper):
                                 pm.fwd_only, pm_pass)
 
 
-class LastAllReduceRMSNormStaticFP8Pattern(_RMSNormQuantOpHelper):
+class LastAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str,
                  op: torch._ops.OpOverload):
@@ -472,7 +445,7 @@ class SequenceParallelismPass(VllmInductorPass):
         for epsilon in [1e-5, 1e-6]:
             # RMSNorm + Static FP8 quantization patterns
             fp8_quant_op = torch.ops._C.static_scaled_fp8_quant.default
-            EmbeddingAllReduceRMSNormStaticFP8Pattern(
+            FirstAllReduceRMSNormStaticFP8Pattern(
                 epsilon, self.model_dtype, self.device,
                 fp8_quant_op).register(self.patterns)
             MiddleAllReduceRMSNormStaticFP8Pattern(
@@ -483,8 +456,8 @@ class SequenceParallelismPass(VllmInductorPass):
                 fp8_quant_op).register(self.patterns)
 
             # Normal RMSNorm patterns
-            EmbeddingAllReduceRMSNormPattern(
-                epsilon, self.model_dtype, self.device).register(self.patterns)
+            FirstAllReduceRMSNormPattern(epsilon, self.model_dtype,
+                                         self.device).register(self.patterns)
 
             MiddleAllReduceRMSNormPattern(epsilon, self.model_dtype,
                                           self.device).register(self.patterns)
@@ -502,13 +475,7 @@ class SequenceParallelismPass(VllmInductorPass):
 
     def __call__(self, graph: fx.Graph):
         self.begin()
-        import torch.distributed as dist
-        if dist.get_rank() == 0:
-            print(f"before_sequence_parallelism_pass {graph}")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_sequence_parallelism_pass")
-        # import torch.distributed as dist
-        if dist.get_rank() == 0:
-            print(f"after_sequence_parallelism_pass {graph}")
         self.end_and_log()

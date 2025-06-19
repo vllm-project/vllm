@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Optional
+
 import pytest
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
+from vllm.compilation.fusion import FusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.sequence_parallelism import SequenceParallelismPass
 from vllm.config import (CompilationConfig, DeviceConfig, ModelConfig,
@@ -14,6 +18,8 @@ from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (init_distributed_environment,
                                              initialize_model_parallel)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    Fp8LinearOp)
 from vllm.platforms import current_platform
 from vllm.utils import update_environment_variables
 
@@ -30,7 +36,10 @@ prompts = [
 
 class TestModel(torch.nn.Module):
 
-    def __init__(self, hidden_size=16, intermediate_size=32):
+    def __init__(self,
+                 hidden_size=16,
+                 intermediate_size=32,
+                 vllm_config: Optional[VllmConfig] = None):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -81,16 +90,24 @@ class TestModel(torch.nn.Module):
 
 class TestQuantModel(torch.nn.Module):
 
-    def __init__(self, hidden_size=16, intermediate_size=32):
+    def __init__(self,
+                 hidden_size=16,
+                 intermediate_size=32,
+                 vllm_config: Optional[VllmConfig] = None):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
+        self.vllm_config = vllm_config
         self.gate_proj = torch.nn.Parameter(torch.empty(
             (intermediate_size, hidden_size)),
                                             requires_grad=False)
         self.norm = RMSNorm(hidden_size, 1e-05)
         # Initialize weights
         torch.nn.init.normal_(self.gate_proj, std=0.02)
+
+        self.fp8_linear = Fp8LinearOp(cutlass_fp8_supported=True,
+                                      use_per_token_if_dynamic=False)
+
         # Register scale as a buffer
         self.register_buffer('scale', torch.tensor(1.0, dtype=torch.float32))
 
@@ -118,59 +135,88 @@ class TestQuantModel(torch.nn.Module):
         # layer normalization
         norm_output, residual_output = self.norm(all_reduce, residual)
 
-        scale = self.scale.to(norm_output.device)
-        quant_result = torch.empty(norm_output.shape,
-                                   dtype=current_platform.fp8_dtype())
-
-        torch.ops._C.static_scaled_fp8_quant.default(result=quant_result,
-                                                     input=norm_output,
-                                                     scale=scale)
+        # Use the same quantization primitive as Fp8LinearOp
+        # for static input quantization
+        # self.fp8_linear is initialized with use_per_token_if_dynamic=False
+        quant_result, _ = ops.scaled_fp8_quant(
+            norm_output,
+            scale=self.scale.to(norm_output.device),
+            scale_ub=None,
+            use_per_token_if_dynamic=self.fp8_linear.use_per_token_if_dynamic)
 
         return quant_result, residual_output
 
     def ops_in_model_before(self):
-        return [torch.ops.vllm.all_reduce.default]
+        ops_to_remove = [torch.ops.vllm.all_reduce.default
+                         ]  # Always removed by SP
+        # The following are only removed if fusion happens
+        if self.vllm_config and self.vllm_config.compilation_config \
+            .pass_config.enable_fusion:
+            ops_to_remove.extend([
+                torch.ops._C.fused_add_rms_norm.default,
+                torch.ops._C.static_scaled_fp8_quant.default,
+            ])
+        return ops_to_remove
 
     def ops_in_model_after(self):
-        return [
+        ops_to_add = [
             torch.ops.vllm.reduce_scatter.default,
             torch.ops.vllm.all_gather.default
         ]
+        # The following is only added if fusion happens
+        if self.vllm_config and self.vllm_config.compilation_config \
+            .pass_config.enable_fusion:
+            ops_to_add.append(
+                torch.ops._C.fused_add_rms_norm_static_fp8_quant.default)
+        return ops_to_add
 
     def ops_in_model(self):
-        return [torch.ops._C.fused_add_rms_norm.default]
+        if self.vllm_config and self.vllm_config.compilation_config \
+            .pass_config.enable_fusion:
+            # If fusion happens, the fused op is the one
+            # we check for (de)functionalization
+            return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default
+                    ]  # noqa: E501
+        else:
+            # If no fusion, the original ops are checked
+            return [
+                torch.ops._C.fused_add_rms_norm.default,
+                # TODO  functionalization pass does not handle this yet
+                # torch.ops._C.static_scaled_fp8_quant.default,
+            ]
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("test_model", [TestModel, TestQuantModel])
+@pytest.mark.parametrize("test_model_cls", [TestModel, TestQuantModel])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [16])
 @pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("enable_fusion", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"],
                     reason="Only test on CUDA")
-def test_sequence_parallelism_pass(test_model: type[torch.nn.Module],
+def test_sequence_parallelism_pass(test_model_cls: type[torch.nn.Module],
                                    batch_size: int, seq_len: int,
-                                   hidden_size: int, dtype: torch.dtype):
+                                   hidden_size: int, dtype: torch.dtype,
+                                   enable_fusion: bool):
     num_processes = 2
 
     def run_torch_spawn(fn, nprocs):
         # need to use torch.mp.spawn otherwise will have problems with
         # torch.distributed and cuda
         torch.multiprocessing.spawn(fn,
-                                    args=(num_processes, test_model,
+                                    args=(num_processes, test_model_cls,
                                           batch_size, seq_len, hidden_size,
-                                          dtype),
+                                          dtype, enable_fusion),
                                     nprocs=nprocs)
 
     run_torch_spawn(sequence_parallelism_pass_on_test_model, num_processes)
 
 
-def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
-                                            test_model: type[torch.nn.Module],
-                                            batch_size: int, seq_len: int,
-                                            hidden_size: int,
-                                            dtype: torch.dtype):
+def sequence_parallelism_pass_on_test_model(
+        local_rank: int, world_size: int,
+        test_model_cls: type[torch.nn.Module], batch_size: int, seq_len: int,
+        hidden_size: int, dtype: torch.dtype, enable_fusion: bool):
     current_platform.seed_everything(0)
 
     device = torch.device(f"cuda:{local_rank}")
@@ -193,7 +239,9 @@ def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
     vllm_config.compilation_config = CompilationConfig(pass_config=PassConfig(
-        enable_sequence_parallelism=True))
+        enable_sequence_parallelism=True,
+        enable_fusion=enable_fusion,
+        enable_noop=True))  # NoOp needed for fusion
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
 
     # this is a fake model name to construct the model config
@@ -208,11 +256,20 @@ def sequence_parallelism_pass_on_test_model(local_rank: int, world_size: int,
                                            seed=42)
 
     sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
-    backend_no_func = TestBackend(sequence_parallelism_pass)
     func_pass = FixFunctionalizationPass(vllm_config)
-    backend_func = TestBackend(sequence_parallelism_pass, func_pass)
 
-    model = test_model(hidden_size, hidden_size * 2)
+    passes_for_backend = [sequence_parallelism_pass]
+    if enable_fusion:
+        fusion_pass = FusionPass.instance(vllm_config)
+        passes_for_backend.append(fusion_pass)
+
+    backend_no_func = TestBackend(*passes_for_backend)
+    backend_func = TestBackend(*passes_for_backend, func_pass)
+
+    model = test_model_cls(hidden_size,
+                           hidden_size * 2,
+                           vllm_config=vllm_config)
+
     hidden_states = torch.randn((batch_size * seq_len, hidden_size),
                                 dtype=dtype)
     residual = torch.randn((batch_size * seq_len, hidden_size), dtype=dtype)
