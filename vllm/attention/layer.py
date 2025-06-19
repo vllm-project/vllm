@@ -209,7 +209,7 @@ class Attention(nn.Module):
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
-            output = torch.empty(output_shape,
+            output = torch.zeros(output_shape,
                                  dtype=query.dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]

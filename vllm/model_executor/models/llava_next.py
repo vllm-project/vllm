@@ -502,7 +502,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
 
-        if not multimodal_embeddings:
+        if multimodal_embeddings is None \
+            or len(multimodal_embeddings) == 0:
             return self.language_model.get_input_embeddings(input_ids)
 
         inputs_embeds = embed_multimodal(

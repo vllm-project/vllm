@@ -145,6 +145,7 @@ def run_with_both_engines(request, monkeypatch):
     # Automatically runs tests twice, once with V1 and once without
     use_v1 = request.param
     # Tests decorated with `@skip_v1` are only run without v1
+    skip_v0 = request.node.get_closest_marker("skip_v0")
     skip_v1 = request.node.get_closest_marker("skip_v1")
 
     if use_v1:
@@ -152,6 +153,8 @@ def run_with_both_engines(request, monkeypatch):
             pytest.skip("Skipping test on vllm V1")
         monkeypatch.setenv('VLLM_USE_V1', '1')
     else:
+        if skip_v0:
+            pytest.skip("Skipping test on vllm V0")
         monkeypatch.setenv('VLLM_USE_V1', '0')
 
     yield
