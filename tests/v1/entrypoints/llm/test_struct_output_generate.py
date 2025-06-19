@@ -158,12 +158,12 @@ def test_structured_output(
             n=2,
             guided_decoding=GuidedDecodingParams(json_object=True))
 
-        outputs = llm.generate(
-            prompts=("Generate a JSON object with curly braces for a person with "
-                    "name and age fields for John Smith who is 31 years old. "
-                    "Make the response as short as possible."),
-            sampling_params=sampling_params,
-            use_tqdm=True)
+        outputs = llm.generate(prompts=(
+            "Generate a JSON object with curly braces for a person with "
+            "name and age fields for John Smith who is 31 years old. "
+            "Make the response as short as possible."),
+                               sampling_params=sampling_params,
+                               use_tqdm=True)
 
         assert outputs is not None
         for output in outputs:
