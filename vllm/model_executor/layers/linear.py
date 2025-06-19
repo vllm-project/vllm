@@ -1309,6 +1309,12 @@ class RowParallelLinear(LinearBase):
             chunk_start = i*self.chunk_size
             chunk_end = min((i+1)*self.chunk_size,input_.size(0))
             input_chunk = input_[chunk_start:chunk_end]
+            if self.input_is_parallel:
+                input_parallel = input_
+            else:
+                tp_rank = get_tensor_model_parallel_rank()
+                splitted_input = split_tensor_along_last_dim(input_chunk, num_partitions=self.tp_size)
+                input_parallel = splitted_input[tp_rank].contiguous()
             assert self.quant_method is not None
             bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
             output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
