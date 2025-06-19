@@ -5,14 +5,76 @@
 BASH_DIR=$(dirname "${BASH_SOURCE[0]}")
 source "$BASH_DIR"/utils.sh
 
-ray stop --force
+Help() {
+    # Display Help
+    echo "Start vllm server for a huggingface model on Gaudi."
+    echo
+    echo "Syntax: bash  start_vllm.sh <-w> [-u:p:l:b:c:s] [-h]"
+    echo "options:"
+    echo "w  Weights of the model, could be model id in huggingface or local path"
+    echo "u  URL of the server, str, default=0.0.0.0"
+    echo "p  Port number for the server, int, default=8688"
+    echo "l  max_model_len for vllm, int, default=16384, maximal value for single node: 32768"
+    echo "b  max_num_seqs for vllm, int, default=128"
+    echo "c  Cache HPU recipe to the specified path, str, default=None"
+    echo "s  Skip warmup or not, bool, default=false"
+    echo "h  Help info"
+    echo
+}
 
-#To be changed
+#Default values for parameters
 model_path=/data/hf_models/DeepSeek-R1-Gaudi
 vllm_port=8688
-export PT_HPU_RECIPE_CACHE_CONFIG=/data/32k_cache,false,16384
+warmup_cache_path=/data/warmup_cache
+max_num_seqs=128
+host=0.0.0.0
+max_model_len=16384
 
-# Check platform
+
+while getopts hw:u:p:l:b:c:s flag; do
+    case $flag in
+    h) # display Help
+        Help
+        exit
+        ;;
+    w) # get model path
+        model_path=$OPTARG ;;
+    u) # get the URL of the server
+        host=$OPTARG ;;
+    p) # get the port of the server
+        vllm_port=$OPTARG ;;
+    l) # max-model-len
+        max_model_len=$OPTARG ;;
+    b) # batch size
+        max_num_seqs=$OPTARG ;;
+    c) # use_recipe_cache
+        warmup_cache_path=$OPTARG ;;
+    s) # skip_warmup
+        skip_warmup=true ;;
+    \?) # Invalid option
+        echo "Error: Invalid option"
+        Help
+        exit
+        ;;
+    esac
+done
+
+
+if [ "$warmup_cache_path" != "" ]; then
+    echo "HPU recipe cache will be saved to $warmup_cache_path"
+    export PT_HPU_RECIPE_CACHE_CONFIG=${warmup_cache_path},false,16384
+    mkdir -p "${warmup_cache_path}"
+fi
+
+if [ "$skip_warmup" = "true" ]; then
+    echo "VLLM_SKIP_WARMUP is set to True"
+    export VLLM_SKIP_WARMUP=True
+fi
+
+
+ray stop --force
+
+# check platform
 if hl-smi 2>/dev/null | grep -q HL-225; then
     echo "Gaudi2 OAM platform"
     default_decode_bs_step=8
@@ -41,7 +103,11 @@ block_size=128
 # DO NOT change ends...
 
 # memory footprint tunning params
-export VLLM_GPU_MEMORY_UTILIZATION=0.75
+if (( max_model_len <= 16384 )); then
+	export VLLM_GPU_MEMORY_UTILIZATION=0.85
+else
+	export VLLM_GPU_MEMORY_UTILIZATION=0.75
+fi
 export VLLM_GRAPH_RESERVED_MEM=0.2
 export VLLM_GRAPH_PROMPT_RATIO=0
 export VLLM_MLA_DISABLE_REQUANTIZATION=0
@@ -50,12 +116,11 @@ export VLLM_MLA_PERFORM_MATRIX_ABSORPTION=0
 #export VLLM_MOE_SLICE_LENGTH=20480
 
 # params
-max_model_len=32768
-max_num_batched_tokens=32768
-max_num_seqs=128
+max_num_batched_tokens=$max_model_len
 input_min=1
-input_max=32768
-output_max=32768
+input_max=$max_model_len
+output_max=$max_model_len
+
 
 unset VLLM_PROMPT_BS_BUCKET_MIN VLLM_PROMPT_BS_BUCKET_STEP VLLM_PROMPT_BS_BUCKET_MAX
 unset VLLM_PROMPT_SEQ_BUCKET_MIN VLLM_PROMPT_SEQ_BUCKET_STEP VLLM_PROMPT_SEQ_BUCKET_MAX
@@ -63,6 +128,8 @@ unset VLLM_DECODE_BS_BUCKET_MIN VLLM_DECODE_BS_BUCKET_STEP VLLM_DECODE_BS_BUCKET
 unset VLLM_DECODE_BLOCK_BUCKET_MIN VLLM_DECODE_BLOCK_BUCKET_STEP VLLM_DECODE_BLOCK_BUCKET_MAX
 
 #export VLLM_SKIP_WARMUP=True
+
+
 
 # !!!!!!!!!!!!!!!!!!!! set bucketing !!!!!!!!!!!!!
 prompt_bs_min=1
@@ -100,7 +167,7 @@ echo " environments are reseted "
 env | grep VLLM
 
 
-python3 -m vllm.entrypoints.openai.api_server --host 0.0.0.0 --port $vllm_port \
+python3 -m vllm.entrypoints.openai.api_server --host $host --port $vllm_port \
 --block-size 128 \
 --model $model_path \
 --device hpu \

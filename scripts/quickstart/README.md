@@ -15,7 +15,7 @@ This guide provides the step-by-step instructions on deploying and running DeepS
   - [Single-Node Setup and Serving Deployment](#single-node-setup-and-serving-deployment)
     - [Download and Install vLLM](#download-and-install-vllm)
     - [HCCL Demo Test](#hccl-demo-test)
-    - [Adjust Workload Parameters in Start Script if Required](#adjust-workload-parameters-in-start-script-if-required)
+    - [The parameters of starting vLLM server script](#the-parameters-of-starting-vllm-server-script)
     - [Launch vLLM Serving with TP=8](#launch-vllm-serving-with-tp8)
     - [Send Requests to Ensure the Service Functionality](#send-requests-to-ensure-the-service-functionality)
   - [Multi-Node Setup and Serving Deployment](#multi-node-setup-and-serving-deployment)
@@ -131,7 +131,7 @@ make
 HCCL_COMM_ID=127.0.0.1:5555 python3 run_hccl_demo.py --nranks 8 --node_id 0 --size 32m --test all_reduce --loop 1000 --ranks_per_node 8
 ```
 
-The hccl test is passed if the message below is shown. For Gaudi PCIe system without Host NIC scale-out, the communication need go throughput CPU UPI and NW Bandwidth is less than 20GB/s. 
+The hccl test is passed if the message below is shown. For Gaudi PCIe system without Host NIC scale-out, the communication need go throughput CPU UPI and NW Bandwidth should be about 18GB/s. 
 ```bash 
 #########################################################################################
 [BENCHMARK] hcclAllReduce(dataSize=33554432, count=8388608, dtype=float, iterations=1000)
@@ -141,18 +141,33 @@ The hccl test is passed if the message below is shown. For Gaudi PCIe system wit
 ```
 
 
-### Adjust Workload Parameters in Start Script if Required
-Modify `single_16k_len.sh` (for 16k context) or `single_32k_len.sh` (for 32k context) for the fields of the following parameters based on your real workload requirements during runtime. For example, set the right model path, vLLM port and vLLM warmup cache folder. 
+### The parameters of starting vLLM server script
+There are some system environment variables which need be set to get the best vLLM performance. We provide the sample script to set the recommended environment variables.
+
+The script file "start_vllm.sh" is used to start vLLM service. You may execute the command below to check its supported parameters.
 ```bash
-#To be changed
-model_path=/data/hf_models/DeepSeek-R1-Gaudi
-vllm_port=8688
-export PT_HPU_RECIPE_CACHE_CONFIG=/data/cache/16k_cache,false,16384
+bash start_vllm.sh -h
+```
+
+The command output is like below. 
+```bash
+Start vllm server for a huggingface model on Gaudi.
+
+Syntax: bash start_vllm.sh <-w> [-u:p:l:b:c:s] [-h]
+options:
+w  Weights of the model, could be model id in huggingface or local path
+u  URL of the server, str, default=0.0.0.0
+p  Port number for the server, int, default=8688
+l  max_model_len for vllm, int, default=16384, maximal value for single node: 32768
+b  max_num_seqs for vllm, int, default=128
+c  Cache HPU recipe to the specified path, str, default=None
+s  Skip warmup or not, bool, default=false
+h  Help info
 ```
 
 ### Launch vLLM Serving with TP=8
 ```bash
-bash single_16k_len.sh
+bash single_vllm.sh -w /data/hf_models/DeepSeek-R1-Gaudi -u 0.0.0.0 -p 8688 -b 128 -l 16384 -c /data/warmup_cache
 ```
 
 It takes more than 1 hour to load and warm up the model for the first time. After completion, a typical output would be like below. The warmup time will be accelerated if the warmup cache is re-used. vLLM server is ready to serve when the log below appears.
@@ -163,7 +178,6 @@ INFO 04-09 00:49:01 api_server.py:800] None
 INFO 04-09 00:49:01 api_server.py:937] Starting vLLM API server on http://0.0.0.0:8688
 INFO 04-09 00:49:01 launcher.py:23] Available routes are:
 INFO 04-09 00:49:01 launcher.py:31] Route: /openapi.json, Methods: HEAD, GET
-
 ```
 
 ### Send Requests to Ensure the Service Functionality
@@ -173,11 +187,11 @@ On bare metal, execute the following command to send a request to the Chat Compl
 ```bash
 curl http://127.0.0.1:8688/v1/chat/completions \
   -X POST \
-  -d '{"model": "/models/DeepSeek-R1-G2-gaudi", "messages": [{"role": "user", "content": "List 3 countries and their capitals."}], "max_tokens":128}' \
+  -d '{"model": "/data/hf_models/DeepSeek-R1-Gaudi", "messages": [{"role": "user", "content": "List 3 countries and their capitals."}], "max_tokens":128}' \
   -H 'Content-Type: application/json'
 ```
 
-If it reponses normally, refer to [Run The Benchmark](#Check-the-vLLM-performanc) and [Check the Model Accuracy](#check-the-model-accuracy) to measure the performance and accuracy.
+If it reponses normally, refer to [Check the vLLM Performance](#Check-the-vLLM-performance) and [Check the Model Accuracy](#check-the-model-accuracy) to measure the performance and accuracy.
 
 
 ## Multi-Node Setup and Serving Deployment
