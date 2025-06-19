@@ -1,0 +1,110 @@
+# Setting this allows creating a symlink to Justfile from another dir
+set working-directory := "/home/rshaw/vllm/pd_examples/"
+
+# Needed for the proxy server
+vllm-directory := "/home/rshaw/vllm/" 
+
+# MODEL := "Qwen/Qwen3-0.6B"
+MODEL := "meta-llama/Llama-3.1-8B-Instruct"
+
+port PORT: 
+  @python port_allocator.py {{PORT}}
+
+
+prefill:
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$(just port 5557) \
+    CUDA_VISIBLE_DEVICES=0,1 \
+    vllm serve {{MODEL}} \
+      --port $(just port 8100) \
+      --tensor-parallel-size 2 \
+      --enforce-eager \
+      --disable-log-requests \
+      --block-size 128 \
+      --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+
+prefill_b:
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$(just port 5558) \
+    CUDA_VISIBLE_DEVICES=6 \
+    vllm serve {{MODEL}} \
+      --port $(just port 8200) \
+      --enforce-eager \
+      --disable-log-requests \
+      --block-size 128 \
+      --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+
+decode:
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$(just port 5559) \
+    CUDA_VISIBLE_DEVICES=2,3,4,5 \
+    vllm serve {{MODEL}} \
+      --port $(just port 8300) \
+      --tensor-parallel-size 2 \
+      --enforce-eager \
+      --disable-log-requests \
+      --block-size 128 \
+      --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+
+# proxy:
+#     python "{{vllm-directory}}tests/v1/kv_connector/nixl_integration/toy_proxy_server.py" \
+#       --port $(just port 8192) \
+#       --prefiller-port $(just port 8100) $(just port 8200) \
+#       --prefiller-host localhost localhost \
+#       --decoder-port $(just port 8300)
+
+proxy:
+    python "{{vllm-directory}}tests/v1/kv_connector/nixl_integration/toy_proxy_server.py" \
+      --port $(just port 8192) \
+      --prefiller-port $(just port 8100) \
+      --prefiller-host localhost \
+      --decoder-port $(just port 8300)
+
+send_request:
+  curl -X POST http://localhost:$(just port 8192)/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{ \
+      "model": "{{MODEL}}", \
+      "prompt": "XXRed Hat is the best open source company by far across Linux, K8s, and AI, and vLLM has the greatest community in open source AI software infrastructure. I love vLLM because", \
+      "max_tokens": 150, \
+      "temperature": 0.7 \
+    }'
+
+benchmark NUM_PROMPTS:
+  python {{vllm-directory}}/benchmarks/benchmark_serving.py \
+    --port $(just port 8192) \
+    --model {{MODEL}} \
+    --dataset-name random \
+    --random-input-len 10000 \
+    --random-output-len 100 \
+    --num-prompts {{NUM_PROMPTS}} \
+    --seed $(date +%s) \
+
+benchmark_one INPUT_LEN:
+  python {{vllm-directory}}benchmarks/benchmark_one_concurrent_req.py \
+    --model {{MODEL}} \
+    --input-len {{INPUT_LEN}} \
+    --output-len 1 \
+    --num-requests 10 \
+    --seed $(date +%s) \
+    --port $(just port 8192)
+
+benchmark_one_no_pd INPUT_LEN:
+  python {{vllm-directory}}benchmarks/benchmark_one_concurrent_req.py \
+    --model {{MODEL}} \
+    --input-len {{INPUT_LEN}} \
+    --output-len 1 \
+    --num-requests 10 \
+    --seed $(date +%s) \
+    --port $(just port 8100)
+
+reset_prefix_cache:
+  curl -X POST http://localhost:$(just port 8100)/reset_prefix_cache && \
+  curl -X POST http://localhost:$(just port 8200)/reset_prefix_cache
+
+eval:
+  lm_eval --model local-completions --tasks gsm8k \
+    --model_args model={{MODEL}},base_url=http://127.0.0.1:$(just port 8192)/v1/completions,num_concurrent=100,max_retries=3,tokenized_requests=False \
+    --limit 1000
+
+eval_port PORT:
+  lm_eval --model local-completions --tasks gsm8k \
+    --model_args model={{MODEL}},base_url=http://127.0.0.1:$(just port {{PORT}})/v1/completions,num_concurrent=100,max_retries=3,tokenized_requests=False \
+    --limit 1000
