@@ -141,11 +141,10 @@ def test_batched_silu_mul(batch_size: int, num_tokens: int, d: int,
     input = torch.randn(
         (batch_size, num_tokens, d), device="cuda", dtype=dtype) / 10.0
 
-    out = torch.empty((batch_size, num_tokens, d // 2),
-                      device="cuda",
-                      dtype=dtype)
-
-    ref_out = out.clone()
+    cuda_out = torch.empty((batch_size, num_tokens, d // 2),
+                           device="cuda",
+                           dtype=dtype)
+    ref_out = cuda_out.clone()
 
     # valid num_tokens per batch
     valid_num_tokens = torch.randint(low=0,
@@ -155,8 +154,7 @@ def test_batched_silu_mul(batch_size: int, num_tokens: int, d: int,
 
     # reference
     ref_batched_silu_mul(input, ref_out, valid_num_tokens)
+    # cuda impl
+    torch.ops._C.batched_silu_and_mul(cuda_out, input, valid_num_tokens)
 
-    # impl
-    torch.ops._C.batched_silu_and_mul(out, input, valid_num_tokens)
-
-    torch.testing.assert_close(ref_out, out)
+    torch.testing.assert_close(ref_out, cuda_out)
