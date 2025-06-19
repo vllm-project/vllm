@@ -491,11 +491,7 @@ class AttnColumnParallelLinear(LinearBase):
         # Matrix multiply.
         assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self, input_, bias)
-        if self.gather_output:
-            # All-gather across the partitions.
-            output = tensor_model_parallel_all_gather(output_parallel)
-        else:
-            output = output_parallel
+        output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:
             return output
@@ -778,7 +774,7 @@ class AttnQKVParallelLinear(AttnColumnParallelLinear):
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
-        tp_rank = get_tensor_model_parallel_rank()
+        tp_rank = get_lm_tensor_model_parallel_rank()
         assert loaded_shard_id in ["q", "k", "v"]
 
         # If output dim is defined, use the default loading process.
