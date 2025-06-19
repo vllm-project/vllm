@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import math
+import queue
 import threading
 import time
 import uuid
 from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -22,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
+from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import _Backend
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down
@@ -30,11 +33,12 @@ from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
-    from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
+EngineId = str
+ReqId = str
 GET_META_MSG = b"get_meta_msg"
 
 logger = init_logger(__name__)
@@ -68,17 +72,17 @@ class ReqMeta:
     remote_block_ids: list[int]
     remote_host: str
     remote_port: int
-    remote_engine_id: str
+    remote_engine_id: EngineId
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
-        self.requests: dict[str, ReqMeta] = {}
+        self.requests: dict[ReqId, ReqMeta] = {}
 
     def add_new_req(
         self,
-        request_id: str,
+        request_id: ReqId,
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
     ):
@@ -95,16 +99,17 @@ class NixlConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
-        self.engine_id = vllm_config.kv_transfer_config.engine_id
+        assert vllm_config.kv_transfer_config.engine_id is not None
+        self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler : Optional[NixlConnectorScheduler] = \
-                NixlConnectorScheduler(vllm_config, str(self.engine_id))
+                NixlConnectorScheduler(vllm_config, self.engine_id)
             self.connector_worker: Optional[NixlConnectorWorker] = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = NixlConnectorWorker(
-                vllm_config, str(self.engine_id))
+                vllm_config, self.engine_id)
 
     ############################################################
     # Scheduler Side Methods
@@ -130,6 +135,17 @@ class NixlConnector(KVConnectorBase_V1):
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def bind_connector_metadata(
+            self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        # start_load_kv() doesn't use the forward_context, so we can pass a dummy one.
+        dummy_ctx = ForwardContext(
+            no_compile_layers={},
+            attn_metadata={},
+            virtual_engine=0,
+        )
+        self.start_load_kv(dummy_ctx)
 
     def request_finished(
         self,
@@ -178,7 +194,7 @@ class NixlConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        self.engine_id = engine_id
+        self.engine_id: EngineId = engine_id
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
@@ -189,7 +205,7 @@ class NixlConnectorScheduler:
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+        self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -331,19 +347,19 @@ class NixlConnectorWorker:
         # Agent.
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
-        self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
+        self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
         # NIXL handshake port.
         # NOTE(rob): Within a DP group, each DP rank gets its own
         # base port (which is sent in the KVTransferParams).
         # Each TP rank listens/queries on the base_port + tp_rank.
-        self.side_channel_port = (
+        self.side_channel_port: int = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
             vllm_config.parallel_config.data_parallel_rank_local *
             vllm_config.parallel_config.tensor_parallel_size)
 
         # Metadata.
-        self.engine_id = engine_id
+        self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
@@ -372,18 +388,26 @@ class NixlConnectorWorker:
 
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers = defaultdict[str, list[Transfer]](list)
+        self._recving_transfers = defaultdict[ReqId, list[Transfer]](list)
 
         # Complete transfer tracker. Used by the rank 0 to track finished
         # transactions on ranks 1 to N-1.
         # [req_id -> count]
-        self._done_recving_count: defaultdict[str,
+        self._done_recving_count: defaultdict[ReqId,
                                               int] = defaultdict(lambda: 0)
-        self._done_sending_count: defaultdict[str,
+        self._done_sending_count: defaultdict[ReqId,
                                               int] = defaultdict(lambda: 0)
 
-        # Background thread for establishing new connections.
+        # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
+        # Background thread for initializing new NIXL handshakes.
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="vllm-nixl-handshake")
+        # Thread results for handshake completion tracking
+        self._handshake_futures: dict[EngineId, Future] = {}
+        self._pending_requests: dict[EngineId, list[tuple[ReqId, ReqMeta]]] = {}
+        self._ready_requests: queue.Queue[tuple[ReqId, ReqMeta]] = queue.Queue()
+        self._lock = threading.Lock()
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -412,6 +436,12 @@ class NixlConnectorWorker:
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[str, int](int)
 
+    def __del__(self):
+        """Cleanup background threads on destruction."""
+        self._executor.shutdown(wait=False)
+        if self._nixl_handshake_listener_t:
+            self._nixl_handshake_listener_t.join(timeout=0)
+
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
                                  ready_event: threading.Event, base_port: int,
@@ -438,6 +468,51 @@ class NixlConnectorWorker:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
+
+    def _start_handshake(self, engine_id: str, host: str, port: int):
+        """Start handshake using ThreadPoolExecutor.
+        
+        This method is non-blocking and submits `_nixl_handshake` to the
+        background thread pool.
+        """
+        if engine_id in self._handshake_futures:
+            return
+
+        logger.debug("Starting handshake for engine %s", engine_id)
+        future = self._executor.submit(self._nixl_handshake, host, port)
+        self._handshake_futures[engine_id] = future
+
+        # Set up callback to handle completion
+        def on_handshake_complete(fut: Future):
+            logger.debug("Handshake callback triggered for engine %s",
+                         engine_id)
+            with self._lock:
+                if engine_id in self._handshake_futures:
+                    # Clean up futures. In case of failure, requests will remain
+                    # pending and be reported to scheduler for retry.
+                    del self._handshake_futures[engine_id]
+                try:
+                    fut.result()  # This will raise if the handshake failed
+                    logger.debug("Handshake succeeded for engine %s", engine_id)
+                    completed_reqs = self._pending_requests.pop(engine_id, None)
+                    if completed_reqs is not None:
+                        for req_id, meta in completed_reqs:
+                            self._ready_requests.put((req_id, meta))
+                        logger.debug(    
+                            "Handshake completed for engine %s. "
+                            "Moved %d requests to ready queue for processing",
+                            engine_id, len(completed_reqs))
+                except Exception as e:
+                    logger.warning("Handshake failed for engine %s: %s", engine_id,
+                                e)
+                    failed_reqs = self._pending_requests.pop(engine_id, None)
+                    if failed_reqs is not None:
+                        logger.warning(
+                            "Handshake failed for engine %s, leaving"
+                            "%d requests pending for scheduler retry",
+                            engine_id, len(failed_reqs))
+
+        future.add_done_callback(on_handshake_complete)
 
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote instance."""
@@ -617,7 +692,7 @@ class NixlConnectorWorker:
             daemon=True,
             name="nixl_handshake_listener")
         self._nixl_handshake_listener_t.start()
-        ready_event.wait()
+        ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
     def add_remote_agent(self,
                          nixl_agent_meta: NixlAgentMetadata,
@@ -836,18 +911,41 @@ class NixlConnectorWorker:
         """
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
-            for handle, xfer_stime in handles:
+            xfer_stats = []
+            for handle, _ in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                xfer_stats.append(xfer_state)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    done_req_ids.add(req_id)
-                    del transfers[req_id]
                 elif xfer_state == "PROC":
                     continue
                 else:
                     raise RuntimeError("Transfer failed with state %s",
                                        xfer_state)
+            if all(xfer_state == "DONE" for xfer_state in xfer_stats):
+                done_req_ids.add(req_id)
+                del transfers[req_id]
         return done_req_ids
+    
+    def _process_ready_requests(self):
+        """Process requests that are ready after handshake completion."""
+        processed_count = 0
+        while True:
+            try:
+                req_id, meta = self._ready_requests.get_nowait()
+                logger.debug("Processing ready request %s for engine %s",
+                             req_id, meta.remote_engine_id)
+                self._read_blocks(
+                    request_id=req_id,
+                    dst_engine_id=meta.remote_engine_id,
+                    local_block_ids=meta.local_block_ids,
+                    remote_block_ids=meta.remote_block_ids,
+                )
+                processed_count += 1
+            except queue.Empty:
+                break
+
+        logger.debug("Processed %d ready requests", processed_count)
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
@@ -860,28 +958,47 @@ class NixlConnectorWorker:
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
-            self._read_blocks(
-                request_id=req_id,
-                dst_engine_id=meta.remote_engine_id,
-                local_block_ids=meta.local_block_ids,
-                remote_block_ids=meta.remote_block_ids,
-                remote_host=meta.remote_host,
-                remote_port=meta.remote_port,
-            )
+            with self._lock:
+                if meta.remote_engine_id in self._remote_agents:
+                    logger.debug(
+                        "Remote agent available for %s, calling _read_blocks",
+                        meta.remote_engine_id)
+                    self._read_blocks(
+                        request_id=req_id,
+                        dst_engine_id=meta.remote_engine_id,
+                        local_block_ids=meta.local_block_ids,
+                        remote_block_ids=meta.remote_block_ids,
+                    )
+                elif meta.remote_engine_id in self._handshake_futures:
+                    logger.debug(
+                        "Handshake in progress for engine %s, adding"
+                        " request %s to pending", meta.remote_engine_id,
+                        req_id)
+                    if meta.remote_engine_id not in self._pending_requests:
+                        self._pending_requests[meta.remote_engine_id] = []
+                    self._pending_requests[meta.remote_engine_id].append(
+                        (req_id, meta))
+                else:
+                    logger.debug(
+                        "Starting handshake for engine %s and adding"
+                        " request %s to pending", meta.remote_engine_id,
+                        req_id)
+                    if meta.remote_engine_id not in self._pending_requests:
+                        self._pending_requests[meta.remote_engine_id] = []
+                    self._pending_requests[meta.remote_engine_id].append(
+                        (req_id, meta))
+                    self._start_handshake(meta.remote_engine_id,
+                                          meta.remote_host, meta.remote_port)
+
+        self._process_ready_requests()
 
     def _read_blocks(
         self,
         local_block_ids: list[int],
         remote_block_ids: list[int],
-        remote_host: str,
-        remote_port: int,
         dst_engine_id: str,
         request_id: str,
     ):
-        # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
-        if dst_engine_id not in self._remote_agents:
-            self._nixl_handshake(remote_host, remote_port)
-
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
