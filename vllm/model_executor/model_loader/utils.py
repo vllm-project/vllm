@@ -48,6 +48,7 @@ def initialize_model(
     """Initialize a model with the given configurations."""
     if model_config is None:
         model_config = vllm_config.model_config
+    logger.info(f"model_config: {model_config}")
     if model_class is None:
         model_class, _ = get_model_architecture(model_config)
 
@@ -56,6 +57,7 @@ def initialize_model(
 
     signatures = inspect.signature(model_class.__init__)
     all_params = [param.name for param in signatures.parameters.values()]
+    logger.info(f"all_params: {all_params}")
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
         with set_current_vllm_config(vllm_config,
@@ -88,6 +90,7 @@ def initialize_model(
         kwargs["lora_config"] = vllm_config.lora_config
     if "scheduler_config" in all_params:
         kwargs["scheduler_config"] = vllm_config.scheduler_config
+    logger.info(f"kwargs: {kwargs}")
     with set_current_vllm_config(vllm_config,
                                  check_compile=True,
                                  prefix=prefix):
@@ -248,6 +251,7 @@ def get_model_architecture(
         model_cls = as_classification_model(model_cls)
     elif model_config.task == "reward":
         model_cls = as_reward_model(model_cls)
+    logger.info(f"model_cls: {model_cls}, arch: {arch}")
 
     return model_cls, arch
 
