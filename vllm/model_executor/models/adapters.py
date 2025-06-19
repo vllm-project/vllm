@@ -189,7 +189,7 @@ def as_seq_cls_model(cls: _T) -> _T:
             **kwargs: Any,
         ) -> None:
             super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
-            self.config_verify(vllm_config)
+            self.verify_and_update_config(vllm_config)
 
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
