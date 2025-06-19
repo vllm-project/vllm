@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import torch
-import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
 
@@ -22,7 +21,7 @@ from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVTransferResult
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture,
     prepare_communication_buffer_for_model)
@@ -1300,8 +1299,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
             self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (
-                self.get_finished_kv_transfers(scheduler_output))
+            kv_transfer_result = self.get_finished_kv_transfers(scheduler_output)
+            finished_sending = kv_transfer_result.finished_sending
+            finished_recving = kv_transfer_result.finished_recving
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1547,8 +1547,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # KV send/recv even if no work to do.
         with set_forward_context(None, self.vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
-            finished_sending, finished_recving = (
-                self.get_finished_kv_transfers(scheduler_output))
+            kv_transfer_result = self.get_finished_kv_transfers(scheduler_output)
+            finished_sending = kv_transfer_result.finished_sending
+            finished_recving = kv_transfer_result.finished_recving
 
         if not finished_sending and not finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -1582,11 +1583,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @staticmethod
     def get_finished_kv_transfers(
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> KVTransferResult:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids)
-        return None, None
+        return KVTransferResult.empty()
 
     def generate_draft_token_ids(
         self,
