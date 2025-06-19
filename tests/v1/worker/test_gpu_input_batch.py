@@ -142,8 +142,6 @@ def _construct_expected_sampling_metadata(
             top_p, dtype=torch.float, device=device),
         top_k=None if all(x == 0 for x in top_k) else torch.tensor(
             top_k, dtype=torch.int, device=device),
-        min_p=None if all(x == 0.0 for x in min_p) else torch.tensor(
-            min_p, dtype=torch.float, device=device),
         generators={},
         max_num_logprobs=0,
         prompt_token_ids=make_tensor_with_pad(
@@ -248,7 +246,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     req_ids_retained = set(req_id_reqs.keys()) - req_ids_to_remove
 
     # Compact the input batch
-    input_batch.condense(req_indices_to_remove)
+    input_batch.condense()
 
     # Generate the sampling metadata
     sampling_metadata = input_batch._make_sampling_metadata()
@@ -352,7 +350,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
         req = reordered_reqs[req_index]
         ref_input_batch.add_request(req, req_index)
 
-    input_batch.refresh_sampling_metadata()
-    ref_input_batch.refresh_sampling_metadata()
+    input_batch.refresh()
+    ref_input_batch.refresh()
 
     _compare_objs(input_batch, ref_input_batch)

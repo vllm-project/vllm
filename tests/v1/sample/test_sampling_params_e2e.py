@@ -51,6 +51,14 @@ def test_penalties(model):
     )
     _ = model.generate(PROMPT, params)
 
+def test_min_p_greedy_fails(model):
+    """Check that min-p fails for greedy sampling."""
+    with pytest.raises(ValueError):
+        _ = model.generate(PROMPT,
+                           SamplingParams(
+        temperature=0.0,
+        min_p=0.5
+    ))
 
 def test_stop(model):
     """Check that we respect the stop words."""
