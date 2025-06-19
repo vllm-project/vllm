@@ -13,20 +13,10 @@ port PORT:
 
 prefill:
     VLLM_NIXL_SIDE_CHANNEL_PORT=$(just port 5557) \
-    CUDA_VISIBLE_DEVICES=0,1 \
+    CUDA_VISIBLE_DEVICES=0 \
     vllm serve {{MODEL}} \
       --port $(just port 8100) \
-      --tensor-parallel-size 2 \
-      --enforce-eager \
-      --disable-log-requests \
-      --block-size 128 \
-      --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-
-prefill_b:
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$(just port 5558) \
-    CUDA_VISIBLE_DEVICES=6 \
-    vllm serve {{MODEL}} \
-      --port $(just port 8200) \
+      --tensor-parallel-size 1 \
       --enforce-eager \
       --disable-log-requests \
       --block-size 128 \
@@ -34,21 +24,14 @@ prefill_b:
 
 decode:
     VLLM_NIXL_SIDE_CHANNEL_PORT=$(just port 5559) \
-    CUDA_VISIBLE_DEVICES=2,3,4,5 \
+    CUDA_VISIBLE_DEVICES=1 \
     vllm serve {{MODEL}} \
       --port $(just port 8300) \
-      --tensor-parallel-size 2 \
+      --tensor-parallel-size 1 \
       --enforce-eager \
       --disable-log-requests \
       --block-size 128 \
       --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-
-# proxy:
-#     python "{{vllm-directory}}tests/v1/kv_connector/nixl_integration/toy_proxy_server.py" \
-#       --port $(just port 8192) \
-#       --prefiller-port $(just port 8100) $(just port 8200) \
-#       --prefiller-host localhost localhost \
-#       --decoder-port $(just port 8300)
 
 proxy:
     python "{{vllm-directory}}tests/v1/kv_connector/nixl_integration/toy_proxy_server.py" \
