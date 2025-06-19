@@ -21,6 +21,7 @@ from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.streaming_params import StreamingParams
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -280,6 +281,7 @@ class AsyncLLM(EngineClient):
         prompt: PromptType,
         sampling_params: SamplingParams,
         request_id: str,
+        streaming_params: Optional[StreamingParams] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -324,7 +326,8 @@ class AsyncLLM(EngineClient):
             while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() or await q.get()
+                out = q.get_nowait() or await q.get(
+                    streaming_params=streaming_params)
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
