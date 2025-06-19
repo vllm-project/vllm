@@ -355,6 +355,7 @@ class EngineArgs:
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
+    enable_activated_lora: bool = LoRAConfig.activated_lora_enabled
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: int = LoRAConfig.max_lora_rank
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
@@ -733,6 +734,8 @@ class EngineArgs:
             help="If True, enable handling of LoRA adapters.")
         lora_group.add_argument("--enable-lora-bias",
                                 **lora_kwargs["bias_enabled"])
+        lora_group.add_argument("--enable-activated-lora",
+                                **lora_kwargs["activated_lora"])
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank",
                                 **lora_kwargs["max_lora_rank"])
@@ -1190,6 +1193,7 @@ class EngineArgs:
 
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
+            activated_lora_enabled=self.enable_activated_lora,
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
             fully_sharded_loras=self.fully_sharded_loras,

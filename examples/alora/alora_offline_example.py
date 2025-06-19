@@ -10,11 +10,11 @@ from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
 BASE_NAME = "ibm-granite/granite-3.2-8b-instruct"
+
 ALORA_NAME = "ibm-granite/granite-3.2-8b-alora-uncertainty"
 invocation_string = "<|start_of_role|>certainty<|end_of_role|>"
 
 os.environ["VLLM_USE_V1"] = "1"
-os.environ["VLLM_V1_USE_DEMO_LOGGING"] = "1"
 
 # download your LoRA adapter to ~/.cache/huggingface/…
 alora_path = snapshot_download(repo_id=ALORA_NAME)
@@ -26,11 +26,9 @@ print(alora_path)
 llm = LLM(
     model=BASE_NAME,
     enable_lora=True,
-    enforce_eager=True,
+    enable_activated_lora=True,
     dtype=torch.bfloat16,
-    enable_prefix_caching=True,  # enable APC
     max_lora_rank=64,
-    enable_chunked_prefill=False,
 )
 
 prompts = [

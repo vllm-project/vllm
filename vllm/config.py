@@ -2873,7 +2873,7 @@ class LoRAConfig:
     allowed."""
     bias_enabled: bool = False
     """Enable bias for LoRA adapters."""
-    activated_lora_enabled: bool = True
+    activated_lora_enabled: bool = False
     """Enable Activated LoRA."""
 
     def compute_hash(self) -> str:
