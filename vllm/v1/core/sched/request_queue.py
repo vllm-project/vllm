@@ -88,7 +88,7 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
     def prepend_requests(self, requests: RequestQueue) -> None:
         """Prepend all requests from another queue to the front of this
         queue."""
-        self.extendleft(reversed(list(requests)))
+        self.extendleft(reversed(requests))
 
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
@@ -170,6 +170,10 @@ class PriorityRequestQueue(RequestQueue):
         while heap_copy:
             _, _, request = heapq.heappop(heap_copy)
             yield request
+
+    def __reversed__(self) -> Iterator[Request]:
+        """Iterate over the queue in reverse priority order."""
+        return reversed(list(self))
 
 
 def create_request_queue(policy: str, ) -> RequestQueue:
