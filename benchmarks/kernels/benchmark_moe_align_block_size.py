@@ -4,12 +4,12 @@ import argparse
 import itertools
 
 import torch
-import triton
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size_triton,
 )
+from vllm.triton_utils import triton
 
 
 def get_topk_ids(num_tokens: int, num_experts: int, topk: int) -> torch.Tensor:
