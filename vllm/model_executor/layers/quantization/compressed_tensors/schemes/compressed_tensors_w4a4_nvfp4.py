@@ -137,12 +137,15 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         if USE_NVFP4_CT_EMULATIONS == "1":
-            return run_nvfp4_emulations(
+            out = run_nvfp4_emulations(
                 x=x,
                 input_global_scale=layer.input_global_scale,
                 weight=layer.weight,
                 weight_scale_swizzled=layer.weight_scale_swizzled,
                 weight_global_scale=layer.weight_global_scale)
+            if bias is not None:
+                out = out + bias
+            return out
 
         output_dtype = x.dtype
         output_shape = [x.shape[0], layer.weight.shape[0]]
