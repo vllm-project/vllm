@@ -33,6 +33,7 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
@@ -321,6 +322,7 @@ class HfRunner:
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
     ) -> None:
+        model_name = maybe_model_redirect(model_name)
         self.model_name = model_name
 
         self.config = AutoConfig.from_pretrained(
