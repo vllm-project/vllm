@@ -552,6 +552,8 @@ class AsyncLLM(EngineClient):
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
+        if self.errored:
+            raise self.dead_error
 
     async def start_profile(self) -> None:
         await self.engine_core.profile_async(True)
