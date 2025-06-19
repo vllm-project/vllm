@@ -391,13 +391,9 @@ class NixlConnectorWorker:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
         # Background thread for initializing new NIXL handshakes.
-        self._executor = ThreadPoolExecutor(
-            max_workers=8, thread_name_prefix="vllm-nixl-handshake")
-        # Thread results for handshake completion tracking.
-        # eng_id -> handshake future
-        self._handshake_futures: dict[EngineId, Future] = {}
+        self._nixl_handshake_initiator_t: Optional[threading.Thread] = None
+        self._pending_hanshake = queue.Queue[tuple[ReqId, ReqMeta]]()
         self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
-        self._lock = threading.Lock()
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -428,7 +424,8 @@ class NixlConnectorWorker:
 
     def __del__(self):
         """Cleanup background threads on destruction."""
-        self._executor.shutdown(wait=False)
+        if self._nixl_handshake_initiator_t:
+            self._nixl_handshake_initiator_t.join(timeout=0)
         if self._nixl_handshake_listener_t:
             self._nixl_handshake_listener_t.join(timeout=0)
 
@@ -893,21 +890,19 @@ class NixlConnectorWorker:
                 remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
             if remote_engine_id not in self._remote_agents:
-                with self._lock:
-                    fut = self._handshake_futures.get(remote_engine_id, None)
-                    if fut is None:
-                        fut = self._executor.submit(
-                            self._nixl_handshake, meta.remote_host,
-                            meta.remote_port)
-                        fut.add_done_callback(
-                            lambda f, eid=remote_engine_id: \
-                            self._handshake_futures.pop(eid))
-                        self._handshake_futures[remote_engine_id] = fut
+                self._pending_hanshake.put((req_id, meta))
+                if not self._nixl_handshake_initiator_t:
+                    def _nixl_handshake_in_sequence():
+                        while True:
+                            req_id, meta = self._pending_hanshake.get()
+                            self._nixl_handshake(meta.remote_host, meta.remote_port)
+                            self._ready_requests.put((req_id, meta))
 
-                    #TODO(#19777): handle failure state of f in the callback,
-                    # we want to fail the request in this case.
-                    fut.add_done_callback(lambda f, entry=(req_id,meta): \
-                                                self._ready_requests.put(entry))
+                    self._nixl_handshake_initiator_t = threading.Thread(
+                        target=_nixl_handshake_in_sequence,
+                        daemon=True,
+                        name="vllm-nixl-handshake-initiator")
+                    self._nixl_handshake_initiator_t.start()
             else:
                 self._read_blocks_for_req(req_id, meta)
 

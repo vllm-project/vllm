@@ -298,7 +298,7 @@ class TestNixlHandshake:
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
         connector.connector_worker = FakeNixlConnectorWorker(vllm_config, connector.engine_id)
         metadata = NixlConnectorMetadata()
-        total_reqs = 100
+        total_reqs = 5
         for i in range(total_reqs):
             metadata.add_new_req(request_id=f"id_{i}",
                                 local_block_ids=[1, 2, 3],
@@ -310,7 +310,7 @@ class TestNixlHandshake:
                                 })
         connector.bind_connector_metadata(metadata)
 
-        timeout = 2.5
+        timeout = 2.5 * total_reqs
         cnt_finished_reqs = 0
         start = time.perf_counter()
         while time.perf_counter() - start < timeout:
