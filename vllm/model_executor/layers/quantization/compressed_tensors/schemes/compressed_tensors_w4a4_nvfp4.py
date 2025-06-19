@@ -31,6 +31,8 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
+        if USE_NVFP4_CT_EMULATIONS == "1":
+            return 80
         return 100
 
     @classmethod
@@ -135,11 +137,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         if USE_NVFP4_CT_EMULATIONS == "1":
+            print("running emulations")
             return run_nvfp4_emulations(
                 x=x,
                 input_global_scale=layer.input_global_scale,
                 weight=layer.weight,
-                weight_scale_swizzles=layer.weight_scale_swizzled,
+                weight_scale_swizzled=layer.weight_scale_swizzled,
                 weight_global_scale=layer.weight_global_scale)
 
         output_dtype = x.dtype
