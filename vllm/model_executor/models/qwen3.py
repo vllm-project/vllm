@@ -375,7 +375,12 @@ class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA,
     ) -> Optional[PoolerOutput]:
         hidden_states = self._pooler.extract_states(hidden_states,
                                                     pooling_metadata)
-        logits, _ = self.score(hidden_states)
+
+        if isinstance(hidden_states, list):
+            logits = [self.score(state)[0] for state in hidden_states]
+        else:
+            logits, _ = self.score(hidden_states)
+
         pooled_data = self._pooler.head(logits, pooling_metadata)
         pooled_outputs = [
             self._pooler.build_output(data.squeeze(-1)) for data in pooled_data
