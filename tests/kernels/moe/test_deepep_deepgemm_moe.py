@@ -15,7 +15,8 @@ from torch.distributed import ProcessGroup
 from typing_extensions import ParamSpec
 
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
+                                                            fused_topk)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -169,15 +170,16 @@ class TestTensors:
         block_k = block_size[1]
         _, rank_token_scales = per_token_group_quant_fp8(rank_tokens, block_k)
 
-        # distribute topk_ids evenly
+        score = torch.randn((m, config.num_experts),
+                            device="cuda",
+                            dtype=dtype)
+        topk_weights, topk_ids, _ = fused_topk(rank_tokens, score, topk, False)
+
+        # overwrite topk_ids to distribute evenly.
         topk_ids = torch.empty((m, topk), device="cpu", dtype=torch.int64)
         for mi in range(m):
             topk_ids[mi] = torch.randperm(config.num_experts)[:topk]
         topk_ids = topk_ids.to(device=torch.cuda.current_device())
-
-        topk_weights = torch.randn(topk_ids.shape,
-                                   dtype=torch.float32,
-                                   device=torch.cuda.current_device())
 
         return TestTensors(rank_tokens=rank_tokens,
                            rank_token_scales=rank_token_scales,
@@ -459,23 +461,25 @@ def test_ht_deepep_deepgemm_moe(mnk: tuple[int, int, int], num_experts: int,
                     w2, w1_scale, w2_scale)
 
 
-TOPKS = [6]
+TOPKS = [2, 6]
 MNKs = [
-    #(1, 128, 2560),
-    #(2, 128, 2560),
-    #(3, 1024, 2560),
-    #(32, 128, 2560),
-
-    #(45, 512, 2560),
-    #(64, 1024, 2560),
-    #(222, 1024, 2560),
-
-    #(45, 128, 2560),
-    #(64, 128, 2560),
+    (1, 128, 2560),
+    (2, 128, 2560),
+    (3, 1024, 2560),
+    (32, 128, 2560),
+    (45, 512, 2560),
+    (64, 1024, 2560),
+    (222, 1024, 2560),
+    (45, 128, 2560),
+    (64, 128, 2560),
     (222, 128, 2560),
+    (45, 2048, 2560),
+    (64, 2048, 2560),
+    (222, 2048, 2560),
+    (333, 2048, 2560),
+    (444, 2048, 2560),
 ]
-# Fix tests for USE_FP8_DISPATCH=True
-USE_FP8_DISPATCH = [True]
+USE_FP8_DISPATCH = [False, True]
 
 
 @pytest.mark.parametrize("mnk", MNKs)
