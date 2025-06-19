@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from nixl._api import nixl_agent as NixlWrapper
+import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 from unittest.mock import patch, MagicMock
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-    NixlConnector,
-    NixlConnectorMetadata,
-    KVConnectorRole)
+    NixlConnector, NixlConnectorMetadata, KVConnectorRole, NixlConnectorWorker, NixlAgentMetadata)
 from vllm.forward_context import ForwardContext
 
 from .utils import create_request, create_scheduler, create_vllm_config
@@ -83,74 +82,119 @@ def test_prompt_less_than_block_size():
 
 class FakeNixlWrapper(NixlWrapper):
     """Mock implementation of NixlWrapper for testing."""
-    
+
+    AGENT_METADATA = b"fake_agent_metadata"
+
     def __init__(self, agent_name: str, *args, **kwargs):
         pass
 
     def get_reg_descs(self, caches_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in caches_data]
-    
+
     def register_memory(self, descs) -> None:
         pass
-        
+
     def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in blocks_data]
-    
+
     def prep_xfer_dlist(self, agent_name: str, descs: list) -> int:
         return uuid.uuid4().int
-    
+
     def get_agent_metadata(self) -> bytes:
-        return b"fake_agent_metadata"
-    
+        return self.AGENT_METADATA
+
     def add_remote_agent(self, agent_metadata: bytes) -> str:
-        return str(agent_metadata)
-    
+        return str(self.AGENT_METADATA)
+
     def get_new_notifs(self) -> Dict[str, List[bytes]]:
         # Used to collect done_sending, which we don't test yet.
         return {}
-    
+
     def check_xfer_state(self, handle: int) -> str:
         return "DONE"
 
     def release_xfer_handle(self, handle: int) -> None:
         pass
-    
+
     def send_notif(self, agent_name: str, notif_msg: bytes) -> None:
         pass
-    
-    def make_prepped_xfer(self, 
-                         xfer_type: str,
-                         local_xfer_side_handle: int,
-                         local_block_descs_ids: List[int],
-                         remote_xfer_side_handle: int,
-                         remote_block_descs_ids: List[int],
-                         notif_msg: Optional[bytes] = None) -> int:
+
+    def make_prepped_xfer(self,
+                          xfer_type: str,
+                          local_xfer_side_handle: int,
+                          local_block_descs_ids: List[int],
+                          remote_xfer_side_handle: int,
+                          remote_block_descs_ids: List[int],
+                          notif_msg: Optional[bytes] = None) -> int:
         return uuid.uuid4().int
 
     def transfer(self, handle: int) -> str:
         return "DONE"
 
 
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper", FakeNixlWrapper)
-def test_async_load_kv(dist_init):
+class FakeNixlConnectorWorker(NixlConnectorWorker):
+
+    REMOTE_ENGINE_ID = "remote_engine"
+    
+    def _nixl_handshake(self, host: str, port: int):
+        # Mimic slow _nixl_handshake, as well as bypass zmq communication.
+        time.sleep(1.8)
+        # These should be done in register_kv_caches(), called by gpu_model_runner.
+        self.slot_size_bytes = 4096
+        self.block_len = self.slot_size_bytes * self.block_size
+        self.num_blocks = 1
+        self.dst_num_blocks[self.engine_id] = self.num_blocks
+
+        self.add_remote_agent(NixlAgentMetadata(
+            engine_id=self.REMOTE_ENGINE_ID,
+            agent_metadata=b"fake_agent_metadata",
+            kv_caches_base_addr=[0],
+            num_blocks=1,
+            tp_size=1,
+            block_len=self.block_len,
+            attn_backend_name=self.backend_name,
+        ))
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper)
+def test_async_load_kv(
+    # dist_init is a fixture that initializes the distributed environment.
+    dist_init):
     """Test that NixlConnector's start_load_kv should be fast."""
-    
+
     vllm_config = create_vllm_config()
-    
+
     # Test worker role in decode server.
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector.connector_worker = FakeNixlConnectorWorker(vllm_config, connector.engine_id)
     metadata = NixlConnectorMetadata()
-    metadata.add_new_req(request_id="id", local_block_ids=[1, 2, 3], kv_transfer_params={
-        "remote_block_ids": [4, 5, 6],
-        "remote_engine_id": "remote_engine",
-        "remote_host": "localhost",
-        "remote_port": 1234,
-    })
+    metadata.add_new_req(request_id="id",
+                         local_block_ids=[1, 2, 3],
+                         kv_transfer_params={
+                             "remote_block_ids": [4, 5, 6],
+                             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                             "remote_host": "localhost",
+                             "remote_port": 1234,
+                         })
     connector.bind_connector_metadata(metadata)
 
-    dummy_ctx = ForwardContext(
-        no_compile_layers={},
-        attn_metadata={},
-        virtual_engine=0,
-    )
-    connector.start_load_kv(dummy_ctx)
+    cnt = 10
+    while cnt > 0:
+        dummy_ctx = ForwardContext(
+            no_compile_layers={},
+            attn_metadata={},
+            virtual_engine=0,
+        )
+        start = time.perf_counter()
+        connector.start_load_kv(dummy_ctx)
+        end = time.perf_counter()
+        assert end - start < 0.1, f"start_load_kv took {end - start} seconds"
+        time.sleep(0.5)  # backoff for the async handshake to complete.
+        connector.bind_connector_metadata(NixlConnectorMetadata())
+        _, done_recving = connector.get_finished(finished_req_ids=set())
+        if len(done_recving) > 0:
+            break
+        cnt -= 1
+    assert cnt > 0, "Took too long to complete async handshake."
