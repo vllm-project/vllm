@@ -1146,8 +1146,11 @@ class ModelConfig:
             return self.hf_text_config.head_dim
 
         # FIXME(woosuk): This may not be true for all models.
-        return (self.hf_text_config.hidden_size //
-                self.hf_text_config.num_attention_heads)
+        if self.hf_text_config.attention_head_dim is not None:
+            return self.hf_text_config.attention_head_dim
+        else:
+            return (self.hf_text_config.hidden_size //
+                    self.hf_text_config.num_attention_heads)
 
     def get_total_num_kv_heads(self) -> int:
         """Returns the total number of KV heads."""
