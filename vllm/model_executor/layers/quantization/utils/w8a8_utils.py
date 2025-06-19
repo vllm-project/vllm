@@ -10,6 +10,9 @@ from vllm import envs
 from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.platforms import current_platform
 
+from .rocm_aiter_w8a8_utils import (is_rocm_aiter_gemm_enabled,
+                                    rocm_aiter_per_token_w8a8_scaled_mm)
+
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = None
@@ -270,8 +273,11 @@ def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor,
 
 
 def dispatch_w8a8_scaled_mm(
-        cutlass_fp8_supported: bool, per_tensor_weights: bool,
-        per_tensor_activations: bool, use_per_token_if_dynamic: Optional[bool]
+    cutlass_fp8_supported: bool,
+    use_rocm_aiter: bool,
+    per_tensor_weights: bool,
+    per_tensor_activations: bool,
+    use_per_token_if_dynamic: Optional[bool],
 ) -> Callable[..., torch.Tensor]:
 
     if cutlass_fp8_supported:
@@ -284,6 +290,8 @@ def dispatch_w8a8_scaled_mm(
     # so fallback to naive if per channel or per token
     if (use_per_token_if_dynamic and not per_tensor_weights
             and not per_tensor_activations and USE_ROWWISE_TORCH_SCALED_MM):
+        if use_rocm_aiter:
+            return rocm_aiter_per_token_w8a8_scaled_mm
         return torch_per_token_w8a8_scaled_mm
     return torch_channelwise_w8a8_scaled_mm
 
@@ -304,6 +312,7 @@ class Fp8LinearOp:
                  pad_output: Optional[bool] = None):
         self.cutlass_fp8_supported = cutlass_fp8_supported
         self.use_per_token_if_dynamic = use_per_token_if_dynamic
+        self.is_rocm_aiter_enabled = is_rocm_aiter_gemm_enabled()
 
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
@@ -364,12 +373,14 @@ class Fp8LinearOp:
             else:
                 qinput, x_scale = input_2d, input_scale
 
-        per_tensor_weights = (weight_scale.numel() == 1)
-        per_tensor_activations = (x_scale.numel() == 1)
+        per_tensor_weights = (weight_scale.numel()
+                              == 1) and weight_scale.dim() < 2
+        per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
 
         w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(
-            self.cutlass_fp8_supported, per_tensor_weights,
-            per_tensor_activations, use_per_token_if_dynamic)
+            self.cutlass_fp8_supported, self.is_rocm_aiter_enabled,
+            per_tensor_weights, per_tensor_activations,
+            use_per_token_if_dynamic)
 
         return w8a8_scaled_mm_func(qinput=qinput,
                                    weight=weight,
