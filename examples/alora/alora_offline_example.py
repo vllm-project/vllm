@@ -43,6 +43,7 @@ sampling_params = SamplingParams(temperature=0, max_tokens=600)
 outputsBase = llm.generate(
     prompts,
     sampling_params,
+    use_tqdm=False,
 )
 generated_text = []
 for output in outputsBase:
@@ -62,6 +63,7 @@ outputs = llm.generate(
     prompts_alora,
     sampling_params,
     lora_request=LoRARequest("UQ_adapter", 1, alora_path),
+    use_tqdm=False,
 )
 t = time.time() - t0
 print(f"Time: {t}")
