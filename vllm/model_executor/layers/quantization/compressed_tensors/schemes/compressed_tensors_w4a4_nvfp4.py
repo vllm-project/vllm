@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 from typing import Callable, Optional
 
 import torch
@@ -9,6 +10,8 @@ from vllm._custom_ops import (cutlass_scaled_fp4_mm,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+    run_nvfp4_emulations)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
@@ -17,6 +20,8 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsW4A4Fp4"]
+
+USE_NVFP4_CT_EMULATIONS = os.environ.get("USE_NVFP4_CT_EMULATIONS", '0')
 
 
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
@@ -128,6 +133,14 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        if USE_NVFP4_CT_EMULATIONS == "1":
+            return run_nvfp4_emulations(
+                x=x,
+                input_global_scale=layer.input_global_scale,
+                weight=layer.weight,
+                weight_scale_swizzles=layer.weight_scale_swizzled,
+                weight_global_scale=layer.weight_global_scale)
 
         output_dtype = x.dtype
         output_shape = [x.shape[0], layer.weight.shape[0]]
