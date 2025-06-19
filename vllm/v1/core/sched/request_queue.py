@@ -176,7 +176,7 @@ class PriorityRequestQueue(RequestQueue):
         return reversed(list(self))
 
 
-def create_request_queue(policy: str, ) -> RequestQueue:
+def create_request_queue(policy: str) -> RequestQueue:
     """Create request queue based on scheduling policy."""
     if policy == "priority":
         return PriorityRequestQueue()
