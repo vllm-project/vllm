@@ -798,9 +798,9 @@ class ModelWrapper(nn.Module):
         """
         batch_size, seq_len = token_ids.shape
         # Calculate the positions to sample from.
-        start_indicies = torch.arange(
+        start_indices = torch.arange(
             batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
-        logits_indices = start_indicies + input_lens - 1
+        logits_indices = start_indices + input_lens - 1
         attn_metadata = get_forward_context().attn_metadata
 
         # FIXME(woosuk): This is a temporary hack to avoid using the existing
@@ -822,14 +822,14 @@ class ModelWrapper(nn.Module):
             num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
             slot_mapping = attn_metadata.slot_mapping
             slot_mapping = slot_mapping.flatten()
-            head_indicies = torch.arange(0,
-                                         num_kv_heads,
-                                         device=slot_mapping.device,
-                                         dtype=slot_mapping.dtype)
-            head_indicies *= block_size * num_blocks
+            head_indices = torch.arange(0,
+                                        num_kv_heads,
+                                        device=slot_mapping.device,
+                                        dtype=slot_mapping.dtype)
+            head_indices *= block_size * num_blocks
             slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
                 -1, num_kv_heads)
-            slot_mapping = slot_mapping + head_indicies.view(1, -1)
+            slot_mapping = slot_mapping + head_indices.view(1, -1)
             slot_mapping = slot_mapping.flatten()
             attn_metadata.slot_mapping = slot_mapping
 

@@ -8,7 +8,7 @@ from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
-                                        SlidingWindowSpec)
+                                        MambaSpec, SlidingWindowSpec)
 from vllm.v1.request import Request
 
 
@@ -52,6 +52,7 @@ class SingleTypeKVCacheManager(ABC):
 
         self.caching_hash_fn = caching_hash_fn
         self.kv_cache_group_id = kv_cache_group_id
+        self._null_block = block_pool.null_block
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
@@ -197,7 +198,7 @@ class SingleTypeKVCacheManager(ABC):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
-    ) -> list[list[KVCacheBlock]]:
+    ) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than 
         `max_length`. The prefix should be a common prefix hit for all the 
@@ -222,7 +223,7 @@ class SingleTypeKVCacheManager(ABC):
             element is a list of cached blocks for the i-th kv cache group
             in `kv_cache_group_ids`.
             For example, sliding window manager should return a list like
-            [[NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)]] for block size 4 
+            ([NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)]) for block size 4
             and sliding window 8 and len(kv_cache_group_ids) = 1.
         """
 
@@ -254,27 +255,25 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
-    ) -> list[list[KVCacheBlock]]:
+    ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, FullAttentionSpec), (
             "FullAttentionManager can only be used for full attention groups")
-        computed_blocks: list[list[KVCacheBlock]] = [
-            [] for _ in range(len(kv_cache_group_ids))
-        ]
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in range(len(kv_cache_group_ids)))
         max_num_blocks = max_length // kv_cache_spec.block_size
-        for i in range(max_num_blocks):
-            block_hash = block_hashes[i]
+        for i, block_hash in zip(range(max_num_blocks), block_hashes):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
             if cached_block := block_pool.get_cached_block(
                     block_hash, kv_cache_group_ids):
-                for j in range(len(kv_cache_group_ids)):
-                    computed_blocks[j].append(cached_block[j])
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed.append(cached)
             else:
                 break
-        if use_eagle and len(computed_blocks[0]) > 0:
-            for j in range(len(kv_cache_group_ids)):
-                computed_blocks[j].pop()
+        if use_eagle and computed_blocks[0]:
+            for computed in computed_blocks:
+                computed.pop()
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
@@ -311,7 +310,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
-    ) -> list[list[KVCacheBlock]]:
+    ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups")
 
@@ -332,23 +331,23 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
-        computed_blocks = [[block_pool.null_block] * max_num_blocks
-                           for _ in range(len(kv_cache_group_ids))]
+        computed_blocks = tuple([block_pool.null_block] * max_num_blocks
+                                for _ in range(len(kv_cache_group_ids)))
         num_contiguous_blocks = 0
         match_found = False
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
                     block_hashes[i], kv_cache_group_ids):
-                for j in range(len(kv_cache_group_ids)):
-                    computed_blocks[j][i] = cached_block[j]
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed[i] = cached
                 num_contiguous_blocks += 1
-                if (num_contiguous_blocks >= sliding_window_contiguous_blocks):
+                if num_contiguous_blocks >= sliding_window_contiguous_blocks:
                     # Trim the trailing blocks.
                     # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
                     # when sliding_window_contiguous_blocks=2.
-                    for j in range(len(kv_cache_group_ids)):
-                        del computed_blocks[j][i + num_contiguous_blocks:]
+                    for computed in computed_blocks:
+                        del computed[i + num_contiguous_blocks:]
                     match_found = True
                     break
             else:
@@ -356,11 +355,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         if not match_found:
             # The first `num_contiguous_blocks` is a cache hit even if
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
-            for j in range(len(kv_cache_group_ids)):
-                del computed_blocks[j][num_contiguous_blocks:]
-        if use_eagle and len(computed_blocks[0]) > 0:
-            for j in range(len(kv_cache_group_ids)):
-                computed_blocks[j].pop()
+            for computed in computed_blocks:
+                del computed[num_contiguous_blocks:]
+        if use_eagle and computed_blocks[0]:
+            for computed in computed_blocks:
+                computed.pop()
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
@@ -392,9 +391,49 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         return 0
 
 
+class MambaManager(SingleTypeKVCacheManager):
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: list[BlockHash],
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        assert isinstance(
+            kv_cache_spec,
+            MambaSpec), ("MambaManager can only be used for mamba groups")
+        # Prefix caching is not supported for mamba now. Always return empty
+        # list.
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in range(len(kv_cache_group_ids)))
+        return computed_blocks
+
+    def remove_skipped_blocks(self, request_id: str,
+                              num_computed_tokens: int) -> None:
+        # Each request will always have 1 block at this moment, so no need to
+        # remove blocks.
+        pass
+
+    def get_num_common_prefix_blocks(self, request_id: str,
+                                     num_running_requests: int) -> int:
+        return 0
+
+    def allocate_new_blocks(self, request_id: str,
+                            num_tokens: int) -> list[KVCacheBlock]:
+        new_blocks = super().allocate_new_blocks(request_id, num_tokens)
+        assert len(self.req_to_blocks[request_id]) == 1, (
+            "MambaManager should only allocate 1 block for each request.")
+        return new_blocks
+
+
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
+    MambaSpec: MambaManager,
 }
 
 

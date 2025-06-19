@@ -227,10 +227,7 @@ class Dots1MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         if self.config.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
-        if self.moe_gating_fp32:
-            router_logits, _ = self.gate(hidden_states.type(torch.float32))
-        else:
-            router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states.type(torch.float32))
         final_hidden_states = fused_moe(
             hidden_states,
             self.w1,

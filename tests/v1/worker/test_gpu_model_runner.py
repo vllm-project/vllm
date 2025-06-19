@@ -122,7 +122,8 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
-                block_ids=[[0]],
+                pooling_params=None,
+                block_ids=([0], ),
                 num_computed_tokens=0,
                 lora_request=None,
             ))
@@ -250,7 +251,7 @@ def test_update_states_request_resumed(model_runner):
         req_id=req_id,
         resumed_from_preemption=False,
         new_token_ids=[],
-        new_block_ids=[[]],
+        new_block_ids=([], ),
         num_computed_tokens=0,
     )
 
