@@ -22,15 +22,19 @@ model_name = "Qwen/Qwen3-Reranker-0.6B"
 # If you want to load the official original version, the init parameters are
 # as follows.
 
-model = LLM(
-    model=model_name,
-    task="score",
-    hf_overrides={
-        "architectures": ["Qwen3ForSequenceClassification"],
-        "classifier_from_token": ["no", "yes"],
-        "is_original_qwen3_reranker": True,
-    },
-)
+
+def get_model() -> LLM:
+    """Initializes and returns the LLM model for Qwen3-Reranker."""
+    return LLM(
+        model=model_name,
+        task="score",
+        hf_overrides={
+            "architectures": ["Qwen3ForSequenceClassification"],
+            "classifier_from_token": ["no", "yes"],
+            "is_original_qwen3_reranker": True,
+        },
+    )
+
 
 # Why do we need hf_overrides for the official original version:
 # vllm converts it to Qwen3ForSequenceClassification when loaded for
@@ -51,7 +55,8 @@ suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 query_template = "{prefix}<Instruct>: {instruction}\n<Query>: {query}\n"
 document_template = "<Document>: {doc}{suffix}"
 
-if __name__ == "__main__":
+
+def main() -> None:
     instruction = (
         "Given a web search query, retrieve relevant passages that answer the query"
     )
@@ -72,6 +77,13 @@ if __name__ == "__main__":
     ]
     documents = [document_template.format(doc=doc, suffix=suffix) for doc in documents]
 
+    model = get_model()
     outputs = model.score(queries, documents)
 
+    print("-" * 30)
     print([output.outputs.score for output in outputs])
+    print("-" * 30)
+
+
+if __name__ == "__main__":
+    main()
