@@ -117,8 +117,8 @@ class LoggingStatLogger(StatLoggerBase):
         # Format and print output.
         log_fn(
             "Engine %03d: "
-            "Avg prompt throughput: %.1f tokens/s, "
-            "Avg generation throughput: %.1f tokens/s, "
+            "Avg prefill throughput: %.1f tokens/s, "
+            "Avg decode throughput: %.1f tokens/s, "
             "Running: %d reqs, Waiting: %d reqs, "
             "GPU KV cache usage: %.1f%%, "
             "Prefix cache hit rate: %.1f%%",
