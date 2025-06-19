@@ -209,7 +209,7 @@ def as_seq_cls_model(cls: _T) -> _T:
                                            prefix=maybe_prefix(
                                                prefix, "score"))
 
-        def config_verify(self, vllm_config):
+        def verify_and_update_config(self, vllm_config):
             # Leave an interface for validating and modifying model_config
             # for slightly different models
             pass

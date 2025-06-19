@@ -331,7 +331,7 @@ class Qwen3ForSequenceClassification(as_seq_cls_model(Qwen3ForCausalLM)):
     ) -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-    def config_verify(self, vllm_config: "VllmConfig"):
+    def verify_and_update_config(self, vllm_config: "VllmConfig"):
         config = vllm_config.model_config.hf_config
 
         is_original_qwen3_reranker = getattr(config,

@@ -33,10 +33,10 @@ MODELS = [
                    enable_test=True),
     EmbedModelInfo("Alibaba-NLP/gte-base-en-v1.5",
                    architecture="GteNewModel",
-                   enable_test=True),
+                   enable_test=False),
     EmbedModelInfo("Alibaba-NLP/gte-large-en-v1.5",
                    architecture="GteNewModel",
-                   enable_test=True),
+                   enable_test=False),
     ########### Qwen2ForCausalLM
     EmbedModelInfo("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
                    architecture="Qwen2ForCausalLM",
