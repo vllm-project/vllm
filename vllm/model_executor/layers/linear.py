@@ -1285,8 +1285,7 @@ class RowParallelLinear(LinearBase):
                 input_parallel = input_
             else:
                 tp_rank = get_tensor_model_parallel_rank()
-                splitted_input = split_tensor_along_last_dim(
-                    input_, num_partitions=self.tp_size)
+                splitted_input = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)
                 input_parallel = splitted_input[tp_rank].contiguous()
             assert self.quant_method is not None
             # Only fuse bias add into GEMM for rank 0 (this ensures that
