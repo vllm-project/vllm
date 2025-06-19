@@ -267,7 +267,9 @@ class Gemma2Model(nn.Module):
         # data type such as bfloat16, not float32.
         # See https://github.com/huggingface/transformers/pull/29402
         normalizer = self.config.hidden_size**0.5
-        self.register_buffer("normalizer", torch.tensor(normalizer))
+        self.register_buffer("normalizer",
+                             torch.tensor(normalizer),
+                             persistent=False)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
