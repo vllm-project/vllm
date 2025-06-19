@@ -735,7 +735,7 @@ class EngineArgs:
         lora_group.add_argument("--enable-lora-bias",
                                 **lora_kwargs["bias_enabled"])
         lora_group.add_argument("--enable-activated-lora",
-                                **lora_kwargs["activated_lora"])
+                                **lora_kwargs["activated_lora_enabled"])
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank",
                                 **lora_kwargs["max_lora_rank"])
