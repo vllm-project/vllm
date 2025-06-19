@@ -177,7 +177,7 @@ docker run --privileged --net host --shm-size=16G -it vllm-tpu
 !!! tip
     If you encounter the following error:
 
-    ```bash
+    ```console
     from torch._C import *  # noqa: F403
     ImportError: libopenblas.so.0: cannot open shared object file: No such
     file or directory

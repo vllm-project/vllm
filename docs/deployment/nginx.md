@@ -17,7 +17,7 @@ export vllm_root=`pwd`
 
 Create a file named `Dockerfile.nginx`:
 
-```bash
+```dockerfile
 FROM nginx:latest
 RUN rm /etc/nginx/conf.d/default.conf
 EXPOSE 80
