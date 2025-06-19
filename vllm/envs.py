@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
-    VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
+    VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = True
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -305,7 +305,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the unified triton kernel.
     "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
     lambda:
-    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "True").lower() in
      ("true", "1")),
 
     # Force vllm to use a specific flash-attention version (2 or 3), only valid

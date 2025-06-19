@@ -193,9 +193,13 @@ class AiterFlashAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
+    def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
+
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
         max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
         total_tokens = int(self.runner.seq_lens_np[:num_reqs].sum())
         query_start_loc = common_attn_metadata.query_start_loc
@@ -283,6 +287,11 @@ class AiterFlashAttentionMetadataBuilder:
             local_attn_metadata=local_attn_metadata,
         )
         return attn_metadata
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        # Full CUDA Graph always supported (FA2 support checked separately)
+        return True
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False
@@ -423,9 +432,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "AiterFlashAttention does not support fp8 kv-cache on this "
                 "device.")
 
-        self._PARTITION_SIZE_ROCM = 256
-        self._nbyes_per_qo_elem = None
-
     def forward(
         self,
         layer: torch.nn.Module,
@@ -434,8 +440,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AiterFlashAttentionMetadata,
-        fp8_out_scale: Optional[torch.Tensor],
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with AiterFlashAttention.
 
@@ -452,6 +458,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
               We use torch's .expand() to avoid duplicating values
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashAttentionImpl")
 
         if attn_metadata is None:
             # Profiling run.
@@ -517,8 +528,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             if max_seqlen_q > 1:
                 cu_seq_lens = attn_metadata.cu_seq_lens
                 total_tokens = attn_metadata.total_tokens
-                # torch.ops.vllm.flash_attn_varlen_func(
-                flash_attn_varlen_func_impl(
+                torch.ops.vllm.flash_attn_varlen_func(
                     query[:num_actual_tokens],
                     key_cache,
                     value_cache,
@@ -535,12 +545,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 )
 
             _, num_heads, head_size = query.shape
+            _PARTITION_SIZE_ROCM = 256
             num_seqs = seqused_k.shape[0]
-            if self._nbyes_per_qo_elem is None:
-                self._nbyes_per_qo_elem = torch.finfo(output.dtype).bits // 8
-            nbyes_per_qo_elem = self._nbyes_per_qo_elem
-            max_num_partitions = (max_seqlen_k + self._PARTITION_SIZE_ROCM -
-                                  1) // self._PARTITION_SIZE_ROCM
+            nbyes_per_qo_elem = torch.finfo(output.dtype).bits // 8
+            max_num_partitions = (max_seqlen_k + _PARTITION_SIZE_ROCM -
+                                  1) // _PARTITION_SIZE_ROCM
 
             workspace_buffer = torch.empty(
                 (num_seqs * num_heads * max_num_partitions * head_size) *
@@ -568,7 +577,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
                 None,
-                self._PARTITION_SIZE_ROCM,
+                _PARTITION_SIZE_ROCM,
             )
             return output
         else:
