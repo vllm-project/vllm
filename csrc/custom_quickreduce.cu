@@ -32,7 +32,6 @@ void qr_destroy(quickreduce::fptr_t _fa) {
 torch::Tensor qr_get_handle(quickreduce::fptr_t _fa) {
   auto fa = reinterpret_cast<quickreduce::DeviceComms*>(_fa);
   hipIpcMemHandle_t handle = fa->get_handle();
-  auto device_index = c10::cuda::current_device();
   auto options =
       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
   auto data_handle =
