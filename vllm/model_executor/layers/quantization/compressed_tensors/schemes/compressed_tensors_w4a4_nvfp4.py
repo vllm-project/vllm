@@ -137,7 +137,6 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
         if USE_NVFP4_CT_EMULATIONS == "1":
-            print("running emulations")
             return run_nvfp4_emulations(
                 x=x,
                 input_global_scale=layer.input_global_scale,
