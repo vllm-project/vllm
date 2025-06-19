@@ -42,7 +42,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 === "NVIDIA CUDA"
 
-    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:create-a-new-python-environment"
+    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:set-up-using-python"
 
 === "AMD ROCm"
 
