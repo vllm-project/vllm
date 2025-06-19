@@ -176,6 +176,7 @@ class MultiConnector(KVConnectorBase_V1):
 
     def request_finished(
         self,
+        request_id: str,
         request_status: "RequestStatus",
         kv_transfer_params: Optional[dict[str, Any]],
         num_computed_tokens: int,
@@ -183,13 +184,10 @@ class MultiConnector(KVConnectorBase_V1):
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         async_saves = 0
         kv_txfer_params = None
-        request_id = None
-        if kv_transfer_params:
-            request_id = kv_transfer_params.get("request_id")
         
         for c in self._connectors:
             async_save, txfer_params = c.request_finished(
-                request_status, kv_transfer_params, num_computed_tokens, blocks
+                request_id, request_status, kv_transfer_params, num_computed_tokens, blocks
             )
             if async_save:
                 async_saves += 1
@@ -200,8 +198,6 @@ class MultiConnector(KVConnectorBase_V1):
                     raise RuntimeError(
                         "Only one connector can produce KV transfer params")
                 kv_txfer_params = txfer_params
-                if request_id is None:
-                    request_id = txfer_params.get("request_id")
             
         if async_saves > 1 and request_id:
             self._extra_async_saves[request_id] = async_saves - 1

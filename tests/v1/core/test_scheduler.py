@@ -35,10 +35,11 @@ def scheduler_update_from_output_sync(
         future = Future()
         # Make the model runner output available imediately 
         future.set_result(model_runner_output)
-        return await scheduler.update_from_output(scheduler_output, future)
+        engine_core_outputs = await scheduler.update_from_output(scheduler_output, future)
+        return await engine_core_outputs
         
     # Run the async method
-    return asyncio.run(_run_update_from_output()) 
+    return asyncio.run(_run_update_from_output())
 
 def core_process_model_outputs(
     core_engine: EngineCore, 
@@ -568,11 +569,22 @@ def test_stop_via_update_from_output():
     # Test case 3: Stop on max tokens
     scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=2, max_tokens=2)
+    request_scheduler_states = []
+    request_generation_states = []
+    
     for req_params in requests:
-        req_state = RequestSchedulerState(req_params)
-        req_state.num_computed_tokens = req_state.num_tokens
-        scheduler.requests[req_params.request_id] = req_state
+        scheduler.add_request(req_params)
+
+        # Fake prefill done.
+        scheduler.kv_cache_manager.allocate_slots(req_params.request_id, 0, req_params.num_prompt_tokens)
+        req_state = scheduler.requests[req_params.request_id]
+        req_state.num_computed_tokens = req_params.num_prompt_tokens
         scheduler.running.append(req_state)
+
+        # For testing; hold a reference to the request scheduler state so we can
+        # inspect it later.
+        request_scheduler_states.append(req_state)
+        request_generation_states.append(scheduler.request_states[req_params.request_id])
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -609,11 +621,11 @@ def test_stop_via_update_from_output():
     # Verify first request stopped due to length
     assert len(scheduler.running) == 1
     assert scheduler.running[0].request_id == requests[1].request_id
-    assert scheduler.requests[requests[0].request_id].status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert request_scheduler_states[0].status == RequestStatus.FINISHED_LENGTH_CAPPED
     assert requests[0].request_id in scheduler.finished_req_ids
-    assert list(requests[0].output_token_ids) == [10, 11
+    assert list(request_generation_states[0].output_token_ids) == [10, 11
                                                   ]  # Truncated to max_tokens
-    assert list(requests[1].output_token_ids) == [13]
+    assert list(request_generation_states[1].output_token_ids) == [13]
 
     # TODO(lucas): new tests; stop tokens no longer handled by the scheduler
     # # Test case 4: Ignore EOS flag
@@ -763,7 +775,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         prompt_logprobs_dict={},
     )
     
-    spec_decoding_stats = scheduler_update_from_output_sync(scheduler, output, model_runner_output)
+    engine_core_outputs = scheduler_update_from_output_sync(scheduler, output, model_runner_output)
 
     for i in range(len(requests)):
         running_req = scheduler.running[i]
@@ -775,7 +787,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert running_req.num_tokens_with_spec == 2 + len(spec_tokens[i])
 
     # No draft or accepted tokens counted yet
-    assert spec_decoding_stats is None
+    assert not engine_core_outputs or (
+            engine_core_outputs[0].scheduler_stats.spec_decoding_stats is None)
 
     # Schedule the speculated tokens for validation
     output = scheduler.schedule()
@@ -801,13 +814,18 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         prompt_logprobs_dict={},
     )
 
-    spec_decoding_stats = scheduler_update_from_output_sync(scheduler, output, model_runner_output)
+    engine_core_outputs = scheduler_update_from_output_sync(scheduler, output, model_runner_output)
+    scheduler_stats = engine_core_outputs[0].scheduler_stats \
+         if engine_core_outputs else None
+
+
+    print("engine_core_outputs", engine_core_outputs)
 
     if expected[0] == 0:
-        assert spec_decoding_stats is None
+        assert scheduler_stats.spec_decoding_stats is None
     else:
-        assert spec_decoding_stats is not None
-        stats = spec_decoding_stats
+        assert scheduler_stats.spec_decoding_stats is not None
+        stats = scheduler_stats.spec_decoding_stats
         assert stats.num_drafts == expected[0]
         assert stats.num_draft_tokens == expected[1]
         assert stats.num_accepted_tokens == expected[2]
@@ -933,9 +951,8 @@ def test_kv_connector_basic():
         expected_num_scheduled_tokens=NUM_TOKENS - NUM_MATCHED_NEW_TOKENS,
     )
 
+    # Caching happens on update_from_output
     scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
-
-    print("NUM_TOKENS", NUM_TOKENS, "BLOCK_SIZE", BLOCK_SIZE, "NUM_TOTAL_BLOCKS", NUM_TOTAL_BLOCKS)
 
     # Ensure KVCacheManager is correct.
     _assert_right_kv_cache_manager(scheduler, req_ids, NUM_TOKENS, BLOCK_SIZE,
@@ -957,6 +974,7 @@ def test_kv_connector_basic():
     requests = create_requests(num_requests=NUM_REQUESTS,
                                num_tokens=NUM_TOKENS,
                                max_tokens=MAX_TOKENS)
+    
     req_ids = []
     req_to_index = {}
     for i, request in enumerate(requests):
@@ -982,6 +1000,9 @@ def test_kv_connector_basic():
         # Just the incremental tokens after local + remote cache hit.
         expected_num_scheduled_tokens=(NUM_TOKENS - NUM_TOKENS_PREFIX -
                                        NUM_MATCHED_NEW_TOKENS))
+
+    # Caching happens on update_from_output
+    scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)   
 
     # Ensure KVCacheManager is correct.
     _assert_right_kv_cache_manager(scheduler, req_ids, NUM_TOKENS, BLOCK_SIZE,

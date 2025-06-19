@@ -104,7 +104,7 @@ class SingleTypeKVCacheManager(ABC):
             assert len(new_computed_blocks) == 0
 
     def allocate_new_blocks(self, request_id: str,
-                            num_tokens: int) -> list[KVCacheBlock]:
+                             num_tokens: int) -> list[KVCacheBlock]:
         """
         Allocate new blocks for the request to give it at least `num_tokens` 
         token slots.
@@ -117,7 +117,6 @@ class SingleTypeKVCacheManager(ABC):
         Returns:
             The new allocated blocks.
         """
-        print("allocate_new_blocks", request_id, num_tokens)
         req_blocks = self.req_to_blocks[request_id]
         num_required_blocks = cdiv(num_tokens, self.block_size)
         num_new_blocks = num_required_blocks - len(req_blocks)
@@ -142,7 +141,6 @@ class SingleTypeKVCacheManager(ABC):
         num_cached_blocks = self.num_cached_block[request.request_id]
         num_full_blocks = num_tokens // self.block_size
         
-        print("num_cached_blocks", num_cached_blocks, "num_full_blocks", num_full_blocks)
 
         self.block_pool.cache_full_blocks(
             request=request,

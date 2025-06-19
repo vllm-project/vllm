@@ -133,11 +133,15 @@ class NixlConnector(KVConnectorBase_V1):
 
     def request_finished(
         self,
-        request: "RequestGenerationState",
-        block_ids: list[int],
+        request_id: str,
+        request_status: "RequestStatus",
+        kv_transfer_params: Optional[dict[str, Any]],
+        num_computed_tokens: int,
+        blocks: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request, block_ids)
+        return self.connector_scheduler.request_finished(
+            request_id, request_status, kv_transfer_params, num_computed_tokens, blocks)
 
     ############################################################
     # Worker Side Methods
@@ -280,29 +284,32 @@ class NixlConnectorScheduler:
 
     def request_finished(
         self,
-        request: "RequestGenerationState",
-        block_ids: list[int],
+        request_id: str,
+        request_status: "RequestStatus",
+        kv_transfer_params: Optional[dict[str, Any]],
+        num_computed_tokens: int,
+        blocks: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
 
-        params = request.kv_transfer_params
+        params = kv_transfer_params
         logger.debug(
             "NIXLConnector request_finished, request_status=%s, "
-            "kv_transfer_params=%s", request.status, params)
+            "kv_transfer_params=%s", request_status, params)
 
         if (params is None or not params.get("do_remote_decode")
-                or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
+                or request_status != RequestStatus.FINISHED_LENGTH_CAPPED):
             return False, None
 
         # Get computed blocks.
         # TODO(lucas): this is a edge case here where we are this request gets
         #  prempted by the next scheduler step (which may be past the stop token
         #  due to async scheduling).
-        all_full = request.num_tokens % self.block_size == 0
-        computed_block_ids = block_ids if all_full else block_ids[:-1]
+        all_full = num_computed_tokens % self.block_size == 0
+        computed_block_ids = blocks if all_full else blocks[:-1]
 
         # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = len(computed_block_ids) > 0

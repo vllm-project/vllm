@@ -267,8 +267,11 @@ class KVConnectorBase_V1(ABC):
 
     def request_finished(
         self,
-        request: "RequestGenerationState",
-        block_ids: list[int],
+        request_id: str,
+        request_status: "RequestStatus",
+        kv_transfer_params: Optional[dict[str, Any]],
+        num_computed_tokens: int,
+        blocks: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.

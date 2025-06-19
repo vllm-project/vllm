@@ -188,9 +188,21 @@ class EngineCore:
         request outputs.
         """
         assert self.connector is not None
-        (block_ids, ) = self.scheduler.kv_cache_manager.get_block_ids(request.request_id)
+        request_id = request.request_id
+        # Look up request status from the scheduler
+        request_scheduler_state = self.scheduler.requests.get(request_id)
+        if request_scheduler_state is None:
+            return False, None
+        
+        request_status = request_scheduler_state.status
+        (block_ids, ) = self.scheduler.kv_cache_manager.get_block_ids(request_id)
         return self.scheduler.connector.request_finished(
-            request, block_ids)
+            request_id=request_id,
+            request_status=request_status,
+            kv_transfer_params=request.kv_transfer_params,
+            num_computed_tokens=request.num_computed_tokens,
+            blocks=block_ids,
+        )
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""

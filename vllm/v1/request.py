@@ -124,6 +124,18 @@ class RequestGenerationState:
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
 
+    # TODO(lucas) This is a hack to reduce the `.params` additions in the PR we
+    #  should probably remove it
+    def __getattribute__(self, name: str) -> Any:
+        if name == "params":
+            return object.__getattribute__(self, name)
+
+        params = object.__getattribute__(self, "params")
+        if hasattr(params, name):
+            return getattr(params, name)
+
+        return object.__getattribute__(self, name)
+
     def append_output_token_ids(
             self,
             token_ids: Union[int, list[int]],
@@ -178,6 +190,18 @@ class RequestSchedulerState:
         # State
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
+
+    # TODO(lucas) This is a hack to reduce the `.params` additions in the PR we
+    #  should probably remove it
+    def __getattribute__(self, name: str) -> Any:
+        if name == "params":
+            return object.__getattribute__(self, name)
+
+        params = object.__getattribute__(self, "params")
+        if hasattr(params, name):
+            return getattr(params, name)
+
+        return object.__getattribute__(self, name)
 
     @property
     def num_tokens_with_spec(self):
