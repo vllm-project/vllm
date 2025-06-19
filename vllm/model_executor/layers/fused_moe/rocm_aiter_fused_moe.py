@@ -22,8 +22,9 @@ class QuantMethod(IntEnum):
     NO = 0  # a16w16
     PER_TENSOR = 1  # w8a8 (pre_Tensor)
     PER_TOKEN = 2  # w8a8/w8a4 (per_Token)
-    BLOCK_1X128 = 3  # block quantized w8a8 (per_1x128)
-    BLOCK_128x128 = 4  # block quantized w8a8 (per_128x128)
+    BLOCK_1X32 = 3  # fp4x2
+    BLOCK_1X128 = 4  # block quantized w8a8 (per_1x128)
+    BLOCK_128x128 = 5  # block quantized w8a8 (per_128x128)
 
 
 class ActivationMethod(IntEnum):
