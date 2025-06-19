@@ -4,11 +4,17 @@
 from __future__ import annotations
 
 import heapq
+import sys
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator
 
 from vllm.v1.request import Request
+
+# Python doesn't provide sys.minsize, so we calculate the minimum integer value.
+# In two's complement representation: min = -2^(n-1), max = 2^(n-1) - 1
+# Therefore, the true minimum is -sys.maxsize - 1, not just -sys.maxsize
+_MIN_PRIORITY = -sys.maxsize - 1
 
 
 class RequestQueue(ABC):
@@ -165,16 +171,19 @@ class PriorityRequestQueue(RequestQueue):
 
     def prepend_request(self, request: Request) -> None:
         """Prepend a request to the front of the queue."""
-        # Set priority to -1 so these requests stay at the front after heapify.
-        heapq.heappush(self._heap, (-1, request.arrival_time, request))
+        # Set priority to max negative integer so these requests stay at the
+        # front after heapify.
+        heapq.heappush(self._heap,
+                       (_MIN_PRIORITY, request.arrival_time, request))
 
     def prepend_requests(self, requests: RequestQueue) -> None:
         """Prepend all requests from another queue to the front of this
         queue."""
         for request in requests:
-            # Set priority to -1 so these requests stay at the front after
-            # heapify.
-            heapq.heappush(self._heap, (-1, request.arrival_time, request))
+            # Set priority to max negative integer so these requests stay at
+            # the front after heapify.
+            heapq.heappush(self._heap,
+                           (_MIN_PRIORITY, request.arrival_time, request))
 
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
