@@ -541,7 +541,7 @@ struct CodecQ8 : public CodecBase {
 };
 
 // Twoshot All Reduce
-template <typename T, class Codec>
+template <typename T, class Codec, bool cast_bf2half>
 struct AllReduceTwoshot {
   static_assert(sizeof(T) == 2);
 
@@ -572,6 +572,17 @@ struct AllReduceTwoshot {
     for (int i = 0; i < kAtoms; i++) {
       tA[i] = buffer_load_dwordx4(src_buffer.descriptor, src_offset, 0, 0);
       src_offset += kAtomStride * sizeof(int32x4_t);
+      if constexpr (cast_bf2half) {
+        const nv_bfloat162* bf_buf =
+            reinterpret_cast<const nv_bfloat162*>(&tA[i]);
+        half2 half_buf[4];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+          float2 f = __bfloat1622float2(bf_buf[j]);
+          half_buf[j] = __float22half2_rn(f);
+        }
+        tA[i] = *reinterpret_cast<const int32x4_t*>(half_buf);
+      }
     }
 
     // --------------------------------------------------------
@@ -669,7 +680,19 @@ struct AllReduceTwoshot {
     int32x4_t* dst = reinterpret_cast<int32x4_t*>(output);
 
     for (int i = 0; i < kAtoms; i++) {
-      buffer_store_dwordx4(tA[i], dst_buffer.descriptor, dst_offset, 0, 0);
+      if constexpr (cast_bf2half) {
+        const half2* half_buf = reinterpret_cast<const half2*>(&tA[i]);
+        nv_bfloat162 bf16_buf[4];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+          float2 f = __half22float2(half_buf[j]);
+          bf16_buf[j] = __float22bfloat162_rn(f);
+        }
+        buffer_store_dwordx4(*reinterpret_cast<const int32x4_t*>(bf16_buf),
+                             dst_buffer.descriptor, dst_offset, 0, 0);
+      } else {
+        buffer_store_dwordx4(tA[i], dst_buffer.descriptor, dst_offset, 0, 0);
+      }
       dst_offset += kAtomStride * sizeof(int32x4_t);
     }
   }

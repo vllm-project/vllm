@@ -1758,9 +1758,13 @@ def qr_destroy(fa: int) -> None:
     torch.ops._C_custom_ar.qr_destroy(fa)
 
 
-def qr_all_reduce(fa: int, inp: torch.Tensor, out: torch.Tensor,
-                  quant_level: int) -> None:
-    torch.ops._C_custom_ar.qr_all_reduce(fa, inp, out, quant_level)
+def qr_all_reduce(fa: int,
+                  inp: torch.Tensor,
+                  out: torch.Tensor,
+                  quant_level: int,
+                  cast_bf2half: bool = False) -> None:
+    torch.ops._C_custom_ar.qr_all_reduce(fa, inp, out, quant_level,
+                                         cast_bf2half)
 
 
 def qr_get_handle(fa: int) -> torch.Tensor:
