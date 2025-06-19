@@ -2119,6 +2119,20 @@ class SchedulerConfig:
     default scheduler. Can be a class directly or the path to a class of form
     "mod.custom_class"."""
 
+    use_batch_scheduler: bool = False
+    """Whether to use the BatchScheduler instead of the default scheduler.
+
+    If set to True, the engine will use
+    "vllm.v1.core.sched.scheduler.BatchScheduler" as the scheduler class unless
+    a custom `scheduler_cls` is explicitly provided.
+
+    If both `use_batch_scheduler=True` and a non-default `scheduler_cls` are
+    specified, the `scheduler_cls` will take precedence and
+    `use_batch_scheduler` will be ignored.
+
+    Default is False.
+    """
+
     disable_hybrid_kv_cache_manager: bool = False
     """If set to True, KV cache manager will allocate the same size of KV cache
     for all attention layers even if there are multiple type of attention layers

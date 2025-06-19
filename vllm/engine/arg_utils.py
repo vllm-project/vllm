@@ -411,6 +411,7 @@ class EngineArgs:
     disable_async_output_proc: bool = not ModelConfig.use_async_output_proc
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
+    use_batch_scheduler: bool = SchedulerConfig.use_batch_scheduler
 
     override_neuron_config: dict[str, Any] = \
         get_field(ModelConfig, "override_neuron_config")
@@ -855,6 +856,8 @@ class EngineArgs:
             **scheduler_kwargs["disable_chunked_mm_input"])
         scheduler_group.add_argument("--scheduler-cls",
                                      **scheduler_kwargs["scheduler_cls"])
+        scheduler_group.add_argument("--use-batch-scheduler",
+                                     **scheduler_kwargs["use_batch_scheduler"])
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
@@ -1182,6 +1185,7 @@ class EngineArgs:
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
+            use_batch_scheduler=self.use_batch_scheduler,
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
@@ -1549,6 +1553,18 @@ class EngineArgs:
 
         if not self.enable_chunked_prefill:
             self.max_num_batched_tokens = model_config.max_model_len
+
+        if self.use_batch_scheduler:
+            if self.scheduler_cls == EngineArgs.scheduler_cls:
+                self.scheduler_cls = \
+                    "vllm.v1.core.sched.scheduler.BatchScheduler"
+            else:
+                logger.warning(
+                    "use_batch_scheduler is set to True, "
+                    "but a custom scheduler_cls is also provided. "
+                    "The specified scheduler_cls (%s) will take precedence, "
+                    "and use_batch_scheduler will be ignored.",
+                    self.scheduler_cls)
 
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default
