@@ -8,6 +8,14 @@ from vllm.platforms import current_platform
 from ...utils import check_embeddings_close
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 @pytest.mark.parametrize(
     "model",
     [
@@ -20,15 +28,27 @@ from ...utils import check_embeddings_close
                      marks=[pytest.mark.core_model]),
         pytest.param("intfloat/e5-mistral-7b-instruct",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
-        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
+        # the qwen models interfere with each other (see PR
+        # https://github.com/vllm-project/vllm/pull/18720).
+        # To avoid this problem, for now we skip v0 since it will be
+        # deprecated anyway.
+        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base",
+                     marks=[pytest.mark.skip_v0]),
         # [Encoder-only]
         pytest.param("BAAI/bge-base-en-v1.5",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
-        pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
-        pytest.param("intfloat/multilingual-e5-small"),
-        pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
+                     marks=[
+                         pytest.mark.core_model, pytest.mark.cpu_model,
+                         pytest.mark.skip_v1
+                     ]),
+        pytest.param("sentence-transformers/all-MiniLM-L12-v2",
+                     marks=[pytest.mark.skip_v1]),
+        pytest.param("intfloat/multilingual-e5-small",
+                     marks=[pytest.mark.skip_v1]),
+        pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+                     marks=[pytest.mark.skip_v1]),
         # [Cross-Encoder]
-        pytest.param("sentence-transformers/stsb-roberta-base-v2"),
+        pytest.param("sentence-transformers/stsb-roberta-base-v2",
+                     marks=[pytest.mark.skip_v1]),
     ],
 )
 def test_models(
@@ -62,7 +82,7 @@ def test_models(
 
     with vllm_runner(model,
                      task="embed",
-                     max_model_len=None,
+                     max_model_len=512,
                      **vllm_extra_kwargs) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
 

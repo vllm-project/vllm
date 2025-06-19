@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -128,6 +129,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_KV_CACHE_LAYOUT: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -652,6 +654,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MLA":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in
              ("true", "1")),
+
+    # Whether to use aiter mha ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_MHA":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in
+             ("true", "1")),
+
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
     lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
@@ -879,6 +888,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB":
     lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
+
+    # KV Cache layout used throughout vllm.
+    # Some common values are:
+    # - NHD
+    # - HND
+    # Where N=num_blocks, H=num_heads and D=head_size. The default value will
+    # leave the layout choice to the backend. Mind that backends may only
+    # implement and support a subset of all possible layouts.
+    "VLLM_KV_CACHE_LAYOUT":
+    lambda: os.getenv("VLLM_KV_CACHE_LAYOUT", None)
 }
 
 # --8<-- [end:env-vars-definition]
