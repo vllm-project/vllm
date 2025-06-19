@@ -291,6 +291,27 @@ class _ModelInfo:
         )
 
 
+# NOTE(woosuk): A shortcut to get model info without subprocess call.
+# This needs to be updated whenever the model definition changes.
+QWEN2_5_VL_MODEL_INFO = _ModelInfo(
+    architecture="Qwen2_5_VLForConditionalGeneration",
+    is_text_generation_model=True,
+    is_pooling_model=True,
+    supports_cross_encoding=False,
+    supports_multimodal=True,
+    supports_pp=True,
+    has_inner_state=False,
+    is_attention_free=False,
+    is_hybrid=False,
+    has_noops=False,
+    supports_transcription=False,
+    supports_v0_only=False,
+)
+CACHED_MODEL_INFO = {
+    "Qwen2_5_VLForConditionalGeneration": QWEN2_5_VL_MODEL_INFO,
+}
+
+
 class _BaseRegisteredModel(ABC):
 
     @abstractmethod
@@ -443,7 +464,10 @@ class _ModelRegistry:
     def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
         if model_arch not in self.models:
             return None
-
+        # NOTE(woosuk): Shortcut to avoid subprocess call.
+        model_info = CACHED_MODEL_INFO.get(model_arch)
+        if model_info is not None:
+            return model_info
         return _try_inspect_model_cls(model_arch, self.models[model_arch])
 
     def _normalize_archs(
