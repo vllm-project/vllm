@@ -7,7 +7,7 @@ vLLM is also available via [Llama Stack](https://github.com/meta-llama/llama-sta
 
 To install Llama Stack, run
 
-```console
+```bash
 pip install llama-stack -q
 ```
 

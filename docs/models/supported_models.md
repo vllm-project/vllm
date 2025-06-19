@@ -168,7 +168,7 @@ Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project
 
 If you prefer, you can use the Hugging Face CLI to [download a model](https://huggingface.co/docs/huggingface_hub/guides/cli#huggingface-cli-download) or specific files from a model repository:
 
-```console
+```bash
 # Download a model
 huggingface-cli download HuggingFaceH4/zephyr-7b-beta
 
@@ -183,7 +183,7 @@ huggingface-cli download HuggingFaceH4/zephyr-7b-beta eval_results.json
 
 Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#scan-your-cache) stored in local cache:
 
-```console
+```bash
 # List cached models
 huggingface-cli scan-cache
 
@@ -198,7 +198,7 @@ huggingface-cli scan-cache --dir ~/.cache/huggingface/hub
 
 Use the Hugging Face CLI to interactively [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
 
-```console
+```bash
 # The `delete-cache` command requires extra dependencies to work with the TUI.
 # Please run `pip install huggingface_hub[cli]` to install them.
 
@@ -563,10 +563,10 @@ Specified using `--task generate`.
 | `SmolVLMForConditionalGeneration`            | SmolVLM2                                                                 | T + I                                                                 | `SmolVLM2-2.2B-Instruct`                                                                                                                                | ✅︎                     |                             | ✅︎                    |
 | `TarsierForConditionalGeneration`            | Tarsier                                                                  | T + I<sup>E+</sup>                                                    | `omni-search/Tarsier-7b`,`omni-search/Tarsier-34b`                                                                                                      |                        | ✅︎                          | ✅︎                    |
 
-<sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.  
-&nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:  
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`--hf-overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'`  
-<sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
+<sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.
+&nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`--hf-overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'`
+<sup>E</sup> Pre-computed embeddings can be inputted for this modality.
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 !!! warning

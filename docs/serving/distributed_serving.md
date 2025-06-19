@@ -34,15 +34,15 @@ output = llm.generate("San Francisco is a")
 
 To run multi-GPU serving, pass in the `--tensor-parallel-size` argument when starting the server. For example, to run API server on 4 GPUs:
 
-```console
- vllm serve facebook/opt-13b \
+```bash
+vllm serve facebook/opt-13b \
      --tensor-parallel-size 4
 ```
 
 You can also additionally specify `--pipeline-parallel-size` to enable pipeline parallelism. For example, to run API server on 8 GPUs with pipeline parallelism and tensor parallelism:
 
-```console
- vllm serve gpt2 \
+```bash
+vllm serve gpt2 \
      --tensor-parallel-size 4 \
      --pipeline-parallel-size 2
 ```
@@ -55,7 +55,7 @@ The first step, is to start containers and organize them into a cluster. We have
 
 Pick a node as the head node, and run the following command:
 
-```console
+```bash
 bash run_cluster.sh \
                 vllm/vllm-openai \
                 ip_of_head_node \
@@ -66,7 +66,7 @@ bash run_cluster.sh \
 
 On the rest of the worker nodes, run the following command:
 
-```console
+```bash
 bash run_cluster.sh \
                 vllm/vllm-openai \
                 ip_of_head_node \
@@ -87,7 +87,7 @@ Then, on any node, use `docker exec -it node /bin/bash` to enter the container, 
 
 After that, on any node, use `docker exec -it node /bin/bash` to enter the container again. **In the container**, you can use vLLM as usual, just as you have all the GPUs on one node: vLLM will be able to leverage GPU resources of all nodes in the Ray cluster, and therefore, only run the `vllm` command on this node but not other nodes. The common practice is to set the tensor parallel size to the number of GPUs in each node, and the pipeline parallel size to the number of nodes. For example, if you have 16 GPUs in 2 nodes (8 GPUs per node), you can set the tensor parallel size to 8 and the pipeline parallel size to 2:
 
-```console
+```bash
  vllm serve /path/to/the/model/in/the/container \
      --tensor-parallel-size 8 \
      --pipeline-parallel-size 2
@@ -95,7 +95,7 @@ After that, on any node, use `docker exec -it node /bin/bash` to enter the conta
 
 You can also use tensor parallel without pipeline parallel, just set the tensor parallel size to the number of GPUs in the cluster. For example, if you have 16 GPUs in 2 nodes (8 GPUs per node), you can set the tensor parallel size to 16:
 
-```console
+```bash
 vllm serve /path/to/the/model/in/the/container \
      --tensor-parallel-size 16
 ```

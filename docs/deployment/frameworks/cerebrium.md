@@ -11,14 +11,14 @@ vLLM can be run on a cloud based GPU machine with [Cerebrium](https://www.cerebr
 
 To install the Cerebrium client, run:
 
-```console
+```bash
 pip install cerebrium
 cerebrium login
 ```
 
 Next, create your Cerebrium project, run:
 
-```console
+```bash
 cerebrium init vllm-project
 ```
 
@@ -56,7 +56,7 @@ def run(prompts: list[str], temperature: float = 0.8, top_p: float = 0.95):
 
 Then, run the following code to deploy it to the cloud:
 
-```console
+```bash
 cerebrium deploy
 ```
 

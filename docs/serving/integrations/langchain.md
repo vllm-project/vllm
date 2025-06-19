@@ -7,7 +7,7 @@ vLLM is also available via [LangChain](https://github.com/langchain-ai/langchain
 
 To install LangChain, run
 
-```console
+```bash
 pip install langchain langchain_community -q
 ```
 
