@@ -1266,7 +1266,7 @@ class LLM:
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
         # lists of tokens to the `text` and `text_pair` kwargs
-        tokenizer = self.llm_engine.get_tokenizer()
+        tokenizer = self.get_tokenizer()
 
         def ensure_str(prompt: SingletonPrompt):
             if isinstance(prompt, dict):
