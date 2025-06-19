@@ -46,7 +46,7 @@ model:
 
 Then, run the following CLI for provisioning:
 
-```bash
+```console
 $ dstack run . -f serve.dstack.yml
 
 ⠸ Getting run plan...
