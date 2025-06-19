@@ -422,6 +422,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     )
                 else:
                     # kv_cache_shape = (NUM_BLOCKS, 2, num_kv_heads, page_size, head_dim)
+                    # 2048 is an arbitrary NUM_BLOCKS to download and load the kernel
                     trtllm_batch_decode_with_kv_cache(
                     query=torch.zeros(self._num_decodes, attn_metadata.num_qo_heads, attn_metadata.head_dim, device=self.runner.device, dtype=attn_metadata.q_data_type).half(),
                     kv_cache=torch.zeros(2048, 2, attn_metadata.num_kv_heads, attn_metadata.head_dim, device=self.runner.device, dtype=attn_metadata.kv_data_type).half(),
@@ -683,10 +684,23 @@ class FlashInferImpl(AttentionImpl):
                 v_scale=layer._v_scale_float,
                 out=output[num_decode_tokens:],
             )
-
         if decode_wrapper := attn_metadata.decode_wrapper:
             decode_query = query[:num_decode_tokens]
-            if envs.VLLM_USE_TRTLLM_DECODE_ATTENTION:
+            assert decode_query.shape[0] == num_decode_tokens
+            if not envs.VLLM_USE_TRTLLM_DECODE_ATTENTION:
+                assert decode_wrapper is not None
+                assert decode_wrapper._window_left == window_left
+                assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
+                                                           or 0.0)
+                assert decode_wrapper._sm_scale == self.scale
+                decode_wrapper.run(
+                    decode_query,
+                    kv_cache.permute(*stride_order),
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
+                    out=output[:num_decode_tokens],
+                )
+            else:
                 output[:num_decode_tokens] = trtllm_batch_decode_with_kv_cache(
                     query=decode_query.contiguous().half(),
                     kv_cache=kv_cache.permute(0,1,3,2,4).contiguous().half(),
@@ -702,19 +716,5 @@ class FlashInferImpl(AttentionImpl):
                     k_scale=layer._k_scale_float,
                     v_scale=layer._v_scale_float,
                 )
-            else:
-                assert decode_query.shape[0] == num_decode_tokens
-                assert decode_wrapper is not None
-                assert decode_wrapper._window_left == window_left
-                assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
-                                                           or 0.0)
-                assert decode_wrapper._sm_scale == self.scale
-                decode_wrapper.run(
-                    decode_query,
-                    kv_cache.permute(*stride_order),
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    out=output[:num_decode_tokens],
-            )
 
         return output_padded
