@@ -47,7 +47,7 @@ def test_rms_norm(
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
     ref_out = layer.forward_native(x, residual)
-    out = layer(x, residual)
+    out = layer.forward_cuda(x, residual)
     # NOTE(woosuk): LayerNorm operators (including RMS) typically have larger
     # numerical errors than other operators because they involve reductions.
     # Therefore, we use a larger tolerance.
@@ -58,8 +58,11 @@ def test_rms_norm(
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
 
     if residual is not None:
+        out = torch.empty_like(x)
+        residual_out = torch.empty_like(residual)
         opcheck(torch.ops._C.fused_add_rms_norm,
-                (x, residual, layer.weight.data, layer.variance_epsilon))
+                (out, residual_out, x, residual, layer.weight.data,
+                 layer.variance_epsilon))
     else:
         opcheck(torch.ops._C.rms_norm,
                 (out, x, layer.weight.data, layer.variance_epsilon))
@@ -107,13 +110,16 @@ def test_fused_rms_norm_quant(
         # Unfused kernel is in-place so it goes second
         # Also use a separate clone of x to avoid modifying the input
         x_unfused = x.clone()
-        torch.ops._C.fused_add_rms_norm(x_unfused, residual, weight, 1e-6)
-        torch.ops._C.static_scaled_fp8_quant(out_quant, x_unfused,
+        out_unfused = torch.empty_like(x_unfused)
+        residual_out = torch.empty_like(residual)
+        torch.ops._C.fused_add_rms_norm(out_unfused, residual_out, x_unfused,
+                                        residual, weight, 1e-6)
+        torch.ops._C.static_scaled_fp8_quant(out_quant, out_unfused,
                                              quant_scale_t)
 
         torch.cuda.synchronize()
         torch.testing.assert_close(residual_fused,
-                                   residual,
+                                   residual_out,
                                    atol=1e-2,
                                    rtol=1e-2)
 

@@ -276,9 +276,11 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
     torch.ops._C.rms_norm(out, input_contiguous, weight, epsilon)
 
 
-def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
+def fused_add_rms_norm(output: torch.Tensor, residual_out: torch.Tensor,
+                       input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+    torch.ops._C.fused_add_rms_norm(output, residual_out, input, residual,
+                                    weight, epsilon)
 
 
 def apply_repetition_penalties_torch(

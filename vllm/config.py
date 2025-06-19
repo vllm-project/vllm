@@ -4457,6 +4457,10 @@ class VllmConfig:
             not self.model_config.enforce_eager:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
             # is set to True, full CUDA graphs will be used.
+            if current_platform.is_rocm():
+                if "none" in self.compilation_config.custom_ops:
+                    self.compilation_config.custom_ops.remove("none")
+                self.compilation_config.custom_ops.append("+rms_norm")
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False

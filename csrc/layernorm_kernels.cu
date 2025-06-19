@@ -50,9 +50,11 @@ __global__ void rms_norm_kernel(
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
-    scalar_t* __restrict__ input,         // [..., hidden_size]
-    scalar_t* __restrict__ residual,      // [..., hidden_size]
-    const scalar_t* __restrict__ weight,  // [hidden_size]
+    scalar_t* __restrict__ output,          // [..., hidden_size]
+    scalar_t* __restrict__ residual_out,    // [..., hidden_size]
+    const scalar_t* __restrict__ input,     // [..., hidden_size]
+    const scalar_t* __restrict__ residual,  // [..., hidden_size]
+    const scalar_t* __restrict__ weight,    // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
@@ -64,10 +66,14 @@ fused_add_rms_norm_kernel(
   /* These and the argument pointers are all declared `restrict` as they are
      not aliased in practice. Argument pointers should not be dereferenced
      in this kernel as that would be undefined behavior */
+  auto* __restrict__ output_v =
+      reinterpret_cast<_f16Vec<scalar_t, width>*>(output);
+  auto* __restrict__ residual_out_v =
+      reinterpret_cast<_f16Vec<scalar_t, width>*>(residual_out);
   auto* __restrict__ input_v =
-      reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
+      reinterpret_cast<const _f16Vec<scalar_t, width>*>(input);
   auto* __restrict__ residual_v =
-      reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
+      reinterpret_cast<const _f16Vec<scalar_t, width>*>(residual);
   auto* __restrict__ weight_v =
       reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
@@ -76,7 +82,7 @@ fused_add_rms_norm_kernel(
     _f16Vec<scalar_t, width> temp = input_v[id];
     temp += residual_v[id];
     variance += temp.sum_squares();
-    residual_v[id] = temp;
+    residual_out_v[id] = temp;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -90,10 +96,10 @@ fused_add_rms_norm_kernel(
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
-    _f16Vec<scalar_t, width> temp = residual_v[id];
+    _f16Vec<scalar_t, width> temp = residual_out_v[id];
     temp *= s_variance;
     temp *= weight_v[idx];
-    input_v[id] = temp;
+    output_v[id] = temp;
   }
 }
 
@@ -103,9 +109,11 @@ fused_add_rms_norm_kernel(
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
-    scalar_t* __restrict__ input,         // [..., hidden_size]
-    scalar_t* __restrict__ residual,      // [..., hidden_size]
-    const scalar_t* __restrict__ weight,  // [hidden_size]
+    scalar_t* __restrict__ output,          // [..., hidden_size]
+    scalar_t* __restrict__ residual_out,    // [..., hidden_size]
+    const scalar_t* __restrict__ input,     // [..., hidden_size]
+    const scalar_t* __restrict__ residual,  // [..., hidden_size]
+    const scalar_t* __restrict__ weight,    // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
@@ -115,7 +123,7 @@ fused_add_rms_norm_kernel(
     z += residual[blockIdx.x * hidden_size + idx];
     float x = (float)z;
     variance += x * x;
-    residual[blockIdx.x * hidden_size + idx] = z;
+    residual_out[blockIdx.x * hidden_size + idx] = z;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -128,8 +136,8 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * hidden_size + idx];
-    input[blockIdx.x * hidden_size + idx] =
+    float x = (float)residual_out[blockIdx.x * hidden_size + idx];
+    output[blockIdx.x * hidden_size + idx] =
         ((scalar_t)(x * s_variance)) * weight[idx];
   }
 }
@@ -162,15 +170,18 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   VLLM_DISPATCH_FLOATING_TYPES(                                                \
       input.scalar_type(), "fused_add_rms_norm_kernel", [&] {                  \
         vllm::fused_add_rms_norm_kernel<scalar_t, width>                       \
-            <<<grid, block, 0, stream>>>(input.data_ptr<scalar_t>(),           \
-                                         residual.data_ptr<scalar_t>(),        \
-                                         weight.data_ptr<scalar_t>(), epsilon, \
-                                         num_tokens, hidden_size);             \
+            <<<grid, block, 0, stream>>>(                                      \
+                output.data_ptr<scalar_t>(),                                   \
+                residual_out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), \
+                residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),    \
+                epsilon, num_tokens, hidden_size);                             \
       });
 
-void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
-                        torch::Tensor& residual,  // [..., hidden_size]
-                        torch::Tensor& weight,    // [hidden_size]
+void fused_add_rms_norm(torch::Tensor& output,        // [..., hidden_size]
+                        torch::Tensor& residual_out,  // [..., hidden_size]
+                        torch::Tensor& input,         // [..., hidden_size]
+                        torch::Tensor& residual,      // [..., hidden_size]
+                        torch::Tensor& weight,        // [hidden_size]
                         double epsilon) {
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
@@ -191,11 +202,14 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
     However, this requires each tensor's data to be aligned to 16
     bytes.
    */
+  auto out_ptr = reinterpret_cast<std::uintptr_t>(output.data_ptr());
+  auto res_out_ptr = reinterpret_cast<std::uintptr_t>(residual_out.data_ptr());
   auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
   auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.data_ptr());
   auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
-  bool ptrs_are_aligned =
-      inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
+  bool ptrs_are_aligned = out_ptr % 16 == 0 && res_out_ptr % 16 == 0 &&
+                          inp_ptr % 16 == 0 && res_ptr % 16 == 0 &&
+                          wt_ptr % 16 == 0;
   if (ptrs_are_aligned && hidden_size % 8 == 0) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);
   } else {
