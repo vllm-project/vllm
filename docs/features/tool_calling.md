@@ -351,7 +351,7 @@ Here is a summary of a plugin file:
 
 Then you can use this plugin in the command line like this.
 
-```console
+```bash
     --enable-auto-tool-choice \
     --tool-parser-plugin <absolute path of the plugin file>
     --tool-call-parser example \

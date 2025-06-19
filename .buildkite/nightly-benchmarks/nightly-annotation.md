@@ -16,7 +16,7 @@ Please download the visualization scripts in the post
   - Download `nightly-benchmarks.zip`.
   - In the same folder, run the following code:
 
-  ```console
+  ```bash
   export HF_TOKEN=<your HF token>
   apt update
   apt install -y git
