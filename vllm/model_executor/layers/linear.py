@@ -1196,6 +1196,7 @@ class RowParallelLinear(LinearBase):
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
         self.chunk_size = 5120
+        #default chunk_size = 5120
         assert self.quant_method is not None
         self.quant_method.create_weights(
             layer=self,
