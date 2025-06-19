@@ -394,13 +394,11 @@ class CustomAllreduce:
 
     def qr_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
         """Performs an out-of-place custom quick all reduce."""
-        inp_dtype = inp.dtype
-        if inp_dtype == torch.bfloat16 and self.use_fp16_kernels:
-            inp = inp.to(torch.float16)
         if out is None:
             out = torch.empty_like(inp)
-        ops.qr_all_reduce(self._qr_ptr, inp, out, self.qr_quant_level.value)
-        return out.to(inp_dtype)
+        ops.qr_all_reduce(self._qr_ptr, inp, out, self.qr_quant_level.value,
+                          self.use_fp16_kernels)
+        return out
 
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
         """The main allreduce API that provides support for cuda graph."""

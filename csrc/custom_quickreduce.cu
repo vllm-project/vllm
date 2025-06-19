@@ -56,7 +56,7 @@ void qr_open_handles(quickreduce::fptr_t _fa,
 }
 
 void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
-                   torch::Tensor& out, int64_t quant_level) {
+                   torch::Tensor& out, int64_t quant_level, bool cast_bf2half) {
   auto fa = reinterpret_cast<quickreduce::DeviceComms*>(_fa);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
   auto stream = at::cuda::getCurrentHIPStreamMasqueradingAsCUDA();
@@ -65,14 +65,20 @@ void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
   TORCH_CHECK_EQ(inp.numel(), out.numel());
   TORCH_CHECK_LE(out.numel(), quickreduce::DeviceComms::kMaxProblemSize);
   if (out.scalar_type() == at::ScalarType::Half) {
-    fa->allreduce<half>(reinterpret_cast<half*>(inp.data_ptr()),
-                        reinterpret_cast<half*>(out.data_ptr()), out.numel(),
-                        quant_level, stream);
+    fa->allreduce<half, false>(reinterpret_cast<half*>(inp.data_ptr()),
+                               reinterpret_cast<half*>(out.data_ptr()),
+                               out.numel(), quant_level, stream);
   } else if (out.scalar_type() == at::ScalarType::BFloat16) {
-    fa->allreduce<quickreduce::nv_bfloat16>(
-        reinterpret_cast<quickreduce::nv_bfloat16*>(inp.data_ptr()),
-        reinterpret_cast<quickreduce::nv_bfloat16*>(out.data_ptr()),
-        out.numel(), quant_level, stream);
+    if (cast_bf2half) {
+      fa->allreduce<half, true>(reinterpret_cast<half*>(inp.data_ptr()),
+                                reinterpret_cast<half*>(out.data_ptr()),
+                                out.numel(), quant_level, stream);
+    } else {
+      fa->allreduce<quickreduce::nv_bfloat16, false>(
+          reinterpret_cast<quickreduce::nv_bfloat16*>(inp.data_ptr()),
+          reinterpret_cast<quickreduce::nv_bfloat16*>(out.data_ptr()),
+          out.numel(), quant_level, stream);
+    }
   } else {
     throw std::runtime_error(
         "quick allreduce only supports float16 and bfloat16");
@@ -82,5 +88,26 @@ void qr_all_reduce(quickreduce::fptr_t _fa, torch::Tensor& inp,
 int64_t qr_max_size() {
   return static_cast<int64_t>(quickreduce::DeviceComms::kMaxProblemSize);
 }
+
+  #define INSTANTIATE_FOR_WORLDSIZE(T, Codec, cast_bf2half)       \
+    template struct quickreduce::AllReduceTwoshot<T, Codec<T, 2>, \
+                                                  cast_bf2half>;  \
+    template struct quickreduce::AllReduceTwoshot<T, Codec<T, 4>, \
+                                                  cast_bf2half>;  \
+    template struct quickreduce::AllReduceTwoshot<T, Codec<T, 8>, cast_bf2half>;
+
+INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecFP, false)
+INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ4, false)
+INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ6, false)
+INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ8, false)
+INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecFP, true)
+INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ4, true)
+INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ6, true)
+INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ8, true)
+
+INSTANTIATE_FOR_WORLDSIZE(half, quickreduce::CodecFP, false)
+INSTANTIATE_FOR_WORLDSIZE(half, quickreduce::CodecQ4, false)
+INSTANTIATE_FOR_WORLDSIZE(half, quickreduce::CodecQ6, false)
+INSTANTIATE_FOR_WORLDSIZE(half, quickreduce::CodecQ8, false)
 
 #endif  // USE_ROCM
