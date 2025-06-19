@@ -707,10 +707,12 @@ class Scheduler(SchedulerInterface):
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        pending_handshake = model_runner_output.pending_handshake or set()
 
         new_running: list[Request] = []
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
+        num_requests_to_reschedule_due_to_handshake = 0
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -718,6 +720,12 @@ class Scheduler(SchedulerInterface):
         for request in self.running:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
+            if req_id in pending_handshake:
+                num_requests_to_reschedule_due_to_handshake += 1
+                # Reset computed tokens to force rescheduling from beginning
+                request.num_computed_tokens = 0
+                new_running.append(request)
+                continue
             if num_tokens_scheduled == 0:
                 # The request was not scheduled in this step.
                 new_running.append(request)
@@ -825,6 +833,11 @@ class Scheduler(SchedulerInterface):
             if not stopped:
                 new_running.append(request)
 
+        if num_requests_to_reschedule_due_to_handshake:
+            logger.warning(
+                "Recovered from handshake failure: "
+                "%d request(s) rescheduled.",
+                num_requests_to_reschedule_due_to_handshake)
         # KV Connector: update state for finished KV Transfers.
         self._update_from_kv_xfer_finished(model_runner_output)
 

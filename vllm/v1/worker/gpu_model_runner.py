@@ -1300,8 +1300,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             self.maybe_wait_for_kv_save()
             kv_transfer_result = self.get_finished_kv_transfers(scheduler_output)
-            finished_sending = kv_transfer_result.finished_sending
-            finished_recving = kv_transfer_result.finished_recving
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1538,8 +1536,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
+            finished_sending=kv_transfer_result.finished_sending,
+            finished_recving=kv_transfer_result.finished_recving,
+            pending_handshake=kv_transfer_result.pending_handshake,
         )
 
     def kv_connector_no_forward(
@@ -1548,15 +1547,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with set_forward_context(None, self.vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
             kv_transfer_result = self.get_finished_kv_transfers(scheduler_output)
-            finished_sending = kv_transfer_result.finished_sending
-            finished_recving = kv_transfer_result.finished_recving
 
-        if not finished_sending and not finished_recving:
+        if kv_transfer_result.is_empty():
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.finished_sending = finished_sending
-        output.finished_recving = finished_recving
+        output.finished_sending = kv_transfer_result.finished_sending
+        output.finished_recving = kv_transfer_result.finished_recving
+        output.pending_handshake = kv_transfer_result.pending_handshake
         return output
 
     @staticmethod
