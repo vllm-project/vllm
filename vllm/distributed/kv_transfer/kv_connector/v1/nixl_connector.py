@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.request import RequestState
+    from vllm.v1.request import RequestGenerationState
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
 GET_META_MSG = b"get_meta_msg"
@@ -133,7 +133,7 @@ class NixlConnector(KVConnectorBase_V1):
 
     def request_finished(
         self,
-        request: "RequestState",
+        request: "RequestGenerationState",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
@@ -280,7 +280,7 @@ class NixlConnectorScheduler:
 
     def request_finished(
         self,
-        request: "RequestState",
+        request: "RequestGenerationState",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
@@ -300,7 +300,7 @@ class NixlConnectorScheduler:
         # Get computed blocks.
         # TODO(lucas): this is a edge case here where we are this request gets
         #  prempted by the next scheduler step (which may be past the stop token
-        #  due to async scheduling)
+        #  due to async scheduling).
         all_full = request.num_tokens % self.block_size == 0
         computed_block_ids = block_ids if all_full else block_ids[:-1]
 

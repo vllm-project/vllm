@@ -11,7 +11,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
-from vllm.v1.request import RequestState
+from vllm.v1.request import RequestGenerationState
 
 logger = init_logger(__name__)
 
@@ -95,7 +95,7 @@ class BlockPool:
 
     def cache_full_blocks(
         self,
-        request: RequestState,
+        request: RequestGenerationState,
         blocks: list[KVCacheBlock],
         block_hashes: list[BlockHash],
         num_cached_blocks: int,

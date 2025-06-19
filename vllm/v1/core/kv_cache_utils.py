@@ -15,7 +15,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import RequestState, RequestParams
+from vllm.v1.request import RequestGenerationState, RequestParams
 
 logger = init_logger(__name__)
 

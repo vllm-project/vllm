@@ -16,6 +16,11 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
 
 class RequestParams:
+    """
+    "Constant" parameters for a request. This should be static during genera    tion
+     but current this is violated by `structured_output_request` which is 
+     stateful
+    """
     def __init__(
         self,
         request_id: str,
@@ -36,6 +41,11 @@ class RequestParams:
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
+
+        # P/D: Connector-specific KV transfer parameters.
+        kv_params = (None if sampling_params.extra_args is None else
+                     sampling_params.extra_args.get("kv_transfer_params"))
+        self.kv_transfer_params: Optional[dict[str, Any]] = kv_params
 
         # NOTE(lucas): Note sure if this belongs in "params" since this is
         # stateful with regards to each generated token.
@@ -91,8 +101,11 @@ class RequestParams:
     def use_structured_output(self) -> bool:
         return self.sampling_params.guided_decoding is not None
 
-
-class RequestState:
+class RequestGenerationState:
+    """
+    Track the generated tokens for a request.
+    """
+    
     def __init__(self, params: RequestParams) -> None:
         # convenience alias
         self.request_id = params.request_id
@@ -100,14 +113,6 @@ class RequestState:
         
         self.params = params
 
-        # P/D: Connector-specific KV transfer parameters.
-        kv_params = (None if params.sampling_params.extra_args is None else
-                     params.sampling_params.extra_args.get("kv_transfer_params"))
-        self.kv_transfer_params: Optional[dict[str, Any]] = kv_params
-
-        self.status = (RequestStatus.WAITING_FOR_FSM
-                       if params.sampling_params.guided_decoding is not None else
-                       RequestStatus.WAITING)
         self.stop_reason: Union[int, str, None] = None
 
         self._output_token_ids: list[int] = []
@@ -145,7 +150,11 @@ class RequestState:
         return RequestStatus.get_finished_reason(self.status)
 
 
-class SchedulerRequestState:
+class RequestSchedulerState:
+    """
+    Track the scheduler state for a request. i.e. all the information the 
+     scheduler needs to know to schedule the next tokens for the request.
+    """
     def __init__(self, params: RequestParams) -> None:
         # Convenience alias
         self.request_id = params.request_id

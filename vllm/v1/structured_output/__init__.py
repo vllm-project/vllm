@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.reasoning import ReasoningParser
-    from vllm.v1.request import RequestParams, RequestState
+    from vllm.v1.request import RequestParams, RequestGenerationState
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -92,7 +92,7 @@ class StructuredOutputManager:
 
     def _async_create_grammar(
         self,
-        request: RequestState,
+        request: RequestGenerationState,
     ) -> StructuredOutputGrammar:
         key = request.params.structured_output_request.structured_output_key  # type: ignore[union-attr]
 
@@ -108,7 +108,7 @@ class StructuredOutputManager:
 
     def grammar_bitmask(
         self,
-        requests: dict[str, RequestState],
+        requests: dict[str, RequestGenerationState],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> Optional[npt.NDArray[np.int32]]:

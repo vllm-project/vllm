@@ -14,8 +14,8 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
-                                   RequestStateStats)
+from vllm.v1.metrics.stats import (IterationStats, LoRARequestGenerationStates,
+                                   RequestGenerationStateStats)
 
 
 class RequestOutputCollector:
@@ -70,7 +70,7 @@ class OutputProcessorOutput:
     reqs_to_abort: list[str]
 
 
-class RequestState:
+class RequestGenerationState:
 
     def __init__(
         self,
@@ -102,7 +102,7 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
 
-        self.stats = RequestStateStats(
+        self.stats = RequestGenerationStateStats(
             arrival_time=arrival_time) if log_stats else None
 
     @classmethod
@@ -115,7 +115,7 @@ class RequestState:
         request_index: int,
         queue: Optional[RequestOutputCollector],
         log_stats: bool,
-    ) -> "RequestState":
+    ) -> "RequestGenerationState":
         if not request.sampling_params.detokenize:
             tokenizer = None
         return cls(
@@ -239,9 +239,9 @@ class OutputProcessor:
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
-        self.request_states: dict[str, RequestState] = {}
+        self.request_states: dict[str, RequestGenerationState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
-        self.lora_states = LoRARequestStates()
+        self.lora_states = LoRARequestGenerationStates()
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -285,7 +285,7 @@ class OutputProcessor:
         if request_id in self.request_states:
             raise ValueError(f"Request id {request_id} already running.")
 
-        req_state = RequestState.from_new_request(
+        req_state = RequestGenerationState.from_new_request(
             tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
             request=request,
             prompt=prompt,
@@ -391,7 +391,7 @@ class OutputProcessor:
             reqs_to_abort=reqs_to_abort,
         )
 
-    def _update_stats_from_output(self, req_state: RequestState,
+    def _update_stats_from_output(self, req_state: RequestGenerationState,
                                   engine_core_output: EngineCoreOutput,
                                   engine_core_timestamp: Optional[float],
                                   iteration_stats: Optional[IterationStats]):
@@ -408,7 +408,7 @@ class OutputProcessor:
                                            req_state.prompt_len,
                                            req_state.stats, lora_stats)
 
-    def _update_stats_from_finished(self, req_state: RequestState,
+    def _update_stats_from_finished(self, req_state: RequestGenerationState,
                                     finish_reason: Optional[FinishReason],
                                     iteration_stats: Optional[IterationStats]):
         if iteration_stats is None:

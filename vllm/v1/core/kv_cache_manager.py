@@ -13,7 +13,7 @@ from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
                                          hash_request_tokens)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import RequestStatus, SchedulerRequestState, RequestState, RequestParams
+from vllm.v1.request import RequestStatus, RequestSchedulerState, RequestGenerationState, RequestParams
 
 logger = init_logger(__name__)
 
@@ -313,7 +313,7 @@ class KVCacheManager:
 
     def get_num_common_prefix_blocks(
         self,
-        request: SchedulerRequestState,
+        request: RequestSchedulerState,
         num_running_requests: int,
     ) -> list[int]:
         """Calculate the number of common prefix blocks shared by all requests
@@ -375,7 +375,7 @@ class KVCacheManager:
         return KVCacheBlocks(
             self.coordinator.get_blocks(request_id)).get_block_ids()
 
-    def cache_blocks(self, request: SchedulerRequestState, num_computed_tokens: int) -> None:
+    def cache_blocks(self, request: RequestSchedulerState, num_computed_tokens: int) -> None:
         """Cache the blocks for the request."""
         block_hashes = self.req_to_block_hashes[request.request_id]
         self.coordinator.cache_blocks(request, block_hashes,

@@ -19,13 +19,13 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import RequestState, RequestStatus, SchedulerRequestState, RequestParams
+from vllm.v1.request import RequestGenerationState, RequestStatus, RequestSchedulerState, RequestParams
 from vllm.v1.structured_output import StructuredOutputManager
 
 EOS_TOKEN_ID = 50256
 
 
-def scheduler_update_from_output(
+def scheduler_update_from_output_sync(
     scheduler: Scheduler, 
     scheduler_output: SchedulerOutput, 
     model_runner_output: ModelRunnerOutput
@@ -137,14 +137,6 @@ def create_scheduler(
         kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
-    )
-
-
-def create_core_engine(scheduler: Scheduler):
-    return EngineCore(
-        vllm_config=scheduler.vllm_config,
-        scheduler=scheduler,
-        log_stats=True,
     )
 
 def create_requests(num_requests: int,
@@ -319,7 +311,7 @@ def test_schedule_partial_requests():
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler_update_from_output(scheduler, output, model_runner_output)
+    scheduler_update_from_output_sync(scheduler, output, model_runner_output)
 
     # Schedule the next step.
     # Only the first and second requests are scheduled.
@@ -369,7 +361,7 @@ def test_no_mm_input_chunking():
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler_update_from_output(scheduler, output, model_runner_output)
+    scheduler_update_from_output_sync(scheduler, output, model_runner_output)
 
     output = scheduler.schedule()
     assert len(scheduler.running) == 1
@@ -432,7 +424,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler_update_from_output(scheduler, output, model_runner_output)
+    scheduler_update_from_output_sync(scheduler, output, model_runner_output)
 
     # Schedule the next step. All three requests are running.
     # Processed the remaining prefills of the first and second requests.
@@ -456,7 +448,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler_update_from_output(scheduler, output1, model_runner_output)
+    scheduler_update_from_output_sync(scheduler, output1, model_runner_output)
     output2 = scheduler.schedule()
     assert len(scheduler.running) == 3
     assert len(output2.scheduled_new_reqs) == 0
@@ -475,7 +467,7 @@ def test_stop_via_update_from_output():
     # Test case 1: Stop on EOS token
     requests = create_requests(num_requests=2, max_tokens=10)
     for req_params in requests:
-        req_state = SchedulerRequestState(req_params)
+        req_state = RequestSchedulerState(req_params)
         req_state.num_computed_tokens = req_state.num_tokens
         scheduler.requests[req_params.request_id] = req_state
         scheduler.running.append(req_state)
@@ -512,7 +504,7 @@ def test_stop_via_update_from_output():
     #     logprobs=None,
     #     prompt_logprobs_dict={})
 
-    # scheduler_update_from_output(scheduler, scheduler_output, model_output)
+    # scheduler_update_from_output_sync(scheduler, scheduler_output, model_output)
 
     # # Verify first request stopped, second continues
     # assert len(scheduler.running) == 1
@@ -562,7 +554,7 @@ def test_stop_via_update_from_output():
     #     logprobs=None,
     #     prompt_logprobs_dict={})
 
-    # scheduler_update_from_output(scheduler, scheduler_output, model_output)
+    # scheduler_update_from_output_sync(scheduler, scheduler_output, model_output)
 
     # # Verify first request stopped on custom token
     # assert len(scheduler.running) == 1
@@ -577,7 +569,7 @@ def test_stop_via_update_from_output():
     scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=2, max_tokens=2)
     for req_params in requests:
-        req_state = SchedulerRequestState(req_params)
+        req_state = RequestSchedulerState(req_params)
         req_state.num_computed_tokens = req_state.num_tokens
         scheduler.requests[req_params.request_id] = req_state
         scheduler.running.append(req_state)
@@ -612,7 +604,7 @@ def test_stop_via_update_from_output():
         logprobs=None,
         prompt_logprobs_dict={})
 
-    scheduler_update_from_output(scheduler, scheduler_output, model_output)
+    scheduler_update_from_output_sync(scheduler, scheduler_output, model_output)
 
     # Verify first request stopped due to length
     assert len(scheduler.running) == 1
@@ -655,7 +647,7 @@ def test_stop_via_update_from_output():
     #     logprobs=None,
     #     prompt_logprobs_dict={})
 
-    # scheduler_update_from_output(scheduler, scheduler_output, model_output)
+    # scheduler_update_from_output_sync(scheduler, scheduler_output, model_output)
 
     # # Verify request continues past EOS
     # assert len(scheduler.running) == 1
@@ -703,7 +695,7 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler_update_from_output(scheduler, scheduler_output0, model_runner_output)
+    scheduler_update_from_output_sync(scheduler, scheduler_output0, model_runner_output)
 
     # Schedule the next step.
     # The first request can be scheduled again while the second
@@ -720,7 +712,7 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         logprobs=None,
         prompt_logprobs_dict={},
     )
-    scheduler_update_from_output(scheduler, scheduler_output1, model_runner_output)
+    scheduler_update_from_output_sync(scheduler, scheduler_output1, model_runner_output)
 
 
 # Note - these test cases mirror some of those in test_rejection_sampler.py
@@ -771,7 +763,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         prompt_logprobs_dict={},
     )
     
-    spec_decoding_stats = scheduler_update_from_output(scheduler, output, model_runner_output)
+    spec_decoding_stats = scheduler_update_from_output_sync(scheduler, output, model_runner_output)
 
     for i in range(len(requests)):
         running_req = scheduler.running[i]
@@ -809,7 +801,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         prompt_logprobs_dict={},
     )
 
-    spec_decoding_stats = scheduler_update_from_output(scheduler, output, model_runner_output)
+    spec_decoding_stats = scheduler_update_from_output_sync(scheduler, output, model_runner_output)
 
     if expected[0] == 0:
         assert spec_decoding_stats is None
@@ -871,8 +863,7 @@ def _step_until_done(
 ):
     """Loop over schedule(), update_from_output() until finished."""
 
-    all_finished = False
-    scheduler_update_from_output(scheduler, output, model_runner_output)
+    all_finished = len(scheduler.running) == 0 and len(scheduler.waiting) == 0
     while not all_finished:
         # Schedule + a few iterations until stopping.
         output = scheduler.schedule()
@@ -881,7 +872,7 @@ def _step_until_done(
             # We should be in the decode phase now.
             assert num_scheduled_tokens == 1
         assert len(output.kv_connector_metadata.requests) == 0
-        scheduler_update_from_output(scheduler, output, model_runner_output)
+        scheduler_update_from_output_sync(scheduler, output, model_runner_output)
         # Check if all requests are finished by looking at scheduler state
         all_done = len(scheduler.running) == 0
         all_finished = all_done
@@ -898,8 +889,7 @@ def test_kv_connector_basic():
         enable_prefix_caching=True,
         use_kv_connector=True,
     )
-    core = create_core_engine(scheduler)
-    
+
     NUM_TOTAL_BLOCKS = (
         scheduler.kv_cache_manager.block_pool.get_num_free_blocks())
     BLOCK_SIZE = scheduler.cache_config.block_size
@@ -921,7 +911,7 @@ def test_kv_connector_basic():
     req_ids = []
     req_to_index = {}
     for i, request in enumerate(requests):
-        core.add_request(request)
+        scheduler.add_request(request)
         req_ids.append(request.request_id)
         req_to_index[request.request_id] = i
 
@@ -942,6 +932,10 @@ def test_kv_connector_basic():
         # Just the incremental tokens should be scheduled.
         expected_num_scheduled_tokens=NUM_TOKENS - NUM_MATCHED_NEW_TOKENS,
     )
+
+    scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
+
+    print("NUM_TOKENS", NUM_TOKENS, "BLOCK_SIZE", BLOCK_SIZE, "NUM_TOTAL_BLOCKS", NUM_TOTAL_BLOCKS)
 
     # Ensure KVCacheManager is correct.
     _assert_right_kv_cache_manager(scheduler, req_ids, NUM_TOKENS, BLOCK_SIZE,
@@ -1133,7 +1127,7 @@ def test_kv_connector_handles_preemption():
         num_requests=2,
         expected_num_scheduled_tokens=NUM_TOKENS - NUM_MATCHED_NEW_TOKENS)
     assert len(scheduler.running) == 2
-    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
 
     # All can be scheduled - 2nd token.
     output = scheduler.schedule()
@@ -1143,7 +1137,7 @@ def test_kv_connector_handles_preemption():
         num_requests=0,
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 2
-    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
 
     # This will generate a new block and cause a preemption - 3rd token.
     output = scheduler.schedule()
@@ -1154,7 +1148,7 @@ def test_kv_connector_handles_preemption():
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
-    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
 
@@ -1167,7 +1161,7 @@ def test_kv_connector_handles_preemption():
         expected_num_scheduled_tokens=1)
     assert len(scheduler.waiting) == 1
     assert len(scheduler.running) == 1
-    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 1
     # All memory should be freed since nothing is running.
@@ -1187,7 +1181,7 @@ def test_kv_connector_handles_preemption():
     )
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
-    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
 
@@ -1199,7 +1193,7 @@ def test_kv_connector_handles_preemption():
         num_requests=0,
         expected_num_scheduled_tokens=1)
     assert len(scheduler.running) == 1
-    _ = scheduler_update_from_output(scheduler, output, MODEL_RUNNER_OUTPUT)
+    _ = scheduler_update_from_output_sync(scheduler, output, MODEL_RUNNER_OUTPUT)
     assert len(scheduler.running) == 0
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() \
@@ -1271,7 +1265,7 @@ def test_memory_leak():
         scheduler.add_request(request)
         scheduler_output = scheduler.schedule()
         model_runner_output = make_output(scheduler)
-        scheduler_update_from_output(scheduler, scheduler_output, model_runner_output)
+        scheduler_update_from_output_sync(scheduler, scheduler_output, model_runner_output)
 
     # Iterate until done.
     while True:
@@ -1279,7 +1273,7 @@ def test_memory_leak():
         if len(scheduler.running) == 0:
             break
         model_runner_output = make_output(scheduler)
-        scheduler_update_from_output(scheduler, scheduler_output, model_runner_output)
+        scheduler_update_from_output_sync(scheduler, scheduler_output, model_runner_output)
 
     # Confirm no memory leak.
     assert_scheduler_empty(scheduler)

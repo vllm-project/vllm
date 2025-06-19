@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.sampling_params import SamplingParams
-    from vllm.v1.request import SchedulerRequestState
+    from vllm.v1.request import RequestSchedulerState
 
 
 @dataclass
@@ -34,7 +34,7 @@ class NewRequestData:
     @classmethod
     def from_request(
         cls,
-        request: SchedulerRequestState,
+        request: RequestSchedulerState,
         block_ids: tuple[list[int], ...],
     ) -> NewRequestData:
         return cls(
@@ -92,7 +92,7 @@ class CachedRequestData:
     @classmethod
     def from_request(
         cls,
-        request: SchedulerRequestState,
+        request: RequestSchedulerState,
         resumed_from_preemption: bool,
         new_block_ids: tuple[list[int], ...],
     ) -> CachedRequestData:

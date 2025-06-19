@@ -21,7 +21,7 @@ _SAMPLING_EPS = 1e-5
 
 
 @dataclass
-class CachedRequestState:
+class CachedRequestGenerationState:
 
     req_id: str
     prompt_token_ids: list[int]
@@ -234,7 +234,7 @@ class InputBatch:
 
     def add_request(
         self,
-        request: "CachedRequestState",
+        request: "CachedRequestGenerationState",
         req_index: Optional[int] = None,
     ) -> None:
         if req_index is None:

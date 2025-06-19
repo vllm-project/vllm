@@ -87,7 +87,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
     def update(self, new_token_ids: list[int],
                stop_terminated: bool) -> Optional[str]:
         """
-        Update RequestState for the request_id by:
+        Update RequestGenerationState for the request_id by:
             1) Detokenize the new token ids incrementally.
             2) Evaluate stop criteria.
 
