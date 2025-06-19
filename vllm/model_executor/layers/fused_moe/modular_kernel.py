@@ -247,6 +247,13 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def supports_expert_map(self) -> bool:
+        """
+        A flag indicating whether or not this class supports expert maps
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def workspace_shapes(
         self,
         a: torch.Tensor,

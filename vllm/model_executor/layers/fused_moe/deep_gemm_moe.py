@@ -85,6 +85,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return True
 
+    def supports_expert_map(self) -> bool:
+        return True
+
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
         topk: int, global_num_experts: int, local_num_experts: int

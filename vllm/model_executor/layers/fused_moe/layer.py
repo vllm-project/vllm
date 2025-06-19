@@ -122,8 +122,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 max_num_tokens=moe.max_num_tokens,
                 world_size=all2all_manager.world_size,
                 rank=all2all_manager.rank,
-                # dp_size actually means tp_size, bug in pplx kernels
-                dp_size=all2all_manager.tp_group.world_size,
+                dp_size=moe.dp_size,
             )
         elif moe.use_deepep_ht_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size
@@ -598,6 +597,7 @@ class FusedMoE(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
+        all2all_manager = get_ep_group().device_communicator.all2all_manager
 
         vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
@@ -606,6 +606,8 @@ class FusedMoE(torch.nn.Module):
                           get_tensor_model_parallel_world_size()),
                 dp_size_=(dp_size if dp_size is not None else
                           get_dp_group().world_size),
+                world_size_=(all2all_manager.world_size
+                             if all2all_manager is not None else 1),
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts

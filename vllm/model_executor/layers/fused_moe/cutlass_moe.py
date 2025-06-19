@@ -237,6 +237,9 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return not self.use_batched_format
 
+    def supports_expert_map(self) -> bool:
+        return not self.use_batched_format
+
     def workspace_shapes(
         self,
         a: torch.Tensor,

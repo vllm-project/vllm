@@ -552,31 +552,22 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
 
-        if (prepare_finalize.activation_format ==
-                FusedMoEActivationFormat.BatchedExperts):
-            # TODO(bnell): attrs from prepare_finalize sketchy
-            max_experts_per_worker = (
-                (moe.num_experts + prepare_finalize.world_size - 1) //
-                prepare_finalize.world_size)
+        use_batched_format = (prepare_finalize.activation_format ==
+                              FusedMoEActivationFormat.BatchedExperts)
 
-            # TODO(bnell): fix this supports_expert_map() method?
-            self.disable_expert_map = True
+        num_experts = (moe.num_local_experts
+                       if use_batched_format else moe.num_experts)
 
-            return CutlassExpertsFp8(
-                max_experts_per_worker,
-                moe.in_dtype,
-                self.input_quant.strategy == QuantizationStrategy.TOKEN,
-                self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
-                use_batched_format=True,
-            )
-        else:
-            return CutlassExpertsFp8(
-                moe.num_experts,
-                moe.in_dtype,
-                self.input_quant.strategy == QuantizationStrategy.TOKEN,
-                self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
-                use_batched_format=False,
-            )
+        experts = CutlassExpertsFp8(
+            num_experts,
+            moe.in_dtype,
+            self.input_quant.strategy == QuantizationStrategy.TOKEN,
+            self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
+            use_batched_format=use_batched_format,
+        )
+
+        self.disable_expert_map = not experts.supports_expert_map()
+        return experts
 
     def apply(
         self,

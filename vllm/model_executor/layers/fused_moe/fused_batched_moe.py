@@ -549,6 +549,9 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return False
 
+    def supports_expert_map(self) -> bool:
+        return False
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -664,6 +667,9 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 mk.FusedMoEActivationFormat.BatchedExperts)
 
     def supports_chunking(self) -> bool:
+        return False
+
+    def supports_expert_map(self) -> bool:
         return False
 
     def workspace_shapes(
