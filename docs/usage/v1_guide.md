@@ -80,7 +80,15 @@ vLLM V1 currently excludes model architectures with the `SupportsV0Only` protoco
 
     This corresponds to the V1 column in our [list of supported models][supported-models].
 
-See below for the status of models that are still not yet supported in V1.
+See below for the status of models that are not yet supported or have more features planned in V1.
+
+#### Embedding Models
+
+The initial basic support is now functional.
+
+Later, we will consider using [hidden states processor](https://github.com/vllm-project/vllm/issues/12249),
+which is based on [global logits processor](https://github.com/vllm-project/vllm/pull/13360)
+to enable simultaneous generation and embedding using the same engine instance in V1.
 
 #### Mamba Models
 
