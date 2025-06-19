@@ -1,16 +1,13 @@
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
-# Please update any changes made here to
-# docs/contributing/dockerfile/dockerfile.md and
-# docs/assets/contributing/dockerfile-stages-dependency.png
-
-ARG CUDA_VERSION=12.8.1
-#################### BASE BUILD IMAGE ####################
-# prepare basic build environment
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
+#################### BASE BUILD IMAGE ####################
+# prepare basic build environment
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS base
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -18,18 +15,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo \
-    && for i in 1 2 3; do \
-        add-apt-repository -y ppa:deadsnakes/ppa && break || \
-        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
-    done \
-    && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+    && apt-get install -y --no-install-recommends ccache software-properties-common git curl sudo \
+       python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv cmake ninja-build \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
-    && python3 --version && python3 -m pip --version
+    && python3 --version && python3 -m pip --version \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -m pip install uv
@@ -39,19 +34,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
-# Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
-# as it was causing spam when compiling the CUTLASS kernels
-RUN apt-get install -y gcc-10 g++-10
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10
 RUN <<EOF
 gcc --version
 EOF
-
-# Workaround for https://github.com/openai/triton/issues/2507 and
-# https://github.com/pytorch/pytorch/issues/107960 -- hopefully
-# this won't be needed for future versions of this docker image
-# or future versions of triton.
-RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 WORKDIR /workspace
 
@@ -87,6 +72,7 @@ ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 #################### WHEEL BUILD IMAGE ####################
 FROM base AS build
 ARG TARGETPLATFORM
+ARG CUDA_VERSION
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
@@ -131,7 +117,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && sccache --show-stats \
-        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
+        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp$(echo $PYTHON_VERSION | tr -d '.') \
         && sccache --show-stats; \
     fi
 
@@ -143,7 +129,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         # Clean any existing CMake artifacts
         rm -rf .deps && \
         mkdir -p .deps && \
-        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp$(echo $PYTHON_VERSION | tr -d '.'); \
     fi
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
@@ -161,6 +147,8 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
 
 #################### DEV IMAGE ####################
 FROM base as dev
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -181,10 +169,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-# TODO: Restore to base image after FlashInfer AOT wheel fixed
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS vllm-base
-ARG CUDA_VERSION=12.8.1
-ARG PYTHON_VERSION=3.12
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS vllm-base
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
@@ -198,19 +185,17 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl wget sudo vim python3-pip \
-    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
-    && for i in 1 2 3; do \
-        add-apt-repository -y ppa:deadsnakes/ppa && break || \
-        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
-    done \
-    && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
+    && apt-get install -y --no-install-recommends ccache software-properties-common git curl wget sudo vim python3-pip \
+       ffmpeg libsm6 libxext6 libgl1 libibverbs-dev \
+       python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
-    && python3 --version && python3 -m pip --version
+    && python3 --version && python3 -m pip --version \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -m pip install uv
@@ -219,12 +204,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
-
-# Workaround for https://github.com/openai/triton/issues/2507 and
-# https://github.com/pytorch/pytorch/issues/107960 -- hopefully
-# this won't be needed for future versions of this docker image
-# or future versions of triton.
-RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 # arm64 (GH200) build follows the practice of "use existing pytorch" build,
 # we need to install torch and torchvision from the nightly builds first,
@@ -242,32 +221,17 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     uv pip install --system dist/*.whl --verbose \
     --extra-index-url https://download.pytorch.org/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# If we need to build FlashInfer wheel before its release:
-# $ export FLASHINFER_ENABLE_AOT=1
-# $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
-# $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.6 8.9 9.0+PTX'
-# $ git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-# $ cd flashinfer
-# $ git checkout 524304395bd1d8cd7d07db083859523fcaa246a4
-# $ rm -rf build
-# $ python3 setup.py bdist_wheel --dist-dir=dist --verbose
-# $ ls dist
-# $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/524304395bd1d8cd7d07db083859523fcaa246a4/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl
 
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    # FlashInfer alreary has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
-    if [[ "$CUDA_VERSION" == 12.8* ]]; then \
-        uv pip install --system https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.5%2Bcu128torch2.7-cp38-abi3-linux_x86_64.whl; \
-    else \
-        export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0+PTX'; \
-        CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
-        if [ "$CUDA_MAJOR" -lt 12 ]; then \
-            export FLASHINFER_ENABLE_SM90=0; \
-        fi; \
-        uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc" ; \
-    fi \
+    # Build FlashInfer from source for Python 3.12
+    export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0+PTX'; \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    if [ "$CUDA_MAJOR" -lt 12 ]; then \
+        export FLASHINFER_ENABLE_SM90=0; \
+    fi; \
+    uv pip install --system --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@21ea1d2545f74782b91eb8c08fd503ac4c0743fc" ; \
 fi
 COPY examples examples
 COPY benchmarks benchmarks
@@ -292,6 +256,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
 FROM vllm-base AS test
+ARG CUDA_VERSION
+ARG PYTHON_VERSION
 
 ADD . /vllm-workspace/
 
@@ -321,7 +287,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
 # Copy in the v1 package for testing (it isn't distributed yet)
-COPY vllm/v1 /usr/local/lib/python3.12/dist-packages/vllm/v1
+COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
@@ -337,6 +303,7 @@ RUN mv mkdocs.yaml test_docs/
 # base openai image with additional requirements, for any subsequent openai-style images
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
+ARG PYTHON_VERSION
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -347,6 +314,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.42.0' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
     else \
+        # For x86_64, bitsandbytes version can be higher
         uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.45.3' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
     fi
 
