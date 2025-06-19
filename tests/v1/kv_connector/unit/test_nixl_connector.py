@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from nixl._api import nixl_agent as NixlWrapper
 import time
 import uuid
 from collections import defaultdict
 from typing import Optional
 from unittest.mock import patch
+
+from nixl._api import nixl_agent as NixlWrapper
+
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-    NixlConnector, NixlConnectorMetadata, KVConnectorRole, NixlConnectorWorker, NixlAgentMetadata)
+    KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
+    NixlConnectorWorker)
 from vllm.forward_context import ForwardContext
 
 from .utils import create_request, create_scheduler, create_vllm_config
@@ -89,7 +92,8 @@ class FakeNixlWrapper(NixlWrapper):
 
     def __init__(self, agent_name: str, *args, **kwargs):
         self._cycles_before_xfer_done = 0
-        self._check_xfer_state_cycles: defaultdict[int, int] = defaultdict(lambda: 0)
+        self._check_xfer_state_cycles: defaultdict[int, int] = defaultdict(
+            lambda: 0)
 
     def get_reg_descs(self, caches_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in caches_data]
@@ -114,7 +118,8 @@ class FakeNixlWrapper(NixlWrapper):
         return {}
 
     def check_xfer_state(self, handle: int) -> str:
-        if self._check_xfer_state_cycles[handle] >= self._cycles_before_xfer_done:
+        if self._check_xfer_state_cycles[
+                handle] >= self._cycles_before_xfer_done:
             return "DONE"
         self._check_xfer_state_cycles[handle] += 1
         return "PROC"
@@ -164,28 +169,31 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.num_blocks = 1
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
-        self.add_remote_agent(NixlAgentMetadata(
-            engine_id=self.REMOTE_ENGINE_ID,
-            agent_metadata=FakeNixlWrapper.AGENT_METADATA,
-            kv_caches_base_addr=[0],
-            num_blocks=1,
-            tp_size=1,
-            block_len=self.block_len,
-            attn_backend_name=self.backend_name,
-        ))
+        self.add_remote_agent(
+            NixlAgentMetadata(
+                engine_id=self.REMOTE_ENGINE_ID,
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                num_blocks=1,
+                tp_size=1,
+                block_len=self.block_len,
+                attn_backend_name=self.backend_name,
+            ))
 
 
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper)
 def test_multi_xfer_one_engine(
     # dist_init is a fixture that initializes the distributed environment.
     dist_init):
     """Test case where multiple xfers are initiated to the same engine.
     
-    This test triggers the connector to load remote KV for the same `request_id`. The
-    transfer is not done immediately due to `set_cycles_before_xfer_done`, so there
-    is a state there are multiple transfer states for the same `request_id`, and
-    `get_finished` should handle it correctly (wait for all transfers to be done).
+    This test triggers the connector to load remote KV for the same
+    `request_id`. The transfer is not done immediately due to
+    `set_cycles_before_xfer_done`, so there is a state where there are multiple
+    transfer states for the same `request_id`, and `get_finished` should handle
+    it correctly (wait for all transfers to be done).
     """
     vllm_config = create_vllm_config()
 
@@ -193,19 +201,22 @@ def test_multi_xfer_one_engine(
 
     # Test worker role in decode server.
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
-    connector.connector_worker = FakeNixlConnectorWorker(vllm_config, connector.engine_id, hand_shake_latency=0)
+    connector.connector_worker = FakeNixlConnectorWorker(vllm_config,
+                                                         connector.engine_id,
+                                                         hand_shake_latency=0)
     assert isinstance(connector.connector_worker.nixl_wrapper, FakeNixlWrapper)
     connector.connector_worker.nixl_wrapper.set_cycles_before_xfer_done(3)
     for i in range(4):
         metadata = NixlConnectorMetadata()
         metadata.add_new_req(request_id=request_id,
-                            local_block_ids=[i + 1, i + 2, i + 3],
-                            kv_transfer_params={
-                                "remote_block_ids": [i + 4, i + 5, i + 6],
-                                "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
-                                "remote_host": "localhost",
-                                "remote_port": 1234,
-                            })
+                             local_block_ids=[i + 1, i + 2, i + 3],
+                             kv_transfer_params={
+                                 "remote_block_ids": [i + 4, i + 5, i + 6],
+                                 "remote_engine_id":
+                                 FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                                 "remote_host": "localhost",
+                                 "remote_port": 1234,
+                             })
         connector.bind_connector_metadata(metadata)
 
         dummy_ctx = ForwardContext(
