@@ -139,7 +139,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
     def _nixl_handshake(self, host: str, port: int):
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(1.8)
-        # These should be done in register_kv_caches(), called by gpu_model_runner.
+        # These should've been done in register_kv_caches(), called by gpu_model_runner.
         self.slot_size_bytes = 4096
         self.block_len = self.slot_size_bytes * self.block_size
         self.num_blocks = 1
@@ -156,45 +156,97 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         ))
 
 
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
-    FakeNixlWrapper)
-def test_async_load_kv(
-    # dist_init is a fixture that initializes the distributed environment.
-    dist_init):
-    """Test that NixlConnector's start_load_kv should be fast."""
+class TestNixlHandshake:
 
-    vllm_config = create_vllm_config()
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        FakeNixlWrapper)
+    def test_async_load_kv(
+        self,
+        # dist_init is a fixture that initializes the distributed environment.
+        dist_init):
+        """Test that NixlConnector's start_load_kv should be non-blocking."""
 
-    # Test worker role in decode server.
-    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
-    connector.connector_worker = FakeNixlConnectorWorker(vllm_config, connector.engine_id)
-    metadata = NixlConnectorMetadata()
-    metadata.add_new_req(request_id="id",
-                         local_block_ids=[1, 2, 3],
-                         kv_transfer_params={
-                             "remote_block_ids": [4, 5, 6],
-                             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
-                             "remote_host": "localhost",
-                             "remote_port": 1234,
-                         })
-    connector.bind_connector_metadata(metadata)
+        vllm_config = create_vllm_config()
 
-    cnt = 10
-    while cnt > 0:
-        dummy_ctx = ForwardContext(
-            no_compile_layers={},
-            attn_metadata={},
-            virtual_engine=0,
-        )
+        # Test worker role in decode server.
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        connector.connector_worker = FakeNixlConnectorWorker(vllm_config, connector.engine_id)
+        metadata = NixlConnectorMetadata()
+        metadata.add_new_req(request_id="id",
+                            local_block_ids=[1, 2, 3],
+                            kv_transfer_params={
+                                "remote_block_ids": [4, 5, 6],
+                                "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                                "remote_host": "localhost",
+                                "remote_port": 1234,
+                            })
+        connector.bind_connector_metadata(metadata)
+
+        timeout = 2.5
         start = time.perf_counter()
-        connector.start_load_kv(dummy_ctx)
-        end = time.perf_counter()
-        assert end - start < 0.1, f"start_load_kv took {end - start} seconds"
-        time.sleep(0.5)  # backoff for the async handshake to complete.
-        connector.bind_connector_metadata(NixlConnectorMetadata())
-        _, done_recving = connector.get_finished(finished_req_ids=set())
-        if len(done_recving) > 0:
-            break
-        cnt -= 1
-    assert cnt > 0, "Took too long to complete async handshake."
+        while time.perf_counter() - start < timeout:
+            dummy_ctx = ForwardContext(
+                no_compile_layers={},
+                attn_metadata={},
+                virtual_engine=0,
+            )
+            _before_load = time.perf_counter()
+            connector.start_load_kv(dummy_ctx)
+            _after_load = time.perf_counter()
+            assert _after_load - _before_load < 0.1, f"start_load_kv took {_after_load - _before_load} seconds"
+            time.sleep(0.5)  # backoff for the async handshake to complete.
+            connector.bind_connector_metadata(NixlConnectorMetadata())
+            _, done_recving = connector.get_finished(finished_req_ids=set())
+            if len(done_recving) > 0:
+                return
+        raise TimeoutError("Took too long to complete async handshake.")
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        FakeNixlWrapper)
+    def test_concurrent_load_kv(
+        self,
+        # dist_init is a fixture that initializes the distributed environment.
+        dist_init):
+        """Test that multiple start_load_kv calls should occur concurrently."""
+
+        vllm_config = create_vllm_config()
+
+        # Test worker role in decode server.
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        connector.connector_worker = FakeNixlConnectorWorker(vllm_config, connector.engine_id)
+        metadata = NixlConnectorMetadata()
+        total_reqs = 100
+        for i in range(total_reqs):
+            metadata.add_new_req(request_id=f"id_{i}",
+                                local_block_ids=[1, 2, 3],
+                                kv_transfer_params={
+                                    "remote_block_ids": [4, 5, 6],
+                                    "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                                    "remote_host": "localhost",
+                                    "remote_port": 1234,
+                                })
+        connector.bind_connector_metadata(metadata)
+
+        timeout = 2.5
+        cnt_finished_reqs = 0
+        start = time.perf_counter()
+        while time.perf_counter() - start < timeout:
+            dummy_ctx = ForwardContext(
+                no_compile_layers={},
+                attn_metadata={},
+                virtual_engine=0,
+            )
+            _before_load = time.perf_counter()
+            connector.start_load_kv(dummy_ctx)
+            _after_load = time.perf_counter()
+            assert _after_load - _before_load < 0.1, f"start_load_kv took {_after_load - _before_load} seconds"
+            time.sleep(0.5)  # backoff for the async handshake to complete.
+            connector.bind_connector_metadata(NixlConnectorMetadata())
+            _, done_recving = connector.get_finished(finished_req_ids=set())
+            if len(done_recving) > 0:
+                cnt_finished_reqs += len(done_recving)
+                if cnt_finished_reqs == total_reqs:
+                    return
+        raise TimeoutError("Took too long to complete async handshake.")
