@@ -242,6 +242,7 @@ class FlexAttentionMetadata:
             None,
             self.num_actual_tokens,
             self.total_cache_tokens,
+            device=self.block_table.device,
         )
 
     def __post_init__(self):
@@ -423,7 +424,6 @@ class FlexAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-
         if output_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
