@@ -53,6 +53,7 @@ def make_request(
         mm_hashes=None,
         mm_placeholders=None,
         sampling_params=params,
+        pooling_params=None,
         eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
         KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+    from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 
@@ -26,7 +27,8 @@ class NewRequestData:
     mm_inputs: list[MultiModalKwargs]
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
-    sampling_params: SamplingParams
+    sampling_params: Optional[SamplingParams]
+    pooling_params: Optional[PoolingParams]
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
@@ -44,6 +46,7 @@ class NewRequestData:
             mm_hashes=request.mm_hashes,
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
+            pooling_params=request.pooling_params,
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,

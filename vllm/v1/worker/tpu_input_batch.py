@@ -231,6 +231,7 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         sampling_params = request.sampling_params
+        assert sampling_params is not None, "pooling requests not supported yet"
         if sampling_params.sampling_type == SamplingType.GREEDY:
             # Avoid later division by zero.
             self.temperature_cpu[req_index] = -1.0
