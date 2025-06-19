@@ -137,15 +137,15 @@ class RequestGenerationState:
         return object.__getattribute__(self, name)
 
     def append_output_token_ids(
-            self,
-            token_ids: Union[int, list[int]],
-        ) -> None:
-            if isinstance(token_ids, int):
-                self._output_token_ids.append(token_ids)
-                self._all_token_ids.append(token_ids)
-            else:
-                self._output_token_ids.extend(token_ids)
-                self._all_token_ids.extend(token_ids)
+        self,
+        token_ids: Union[int, list[int]],
+    ) -> None:
+        if isinstance(token_ids, int):
+            self._output_token_ids.append(token_ids)
+            self._all_token_ids.append(token_ids)
+        else:
+            self._output_token_ids.extend(token_ids)
+            self._all_token_ids.extend(token_ids)
 
     @property
     def num_tokens(self) -> int:

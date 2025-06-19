@@ -818,9 +818,6 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     scheduler_stats = engine_core_outputs[0].scheduler_stats \
          if engine_core_outputs else None
 
-
-    print("engine_core_outputs", engine_core_outputs)
-
     if expected[0] == 0:
         assert scheduler_stats.spec_decoding_stats is None
     else:
