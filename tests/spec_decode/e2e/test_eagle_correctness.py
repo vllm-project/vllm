@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This docstring details important information on the testing methodology.
 
 Most of the tests rely on "greedy equality", where we expect the output of
@@ -17,7 +18,7 @@ However, we still need to verify below scenario could be passed:
     * Test greedy equality under various number of speculative tokens.
 
 With those tests, we can say at least, EAGLE would not break the
-correctess for the target model outputs.
+correctness for the target model outputs.
 """
 
 import pytest
@@ -57,8 +58,10 @@ PRECISION = "float32"
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -95,18 +98,19 @@ def test_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [
-    {
-        "speculative_model": SPEC_MODEL,
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_config": {
+        "model": SPEC_MODEL,
         "num_speculative_tokens": MAX_SPEC_TOKENS,
-        "disable_logprobs_during_spec_decoding": False,
+        "disable_logprobs": False,
     },
-    {
-        "speculative_model": SPEC_MODEL,
+}, {
+    "speculative_config": {
+        "model": SPEC_MODEL,
         "num_speculative_tokens": MAX_SPEC_TOKENS,
-        "disable_logprobs_during_spec_decoding": True,
+        "disable_logprobs": True,
     },
-])
+}])
 @pytest.mark.parametrize("output_len", [
     128,
 ])
@@ -119,18 +123,19 @@ def test_eagle_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
                                    batch_size: int, output_len: int, seed: int,
                                    logprobs: int):
 
-    run_equality_correctness_test(vllm_runner,
-                                  common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs,
-                                  test_llm_kwargs,
-                                  batch_size,
-                                  output_len,
-                                  seed,
-                                  logprobs=logprobs,
-                                  prompt_logprobs=logprobs,
-                                  disable_logprobs=test_llm_kwargs[
-                                      'disable_logprobs_during_spec_decoding'])
+    run_equality_correctness_test(
+        vllm_runner,
+        common_llm_kwargs,
+        per_test_common_llm_kwargs,
+        baseline_llm_kwargs,
+        test_llm_kwargs,
+        batch_size,
+        output_len,
+        seed,
+        logprobs=logprobs,
+        prompt_logprobs=logprobs,
+        disable_logprobs=test_llm_kwargs["speculative_config"]
+        ["disable_logprobs"])
 
 
 @pytest.mark.parametrize(
@@ -151,8 +156,10 @@ def test_eagle_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -193,8 +200,10 @@ def test_eagle_e2e_greedy_correctness_cuda_graph(
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
     },
 ])
 @pytest.mark.parametrize(
@@ -236,8 +245,10 @@ def test_eagle_e2e_greedy_correctness_with_preemption(
     "test_llm_kwargs",
     [
         {
-            "speculative_model": SPEC_MODEL,
-            "num_speculative_tokens": k,
+            "speculative_config": {
+                "model": SPEC_MODEL,
+                "num_speculative_tokens": k,
+            },
         }
         # Try a range of num. speculative tokens
         for k in range(1, 1 + MAX_SPEC_TOKENS)
@@ -277,12 +288,13 @@ def test_eagle_different_k(vllm_runner, common_llm_kwargs,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",
-                         [{
-                             "speculative_model": SPEC_MODEL,
-                             "num_speculative_tokens": MAX_SPEC_TOKENS,
-                             "speculative_disable_by_batch_size": 4
-                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_config": {
+        "model": SPEC_MODEL,
+        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "disable_by_batch_size": 4,
+    },
+}])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
     "output_len",
@@ -324,8 +336,10 @@ def test_eagle_disable_queue(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": "yuhuili/EAGLE-llama2-chat-7B",
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "speculative_config": {
+            "model": "yuhuili/EAGLE-llama2-chat-7B",
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
     },
 ])
 @pytest.mark.parametrize(
@@ -372,8 +386,10 @@ def test_llama2_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "speculative_config": {
+            "model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
     },
 ])
 @pytest.mark.parametrize(
@@ -420,8 +436,10 @@ def test_llama3_eagle_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": "yuhuili/EAGLE-Qwen2-7B-Instruct",
-        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "speculative_config": {
+            "model": "yuhuili/EAGLE-Qwen2-7B-Instruct",
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
     },
 ])
 @pytest.mark.parametrize(

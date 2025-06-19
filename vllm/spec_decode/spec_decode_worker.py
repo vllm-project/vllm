@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
 from collections import defaultdict
@@ -92,22 +93,20 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
         vllm_config=draft_worker_config,
-        ngram_prompt_lookup_max=speculative_config.ngram_prompt_lookup_max,
-        ngram_prompt_lookup_min=speculative_config.ngram_prompt_lookup_min,
+        ngram_prompt_lookup_max=speculative_config.prompt_lookup_max,
+        ngram_prompt_lookup_min=speculative_config.prompt_lookup_min,
     )
 
     spec_decode_worker = SpecDecodeWorker.create_worker(
         scorer_worker=target_worker,
         draft_worker_kwargs=draft_worker_kwargs,
-        disable_mqa_scorer=speculative_config.speculative_disable_mqa_scorer,
-        disable_by_batch_size=speculative_config.
-        speculative_disable_by_batch_size,
-        draft_token_acceptance_method=speculative_config.
-        draft_token_acceptance_method,
+        disable_mqa_scorer=speculative_config.disable_mqa_scorer,
+        disable_by_batch_size=speculative_config.disable_by_batch_size,
+        draft_token_acceptance_method=speculative_config.acceptance_method,
         typical_acceptance_sampler_posterior_threshold=speculative_config.
-        typical_acceptance_sampler_posterior_threshold,
+        posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
-        typical_acceptance_sampler_posterior_alpha,
+        posterior_alpha,
         disable_logprobs=speculative_config.disable_logprobs,
         disable_log_stats=speculative_config.disable_log_stats,
         num_speculative_tokens=speculative_config.num_speculative_tokens,
@@ -116,7 +115,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     return spec_decode_worker
 
 
-# Reminder: Please update docs/source/features/compatibility_matrix.md
+# Reminder: Please update docs/features/compatibility_matrix.md
 # If the feature combo become valid
 class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     """Worker which implements speculative decoding.
@@ -412,9 +411,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         NOTE(cade): This will require a special check if the proposer worker
         does not have a sampler (e.g. ngram speculation).
         """
-        (self.scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor
+        (self.scorer_worker.model_runner.sampler.include_gpu_probs_tensor
          ) = True
-        (self.scorer_worker.model_runner.model.sampler.
+        (self.scorer_worker.model_runner.sampler.
          should_modify_greedy_probs_inplace) = True
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
@@ -697,6 +696,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     seq_group_meta_with_hidden):
                 self.previous_hidden_states.update(hidden_states,
                                                    seq_group_meta_with_hidden)
+                self.previous_hidden_states.prune(seq_group_meta_with_hidden)
 
         if not skip_proposer:
             # We prepare the prefill hidden states here so that there no

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024- the Outlines developers
 # This file is adapted from
@@ -19,7 +20,7 @@ import copy
 import json
 from collections import defaultdict
 from functools import lru_cache
-from typing import Callable, DefaultDict, Dict, List, Optional, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
@@ -34,8 +35,8 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.guided_decoding.reasoner import Reasoner
 from vllm.platforms import current_platform
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
@@ -49,19 +50,25 @@ else:
 
 class BaseLogitsProcessor:
 
-    def __init__(self, guide: Guide, reasoner: Optional[Reasoner]):
+    def __init__(self, guide: Guide, reasoner: Optional[ReasoningParser]):
         self._guide: Guide = guide
-        self._reasoner: Optional[Reasoner] = reasoner
+        self._reasoner: Optional[ReasoningParser] = reasoner
         # CFGState is used for the FSM state for CFGGuide
-        self._fsm_state: DefaultDict[int, Union[int,
+        self._fsm_state: defaultdict[int, Union[int,
                                                 CFGState]] = defaultdict(int)
 
-    def __call__(self, input_ids: List[int],
+    def clone(self) -> "BaseLogitsProcessor":
+        cloned = copy.copy(self)
+        cloned._guide = self._guide.copy()
+        cloned._fsm_state = copy.deepcopy(self._fsm_state)
+        return cloned
+
+    def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
 
         # Skip the structured logits processing if reasoning is not finished.
-        # reasoner is not None only when `--enable-reasoning` is set.
+        # reasoner is not None only when `--reasoning-parser` is set.
         if self._reasoner is not None:
             if not self._reasoner.is_reasoning_end(input_ids):
                 return scores
@@ -69,7 +76,7 @@ class BaseLogitsProcessor:
                 # Remove the reasoning tokens from the input_ids
                 # We need this because our implementation relies on the
                 # hash of the input_ids to store the FSM state.
-                input_ids = self._reasoner.extract_content(input_ids)
+                input_ids = self._reasoner.extract_content_ids(input_ids)
 
         seq_id = hash(tuple(input_ids))
 
@@ -142,7 +149,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
         self,
         regex_string: str,
         tokenizer: PreTrainedTokenizerBase,
-        reasoner: Optional[Reasoner],
+        reasoner: Optional[ReasoningParser],
     ):
         """Compile the FSM that drives the regex-structured generation.
 
@@ -160,10 +167,10 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
 
-    def __init__(self, schema: Union[str, Dict, BaseModel],
+    def __init__(self, schema: Union[str, dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
                  whitespace_pattern: Union[str, None],
-                 reasoner: Optional[Reasoner]):
+                 reasoner: Optional[ReasoningParser]):
         """Compile the FSM that drives the JSON-guided generation.
 
         Parameters
@@ -181,7 +188,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
         """
         if isinstance(schema, type(BaseModel)):
             schema_str = json.dumps(schema.model_json_schema())
-        elif isinstance(schema, Dict):
+        elif isinstance(schema, dict):
             schema_str = json.dumps(schema)
         elif isinstance(schema, str):
             schema_str = schema
@@ -203,7 +210,7 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         return CFGGuide(cfg, tokenizer)
 
     def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase,
-                 reasoner: Optional[Reasoner]):
+                 reasoner: Optional[ReasoningParser]):
         """Compile the FSM that drives the context free grammar generation.
 
         Parameters
@@ -217,6 +224,12 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         super().__init__(CFGLogitsProcessor._get_guide(cfg, tokenizer),
                          reasoner)
         self._guide = self._guide.copy()
+
+    def clone(self) -> "CFGLogitsProcessor":
+        cloned = copy.copy(self)
+        cloned._fsm_state = copy.deepcopy(self._fsm_state)
+        cloned._guide = self._guide.copy()
+        return cloned
 
 
 @lru_cache(maxsize=32)
@@ -252,11 +265,11 @@ def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
         return string
 
     def change_decoder(
-        decoder: Callable[[List[int]],
-                          str]) -> Callable[[List[int]], List[str]]:
+        decoder: Callable[[list[int]],
+                          str]) -> Callable[[list[int]], list[str]]:
         """Sync vLLM's decoder with the outlines by returning list."""
 
-        def new_decoder(inp_tokens: List[int]) -> List[str]:
+        def new_decoder(inp_tokens: list[int]) -> list[str]:
             if (isinstance(inp_tokens, list) and len(inp_tokens) == 1
                     and isinstance(inp_tokens[0], list)):
                 inp_tokens = inp_tokens[0]

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 
 from vllm.entrypoints.cli.types import CLISubcommand
@@ -32,6 +33,7 @@ class BenchmarkSubcommandBase(CLISubcommand):
         parser = subparsers.add_parser(
             self.name,
             help=self.help,
+            description=self.help,
             usage=f"vllm bench {self.name} [options]")
         self.add_cli_args(parser)
         return parser

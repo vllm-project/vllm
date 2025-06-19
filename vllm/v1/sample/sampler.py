@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that samples the next tokens from the model's outputs."""
 
 import torch
 import torch.nn as nn
 
+from vllm.utils import async_tensor_h2d, is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
@@ -19,6 +21,7 @@ class Sampler(nn.Module):
     def __init__(self):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
+        self.pin_memory = is_pin_memory_available()
 
     def forward(
         self,
@@ -87,6 +90,12 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
+        """Sample logits based on sampling metadata.
+
+        The various logits processing functions called in this method
+        may update the logits tensor in-place.
+        """
+
         assert not (sampling_metadata.all_greedy
                     and sampling_metadata.all_random)
         if sampling_metadata.all_random:
@@ -137,7 +146,7 @@ class Sampler(nn.Module):
         Gather logprobs for topk and sampled/prompt token.
 
         Args:
-          logits: (num tokens) x (vocab) tensor
+          logprobs: (num tokens) x (vocab) tensor
           num_logprobs: minimum number of logprobs to
                         retain per token
           token_ids: prompt tokens (if prompt logprobs)
@@ -224,10 +233,33 @@ class Sampler(nn.Module):
         # TODO(houseroad): this implementation is extremely inefficient.
         # One idea is implement this as a PyTorch C++ op, and we may
         # even optimize the logit_bias layout.
+
+        rows: list[int] = []
+        cols: list[int] = []
+        vals: list[float] = []
+
+        # Get vocabulary size from logits
+        vocab_size = logits.shape[-1]
+
         for i, logit_bias in enumerate(sampling_metadata.logit_bias):
             if logit_bias:
                 for token_id, bias in logit_bias.items():
-                    logits[i, token_id] += bias
+                    # Check token_id bounds to ensure within vocabulary
+                    if token_id < 0 or token_id >= vocab_size:
+                        raise ValueError(
+                            f"token_id {token_id} in logit_bias contains "
+                            f"out-of-vocab token id. Vocabulary size: "
+                            f"{vocab_size}")
+                    rows.append(i)
+                    cols.append(token_id)
+                    vals.append(bias)
+
+        if rows:
+            indices = async_tensor_h2d([rows, cols], torch.int64,
+                                       logits.device, self.pin_memory)
+            values = async_tensor_h2d(vals, torch.float, logits.device,
+                                      self.pin_memory)
+            logits.index_put_(tuple(indices), values=values, accumulate=True)
         return logits
 
     def apply_allowed_token_ids(

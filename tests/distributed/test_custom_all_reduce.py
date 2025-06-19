@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
 
@@ -106,7 +107,7 @@ def eager_allreduce(
         # communicate independently
         num_communication = rank // tp_size + 1
         sz = 1024
-        fa = get_tp_group().ca_comm
+        fa = get_tp_group().device_communicator.ca_comm
         inp = torch.ones(sz, dtype=torch.float32, device=device)
         out = inp
         for _ in range(num_communication):

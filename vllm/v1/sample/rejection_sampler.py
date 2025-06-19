@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import torch
 import torch.nn as nn
-import triton
-import triton.language as tl
 
 from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.utils import compiled_softmax
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 logger = init_logger(__name__)
@@ -67,6 +67,7 @@ class RejectionSampler(nn.Module):
                 Shape is [num_tokens, vocab_size]. Here, probabilities from
                 different requests are flattened into a single tensor because
                 this is the shape of the output logits.
+                NOTE: `target_logits` can be updated in place to save memory.
             bonus_token_ids_tensor (torch.Tensor):
                 A tensor containing bonus tokens. Shape is [batch_size, 1].
                 Bonus tokens are added to the end of the sequence if all
@@ -74,7 +75,7 @@ class RejectionSampler(nn.Module):
                 outside of the rejection sampler with the default sampling
                 strategy. It allows for more flexibility in the sampling
                 process such as top_p, top_k sampling.
-            sampling_metadata (SamplingMetadata):
+            sampling_metadata (vllm.v1.sample.metadata.SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
         Returns:
@@ -83,6 +84,8 @@ class RejectionSampler(nn.Module):
         '''
         assert metadata.max_spec_len <= MAX_SPEC_LEN
         # [num_tokens, vocab_size]
+        # NOTE(woosuk): `target_logits` can be updated in place inside the
+        # `compute_probs` function.
         target_probs = compute_probs(
             target_logits,
             metadata.cu_num_draft_tokens,
@@ -106,6 +109,18 @@ class RejectionSampler(nn.Module):
         output_token_ids: torch.Tensor,
         vocab_size: int,
     ) -> list[list[int]]:
+        """Parse the output of the rejection sampler.
+
+        Args:
+            output_token_ids: The sampled token IDs in shape
+                [batch_size, max_spec_len + 1]. The rejected tokens are
+                replaced with `PLACEHOLDER_TOKEN_ID` by the rejection sampler
+                and will be filtered out in this function.
+            vocab_size: The size of the vocabulary.
+
+        Returns:
+            A list of lists of token IDs.
+        """
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
         valid_mask = ((output_token_ids_np != PLACEHOLDER_TOKEN_ID) &
@@ -211,7 +226,7 @@ def rejection_sample(
         is_greedy,
         max_spec_len,
         vocab_size,
-        IS_NGRAM=draft_probs is None,
+        NO_DRAFT_PROBS=draft_probs is None,
         num_warps=1,
     )
     return output_token_ids
@@ -245,23 +260,78 @@ def compute_probs(
         return logits
 
     num_tokens = logits.shape[0]
-    batch_size = cu_num_draft_tokens.shape[0]
-    expanded_temperature = torch.empty(
-        (num_tokens, 1),
-        dtype=torch.float32,
-        device=logits.device,
-    )
-    expand_kernel[(batch_size, )](
-        expanded_temperature,
+    temperature = expand_batch_to_tokens(
         sampling_metadata.temperature,
         cu_num_draft_tokens,
-        GREEDY_TEMPERATURE,  # replace_from
-        1,  # replace_to
-        MAX_NUM_TOKENS=MAX_SPEC_LEN,
+        num_tokens,
+        replace_from=GREEDY_TEMPERATURE,
+        replace_to=1,
+    )
+    # NOTE(woosuk): Update `logits` in place to avoid allocating a new tensor.
+    logits.div_(temperature.unsqueeze(-1))
+
+    # Get expanded top_k and top_p tensors.
+    top_k = None
+    if sampling_metadata.top_k is not None:
+        top_k = expand_batch_to_tokens(
+            sampling_metadata.top_k,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
+    top_p = None
+    if sampling_metadata.top_p is not None:
+        top_p = expand_batch_to_tokens(
+            sampling_metadata.top_p,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
+
+    # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
+    # which is slow for large vocab sizes. This may cause performance issues.
+    logits = apply_top_k_top_p(logits, top_k, top_p)
+    output_prob = logits.softmax(dim=-1, dtype=torch.float32)
+    return output_prob
+
+
+def expand_batch_to_tokens(
+    x: torch.Tensor,  # [batch_size]
+    cu_num_tokens: torch.Tensor,  # [batch_size]
+    num_tokens: int,
+    replace_from: int = 0,
+    replace_to: int = 0,
+) -> torch.Tensor:
+    """Expand [batch_size] tensor to [num_tokens] tensor based on the number of
+    tokens per batch in cu_num_tokens.
+
+    For example, if x = [a, b, c] and cu_num_tokens = [2, 5, 6], then
+    num_tokens = 6, and expanded_x = [a, a, b, b, b, c].
+
+    Args:
+        x: [batch_size] tensor to expand.
+        cu_num_tokens: [batch_size] tensor containing the cumulative number of
+            tokens per batch. Each element represents the total number of
+            tokens up to and including that batch.
+        num_tokens: Total number of tokens.
+        replace_from: int = 0
+            Value to be replaced if it is found in x.
+        replace_to: int = 0
+            Value to replace with when replace_from is found.
+    Returns:
+        expanded_x: [num_tokens] tensor.
+    """
+    batch_size = x.shape[0]
+    assert cu_num_tokens.shape[0] == batch_size
+    expanded_x = x.new_empty(num_tokens)
+    expand_kernel[(batch_size, )](
+        expanded_x,
+        x,
+        cu_num_tokens,
+        replace_from,
+        replace_to,
+        MAX_NUM_TOKENS=MAX_SPEC_LEN,  # To avoid recompilation.
         num_warps=1,
     )
-    output_prob = compiled_softmax(logits, expanded_temperature)
-    return output_prob
+    return expanded_x
 
 
 def generate_uniform_probs(
@@ -353,7 +423,7 @@ def sample_recovered_tokens(
         q,
         vocab_size,
         triton.next_power_of_2(vocab_size),
-        IS_NGRAM=draft_probs is None,
+        NO_DRAFT_PROBS=draft_probs is None,
     )
     return recovered_token_ids
 
@@ -420,7 +490,7 @@ def rejection_random_sample_kernel(
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
     vocab_size,
-    IS_NGRAM: tl.constexpr,
+    NO_DRAFT_PROBS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     is_greedy = tl.load(is_greedy_ptr + req_idx)
@@ -439,7 +509,7 @@ def rejection_random_sample_kernel(
     for pos in range(num_draft_tokens):
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-            if IS_NGRAM:
+            if NO_DRAFT_PROBS:
                 draft_prob = 1
             else:
                 draft_prob = tl.load(draft_probs_ptr +
@@ -505,7 +575,7 @@ def sample_recovered_tokens_kernel(
     q_ptr,  # [batch_size, vocab_size]
     vocab_size,
     PADDED_VOCAB_SIZE: tl.constexpr,
-    IS_NGRAM: tl.constexpr,
+    NO_DRAFT_PROBS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     if req_idx == 0:
@@ -521,7 +591,7 @@ def sample_recovered_tokens_kernel(
         return
 
     vocab_offset = tl.arange(0, PADDED_VOCAB_SIZE)
-    if IS_NGRAM:
+    if NO_DRAFT_PROBS:
         draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
         orig_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
                             draft_token_id)
@@ -554,7 +624,7 @@ def sample_recovered_tokens_kernel(
     recovered_id = tl.argmax(prob / q, axis=-1)
     tl.store(output_token_ids_ptr + start_idx + pos, recovered_id)
 
-    if IS_NGRAM:
+    if NO_DRAFT_PROBS:
         # Restore the original probability.
         tl.store(
             target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,

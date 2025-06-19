@@ -2,7 +2,7 @@
 /vllm/_version.py
 
 # vllm-flash-attn built from source
-vllm/vllm_flash_attn/
+vllm/vllm_flash_attn/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -77,10 +77,6 @@ instance/
 # Scrapy stuff:
 .scrapy
 
-# Sphinx documentation
-docs/_build/
-docs/source/getting_started/examples/
-
 # PyBuilder
 .pybuilder/
 target/
@@ -150,6 +146,7 @@ venv.bak/
 
 # mkdocs documentation
 /site
+docs/examples
 
 # mypy
 .mypy_cache/
@@ -202,3 +199,6 @@ benchmarks/**/*.json
 # Linting
 actionlint
 shellcheck*/
+
+# Ignore moe/marlin_moe gen code
+csrc/moe/marlin_moe_wna16/kernel_*

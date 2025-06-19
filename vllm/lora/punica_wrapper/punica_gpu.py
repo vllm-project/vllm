@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
@@ -6,10 +7,11 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union, final
+from typing import TYPE_CHECKING, Optional, Union, final
 
 import torch
 
+import vllm.envs as envs
 from vllm.lora.layers import LoRAMapping
 from vllm.triton_utils import HAS_TRITON
 
@@ -42,14 +44,21 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.token_mapping_meta = LoRAKernelMeta.make(self.max_loras,
                                                       max_num_batched_tokens,
                                                       device=device)
+
+        # When cudagraph capture size is greater than max_num_seqs (max_batches,
+        # here), V0 captures the graph as if max_num_seqs is set to
+        # the capture size.
+        # V1 doesn't have this problem and always respects max_num_seqs.
+        max_num_prompts = (max_batches
+                           if envs.VLLM_USE_V1 else max_num_batched_tokens)
         self.prompt_mapping_meta = LoRAKernelMeta.make(self.max_loras,
-                                                       max_batches,
+                                                       max_num_prompts,
                                                        device=device)
 
     def update_metadata(
             self,
             mapping: LoRAMapping,
-            lora_index_to_id: List[Optional[int]],
+            lora_index_to_id: list[Optional[int]],
             max_loras: int,
             vocab_size: int,
             extra_vocab_size: int,
@@ -66,14 +75,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
     def add_shrink(self, y: torch.Tensor, x: torch.Tensor,
-                   lora_a_stacked: Tuple[torch.Tensor,
+                   lora_a_stacked: tuple[torch.Tensor,
                                          ...], scale: float, **kwargs):
         """
         Performs GEMM  for multiple slices of lora_a.
-        When `is_prefill is` true, it indicates that it is currently the
-        prefill stage, and the `_shrink_prefill` function should be called.
-        Otherwise, it is the decode stage, and the _shrink_decode function
-        should be called.
             
         Semantics:
         for i in range(len(lora_a_stacked)):
@@ -82,7 +87,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Args:
             y (torch.Tensor): Output tensors
             x (torch.Tensor): Input tensor
-            lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weights
+            lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
         """
 
@@ -98,9 +103,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     def add_expand(self,
                    y: torch.Tensor,
                    x: torch.Tensor,
-                   lora_b_stacked: Tuple[torch.Tensor, ...],
-                   lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
-                   output_slices: Tuple[int, ...],
+                   lora_b_stacked: tuple[torch.Tensor, ...],
+                   lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
+                   output_slices: tuple[int, ...],
                    offset_start: int = 0,
                    add_inputs=True,
                    **kwargs) -> None:
@@ -117,11 +122,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Args:
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensors
-            lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight
-            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): 
+            lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
+            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]): 
                 bias's weight
-            output_slices (Tuple[int, ...]): Every slice's size
-            add_inputs (bool):  Defaults to True.
+            output_slices (tuple[int, ...]): Every slice's size
+            add_inputs (bool): Defaults to True.
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
@@ -177,11 +182,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     def add_lora_linear(self,
                         y: torch.Tensor,
                         x: torch.Tensor,
-                        lora_a_stacked: Tuple[torch.Tensor, ...],
-                        lora_b_stacked: Tuple[torch.Tensor, ...],
-                        lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
+                        lora_a_stacked: tuple[torch.Tensor, ...],
+                        lora_b_stacked: tuple[torch.Tensor, ...],
+                        lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
                         scale: float,
-                        output_slices: Tuple[int, ...],
+                        output_slices: tuple[int, ...],
                         *,
                         buffer: Optional[torch.Tensor] = None,
                         **kwargs) -> None:
@@ -200,11 +205,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Args:
             y (torch.Tensor): Output tensor. Will be changed in-place.
             x (torch.Tensor): Input tensor
-            lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weight.
-            lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight.
-            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): lora's bias.
+            lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weight.
+            lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight.
+            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]): lora's bias.
             scale (float): Scaling factor.
-            output_slices (Tuple[int, ...]): Every slice's size.
+            output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[torch.Tensor]): Defaults to None.
         """
 
@@ -218,7 +223,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default ,refer to:
+            # We set the buffer to be float32 by default, refer to:
             # https://github.com/triton-lang/triton/issues/1387
             buffer = torch.zeros(  # type: ignore
                 (len(output_slices), x.size(0), r),
@@ -260,16 +265,16 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensor.
             lora_a_stacked (torch.Tensor): lora_a's weights.
-            lora_b_stacked (torch.Tensor):lora_b's weights.
+            lora_b_stacked (torch.Tensor): lora_b's weights.
             scale (float): Scaling factor.
-            buffer (Optional[torch.Tensor]):Default to None.
+            buffer (Optional[torch.Tensor]): Default to None.
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
         if buffer is None:
-            # We set the buffer to be float32 by default ,refer to:
+            # We set the buffer to be float32 by default, refer to:
             # https://github.com/triton-lang/triton/issues/1387
             buffer = torch.zeros((x.size(0), r),
                                  dtype=torch.float32,

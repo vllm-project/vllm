@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.utils import direct_register_custom_op
 
 
 class BitsAndBytesConfig(QuantizationConfig):
@@ -27,7 +30,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         bnb_4bit_use_double_quant: bool = False,
         llm_int8_enable_fp32_cpu_offload: bool = False,
         llm_int8_has_fp16_weight: bool = False,
-        llm_int8_skip_modules: Optional[List[str]] = None,
+        llm_int8_skip_modules: Optional[list[str]] = None,
         llm_int8_threshold: float = 6.0,
     ) -> None:
         super().__init__()
@@ -55,11 +58,11 @@ class BitsAndBytesConfig(QuantizationConfig):
                 f"llm_int8_skip_modules={self.llm_int8_skip_modules})")
 
     @classmethod
-    def get_name(self) -> str:
+    def get_name(self) -> QuantizationMethods:
         return "bitsandbytes"
 
     @classmethod
-    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.float32, torch.float16, torch.bfloat16]
 
     @classmethod
@@ -67,13 +70,11 @@ class BitsAndBytesConfig(QuantizationConfig):
         return 70
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
-        return [
-            "adapter_config.json",
-        ]
+    def get_config_filenames() -> list[str]:
+        return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "BitsAndBytesConfig":
+    def from_config(cls, config: dict[str, Any]) -> "BitsAndBytesConfig":
 
         def get_safe_value(config, keys, default_value=None):
             try:
@@ -128,7 +129,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         return None
 
 
-def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
+def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: list[str]):
     # Split the prefix into its dot-separated components
     components = prefix.split('.')
 
@@ -155,19 +156,19 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: BitsAndBytesConfig):
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.45.0":
+            if bitsandbytes.__version__ < "0.45.3":
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.45.0.")
+                                  "install bitsandbytes>=0.45.3.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.45.0 via "
-                              "`pip install bitsandbytes>=0.45.0` to use "
+            raise ImportError("Please install bitsandbytes>=0.45.3 via "
+                              "`pip install bitsandbytes>=0.45.3` to use "
                               "bitsandbytes quantizer.") from err
 
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         from bitsandbytes.nn import Int8Params
@@ -321,9 +322,6 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
             x: torch.Tensor,
             bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        # only load the bitsandbytes module when needed
-        from bitsandbytes import matmul_4bit
-
         original_type = x.dtype
         original_shape = x.shape
         reshape_after_matmul = False
@@ -343,19 +341,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
                           out_dim_1,
                           dtype=torch.bfloat16,
                           device=x.device)
-
-        current_index = 0
-        for i in range(len(quant_states)):
-            output_size = quant_states[i].shape[0]
-            # It is more efficient to use out kwarg like
-            # matmul_4bit(..., out = ...).  Infeasible now due to the bug
-            # https://github.com/TimDettmers/bitsandbytes/issues/1235.
-            # Need to change  after the bug is fixed.
-            out[:, current_index:current_index + output_size] = matmul_4bit(
-                bf_x, qweight[offsets[i]:offsets[i + 1]].t(), quant_states[i])
-
-            current_index += output_size
-
+        apply_bnb_4bit(bf_x, qweight, offsets, out)
         out = out.to(original_type)
 
         if reshape_after_matmul:
@@ -365,3 +351,46 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
             out += bias
 
         return out
+
+
+def _apply_bnb_4bit(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    offsets: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    # only load the bitsandbytes module when needed
+    from bitsandbytes import matmul_4bit
+    quant_states = weight.bnb_quant_state
+    current_index = 0
+    for i in range(len(quant_states)):
+        output_size = quant_states[i].shape[0]
+        # It is more efficient to use out kwarg like
+        # matmul_4bit(..., out = ...).  Infeasible now due to the bug
+        # https://github.com/TimDettmers/bitsandbytes/issues/1235.
+        # Need to change  after the bug is fixed.
+        out[:, current_index:current_index + output_size] = matmul_4bit(
+            x, weight[offsets[i]:offsets[i + 1]].t(), quant_states[i])
+        current_index += output_size
+
+
+def _apply_bnb_4bit_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    offsets: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    return
+
+
+try:
+    direct_register_custom_op(
+        op_name="apply_bnb_4bit",
+        op_func=_apply_bnb_4bit,
+        mutates_args=["out"],
+        fake_impl=_apply_bnb_4bit_fake,
+    )
+    apply_bnb_4bit = torch.ops.vllm.apply_bnb_4bit
+
+except AttributeError as error:
+    raise error

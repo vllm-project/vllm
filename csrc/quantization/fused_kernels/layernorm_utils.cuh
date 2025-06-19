@@ -5,6 +5,7 @@
  */
 
 #include "quantization/vectorization.cuh"
+#include "quantization/utils.cuh"
 #include "quant_conversions.cuh"
 
 #ifndef USE_ROCM
@@ -24,7 +25,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   // sum of squares
   float ss = 0.0f;
 
-  for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
@@ -51,14 +52,14 @@ __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
-    float const min_scaling_factor, int32_t const hidden_size,
+    int32_t const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
   ;
-  constexpr scalar_out_t qmax{std::numeric_limits<scalar_out_t>::max()};
+  constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
 
   float block_absmax_val_maybe = 0.0f;
-  for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
@@ -83,7 +84,7 @@ __device__ void compute_dynamic_per_token_scales(
       scale = block_absmax_val_maybe;
     }
     // token scale computation
-    scale = max(scale / qmax, min_scaling_factor);
+    scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
     s_token_scale = scale;                 // Shared memory store
     all_token_scales[blockIdx.x] = scale;  // Global output store
   }
@@ -103,7 +104,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
   ;
 
-  for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
@@ -139,29 +140,31 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   // sum of squares
   float ss = 0.0f;
 
+  const int VEC_SIZE = 4;
   int32_t const num_vec_elems = hidden_size >> 2;
 
 #pragma unroll 4
-  for (int32_t i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> in = vec_input[i];
 
     vec4_t<float> x;
-    x.x = static_cast<float>(in.x);
-    x.y = static_cast<float>(in.y);
-    x.z = static_cast<float>(in.z);
-    x.w = static_cast<float>(in.w);
-    if constexpr (has_residual) {
-      vec4_t<scalar_t> r = vec_residual[i];
-      x.x += static_cast<float>(r.x);
-      x.y += static_cast<float>(r.y);
-      x.z += static_cast<float>(r.z);
-      x.w += static_cast<float>(r.w);
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      x.val[j] = static_cast<float>(in.val[j]);
     }
 
-    ss += x.x * x.x;
-    ss += x.y * x.y;
-    ss += x.z * x.z;
-    ss += x.w * x.w;
+    if constexpr (has_residual) {
+      vec4_t<scalar_t> r = vec_residual[i];
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        x.val[j] += static_cast<float>(r.val[j]);
+      }
+    }
+
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      ss += x.val[j] * x.val[j];
+    }
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -184,7 +187,7 @@ __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
     float const rms, float const* __restrict__ scale_ub,
-    float const min_scaling_factor, int32_t const hidden_size,
+    int32_t const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
   ;
@@ -200,37 +203,37 @@ __device__ void compute_dynamic_per_token_scales(
         reinterpret_cast<vec4_t<scalar_t> const*>(&residual[token_offset]);
   }
 
-  constexpr scalar_out_t qmax{std::numeric_limits<scalar_out_t>::max()};
+  constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
 
+  const int VEC_SIZE = 4;
   int32_t const num_vec_elems = hidden_size >> 2;
   float block_absmax_val_maybe = 0.0f;
 
 #pragma unroll 4
-  for (int32_t i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> in = vec_input[i];
     vec4_t<scalar_t> const w = vec_weight[i];
 
     vec4_t<float> x;
-    x.x = static_cast<float>(in.x);
-    x.y = static_cast<float>(in.y);
-    x.z = static_cast<float>(in.z);
-    x.w = static_cast<float>(in.w);
-    if constexpr (has_residual) {
-      vec4_t<scalar_t> r = vec_residual[i];
-      x.x += static_cast<float>(r.x);
-      x.y += static_cast<float>(r.y);
-      x.z += static_cast<float>(r.z);
-      x.w += static_cast<float>(r.w);
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      x.val[j] = static_cast<float>(in.val[j]);
     }
 
-    block_absmax_val_maybe = fmaxf(
-        block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.x * rms) * w.x));
-    block_absmax_val_maybe = fmaxf(
-        block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.y * rms) * w.y));
-    block_absmax_val_maybe = fmaxf(
-        block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.z * rms) * w.z));
-    block_absmax_val_maybe = fmaxf(
-        block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.w * rms) * w.w));
+    if constexpr (has_residual) {
+      vec4_t<scalar_t> r = vec_residual[i];
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        x.val[j] += static_cast<float>(r.val[j]);
+      }
+    }
+
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      block_absmax_val_maybe =
+          fmaxf(block_absmax_val_maybe,
+                fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+    }
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -248,7 +251,7 @@ __device__ void compute_dynamic_per_token_scales(
       scale = block_absmax_val_maybe;
     }
     // token scale computation
-    scale = max(scale / qmax, min_scaling_factor);
+    scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
     s_token_scale = scale;                 // shared memory store
     all_token_scales[blockIdx.x] = scale;  // global output store
   }
@@ -281,43 +284,42 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     vec_residual = reinterpret_cast<vec4_t<scalar_t>*>(&residual[token_offset]);
   }
 
+  const int VEC_SIZE = 4;
   int32_t const num_vec_elems = hidden_size >> 2;
 
 // TODO(luka/varun) extract into type-agnostic vectorized quant function to
 //  replace scaled_fp8_conversion_vec
 #pragma unroll 4
-  for (int32_t i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> const in = vec_input[i];
     vec4_t<scalar_t> const w = vec_weight[i];
 
     vec4_t<float> x;
-    x.x = static_cast<float>(in.x);
-    x.y = static_cast<float>(in.y);
-    x.z = static_cast<float>(in.z);
-    x.w = static_cast<float>(in.w);
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      x.val[j] = static_cast<float>(in.val[j]);
+    }
+
     if constexpr (has_residual) {
       vec4_t<scalar_t> r = vec_residual[i];
-      x.x += static_cast<float>(r.x);
-      x.y += static_cast<float>(r.y);
-      x.z += static_cast<float>(r.z);
-      x.w += static_cast<float>(r.w);
-      // Update residual
-      r.x = static_cast<scalar_t>(x.x);
-      r.y = static_cast<scalar_t>(x.y);
-      r.z = static_cast<scalar_t>(x.z);
-      r.w = static_cast<scalar_t>(x.w);
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        x.val[j] += static_cast<float>(r.val[j]);
+      }
+// Update residual
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        r.val[j] = static_cast<scalar_t>(x.val[j]);
+      }
       vec_residual[i] = r;
     }
 
     q8x4_t<scalar_out_t> out;
-    out.x = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-        static_cast<scalar_t>(x.x * rms) * w.x, scale);
-    out.y = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-        static_cast<scalar_t>(x.y * rms) * w.y, scale);
-    out.z = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-        static_cast<scalar_t>(x.z * rms) * w.z, scale);
-    out.w = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-        static_cast<scalar_t>(x.w * rms) * w.w, scale);
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      out.val[j] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
+          static_cast<scalar_t>(x.val[j] * rms) * w.val[j], scale);
+    }
     vec_output[i] = out;
   }
 }

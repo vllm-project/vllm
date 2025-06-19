@@ -21,7 +21,13 @@ static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
   // round
   float dst = std::nearbyint(x);
   // saturate
-  dst = std::clamp(dst, i8_min, i8_max);
+
+  // See https://github.com/pytorch/pytorch/issues/127666
+  // See https://github.com/llvm/llvm-project/issues/95183
+  // hip-clang std::clamp __glibcxx_assert_fail host function when building on
+  // Arch/gcc14. The following replaces std::clamp usage with similar logic
+  // dst = std::clamp(dst, i8_min, i8_max);
+  dst = (dst < i8_min) ? i8_min : (dst > i8_max) ? i8_max : dst;
   return static_cast<int8_t>(dst);
 #else
   // CUDA path
@@ -33,8 +39,8 @@ static __device__ __forceinline__ int8_t float_to_int8_rn(float const x) {
 
 template <typename fp8_type>
 static __device__ __forceinline__ fp8_type float_to_fp8(float const x) {
-  float const r = fmax(-fp8_e4m3_adjusted_max_v<fp8_type>,
-                       fmin(x, fp8_e4m3_adjusted_max_v<fp8_type>));
+  float const r =
+      fmax(-quant_type_max_v<fp8_type>, fmin(x, quant_type_max_v<fp8_type>));
   return static_cast<fp8_type>(r);
 }
 

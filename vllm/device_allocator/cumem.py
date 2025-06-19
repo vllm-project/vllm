@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # cumem-based pytorch pluggable allocator to implement sleep mode.
 # other approaches tried but failed:
@@ -8,9 +9,10 @@
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
 import dataclasses
+import gc
 import os
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 
@@ -62,7 +64,7 @@ except ModuleNotFoundError:
     libcudart = None
 
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = Tuple[int, int, int, int]
+HandleType = tuple[int, int, int, int]
 
 
 @dataclasses.dataclass
@@ -147,9 +149,9 @@ class CuMemAllocator:
             "Please track https://github.com/pytorch/pytorch/issues/147851 "
             "for the latest updates.")
 
-        self.pointer_to_data: Dict[int, AllocationData] = {}
+        self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
-        self.allocator_and_pools: Dict[str, Any] = {}
+        self.allocator_and_pools: dict[str, Any] = {}
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
@@ -171,11 +173,11 @@ class CuMemAllocator:
 
     def sleep(
             self,
-            offload_tags: Optional[Union[Tuple[str, ...],
+            offload_tags: Optional[Union[tuple[str, ...],
                                          str]] = None) -> None:
         """
         Put the allocator in sleep mode.
-        All data in the memory allocation with the specified tag will be 
+        All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
 
         :param offload_tags: The tags of the memory allocation that will be
@@ -204,28 +206,37 @@ class CuMemAllocator:
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
 
-    def wake_up(self):
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU 
-        memory, and the rest of the data will have empty memory."""
+        memory, and the rest of the data will have empty memory.
+        
+        :param tags: The tags of the memory allocation that will be loaded
+            back to GPU memory. If None, all memory allocation will be loaded
+            back to GPU memory.
+        """
         for ptr, data in self.pointer_to_data.items():
-            handle = data.handle
-            create_and_map(handle)
-            if data.cpu_backup_tensor is not None:
-                cpu_backup_tensor = data.cpu_backup_tensor
-                if cpu_backup_tensor is not None:
-                    size_in_bytes = cpu_backup_tensor.numel(
-                    ) * cpu_backup_tensor.element_size()
-                    cpu_ptr = cpu_backup_tensor.data_ptr()
-                    libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                    data.cpu_backup_tensor = None
+            if tags is None or data.tag in tags:
+                handle = data.handle
+                create_and_map(handle)
+                if data.cpu_backup_tensor is not None:
+                    cpu_backup_tensor = data.cpu_backup_tensor
+                    if cpu_backup_tensor is not None:
+                        size_in_bytes = cpu_backup_tensor.numel(
+                        ) * cpu_backup_tensor.element_size()
+                        cpu_ptr = cpu_backup_tensor.data_ptr()
+                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
+                        data.cpu_backup_tensor = None
 
     @contextmanager
     def use_memory_pool(self, tag: Optional[str] = None):
         """
         A context manager to use the memory pool.
-        All memory allocation created inside the context will be allocated 
+        All memory allocation created inside the context will be allocated
         in the memory pool, and has the specified tag.
 
         :param tag: The tag of the memory allocation. If None, the default tag

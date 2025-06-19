@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from dataclasses import dataclass
+from math import prod
+from typing import Optional
 
 import torch
+from typing_extensions import Self
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, get_dtype_size
 
@@ -11,7 +17,7 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class KVCacheSpecBase:
+class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
     """
@@ -43,27 +49,32 @@ class KVCacheSpecBase:
         """
         raise NotImplementedError
 
-    def bytes_for_tokens(self, num_tokens: int) -> int:
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
-        The KV cache size for `num_tokens` tokens in bytes. Returns the real
-        memory size after padding `num_tokens` to full blocks.
+        The maximum possible memory usage of this KV cache in bytes.
 
         Returns:
-            The KV cache size
+            The KV cache size in bytes
         """
         raise NotImplementedError
 
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        """
+        Merge a list of KVCacheSpec objects into a single KVCacheSpec object.
+        """
+        assert all(spec.type_id == specs[0].type_id for spec in specs[1:]), (
+            "All layers in the same KV cache group must share the same "
+            "type_id.")
+        return copy.deepcopy(specs[0])
+
 
 @dataclass
-class FullAttentionSpec(KVCacheSpecBase):
+class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
     use_mla: bool
-
-    @property
-    def type_id(self) -> str:
-        return f"full_attention_{self.block_size}_{self.page_size_bytes}"
 
     @property
     def page_size_bytes(self) -> int:
@@ -72,21 +83,120 @@ class FullAttentionSpec(KVCacheSpecBase):
         return coef * self.block_size * self.num_kv_heads * self.head_size \
                 * get_dtype_size(self.dtype)
 
-    def bytes_for_tokens(self, num_tokens: int) -> int:
-        return cdiv(num_tokens, self.block_size) * self.page_size_bytes
+
+@dataclass
+class FullAttentionSpec(AttentionSpec):
+    sliding_window: Optional[int] = None
+    """
+    When hybrid allocator is disabled and the model contains both full 
+    attention layers and sliding window attention layers, sliding 
+    window attention are regarded as full attention in KV cache manager 
+    (blocks are allocated for all tokens), while computed as sliding window 
+    attention in model runner.
+    In this case, we use FullAttentionSpec and record the sliding window size.
+    Default to None for not using sliding window attention.
+    """
+
+    @property
+    def type_id(self) -> str:
+        return f"full_attention_{self.block_size}_{self.page_size_bytes}"
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_model_len = vllm_config.model_config.max_model_len
+        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        """
+        Merge a list of FullAttentionSpec objects into a single 
+        FullAttentionSpec object.
+        """
+        merged_spec = super().merge(specs)
+        sliding_window = set(spec.sliding_window for spec in specs
+                             if spec.sliding_window is not None)
+        if len(sliding_window) == 0:
+            merged_spec.sliding_window = None
+        elif len(sliding_window) == 1:
+            merged_spec.sliding_window = sliding_window.pop()
+        else:
+            raise ValueError(
+                "All sliding window layers in the same KV cache group "
+                "must have the same window size.")
+        return merged_spec
 
 
-KVCacheSpec = dict[str, KVCacheSpecBase]
+@dataclass
+class SlidingWindowSpec(AttentionSpec):
+    sliding_window: int
+
+    def __post_init__(self):
+        assert not self.use_mla, "MLA is not supported for sliding window"
+
+    @property
+    def type_id(self) -> str:
+        return f"sliding_window_{self.sliding_window}_{self.block_size}_{self.page_size_bytes}"  # noqa
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_model_len = vllm_config.model_config.max_model_len
+        max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens)
+
+        # During chunked prefill, we allocate KV cache for the last
+        # `self.sliding_window-1` computed tokens plus the newly scheduled
+        # tokens. And we won't allocate KV cache for more than `max_model_len`
+        # tokens.
+        num_tokens = min(self.sliding_window - 1 + max_num_batched_tokens,
+                         max_model_len)
+
+        # +1 here because the sliding window may not start from the beginning
+        # of the block. For example, if the block size is 4 and num_token
+        # is 4, we need two blocks [XXCD] [EF] to store the sliding
+        # window [CDEF] of 6 tokens.
+        return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
+
+
+@dataclass
+class MambaSpec(KVCacheSpec):
+    shapes: tuple[tuple[int, ...], ...]
+    dtype: torch.dtype
+
+    def __post_init__(self):
+        self.num_elements = sum(prod(shape) for shape in self.shapes)
+
+    @property
+    def type_id(self) -> str:
+        return f"mamba_{self.shapes}_{self.dtype}"
+
+    @property
+    def page_size_bytes(self) -> int:
+        return self.num_elements * get_dtype_size(self.dtype)
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # We allocate 1 block for each request now, so max_memory_usage_bytes is
+        # the same as page_size_bytes.
+        # Need to update this when supporting prefix caching.
+        return self.page_size_bytes
 
 
 @dataclass
 class KVCacheTensor:
     """
-    A dataclass for specifying how the workers should initialize the KV cache
-    for a layer. Only contains the size of KV cache for that layer for now. Will
-    be extended to support multiple layers sharing the same memory pool.
+    A class for specifying how the workers should initialize the KV cache.
     """
-    size: int  # The size of KV cache Tensor in bytes
+    size: int  # size of the KV cache tensor in bytes
+    shared_by: list[str]  # layer names that share the same KV cache tensor
+
+
+@dataclass
+class KVCacheGroupSpec:
+    """
+    Represents a group of model layers that share the same KV cache block table.
+    These layers are regarded as one layer in the KV cache manager.
+    """
+    # The names of model layers in this group
+    layer_names: list[str]
+    # The KV cache spec of this manager layer
+    kv_cache_spec: KVCacheSpec
 
 
 @dataclass
@@ -96,20 +206,13 @@ class KVCacheConfig:
     """
     """The number of KV cache blocks"""
     num_blocks: int
-    """layer_name -> how to initialize KV cache for that layer"""
-    tensors: dict[str, KVCacheTensor]
+    """How should model runner initialize the KV cache tensors for each layer"""
+    kv_cache_tensors: list[KVCacheTensor]
     """
-    A list of kv-cache groups. Each group includes a set of layers with
-    the same kv-cache spec, and the total page_size of layers inside a group
-    is same across all groups (as the KVCacheManager only supports allocating
-    pages of the same size). For example:
-    1. A model only uses full attention: one group with all layers in the model.
-    2. (not implemented yet) A model with the same number of full attention
-    layers and sliding window attention layers: two groups, one for full
-    attention layers and one for sliding window attention layers.
-    3. (not implemented yet) A model with 2 full attention layers and 4 sliding
-    window attention layers: three groups, (full * 2), (sw * 2), (sw * 2).
+    The kv cache groups of the model.
+    For models with only one type of attention, there is only one group that
+    contains all layers.
+    For models with multiple types of attention, there will be multiple groups,
+    see `_get_kv_cache_config_uniform_page_size` for more details.
     """
-    groups: list[list[str]]
-    """the KVCacheSpec of the model"""
-    kv_cache_spec: KVCacheSpec
+    kv_cache_groups: list[KVCacheGroupSpec]

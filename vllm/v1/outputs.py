@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
@@ -37,6 +38,25 @@ class LogprobsTensors(NamedTuple):
             self.logprob_token_ids.tolist(),
             self.logprobs.tolist(),
             self.selected_token_ranks.tolist(),
+        )
+
+    @staticmethod
+    def empty_cpu(num_positions: int,
+                  num_tokens_per_position: int) -> "LogprobsTensors":
+        """Create empty LogprobsTensors on CPU."""
+
+        logprob_token_ids = torch.empty(
+            (num_positions, num_tokens_per_position),
+            dtype=torch.int32,
+            device="cpu")
+        logprobs = torch.empty_like(logprob_token_ids, dtype=torch.float32)
+        selected_token_ranks = torch.empty(num_positions,
+                                           dtype=torch.int32,
+                                           device="cpu")
+        return LogprobsTensors(
+            logprob_token_ids=logprob_token_ids,
+            logprobs=logprobs,
+            selected_token_ranks=selected_token_ranks,
         )
 
 
@@ -81,12 +101,20 @@ class ModelRunnerOutput:
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
 
+    # [num_reqs, hidden_size]
+    pooler_output: list[Optional[torch.Tensor]]
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
-    req_ids=[],
-    req_id_to_index={},
-    sampled_token_ids=[],
-    spec_token_ids=None,
-    logprobs=None,
-    prompt_logprobs_dict={},
-)
+    # [req_ids]
+    finished_sending: Optional[set[str]] = None
+    finished_recving: Optional[set[str]] = None
+
+
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
+                                              req_id_to_index={},
+                                              sampled_token_ids=[],
+                                              spec_token_ids=None,
+                                              logprobs=None,
+                                              prompt_logprobs_dict={},
+                                              pooler_output=[],
+                                              finished_sending=None,
+                                              finished_recving=None)

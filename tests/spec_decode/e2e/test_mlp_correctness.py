@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This docstring details important information on the testing methodology.
 
 Most of the tests rely on "greedy equality", where we expect the output of
@@ -62,7 +63,9 @@ PRECISION = "float32"
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+        },
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -108,12 +111,16 @@ def test_mlp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
-        "disable_logprobs_during_spec_decoding": False,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "disable_logprobs": False,
+        },
     },
     {
-        "speculative_model": SPEC_MODEL,
-        "disable_logprobs_during_spec_decoding": True,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "disable_logprobs": True,
+        },
     },
 ])
 @pytest.mark.parametrize("output_len", [8])
@@ -133,19 +140,20 @@ def test_mlp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
     # up sampling different tokens at the tail (ie top tokens don't change).
     # TL;DR: sd+cp == org+cp but sd+cp != org..is this expected?
     maybe_enable_chunked_prefill(prefill_chunk_size, baseline_llm_kwargs)
-    run_equality_correctness_test(vllm_runner,
-                                  common_llm_kwargs,
-                                  per_test_common_llm_kwargs,
-                                  baseline_llm_kwargs,
-                                  test_llm_kwargs,
-                                  batch_size,
-                                  max_output_len=output_len,
-                                  seed=seed,
-                                  temperature=0.0,
-                                  logprobs=logprobs,
-                                  prompt_logprobs=logprobs,
-                                  disable_logprobs=test_llm_kwargs[
-                                      'disable_logprobs_during_spec_decoding'])
+    run_equality_correctness_test(
+        vllm_runner,
+        common_llm_kwargs,
+        per_test_common_llm_kwargs,
+        baseline_llm_kwargs,
+        test_llm_kwargs,
+        batch_size,
+        max_output_len=output_len,
+        seed=seed,
+        temperature=0.0,
+        logprobs=logprobs,
+        prompt_logprobs=logprobs,
+        disable_logprobs=test_llm_kwargs["speculative_config"]
+        ["disable_logprobs"])
 
 
 @pytest.mark.parametrize(
@@ -167,7 +175,9 @@ def test_mlp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+        },
     },
 ])
 @pytest.mark.parametrize("output_len", [2048])
@@ -209,8 +219,10 @@ def test_mlp_e2e_acceptance_rate(vllm_runner, common_llm_kwargs,
         # Main model
         "model_name": MAIN_MODEL,
 
-        # Speculative model
-        "speculative_model": SPEC_MODEL,
+        # Speculative config
+        "speculative_config": {
+            "model": SPEC_MODEL,
+        },
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{"seed": 1}])
@@ -256,7 +268,7 @@ def test_mlp_e2e_seeded_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "block_size": 8,
+        "block_size": 16,
         # 2 for small prompt, 256//8 for generated.
         "num_gpu_blocks_override": 2 + 256 // 8,
         "max_model_len": (2 + 256 // 8) * 8,
@@ -274,7 +286,9 @@ def test_mlp_e2e_seeded_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+        },
     },
 ])
 @pytest.mark.parametrize(
@@ -308,7 +322,7 @@ def test_mlp_e2e_greedy_correctness_with_preemption(
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "block_size": 8,
+        "block_size": 16,
         # 2 for small prompt, 256//8 for generated.
         "num_gpu_blocks_override": 2 + 256 // 8,
         "max_model_len": (2 + 256 // 8) * 8,
@@ -326,7 +340,9 @@ def test_mlp_e2e_greedy_correctness_with_preemption(
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
-        "speculative_model": SPEC_MODEL,
+        "speculative_config": {
+            "model": SPEC_MODEL,
+        },
     },
 ])
 @pytest.mark.parametrize(
@@ -382,8 +398,10 @@ def test_mlp_e2e_greedy_correctness_with_padding(
     "test_llm_kwargs",
     [
         {
-            "speculative_model": SPEC_MODEL,
-            "num_speculative_tokens": k,
+            "speculative_config": {
+                "model": SPEC_MODEL,
+                "num_speculative_tokens": k,
+            },
         }
         # Try a range of num. speculative tokens
         for k in range(1, 1 + MAX_SPEC_TOKENS)
@@ -430,11 +448,12 @@ def test_mlp_different_k(vllm_runner, common_llm_kwargs,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",
-                         [{
-                             "speculative_model": SPEC_MODEL,
-                             "speculative_disable_by_batch_size": 4
-                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_config": {
+        "model": SPEC_MODEL,
+        "disable_by_batch_size": 4,
+    },
+}])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
     "output_len",
@@ -475,14 +494,18 @@ def test_mlp_disable_queue(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-        "speculative_model": SPEC_MODEL,
+
+        # Precision
+        "dtype": PRECISION,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs",
-                         [{
-                             "speculative_disable_mqa_scorer": True,
-                         }])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_config": {
+        "model": SPEC_MODEL,
+        "disable_mqa_scorer": True,
+    },
+}])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
     "output_len",

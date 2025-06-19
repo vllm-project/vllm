@@ -1,20 +1,12 @@
 #pragma once
 
 #include "quantization/vectorization.cuh"
+#include "quantization/utils.cuh"
 
 #include <cmath>
-#include <c10/core/ScalarType.h>
 
-#ifndef USE_ROCM
-  #include <c10/util/Float8_e4m3fn.h>
-  #define MAYBE_HOST_DEVICE C10_HOST_DEVICE
-#else
-  #include <ATen/hip/HIPContext.h>
-  #include <c10/util/Float8_e4m3fn.h>
-  #include <c10/util/Float8_e4m3fnuz.h>
+#ifdef USE_ROCM
   #include "amd/quant_utils.cuh"
-  // ROCm doesn't seem to need C10_HOST_DEVICE for static constexpr
-  #define MAYBE_HOST_DEVICE
 #endif
 
 // Determines the preferred FP8 type for the current platform.
@@ -30,29 +22,6 @@ static bool is_fp8_ocp() {
   return substring == std::string::npos;
 #endif
 }
-
-template <typename T>
-struct fp8_e4m3_adjusted_max;
-
-template <>
-struct fp8_e4m3_adjusted_max<c10::Float8_e4m3fn> {
-  static constexpr c10::Float8_e4m3fn val() {
-    return std::numeric_limits<c10::Float8_e4m3fn>::max();
-  }
-};
-
-// Using the default max value from pytorch (240.0 0x7F) will cause accuracy
-// issues when running dynamic quantization. Here use 224.0 0x7E for rocm.
-template <>
-struct fp8_e4m3_adjusted_max<c10::Float8_e4m3fnuz> {
-  static constexpr c10::Float8_e4m3fnuz val() {
-    return c10::Float8_e4m3fnuz(0x7E, c10::Float8_e4m3fnuz::from_bits());
-  }
-};
-
-template <typename T>
-MAYBE_HOST_DEVICE static constexpr T fp8_e4m3_adjusted_max_v =
-    fp8_e4m3_adjusted_max<T>::val();
 
 namespace vllm {
 
@@ -76,8 +45,8 @@ __device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
     x = val / scale;
   }
 
-  float r = fmax(-fp8_e4m3_adjusted_max_v<fp8_type>,
-                 fmin(x, fp8_e4m3_adjusted_max_v<fp8_type>));
+  float r =
+      fmaxf(-quant_type_max_v<fp8_type>, fminf(x, quant_type_max_v<fp8_type>));
 #ifndef USE_ROCM
   return static_cast<fp8_type>(r);
 #else
@@ -96,7 +65,7 @@ template <typename scalar_t, typename fp8_type>
 __global__ void segmented_max_reduction(float* __restrict__ scale,
                                         const scalar_t* __restrict__ input,
                                         int64_t num_elems) {
-  __shared__ float cache[1024];
+  __shared__ float cache[256];
   int64_t i = blockDim.x * blockIdx.x + threadIdx.x;
 
   // First store maximum for all values processes by
@@ -104,7 +73,7 @@ __global__ void segmented_max_reduction(float* __restrict__ scale,
   scalar_t tmp = 0.0;
   while (i < num_elems) {
     float x = static_cast<float>(input[i]);
-    tmp = max(tmp, fabs(x));
+    tmp = fmaxf(tmp, fabsf(x));
     i += blockDim.x * gridDim.x;
   }
   cache[threadIdx.x] = tmp;
@@ -123,7 +92,7 @@ __global__ void segmented_max_reduction(float* __restrict__ scale,
   // Finally, since cache[0] contains the maximum for this thread block,
   // atomically write the max to the target location
   if (threadIdx.x == 0) {
-    atomicMaxFloat(scale, cache[0] / fp8_e4m3_adjusted_max_v<fp8_type>);
+    atomicMaxFloat(scale, cache[0] / quant_type_max_v<fp8_type>);
   }
 }
 
@@ -131,25 +100,27 @@ template <typename scalar_t>
 __device__ float thread_max_vec(scalar_t const* __restrict__ input,
                                 int64_t const num_elems, int const tid,
                                 int const step) {
+  constexpr size_t VEC_SIZE = 16;
+  using scalarxN_t = vec_n_t<scalar_t, VEC_SIZE>;
   // Vectorized input/output to better utilize memory bandwidth.
-  vec4_t<scalar_t> const* vectorized_in =
-      reinterpret_cast<vec4_t<scalar_t> const*>(input);
+  auto const* vectorized_in = reinterpret_cast<scalarxN_t const*>(input);
 
-  int64_t const num_vec_elems = num_elems >> 2;
+  // num_elems / VEC_SIZE (which is 16)
+  int64_t const num_vec_elems = num_elems >> 4;
   float absmax_val = 0.0f;
 
-#pragma unroll 4
+#pragma unroll
   for (int64_t i = tid; i < num_vec_elems; i += step) {
-    vec4_t<scalar_t> in_vec = vectorized_in[i];
-    absmax_val = max(absmax_val, fabs(in_vec.x));
-    absmax_val = max(absmax_val, fabs(in_vec.y));
-    absmax_val = max(absmax_val, fabs(in_vec.z));
-    absmax_val = max(absmax_val, fabs(in_vec.w));
+    scalarxN_t in_vec = vectorized_in[i];
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      absmax_val = fmaxf(absmax_val, fabsf(in_vec.val[j]));
+    }
   }
 
-  // Handle the remaining elements if num_elems is not divisible by 4
-  for (int64_t i = num_vec_elems * 4 + tid; i < num_elems; i += step) {
-    absmax_val = max(absmax_val, fabs(input[i]));
+  // Handle the remaining elements if num_elems is not divisible by VEC_SIZE
+  for (int64_t i = num_vec_elems * VEC_SIZE + tid; i < num_elems; i += step) {
+    absmax_val = fmaxf(absmax_val, fabsf(input[i]));
   }
 
   return absmax_val;
@@ -161,31 +132,31 @@ __device__ void scaled_fp8_conversion_vec(fp8_type* __restrict__ out,
                                           float const scale,
                                           int64_t const num_elems,
                                           int const tid, int const step) {
-  using float8x4_t = q8x4_t<fp8_type>;
+  constexpr size_t VEC_SIZE = 16;
+  using scalarxN_t = vec_n_t<scalar_t, VEC_SIZE>;
+  using float8xN_t = q8_n_t<fp8_type, VEC_SIZE>;
   // Vectorized input/output to better utilize memory bandwidth.
-  auto const* vectorized_in = reinterpret_cast<vec4_t<scalar_t> const*>(input);
-  auto* vectorized_out = reinterpret_cast<float8x4_t*>(out);
+  auto const* vectorized_in = reinterpret_cast<scalarxN_t const*>(input);
+  auto* vectorized_out = reinterpret_cast<float8xN_t*>(out);
 
-  int64_t const num_vec_elems = num_elems >> 2;
+  // num_elems / VEC_SIZE (which is 16)
+  int64_t const num_vec_elems = num_elems >> 4;
 
-#pragma unroll 4
+#pragma unroll
   for (int64_t i = tid; i < num_vec_elems; i += step) {
-    vec4_t<scalar_t> in_vec = vectorized_in[i];
-    float8x4_t out_vec;
+    scalarxN_t in_vec = vectorized_in[i];
+    float8xN_t out_vec;
 
-    out_vec.x = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
-        static_cast<float>(in_vec.x), scale);
-    out_vec.y = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
-        static_cast<float>(in_vec.y), scale);
-    out_vec.z = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
-        static_cast<float>(in_vec.z), scale);
-    out_vec.w = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
-        static_cast<float>(in_vec.w), scale);
+#pragma unroll
+    for (int j = 0; j < VEC_SIZE; ++j) {
+      out_vec.val[j] = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
+          static_cast<float>(in_vec.val[j]), scale);
+    }
     vectorized_out[i] = out_vec;
   }
 
-  // Handle the remaining elements if num_elems is not divisible by 4
-  for (int64_t i = num_vec_elems * 4 + tid; i < num_elems; i += step) {
+  // Handle the remaining elements if num_elems is not divisible by VEC_SIZE
+  for (int64_t i = num_vec_elems * VEC_SIZE + tid; i < num_elems; i += step) {
     out[i] = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
         static_cast<float>(input[i]), scale);
   }

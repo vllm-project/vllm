@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -8,23 +9,24 @@ from transformers import BatchFeature, PaliGemmaConfig
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, MultiModalKwargs)
-from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
+                                   MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptIndexTargets,
                                         PromptInsertion, PromptUpdate,
                                         PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
 
 logger = init_logger(__name__)
@@ -72,43 +74,43 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
-    def get_mm_max_tokens_per_item(
+    def get_num_image_tokens(
         self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_num_image_tokens()}
-
-    def get_num_image_tokens(self) -> int:
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> int:
         vision_encoder_info = self.get_vision_encoder_info()
-        return vision_encoder_info.get_max_image_tokens()
+
+        return vision_encoder_info.get_num_image_tokens(
+            image_width=image_width,
+            image_height=image_height,
+        )
 
 
 class PaliGemmaDummyInputsBuilder(
         BaseDummyInputsBuilder[PaliGemmaProcessingInfo]):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        return ""
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
         max_image_size = vision_config.image_size
 
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=max_image_size,
                                    height=max_image_size,
                                    num_images=num_images)
         }
-
-        return ProcessorInputs(
-            prompt_text="",
-            mm_data=mm_data,
-        )
 
 
 class PaliGemmaMultiModalProcessor(
@@ -148,11 +150,29 @@ class PaliGemmaMultiModalProcessor(
         image_token_id = hf_config.image_token_index
 
         tokenizer = self.info.get_tokenizer()
-        num_image_tokens = self.info.get_num_image_tokens()
-        image_tokens = [image_token_id] * num_image_tokens
 
         bos_token_id = tokenizer.bos_token_id
         assert isinstance(bos_token_id, int)
+
+        def get_insertion(item_idx: int):
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems))
+
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                image_size = images.get_image_size(item_idx)
+                num_image_tokens = self.info.get_num_image_tokens(
+                    image_width=image_size.width,
+                    image_height=image_size.height,
+                )
+
+            image_tokens = [image_token_id] * num_image_tokens
+
+            return PromptUpdateDetails.select_token_id(
+                image_tokens + [bos_token_id],
+                embed_token_id=image_token_id,
+            )
 
         # Paligemma 1 and 2 have different tokenizer.add_bos_token
         # Insert <image>*n + <bos> after <bos> for Paligemma 1
@@ -162,10 +182,7 @@ class PaliGemmaMultiModalProcessor(
                 modality="image",
                 target=PromptIndexTargets.prefix(
                     [bos_token_id] if tokenizer.add_bos_token else []),
-                insertion=PromptUpdateDetails(
-                    full=image_tokens + [bos_token_id],
-                    features=image_tokens,
-                ),
+                insertion=get_insertion,
             )
         ]
 
@@ -211,6 +228,15 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         ],
     }
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            "lm_head.": "language_model.lm_head.",
+        })
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -243,10 +269,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    @property
-    def sampler(self):
-        return self.language_model.sampler
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -323,11 +345,14 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return self.multi_modal_projector(image_features)
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
         vision_embeddings = self._process_image_input(image_input)
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
         vision_embeddings = vision_embeddings * (self.config.hidden_size**-0.5)
@@ -339,7 +364,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.config.image_token_index)
@@ -350,7 +376,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
                 positions: torch.Tensor,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs: object) -> Union[SamplerOutput, IntermediateTensors]:
+                **kwargs: object) -> IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -377,14 +403,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

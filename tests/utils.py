@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import copy
@@ -28,8 +29,8 @@ from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
@@ -99,10 +100,14 @@ class RemoteOpenAIServer:
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
-        parser = make_arg_parser(parser)
+        subparsers = parser.add_subparsers(required=False, dest="subparser")
+        parser = ServeSubcommand().subparser_init(subparsers)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
         self.host = str(args.host or 'localhost')
         self.port = int(args.port)
+
+        self.show_hidden_metrics = \
+            args.show_hidden_metrics_for_version is not None
 
         # download the model before starting the server to avoid timeout
         is_local = os.path.isdir(model)
@@ -317,6 +322,37 @@ def _test_completion_close(
     return results
 
 
+def _test_chat(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+):
+    results = []
+
+    messages = [{
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": prompt
+        }]
+    }]
+
+    # test with text prompt
+    chat_response = client.chat.completions.create(model=model,
+                                                   messages=messages,
+                                                   max_tokens=5,
+                                                   temperature=0.0)
+
+    results.append({
+        "test": "completion_close",
+        "text": chat_response.choices[0].message.content,
+        "finish_reason": chat_response.choices[0].finish_reason,
+        "usage": chat_response.usage,
+    })
+
+    return results
+
+
 def _test_embeddings(
     client: openai.OpenAI,
     model: str,
@@ -512,6 +548,8 @@ def compare_all_settings(model: str,
                 results += _test_completion(client, model, prompt, token_ids)
             elif method == "generate_close":
                 results += _test_completion_close(client, model, prompt)
+            elif method == "generate_chat":
+                results += _test_chat(client, model, prompt)
             elif method == "generate_with_image":
                 results += _test_image_text(
                     client, model,
@@ -579,7 +617,16 @@ def multi_process_parallel(
     # as compared to multiprocessing.
     # NOTE: We need to set working_dir for distributed tests,
     # otherwise we may get import errors on ray workers
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
+    # NOTE: Force ray not to use gitignore file as excluding, otherwise
+    # it will not move .so files to working dir.
+    # So we have to manually add some of large directories
+    os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
+    ray.init(
+        runtime_env={
+            "working_dir": VLLM_PATH,
+            "excludes":
+            ["build", ".git", "cmake-build-*", "shellcheck", "dist"]
+        })
 
     distributed_init_port = get_open_port()
     refs = []
@@ -620,42 +667,54 @@ def get_physical_device_indices(devices):
 
 
 @_nvml()
-def wait_for_gpu_memory_to_clear(devices: list[int],
-                                 threshold_bytes: int,
+def wait_for_gpu_memory_to_clear(*,
+                                 devices: list[int],
+                                 threshold_bytes: Optional[int] = None,
+                                 threshold_ratio: Optional[float] = None,
                                  timeout_s: float = 120) -> None:
+    assert threshold_bytes is not None or threshold_ratio is not None
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
     devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
         output: dict[int, str] = {}
-        output_raw: dict[int, float] = {}
+        output_raw: dict[int, tuple[float, float]] = {}
         for device in devices:
             if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]
                 mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
                 gb_used = mem_info["vram_used"] / 2**10
+                gb_total = mem_info["vram_total"] / 2**10
             else:
                 dev_handle = nvmlDeviceGetHandleByIndex(device)
                 mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
                 gb_used = mem_info.used / 2**30
-            output_raw[device] = gb_used
-            output[device] = f'{gb_used:.02f}'
+                gb_total = mem_info.total / 2**30
+            output_raw[device] = (gb_used, gb_total)
+            output[device] = f'{gb_used:.02f}/{gb_total:.02f}'
 
-        print('gpu memory used (GB): ', end='')
+        print('gpu memory used/total (GiB): ', end='')
         for k, v in output.items():
             print(f'{k}={v}; ', end='')
         print('')
 
+        if threshold_bytes is not None:
+            is_free = lambda used, total: used <= threshold_bytes / 2**30
+            threshold = f"{threshold_bytes/2**30} GiB"
+        else:
+            is_free = lambda used, total: used / total <= threshold_ratio
+            threshold = f"{threshold_ratio:.2f}"
+
         dur_s = time.time() - start_time
-        if all(v <= (threshold_bytes / 2**30) for v in output_raw.values()):
+        if all(is_free(used, total) for used, total in output_raw.values()):
             print(f'Done waiting for free GPU memory on devices {devices=} '
-                  f'({threshold_bytes/2**30=}) {dur_s=:.02f}')
+                  f'({threshold=}) {dur_s=:.02f}')
             break
 
         if dur_s >= timeout_s:
             raise ValueError(f'Memory of devices {devices=} not free after '
-                             f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
+                             f'{dur_s=:.02f} ({threshold=})')
 
         time.sleep(5)
 
@@ -786,7 +845,7 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     without enough resources, or called when filtering tests to run directly.
     """
     try:
-        if current_platform.is_cpu() or current_platform.is_openvino():
+        if current_platform.is_cpu():
             memory_gb = 0
         else:
             memory_gb = current_platform.get_device_total_memory() / GB_bytes
@@ -907,7 +966,7 @@ def get_client_text_logprob_generations(
         completions: list[Completion]) -> list[TextTextLogprobs]:
     '''Operates on the output of a request made to an Open-AI-protocol
     completions endpoint; obtains top-rank logprobs for each token in
-    each :class:`SequenceGroup`
+    each {class}`SequenceGroup`
     '''
     text_generations = get_client_text_generations(completions)
     text = ''.join(text_generations)

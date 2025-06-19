@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -8,6 +9,7 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.parameter import (BasevLLMParameter,
@@ -84,11 +86,11 @@ class QQQConfig(QuantizationConfig):
             self.weight_bits, self.group_size)
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "qqq"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half]
 
     @classmethod
@@ -96,7 +98,7 @@ class QQQConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         """List of filenames to search for in the model directory."""
         return [
             "quant_config.json",
@@ -104,7 +106,7 @@ class QQQConfig(QuantizationConfig):
         ]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "QQQConfig":
+    def from_config(cls, config: dict[str, Any]) -> "QQQConfig":
         weight_bits = cls.get_from_keys(config, ["wbits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(weight_bits, group_size)
@@ -130,7 +132,7 @@ class QQQLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 import pickle
@@ -16,7 +17,9 @@ from vllm.model_executor.guided_decoding.outlines_logits_processors import (
 from vllm.sampling_params import GuidedDecodingParams
 
 MODEL_NAME = 'HuggingFaceH4/zephyr-7b-beta'
-GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
+GUIDED_DECODING_BACKENDS = [
+    "outlines", "lm-format-enforcer", "xgrammar", "guidance"
+]
 GUIDED_DECODING_BACKENDS_WITH_REASONING_SUPPORT = ["outlines", "xgrammar"]
 REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
@@ -200,12 +203,15 @@ def test_multiple_guided_options_not_allowed(sample_json_schema, sample_regex):
 
 def test_guided_decoding_backend_options():
     """Test backend-specific options"""
-    params = GuidedDecodingParams(
-        backend="xgrammar:option-1,option-2,option-3")
-    assert params.backend_options() == ["option-1", "option-2", "option-3"]
-
-    no_fallback = GuidedDecodingParams(backend="xgrammar:option-1,no-fallback")
-    assert no_fallback.no_fallback()
+    with pytest.warns(DeprecationWarning):
+        guided_decoding_params = GuidedDecodingParams(
+            backend=
+            "xgrammar:no-fallback,disable-any-whitespace,no-additional-properties"
+        )
+    assert guided_decoding_params.backend == "xgrammar"
+    assert guided_decoding_params.disable_fallback
+    assert guided_decoding_params.disable_any_whitespace
+    assert guided_decoding_params.disable_additional_properties
 
 
 def test_pickle_xgrammar_tokenizer_data():

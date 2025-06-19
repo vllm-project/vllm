@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Simple KV Cache Connector for Distributed Machine Learning Inference
 
@@ -8,13 +9,14 @@ MooncakePipe.
 
 But the logic can be extended to support other pipe and lookup buffer.
 """
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    model_aware_kv_ops_helper as kv_helper)
 from vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer import (
     SimpleBuffer)
 from vllm.logger import init_logger
@@ -36,7 +38,7 @@ class SimpleConnector(KVConnectorBase):
     ):
 
         self.config = config.kv_transfer_config
-        self.tp_size = config.parallel_config.tensor_parallel_size
+        self.kv_helper = kv_helper(config)
 
         if self.config.kv_connector == "PyNcclConnector":
             from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import (
@@ -105,7 +107,7 @@ class SimpleConnector(KVConnectorBase):
         else:
 
             # the current vLLM instance is KV consumer, so it needs to connect
-            # its recv pipe to the send pipe of KV producder
+            # its recv pipe to the send pipe of KV producer
             if self.config.kv_connector == "PyNcclConnector":
                 self.consumer_data_pipe = PyNcclPipe(
                     local_rank=local_rank,
@@ -132,7 +134,7 @@ class SimpleConnector(KVConnectorBase):
             )
 
     def select(self, input_tokens: Optional[torch.Tensor],
-               roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+               roi: Optional[torch.Tensor]) -> list[Optional[torch.Tensor]]:
 
         assert self.consumer_buffer is not None, "Please initialize the "\
             "consumer buffer before calling select."
@@ -151,7 +153,7 @@ class SimpleConnector(KVConnectorBase):
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
@@ -162,13 +164,7 @@ class SimpleConnector(KVConnectorBase):
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
-
-        model_config = model_executable.model.config
-        num_heads = int(model_config.num_key_value_heads / self.tp_size)
-        hidden_size = model_config.hidden_size
-        num_attention_heads = model_config.num_attention_heads
-        head_size = getattr(model_config, "head_dim",
-                            int(hidden_size // num_attention_heads))
+        num_heads, head_size = self.kv_helper.get_model_args(model_executable)
 
         # query_lens contains new KV caches that are added to vLLM.
         # so we will send them to decode instance
@@ -191,9 +187,8 @@ class SimpleConnector(KVConnectorBase):
 
             for layer_id in range(start_layer, end_layer):
                 kv_cache = kv_caches[layer_id - start_layer]
-
-                key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
-                value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
+                key_cache, value_cache = self.kv_helper.get_kv_from_cache(
+                    kv_cache, num_heads, head_size)
 
                 current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
@@ -213,8 +208,8 @@ class SimpleConnector(KVConnectorBase):
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+        kv_caches: list[torch.Tensor]
+    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
         # When bypass_model_exec is set to False, it means that at least for one
@@ -227,6 +222,8 @@ class SimpleConnector(KVConnectorBase):
         seq_lens = model_input.attn_metadata.seq_lens
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
+        start_layer = model_executable.model.start_layer
+        end_layer = model_executable.model.end_layer
 
         hidden_or_intermediate_states_for_one_req = []
 
@@ -285,25 +282,19 @@ class SimpleConnector(KVConnectorBase):
             end_pos = start_pos + num_computed_tokens
 
             # put received KV caches into paged memory
-            for i in range(model_executable.model.start_layer,
-                           model_executable.model.end_layer):
+            for cur_layer in range(start_layer, end_layer):
 
-                kv_cache = kv_caches[i - model_executable.model.start_layer]
-                layer = model_executable.model.layers[i]
+                layer_id = cur_layer - start_layer
+                kv_cache = kv_caches[layer_id]
+                layer = model_executable.model.layers[cur_layer]
 
-                key_cache, value_cache = kv_cache[0], kv_cache[1]
-                ops.reshape_and_cache_flash(
-                    keys[i - model_executable.model.start_layer].to(
-                        key_cache.device),
-                    values[i - model_executable.model.start_layer].to(
-                        value_cache.device),
-                    key_cache,
-                    value_cache,
-                    slot_mapping[start_pos:end_pos],
-                    layer.self_attn.attn.kv_cache_dtype,
-                    layer.self_attn.attn._k_scale,
-                    layer.self_attn.attn._v_scale,
-                )
+                # get remote kvcache
+                remote_k, remote_v = keys[layer_id], values[layer_id]
+
+                self.kv_helper.put_kv_to_cache(model_executable, remote_k,
+                                               remote_v, layer, kv_cache,
+                                               slot_mapping, start_pos,
+                                               end_pos)
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 

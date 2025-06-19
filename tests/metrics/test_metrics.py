@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
 
@@ -248,8 +249,10 @@ def test_metric_spec_decode(
             dtype=dtype,
             disable_log_stats=False,
             gpu_memory_utilization=0.4,
-            speculative_model=model,
-            num_speculative_tokens=k,
+            speculative_config={
+                "model": model,
+                "num_speculative_tokens": k,
+            },
     ) as vllm_model:
 
         # Force log interval to be 0 to catch all metrics.
@@ -300,8 +303,10 @@ def test_metric_spec_decode_interval(
         dtype=dtype,
         disable_log_stats=False,
         gpu_memory_utilization=0.4,
-        speculative_model=model,
-        num_speculative_tokens=k,
+        speculative_config={
+            "model": model,
+            "num_speculative_tokens": k,
+        },
         enforce_eager=True,
     )
 

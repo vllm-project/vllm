@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -15,7 +16,7 @@ def v1(run_with_both_engines):
 
 def test_empty_prompt():
     llm = LLM(model="openai-community/gpt2", enforce_eager=True)
-    with pytest.raises(ValueError, match='Prompt cannot be empty'):
+    with pytest.raises(ValueError, match='decoder prompt cannot be empty'):
         llm.generate([""])
 
 

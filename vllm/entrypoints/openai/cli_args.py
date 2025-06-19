@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file contains the command line arguments for the vLLM's
 OpenAI-compatible server. It is kept in a separate file for documentation
@@ -11,13 +12,17 @@ import ssl
 from collections.abc import Sequence
 from typing import Optional, Union, get_args
 
-from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
+import vllm.envs as envs
+from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
 from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
+
+logger = init_logger(__name__)
 
 
 class LoRAParserAction(argparse.Action):
@@ -79,7 +84,7 @@ class PromptAdapterParserAction(argparse.Action):
 
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument("--host",
-                        type=nullable_str,
+                        type=optional_type(str),
                         default=None,
                         help="Host name.")
     parser.add_argument("--port", type=int, default=8000, help="Port number.")
@@ -89,6 +94,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default="info",
         choices=['debug', 'info', 'warning', 'error', 'critical', 'trace'],
         help="Log level for uvicorn.")
+    parser.add_argument("--disable-uvicorn-access-log",
+                        action="store_true",
+                        help="Disable uvicorn access log.")
     parser.add_argument("--allow-credentials",
                         action="store_true",
                         help="Allow credentials.")
@@ -105,13 +113,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         default=["*"],
                         help="Allowed headers.")
     parser.add_argument("--api-key",
-                        type=nullable_str,
+                        type=optional_type(str),
                         default=None,
                         help="If provided, the server will require this key "
                         "to be presented in the header.")
     parser.add_argument(
         "--lora-modules",
-        type=nullable_str,
+        type=optional_type(str),
         default=None,
         nargs='+',
         action=LoRAParserAction,
@@ -123,14 +131,14 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "\"base_model_name\": \"id\"}``")
     parser.add_argument(
         "--prompt-adapters",
-        type=nullable_str,
+        type=optional_type(str),
         default=None,
         nargs='+',
         action=PromptAdapterParserAction,
         help="Prompt adapter configurations in the format name=path. "
         "Multiple adapters can be specified.")
     parser.add_argument("--chat-template",
-                        type=nullable_str,
+                        type=optional_type(str),
                         default=None,
                         help="The file path to the chat template, "
                         "or the template in single-line form "
@@ -148,20 +156,20 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         'similar to OpenAI schema. '
         'Example: ``[{"type": "text", "text": "Hello world!"}]``')
     parser.add_argument("--response-role",
-                        type=nullable_str,
+                        type=optional_type(str),
                         default="assistant",
                         help="The role name to return if "
                         "``request.add_generation_prompt=true``.")
     parser.add_argument("--ssl-keyfile",
-                        type=nullable_str,
+                        type=optional_type(str),
                         default=None,
                         help="The file path to the SSL key file.")
     parser.add_argument("--ssl-certfile",
-                        type=nullable_str,
+                        type=optional_type(str),
                         default=None,
                         help="The file path to the SSL cert file.")
     parser.add_argument("--ssl-ca-certs",
-                        type=nullable_str,
+                        type=optional_type(str),
                         default=None,
                         help="The CA certificates file.")
     parser.add_argument(
@@ -177,13 +185,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     )
     parser.add_argument(
         "--root-path",
-        type=nullable_str,
+        type=optional_type(str),
         default=None,
         help="FastAPI root_path when app is behind a path based routing proxy."
     )
     parser.add_argument(
         "--middleware",
-        type=nullable_str,
+        type=optional_type(str),
         action="append",
         default=[],
         help="Additional ASGI middleware to apply to the app. "
@@ -237,6 +245,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         " into OpenAI API format, the name register in this plugin can be used "
         "in ``--tool-call-parser``.")
 
+    parser.add_argument(
+        "--log-config-file",
+        type=str,
+        default=envs.VLLM_LOGGING_CONFIG_PATH,
+        help="Path to logging config JSON file for both vllm and uvicorn",
+    )
+
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     parser.add_argument('--max-log-len',
@@ -244,7 +259,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         default=None,
                         help='Max number of prompt characters or prompt '
                         'ID numbers being printed in log.'
-                        '\n\nDefault: Unlimited')
+                        ' The default of None means unlimited.')
 
     parser.add_argument(
         "--disable-fastapi-docs",
@@ -280,18 +295,18 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
+    if args.enable_prompt_embeds and args.enable_prompt_adapter:
+        raise ValueError(
+            "Cannot use prompt embeds and prompt adapter at the same time.")
 
-    # Enable reasoning needs a reasoning parser to be valid
-    if args.enable_reasoning and not args.reasoning_parser:
-        raise TypeError("Error: --enable-reasoning requires "
-                        "--reasoning-parser")
 
-    # Ref https://api-docs.deepseek.com/guides/reasoning_model
-    # tool call and reasoning cannot be enabled at the same time.
-    if args.enable_auto_tool_choice and args.enable_reasoning:
-        raise TypeError(
-            "Error: --enable-auto-tool-choice and "
-            "--enable-reasoning cannot be enabled at the same time")
+def log_non_default_args(args: argparse.Namespace):
+    non_default_args = {}
+    parser = make_arg_parser(FlexibleArgumentParser())
+    for arg, default in vars(parser.parse_args([])).items():
+        if default != getattr(args, arg):
+            non_default_args[arg] = getattr(args, arg)
+    logger.info("non-default args: %s", non_default_args)
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

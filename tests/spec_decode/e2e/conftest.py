@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
 from itertools import cycle
@@ -56,7 +57,7 @@ def test_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
 def maybe_assert_ngram_worker(llm):
     # Verify the proposer worker is ngram if ngram is specified.
     if (llm.llm_engine.speculative_config is not None
-            and llm.llm_engine.speculative_config.ngram_prompt_lookup_max > 0):
+            and llm.llm_engine.speculative_config.method == "ngram"):
         from vllm.spec_decode.ngram_worker import NGramWorker
         assert isinstance(
             llm.llm_engine.model_executor.driver_worker.proposer_worker,

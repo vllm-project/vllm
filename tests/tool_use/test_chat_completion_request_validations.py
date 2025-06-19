@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -43,7 +44,8 @@ def test_chat_completion_request_with_no_tools():
     assert request.tool_choice == 'none'
 
 
-def test_chat_completion_request_with_tool_choice_but_no_tools():
+@pytest.mark.parametrize('tool_choice', ['auto', 'required'])
+def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
     with pytest.raises(ValueError,
                        match="When using `tool_choice`, `tools` must be set."):
         ChatCompletionRequest.model_validate({
@@ -54,7 +56,7 @@ def test_chat_completion_request_with_tool_choice_but_no_tools():
             'model':
             'facebook/opt-125m',
             'tool_choice':
-            'auto'
+            tool_choice
         })
 
     with pytest.raises(ValueError,
@@ -67,7 +69,7 @@ def test_chat_completion_request_with_tool_choice_but_no_tools():
             'model':
             'facebook/opt-125m',
             'tool_choice':
-            'auto',
+            tool_choice,
             'tools':
             None
         })

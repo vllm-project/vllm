@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -34,13 +35,13 @@ class UniProcExecutor(ExecutorBase):
         if len(device_info) > 1:
             local_rank = int(device_info[1])
         rank = 0
+        is_driver_worker = True
         kwargs = dict(
             vllm_config=self.vllm_config,
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
-            is_driver_worker=(not self.parallel_config)
-            or (rank % self.parallel_config.tensor_parallel_size == 0),
+            is_driver_worker=is_driver_worker,
         )
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
@@ -86,9 +87,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
         """
-        assert self.vllm_config.parallel_config.pipeline_parallel_size == 1, \
-            ("ExecutorWithExternalLauncher does not "
-            "support pipeline parallelism.")
         assert self.vllm_config.scheduler_config.delay_factor == 0.0, \
             ("ExecutorWithExternalLauncher needs deterministic "
             "execution, so it"

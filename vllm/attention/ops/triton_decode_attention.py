@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/sgl-project/sglang/blob/9f635ea50de920aa507f486daafba26a5b837574/python/sglang/srt/layers/attention/triton_ops/decode_attention.py
@@ -30,20 +31,19 @@ It supports page size >= 1.
 
 import logging
 
-import triton
-import triton.language as tl
-
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 is_hip_ = current_platform.is_rocm()
 
 logger = logging.getLogger(__name__)
 
-# TODO: Remove this when triton>=3.2.0. This issue will not affect performance
-# and accuracy.
-logger.warning(
-    "The following error message 'operation scheduled before its operands' "
-    "can be ignored.")
+# Only print the following warnings when triton version < 3.2.0.
+# The issue won't affect performance or accuracy.
+if triton.__version__ < '3.2.0':
+    logger.warning(
+        "The following error message 'operation scheduled before its operands' "
+        "can be ignored.")
 
 
 @triton.jit

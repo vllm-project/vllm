@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 
@@ -7,7 +8,6 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
-from vllm import envs
 from vllm.config import LoRAConfig
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
@@ -31,6 +31,19 @@ EMBEDDING_PADDING_MODULES = ["lm_head"]
 DEVICES = ([
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ] if current_platform.is_cuda_alike() else ["cpu"])
+
+DEFAULT_DTYPE = torch.get_default_dtype()
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch: pytest.MonkeyPatch):
+    """
+    Some tests depend on V0 internals. Since both V0 and V1 use the same
+    LoRAModelManager it is okay to just test V0.
+    """
+    with monkeypatch.context() as m:
+        m.setenv('VLLM_USE_V1', '0')
+        yield
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -115,8 +128,10 @@ def test_replace_submodules(dist_init, dummy_model):
     model = dummy_model
     manager = LoRAModelManager(
         model, 1, 1, 1,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=8, max_loras=8),
-        torch.device(DEVICES[0]))
+        LoRAConfig(max_lora_rank=8,
+                   max_cpu_loras=8,
+                   max_loras=8,
+                   lora_dtype=DEFAULT_DTYPE), torch.device(DEVICES[0]))
     model = manager.model
     assert isinstance(model.get_submodule("dense1"),
                       ColumnParallelLinearWithLoRA)
@@ -145,7 +160,8 @@ def test_lora_model_manager(dist_init, dummy_model, device):
                                2,
                                LoRAConfig(max_lora_rank=8,
                                           max_cpu_loras=3,
-                                          max_loras=2),
+                                          max_loras=2,
+                                          lora_dtype=DEFAULT_DTYPE),
                                device=device)
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_adapter(model_lora1)
@@ -211,7 +227,8 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model, device):
                                        2,
                                        LoRAConfig(max_lora_rank=8,
                                                   max_cpu_loras=3,
-                                                  max_loras=2),
+                                                  max_loras=2,
+                                                  lora_dtype=DEFAULT_DTYPE),
                                        device=device)
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_adapter(model_lora1)
@@ -306,7 +323,8 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
                                        2,
                                        LoRAConfig(max_lora_rank=8,
                                                   max_cpu_loras=2,
-                                                  max_loras=2),
+                                                  max_loras=2,
+                                                  lora_dtype=DEFAULT_DTYPE),
                                        device=device)
 
     assert all(x is None for x in manager.lora_index_to_id)
@@ -411,11 +429,13 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
     assert manager.device == device
 
 
-@pytest.mark.skipif(envs.VLLM_USE_V1, reason="Test leverages V0 internals.")
 @pytest.mark.parametrize("device", DEVICES)
 def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
                                           sql_lora_files, device):
-    lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
+    lora_config = LoRAConfig(max_lora_rank=8,
+                             max_cpu_loras=4,
+                             max_loras=4,
+                             lora_dtype=DEFAULT_DTYPE)
     worker_adapter_manager = LRUCacheWorkerLoRAManager(
         4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
         lora_config.lora_extra_vocab_size, lora_config, device,
@@ -491,12 +511,14 @@ def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
             device)
 
 
-@pytest.mark.skipif(envs.VLLM_USE_V1, reason="Test leverages V0 internals.")
 @pytest.mark.parametrize("device", DEVICES)
 def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
                                 sql_lora_files, device):
     # Should remove every LoRA not specified in the request.
-    lora_config = LoRAConfig(max_lora_rank=8, max_cpu_loras=4, max_loras=4)
+    lora_config = LoRAConfig(max_lora_rank=8,
+                             max_cpu_loras=4,
+                             max_loras=4,
+                             lora_dtype=DEFAULT_DTYPE)
     worker_adapter_manager = WorkerLoRAManager(
         4, 2, llama_2_7b_model_extra_embeddings.unpadded_vocab_size -
         lora_config.lora_extra_vocab_size, lora_config, device,
@@ -592,7 +614,8 @@ def test_packed_loras(dist_init, dummy_model_gate_up, device):
                                2,
                                LoRAConfig(max_lora_rank=8,
                                           max_cpu_loras=2,
-                                          max_loras=2),
+                                          max_loras=2,
+                                          lora_dtype=DEFAULT_DTYPE),
                                device=device)
     model = manager.model
 
