@@ -1391,6 +1391,7 @@ def create_requests_with_priority(
             request_id=f"{i}",
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
+            pooling_params=None,
             multi_modal_inputs=mm_inputs,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
@@ -1526,6 +1527,7 @@ def test_priority_scheduling_preemption():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
     scheduler.update_from_output(output, model_output)
 
@@ -1598,6 +1600,7 @@ def test_priority_scheduling_no_preemption_when_space_available():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
+        pooler_output=[],
     )
     scheduler.update_from_output(output, model_output)
 
@@ -1839,6 +1842,7 @@ def test_priority_scheduling_heap_property():
                 spec_token_ids=None,
                 logprobs=None,
                 prompt_logprobs_dict={},
+                pooler_output=[],
             )
             scheduler.update_from_output(output, model_output)
 

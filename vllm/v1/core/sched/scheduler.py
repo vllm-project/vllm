@@ -426,8 +426,8 @@ class Scheduler(SchedulerInterface):
                     # pooling requests to be chunked
                     if not self.scheduler_config.chunked_prefill_enabled and \
                         num_new_tokens > token_budget:
-                        self.waiting.popleft()
-                        skipped_waiting_requests.appendleft(request)
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
                         continue
 
                     num_new_tokens = min(num_new_tokens, token_budget)
