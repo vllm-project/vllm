@@ -10,6 +10,7 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
 
 import cloudpickle
 import torch.nn as nn
+from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
@@ -179,7 +180,8 @@ class LLM:
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
-        compilation_config: Optional[Union[int, dict[str, Any]]] = None,
+        compilation_config: Optional[Union[int, dict[str, Any],
+                                           CompilationConfig]] = None,
         **kwargs,
     ) -> None:
         """LLM constructor."""
@@ -193,6 +195,23 @@ class LLM:
             # we serialize it using cloudpickle to avoid pickling issues
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
+
+        if "kv_transfer_config" in kwargs and isinstance(
+                kwargs["kv_transfer_config"], dict):
+            from vllm.config import KVTransferConfig
+            raw_config_dict = kwargs["kv_transfer_config"]
+            try:
+                kwargs["kv_transfer_config"] = KVTransferConfig(
+                    **raw_config_dict)
+            except ValidationError as e:
+                logger.error(
+                    "Failed to convert 'kv_transfer_config' dict to "
+                    "KVTransferConfig object. Dict: %s. Error: %s",
+                    raw_config_dict, e)
+                # Consider re-raising a more specific vLLM error or ValueError
+                # to provide better context to the user.
+                raise ValueError(
+                    f"Invalid 'kv_transfer_config' provided: {e}") from e
 
         if hf_overrides is None:
             hf_overrides = {}
@@ -533,6 +552,7 @@ class LLM:
         prompts: list[Union[TokensPrompt, TextPrompt]],
         params: BeamSearchParams,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        use_tqdm: bool = False,
     ) -> list[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -542,6 +562,7 @@ class LLM:
                 of token IDs.
             params: The beam search parameters.
             lora_request: LoRA request to use for generation, if any.
+            use_tqdm: Whether to use tqdm to display the progress bar.
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
@@ -604,7 +625,18 @@ class LLM:
                     **mm_kwargs,
                 ), )
 
-        for _ in range(max_tokens):
+        token_iter = range(max_tokens)
+        if use_tqdm:
+            token_iter = tqdm(token_iter,
+                              desc="Beam search",
+                              unit="token",
+                              unit_scale=False)
+            logger.warning(
+                "The progress bar shows the upper bound on token steps and "
+                "may finish early due to stopping conditions. It does not "
+                "reflect instance-level progress.")
+
+        for _ in token_iter:
             all_beams: list[BeamSearchSequence] = list(
                 sum((instance.beams for instance in instances), []))
             pos = [0] + list(
@@ -1247,7 +1279,7 @@ class LLM:
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
         # lists of tokens to the `text` and `text_pair` kwargs
-        tokenizer = self.llm_engine.get_tokenizer()
+        tokenizer = self.get_tokenizer()
 
         def ensure_str(prompt: SingletonPrompt):
             if isinstance(prompt, dict):
