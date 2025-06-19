@@ -770,7 +770,7 @@ class NixlConnectorWorker:
             )
 
         assert self.block_size == remote_block_size, "Remote P worker with " \
-        "different block size is not supported"
+        f"different block size is not supported {self.block_size=} {remote_block_size=}"
 
         # Create dst descs and xfer side handles. TP workers have same #blocks.
         if engine_id in self.dst_num_blocks:
