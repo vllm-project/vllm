@@ -112,6 +112,7 @@ class Request:
 
         return cls(
             request_id=request.request_id,
+            client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
             multi_modal_inputs=request.mm_inputs,
             multi_modal_hashes=request.mm_hashes,
