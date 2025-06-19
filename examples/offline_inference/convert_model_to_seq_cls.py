@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
+
 import argparse
 import json
 
@@ -9,9 +10,9 @@ import transformers
 
 # Usage:
 # for Qwen3-Reranker
-# python converting.py --model_name Qwen/Qwen3-Reranker-0.6B --classifier_from_tokens '["no", "yes"]' --method from_2_way_softmax --path ./Qwen3-Reranker-0.6B-seq-cls
+# python convert_model_to_seq_cls.py --model_name Qwen/Qwen3-Reranker-0.6B --classifier_from_tokens '["no", "yes"]' --method from_2_way_softmax --path ./Qwen3-Reranker-0.6B-seq-cls
 # for BAAI/bge-reranker-v2-gemma
-# python converting.py --model_name BAAI/bge-reranker-v2-gemma --classifier_from_tokens '["yes"]' --method no_post_processing --path ./bge-reranker-v2-gemma-seq-cls
+# python convert_model_to_seq_cls.py --model_name BAAI/bge-reranker-v2-gemma --classifier_from_tokens '["Yes"]' --method no_post_processing --path ./bge-reranker-v2-gemma-seq-cls
 
 
 def from_2_way_softmax(
@@ -56,7 +57,9 @@ method_map = {
 }
 
 
-def converting(model_name, classifier_from_tokens, path, method, device="cpu"):
+def converting(
+    model_name, classifier_from_tokens, path, method, use_pad_token=False, device="cpu"
+):
     assert method in method_map
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
@@ -73,6 +76,7 @@ def converting(model_name, classifier_from_tokens, path, method, device="cpu"):
     )
 
     seq_cls_model.config.pad_token_id = tokenizer.pad_token_id
+    seq_cls_model.config.use_pad_token = use_pad_token
 
     seq_cls_model.save_pretrained(path)
     tokenizer.save_pretrained(path)
@@ -93,6 +97,9 @@ def parse_args():
         help="classifier from tokens",
     )
     parser.add_argument(
+        "--use-pad-token", action="store_true", help="Whether to use pad_token"
+    )
+    parser.add_argument(
         "--method", type=str, default="from_2_way_softmax", help="Converting converting"
     )
     parser.add_argument(
@@ -111,5 +118,6 @@ if __name__ == "__main__":
         model_name=args.model_name,
         classifier_from_tokens=json.loads(args.classifier_from_tokens),
         method=args.method,
+        use_pad_token=args.use_pad_token,
         path=args.path,
     )

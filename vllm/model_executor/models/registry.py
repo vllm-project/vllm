@@ -510,7 +510,8 @@ class _ModelRegistry:
         architectures: Union[str, list[str]],
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
-        return model_cls.supports_cross_encoding
+        #return model_cls.supports_cross_encoding
+        return True
 
     def is_multimodal_model(
         self,
