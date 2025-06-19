@@ -37,6 +37,8 @@ class PEFTHelper:
     use_dora: bool = field(default=False)
     # long context lora field
     context_length: int = field(default=0)
+    # Invocation string for Activated LoRA (aLoRA, see: https://arxiv.org/abs/2504.12397)
+    invocation_string: Optional[str] = field(default=None)
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: Optional[int] = field(default=False)

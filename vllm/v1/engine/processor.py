@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
-import os
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, Optional, Union
@@ -11,8 +9,8 @@ from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
 from vllm.multimodal.inputs import PlaceholderRange
@@ -328,19 +326,18 @@ class Processor:
                 sorted_mm_inputs = orig_sorted_mm_inputs
 
         # Tokenize aLoRA invocation sequence if applicable.
-        if lora_request is not None:
+        if self.lora_config.activated_lora_enabled and lora_request is not None:
 
-            # tpa: can we get this from PeftHelper somehow?
-            # Load in adapter config file
-            lora_path = get_adapter_absolute_path(lora_request.lora_path)
-            lora_config_path = os.path.join(lora_path, "adapter_config.json")
-            with open(lora_config_path) as f:
-                config = json.load(f)
+            text_config = self.model_config.hf_config.get_text_config()
 
-            if "invocation_string" in config:
+            peft_helper = PEFTHelper.from_local_dir(
+                lora_request.lora_path, text_config.max_position_embeddings,
+                lora_request.tensorizer_config_dict)
+
+            if peft_helper.invocation_string is not None:
 
                 invocation_tokens = self.input_preprocessor._tokenize_prompt(
-                    config["invocation_string"],
+                    peft_helper.invocation_string,
                     lora_request=lora_request,
                     tokenization_kwargs=tokenization_kwargs)
 
