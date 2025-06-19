@@ -18,6 +18,7 @@ import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
+from vllm.compilation.counter import compilation_counter
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -200,9 +201,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_sizes=[self.cache_config.block_size],
         )
 
-        self.use_cuda_graph = (self.compilation_config.level
-                               == CompilationLevel.PIECEWISE
-                               and not self.model_config.enforce_eager)
+        self.use_cuda_graph = (
+            self.vllm_config.compilation_config.level
+            == CompilationLevel.PIECEWISE
+            and self.vllm_config.compilation_config.use_cudagraph
+            and not self.model_config.enforce_eager)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
@@ -2058,9 +2061,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def capture_model(self) -> None:
         if not self.use_cuda_graph:
             logger.warning(
-                "Skipping CUDA graph capture. Please add "
-                "-O %s to use CUDA graphs.", CompilationLevel.PIECEWISE)
+                "Skipping CUDA graph capture. To turn on CUDA graph capture, "
+                "set -O %s and ensure `use_cudagraph` was not manually set to "
+                "False", CompilationLevel.PIECEWISE)
             return
+
+        compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
