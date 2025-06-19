@@ -908,9 +908,10 @@ class NixlConnectorWorker:
             in_progress = False
             for handle, _xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
-                xfer_stats.append(xfer_state)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
+                    done_req_ids.add(req_id)
+                    del transfers[req_id]
                 elif xfer_state == "PROC":
                     in_progress = True
                     continue

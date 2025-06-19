@@ -274,7 +274,8 @@ class TestNixlHandshake:
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
             _after_load = time.perf_counter()
-            assert _after_load - _before_load < 0.1, f"start_load_kv took {_after_load - _before_load} seconds"
+            assert _after_load - _before_load < 0.1, "start_load_kv took " \
+                f"{_after_load - _before_load} seconds"
             time.sleep(0.5)  # backoff for the async handshake to complete.
             connector.bind_connector_metadata(NixlConnectorMetadata())
             _, done_recving = connector.get_finished(finished_req_ids=set())
@@ -321,7 +322,8 @@ class TestNixlHandshake:
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
             _after_load = time.perf_counter()
-            assert _after_load - _before_load < 0.1, f"start_load_kv took {_after_load - _before_load} seconds"
+            assert _after_load - _before_load < 0.1, "start_load_kv took " \
+                f"{_after_load - _before_load} seconds"
             time.sleep(0.5)  # backoff for the async handshake to complete.
             connector.bind_connector_metadata(NixlConnectorMetadata())
             _, done_recving = connector.get_finished(finished_req_ids=set())
