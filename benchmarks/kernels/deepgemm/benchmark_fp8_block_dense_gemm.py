@@ -238,6 +238,7 @@ def run_benchmarks(verbose: bool = False):
     torch.manual_seed(42)
     torch.cuda.manual_seed(42)
 
+    # Define benchmark shapes (m, n, k)
     shapes = [
         # (64, 2112, 7168),
         (64, 24576, 1536),
