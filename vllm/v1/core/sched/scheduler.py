@@ -329,9 +329,6 @@ class Scheduler(SchedulerInterface):
                     if is_ready:
                         request.status = RequestStatus.WAITING
                     else:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request.request_id)
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
@@ -707,10 +704,14 @@ class Scheduler(SchedulerInterface):
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        pending_handshake_req_ids = (
+            model_runner_output.pending_handshake_req_ids)
 
         new_running: list[Request] = []
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
+        num_requests_to_reschedule = 0
+        num_tokens_to_reschedule = 0
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -718,6 +719,18 @@ class Scheduler(SchedulerInterface):
         for request in self.running:
             req_id = request.request_id
             num_tokens_scheduled = num_scheduled_tokens.get(req_id, 0)
+            
+            # Check if this request is pending handshake and needs to reschedule
+            if (pending_handshake_req_ids
+                    and req_id in pending_handshake_req_ids):
+                num_requests_to_reschedule += 1
+                num_tokens_to_reschedule += request.num_computed_tokens
+                # Reset computed tokens to force rescheduling from beginning
+                request.num_computed_tokens = 0
+                num_tokens_to_reschedule -= request.num_computed_tokens
+                new_running.append(request)
+                continue
+            
             if num_tokens_scheduled == 0:
                 # The request was not scheduled in this step.
                 new_running.append(request)
@@ -824,6 +837,12 @@ class Scheduler(SchedulerInterface):
 
             if not stopped:
                 new_running.append(request)
+
+        if num_requests_to_reschedule:
+            logger.info(
+                "Recovered from handshake failure: "
+                "%d request(s) rescheduled (%d tokens affected).",
+                num_requests_to_reschedule, num_tokens_to_reschedule)
 
         # KV Connector: update state for finished KV Transfers.
         self._update_from_kv_xfer_finished(model_runner_output)

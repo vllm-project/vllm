@@ -536,6 +536,17 @@ def wait_for_engine_startup(
             num_gpu_blocks = cache_config.num_gpu_blocks or 0
             num_gpu_blocks += msg["num_gpu_blocks"]
             cache_config.num_gpu_blocks = num_gpu_blocks
+            # stash KV connector metadata in vllm_config if passed in.
+            if txfer_metadata := msg.get("transfer_handshake_metadata"):
+                logger.debug(
+                    "Received transfer handshake metadata from engine %s: %s",
+                    eng_index, txfer_metadata)
+                if cache_config.transfer_handshake_metadata is None:
+                    cache_config.transfer_handshake_metadata = defaultdict(dict)
+                for dp_rank, tp_dict in txfer_metadata.items():
+                    for tp_rank, metadata in tp_dict.items():
+                        cache_config.transfer_handshake_metadata[dp_rank][
+                            tp_rank] = metadata
 
             start_pending[0 if local else 1] -= 1
             engine.state = CoreEngineState.READY

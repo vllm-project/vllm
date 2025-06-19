@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 KVConnectorBase_V1 Class for Distributed KV Cache & Hidden State
 communication in vLLM v1
@@ -8,15 +7,9 @@ The class provides the following primitives:
     Scheduler-side: runs in the scheduler, binds metadata, which
     is used by the worker-side to load/save KV cache.
         get_num_new_matched_tokens() - get number of new tokens 
-            that exist in the remote KV cache. Might be called multiple
-            times for a given request and should be side-effect free.
+            that exist in the remote KV cache
         update_state_after_alloc() - update KVConnector state after
             temporary buffer alloc by the CacheManager.
-        request_finished() - called when a request is finished, with
-            the computed kv cache blocks for the request.
-            Returns whether KV cache should be freed now or will be
-            freed asynchronously and optionally returns KV transfer
-            params.
 
     Worker-side: runs in each worker, loads/saves KV cache to/from
     the Connector based on the metadata.
@@ -25,16 +18,16 @@ The class provides the following primitives:
 
         save_kv_layer() - starts saving KV for layer i (maybe async)
         wait_for_save() - blocks until all saves are done
-
-        get_finished() - called with ids of finished requests, returns
-            ids of requests that have completed async sending/recving.
 """
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
+import msgspec
 import torch
+from pydantic_core import core_schema
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -47,6 +40,64 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class KVTransferFinishedResult:
+    """Result of KV transfer get_finished operation."""
+
+    finished_sending: set[str]
+    finished_recving: set[str]
+    pending_handshake: set[str]
+
+    def has_any_finished(self) -> bool:
+        """Check if any requests finished or are pending."""
+        return bool(self.finished_sending or self.finished_recving
+                    or self.pending_handshake)
+
+    def is_empty(self) -> bool:
+        """Check if all sets are empty."""
+        return not self.has_any_finished()
+
+    def get_all_finished_req_ids(self) -> set[str]:
+        """Get all request IDs that have finished (sending or receiving)."""
+        return self.finished_sending.union(self.finished_recving)
+
+    def merge(self,
+              other: 'KVTransferFinishedResult') -> 'KVTransferFinishedResult':
+        """Merge with another result, combining all sets."""
+        return KVTransferFinishedResult(
+            finished_sending=self.finished_sending.union(
+                other.finished_sending),
+            finished_recving=self.finished_recving.union(
+                other.finished_recving),
+            pending_handshake=self.pending_handshake.union(
+                other.pending_handshake))
+
+    @classmethod
+    def empty(cls) -> 'KVTransferFinishedResult':
+        """Create an empty result."""
+        return cls(finished_sending=set(),
+                   finished_recving=set(),
+                   pending_handshake=set())
+
+    @classmethod
+    def from_tuple(
+        cls, result_tuple: tuple[set[str], set[str], set[str]]
+    ) -> 'KVTransferFinishedResult':
+        """Create from the old tuple format for backward compatibility."""
+        finished_sending, finished_recving, pending_handshake = result_tuple
+        return cls(finished_sending=finished_sending,
+                   finished_recving=finished_recving,
+                   pending_handshake=pending_handshake)
+
+    def to_tuple(self) -> tuple[set[str], set[str], set[str]]:
+        """Convert to the old tuple format for backward compatibility."""
+        return (
+            self.finished_sending,
+            self.finished_recving,
+            self.pending_handshake,
+        )
 
 
 class KVConnectorRole(enum.Enum):
@@ -65,6 +116,39 @@ class KVConnectorMetadata:
     pass
 
 
+class KVConnectorHandshakeMetadata(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):
+    """
+    Metadata optionally used for out of band connector handshake between
+    P/D workers.
+    """
+    connector_type: str = "base"
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, _source_type: Any, _handler: Callable[[Any],
+                                                   core_schema.CoreSchema]
+    ) -> core_schema.CoreSchema:
+        """bridge msgspec.Struct with pydantic for schema generation"""
+        return core_schema.no_info_after_validator_function(
+            cls, core_schema.dict_schema())
+
+
+class KVConnectorTransferMetadata(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        dict=True):
+    """
+    Wrapper for transfer handshake metadata sent between engine and utils.
+    """
+    tensor_parallel_rank: int
+    data_parallel_rank: int
+    content: Optional[dict]
+
+
 class KVConnectorBase_V1(ABC):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
@@ -74,6 +158,7 @@ class KVConnectorBase_V1(ABC):
         self._connector_metadata = KVConnectorMetadata()
         self._vllm_config = vllm_config
         self._role = role
+        self._handshake_metadata: Optional[KVConnectorHandshakeMetadata] = None
 
     @property
     def role(self) -> KVConnectorRole:
@@ -104,7 +189,7 @@ class KVConnectorBase_V1(ABC):
         """
         self._connector_metadata = KVConnectorMetadata()
 
-    def _get_connector_metadata(self) -> KVConnectorMetadata:
+    def get_connector_metadata(self) -> KVConnectorMetadata:
         """Get the connector metadata.
 
         This function should only be called inside the connector.
@@ -185,21 +270,37 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    def get_finished(self,
+                     finished_req_ids: set[str]) -> KVTransferFinishedResult:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
 
         Returns:
-            ids of requests that have finished asynchronous transfer
-            (requests that previously returned True from request_finished()),
-            tuple of (sending/saving ids, recving/loading ids).
+            KVTransferFinishedResult containing sets of finished sending,
+            finished receiving, and pending handshake request IDs.
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        return None, None
+        return KVTransferFinishedResult.empty()
+
+    def get_pending_handshake_req_ids(self) -> Optional[set[str]]:
+        """
+        Get request IDs that are currently pending handshake completion.
+        
+        Returns:
+            Set of request IDs waiting for handshake, or None if not applicable.
+        """
+        return None
+
+    def get_handshake_metadata(self) -> Optional[KVConnectorHandshakeMetadata]:
+        """
+        Get the handshake metadata for the connector.
+
+        Returns:
+            KVConnectorHandshakeMetadata: the handshake metadata.
+        """
+        return self._handshake_metadata
 
     # ==============================
     # Scheduler-side methods
@@ -225,8 +326,7 @@ class KVConnectorBase_V1(ABC):
                 - The number of tokens that can be loaded from the 
                   external KV cache beyond what is already computed.
                 - `True` if external KV cache tokens will be loaded
-                  asynchronously (between scheduler steps). Must be
-                  'False' if the first element is 0.
+                  asynchronously (between scheduler steps).
         """
         pass
 
@@ -236,18 +336,6 @@ class KVConnectorBase_V1(ABC):
                                  num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
-
-        If get_num_new_matched_tokens previously returned True for a
-        request, this function may be called twice for that same request -
-        first when blocks are allocated for the connector tokens to be
-        asynchronously loaded into, and second when any additional blocks
-        are allocated, after the load/transfer is complete.
-
-        Args:
-            request (Request): the request object.
-            blocks (KVCacheBlocks): the blocks allocated for the request.
-            num_external_tokens (int): the number of tokens that will be
-                loaded from the external KV cache.
         """
         pass
 

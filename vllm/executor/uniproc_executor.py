@@ -57,6 +57,10 @@ class UniProcExecutor(ExecutorBase):
         answer = run_method(self.driver_worker, method, args, kwargs)
         return [answer]
 
+    def get_kv_connector_handshake_metadata(self) -> List[Optional[Dict]]:
+        """Get KV connector handshake metadata from all workers."""
+        return self.collective_rpc("get_kv_connector_handshake_metadata")
+
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as
         # it's running.

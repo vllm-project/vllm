@@ -868,6 +868,33 @@ if envs.VLLM_SERVER_DEV_MODE:
         server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
         return JSONResponse(content=server_info)
 
+    @router.get("/get_kv_connector_metadata")
+    @router.get("/get_kv_connector_metadata/{dp_rank}")
+    @router.get("/get_kv_connector_metadata/{dp_rank}/{tp_rank}")
+    async def get_kv_connector_metadata(raw_request: Request,
+                                        dp_rank: Optional[int] = None,
+                                        tp_rank: Optional[int] = None):
+        kv_meta: Optional[dict[str, dict[str, dict[str, Any]]]] = (
+            raw_request.app.state.vllm_config.cache_config.
+            transfer_handshake_metadata)
+
+        if kv_meta is None:
+            return None
+
+        if dp_rank is not None:
+            if dp_rank not in kv_meta:
+                return {}
+            dp_data = kv_meta[dp_rank]
+
+            if tp_rank is not None:
+                if tp_rank not in dp_data:
+                    return {}
+                return {dp_rank: {tp_rank: dp_data[tp_rank]}}
+            else:
+                return {dp_rank: dp_data}
+
+        return kv_meta
+
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
         """

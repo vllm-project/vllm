@@ -104,6 +104,7 @@ class ModelRunnerOutput:
     # [req_ids]
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
+    pending_handshake_req_ids: Optional[set[str]] = None
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
@@ -113,4 +114,5 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               finished_sending=None,
-                                              finished_recving=None)
+                                              finished_recving=None,
+                                              pending_handshake_req_ids=None)

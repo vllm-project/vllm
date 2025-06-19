@@ -33,6 +33,8 @@ from typing_extensions import deprecated, runtime_checkable
 import vllm.envs as envs
 from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      QuantizationMethods,
@@ -1512,6 +1514,10 @@ class CacheConfig:
     """The number of blocks to allocate for GPU memory."""
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
+
+    transfer_handshake_metadata: Optional[dict[int, dict[
+        int, KVConnectorHandshakeMetadata]]] = field(default=None, init=False)
+    """Metadata for the KV connector handshake. Structure: dp_rank -> tp_rank -> metadata"""
 
     def compute_hash(self) -> str:
         """
@@ -4533,6 +4539,11 @@ class VllmConfig:
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
+        
+        if (self.kv_transfer_config is not None 
+                and self.kv_transfer_config.is_kv_transfer_instance):
+            from collections import defaultdict
+            self.cache_config.transfer_handshake_metadata = defaultdict(dict)
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
