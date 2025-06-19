@@ -1841,6 +1841,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
         capture_attn_cudagraph: bool = False,
+        skip_eplb: bool = False,
     ) -> torch.Tensor:
 
         # Padding for DP
@@ -1938,7 +1939,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter.dummy_run(num_tokens)
 
         # This is necessary to avoid blocking DP
-        self.eplb_step(is_dummy=True)
+        if not skip_eplb:
+            self.eplb_step(is_dummy=True)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]
@@ -2120,8 +2122,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                    total=len(self.cudagraph_batch_sizes)):
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens, capture_attn_cudagraph=full_cg)
-                self._dummy_run(num_tokens, capture_attn_cudagraph=full_cg)
+                    self._dummy_run(num_tokens,
+                                    capture_attn_cudagraph=full_cg,
+                                    skip_eplb=True)
+                self._dummy_run(num_tokens,
+                                capture_attn_cudagraph=full_cg,
+                                skip_eplb=True)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
