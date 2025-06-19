@@ -921,14 +921,14 @@ class NixlConnectorWorker:
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
         # workers will issue xfers to parts of the P worker remote kv caches.
 
-        # Sort block ids to ensure nixl can merge contiguous blocks.
-        start = time.perf_counter()
-        sorted_idx = sorted(range(len(local_block_ids)),
-                            key=local_block_ids.__getitem__)
-        local_block_ids = [local_block_ids[i] for i in sorted_idx]
-        remote_block_ids = [remote_block_ids[i] for i in sorted_idx]
-        end = time.perf_counter()
-        print(f"REORDER took: {end - start}")
+        # # Sort block ids to ensure nixl can merge contiguous blocks.
+        # start = time.perf_counter()
+        # sorted_idx = sorted(range(len(local_block_ids)),
+        #                     key=local_block_ids.__getitem__)
+        # local_block_ids = [local_block_ids[i] for i in sorted_idx]
+        # remote_block_ids = [remote_block_ids[i] for i in sorted_idx]
+        # end = time.perf_counter()
+        # print(f"REORDER took: {end - start}")
 
         # Get descs ids.
         local_block_descs_ids: list[int] = []
@@ -974,7 +974,7 @@ class NixlConnectorWorker:
             remote_xfer_side_handle,
             remote_block_descs_ids,
             notif_msg=notif_id,
-            # skip_desc_merge=True,
+            skip_desc_merge=True,  # this causes the issue to emerge immediately.
         )
 
         # Begin async xfer.
