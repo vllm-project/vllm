@@ -370,7 +370,7 @@ def pplx_moe(
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     qtype: Optional[torch.dtype] = None,
-    per_act_token_quant = False,
+    per_act_token_quant=False,
     block_shape: Optional[list[int]] = None,
     use_compile: bool = False,
     use_cudagraphs: bool = True,
