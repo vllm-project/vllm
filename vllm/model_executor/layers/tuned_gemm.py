@@ -10,7 +10,8 @@ import torch.nn.functional as F
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.platforms import current_platform
-from vllm.utils import aiter_linear_enabled, is_mi250, is_navi
+from vllm.platforms.rocm import on_gfx9
+from vllm.utils import aiter_linear_enabled, is_navi
 
 if aiter_linear_enabled():
     from aiter.tuned_gemm import tgemm as aiter_tgemm
@@ -116,7 +117,7 @@ class TunedGemm:
                                   bias=bias)
         n = inp.shape[0]
         if (not envs.VLLM_USE_ROCM_SKINNY_GEMM or n != 1
-                or not current_platform.is_rocm() or is_mi250() or is_navi()):
+                or not current_platform.is_rocm() or on_gfx9() or is_navi()):
             return torch._scaled_mm(inp,
                                     weight,
                                     out_dtype=out_dtype,

@@ -170,7 +170,6 @@ def main(
                         kv_cache_dtype,
                         k_scale,
                         v_scale,
-                        None,
                     )
             else:
                 raise ValueError(f"Invalid version: {version}")
@@ -184,13 +183,13 @@ def main(
     # Warmup.
     print("Warming up...")
     run_benchmark = run_cuda_benchmark
-    run_benchmark(num_iters=500, profile=False)
+    run_benchmark(num_iters=3, profile=False)
 
     # Benchmark.
     if do_profile:
         latency = run_benchmark(num_iters=1, profile=True)
     else:
-        latency = run_benchmark(num_iters=10000, profile=False)
+        latency = run_benchmark(num_iters=100, profile=False)
     print(f"Kernel running time: {latency * 1000000:.3f} us")
 
 

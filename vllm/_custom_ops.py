@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-import importlib
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -12,7 +11,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
-from vllm.utils import is_navi
 
 logger = init_logger(__name__)
 
@@ -65,9 +63,7 @@ def paged_attention_v1(
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
         k_scale, v_scale, tp_rank, blocksparse_local_blocks,
         blocksparse_vert_stride, blocksparse_block_size,
-        blocksparse_head_sliding_step,
-        num_threads = 1024 if current_platform.is_rocm() \
-            and not is_navi() else 128)
+        blocksparse_head_sliding_step)
 
 
 def paged_attention_v2(
@@ -99,9 +95,7 @@ def paged_attention_v2(
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
         alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
-        blocksparse_block_size, blocksparse_head_sliding_step,
-        num_threads = 1024 if current_platform.is_rocm() \
-            and not is_navi() else 128)
+        blocksparse_block_size, blocksparse_head_sliding_step)
 
 
 def paged_attention_rocm(
@@ -613,7 +607,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         quant_type: int,
         row: torch.SymInt,
     ) -> torch.Tensor:
-        return torch.empty((1, row), dtype=X.dtype, device=W.device)
+        return torch.empty((X.shape[0], row), dtype=X.dtype, device=W.device)
 
     @register_fake("_C::ggml_mul_mat_a8")
     def _ggml_mul_mat_a8_fake(
@@ -724,10 +718,8 @@ def cutlass_scaled_mm(a: torch.Tensor,
 
     cutlass_compatible_b = (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     if current_platform.is_rocm() or not cutlass_compatible_b:
-        triton_scaled_mm_module = importlib.import_module(
-            "vllm.model_executor.layers.quantization.compressed_tensors."
-            "triton_scaled_mm")
-        triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
+        from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa
+            triton_scaled_mm)
         return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
@@ -863,11 +855,16 @@ def cutlass_scaled_sparse_mm(
     return out
 
 
-def get_cutlass_moe_mm_data(
-        topk_ids: torch.Tensor, expert_offsets: torch.Tensor,
-        problem_sizes1: torch.Tensor, problem_sizes2: torch.Tensor,
-        input_permutation: torch.Tensor, output_permutation: torch.Tensor,
-        num_experts: int, n: int, k: int):
+def get_cutlass_moe_mm_data(topk_ids: torch.Tensor,
+                            expert_offsets: torch.Tensor,
+                            problem_sizes1: torch.Tensor,
+                            problem_sizes2: torch.Tensor,
+                            input_permutation: torch.Tensor,
+                            output_permutation: torch.Tensor,
+                            num_experts: int,
+                            n: int,
+                            k: int,
+                            blockscale_offsets: Optional[torch.Tensor] = None):
     """
     Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
@@ -885,19 +882,63 @@ def get_cutlass_moe_mm_data(
                          before executing the MMs.
     - output_permutation: Permutation that must be used to shuffle the output
                           after executing the MMs.
+    - blockscale_offsets: Optional argument passed for fp4 moe. Indices that
+                          mark at which block scale index each expert begins
+                          its computation. The number of block scale rows
+                          computed with expert E is blockscale_offsets[E + 1] -
+                          blockscale_offsets[E]
     """
     return torch.ops._C.get_cutlass_moe_mm_data(topk_ids, expert_offsets,
                                                 problem_sizes1, problem_sizes2,
                                                 input_permutation,
                                                 output_permutation,
-                                                num_experts, n, k)
+                                                num_experts, n, k,
+                                                blockscale_offsets)
+
+
+def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
+    """
+    Shuffle and expand the input tensor according to the dst2src_map and store the result in output_tensor.
+    This is used in MoE to permute the input tensor before performing grouped matrix multiplications.
+    """
+    num_tokens_permuted = dst2src_map.shape[0]
+    output_tensor = torch.empty((num_tokens_permuted, input_tensor.shape[1]),
+                                device=input_tensor.device,
+                                dtype=input_tensor.dtype)
+    torch.ops._moe_C.shuffle_rows(input_tensor, dst2src_map, output_tensor)
+    return output_tensor
+
+
+def get_cutlass_pplx_moe_mm_data(expert_offsets: torch.Tensor,
+                                 problem_sizes1: torch.Tensor,
+                                 problem_sizes2: torch.Tensor,
+                                 expert_num_tokens: torch.Tensor,
+                                 num_local_experts: int, padded_m: int, n: int,
+                                 k: int):
+    """
+    Prepare data necessary to perform CUTLASS grouped matrix multiplications
+    used in CUTLASS-based fused MoE.
+
+    The function takes in expert_num_tokens (token count per expert) and
+    non_zero_expert_idxs (consecutive indices of experts with non-zero token 
+    counts) and uses them to compute:
+    - expert_offsets: Indices that mark at which token index each expert begins
+                      its computation.
+    - problem_sizes1, problem_sizes2: MxNxK sizes of each expert's
+                                      multiplication in two grouped MMs used in
+                                      the fused MoE operation.
+    """
+    return torch.ops._C.get_cutlass_pplx_moe_mm_data(
+        expert_offsets, problem_sizes1, problem_sizes2, expert_num_tokens,
+        num_local_experts, padded_m, n, k)
 
 
 def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                    b_tensors: torch.Tensor, a_scales: torch.Tensor,
                    b_scales: torch.Tensor, expert_offsets: torch.Tensor,
                    problem_sizes: torch.Tensor, a_strides: torch.Tensor,
-                   b_strides: torch.Tensor, c_strides: torch.Tensor):
+                   b_strides: torch.Tensor, c_strides: torch.Tensor,
+                   per_act_token: bool, per_out_ch: bool):
     """
     A single grouped matrix multiplication used in CUTLASS-based fused MoE.
     The function executes fp8-quantized OUT = AB matrix multiplication.
@@ -912,7 +953,7 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
     return torch.ops._C.cutlass_moe_mm(out_tensors, a_tensors, b_tensors,
                                        a_scales, b_scales, expert_offsets,
                                        problem_sizes, a_strides, b_strides,
-                                       c_strides)
+                                       c_strides, per_act_token, per_out_ch)
 
 
 def cutlass_fp4_moe_mm(a_tensors: torch.Tensor, b_tensors: torch.Tensor,
@@ -1142,14 +1183,12 @@ def scaled_fp4_experts_quant(
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
     topk: int,
-    expert_map: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale, for
     packed MoE Inputs.
     Args:
-        input: The input tensor to be quantized to FP4
-        expert_map: The expert map tensor
+        input_tensor: The input tensor to be quantized to FP4
         input_global_scale: A scalar scaling factor for the entire tensor.
         expert_offsets: The expert offsets tensor
         blockscale_offsets: The blockscale offsets tensor
@@ -1161,14 +1200,13 @@ def scaled_fp4_experts_quant(
     assert input_tensor.ndim == 2, (
         f'input.ndim needs to be == 2, but got {input_tensor.ndim}.')
 
-    input_tensor = input_tensor[
-        expert_map] if expert_map is not None else input_tensor
-    m_numtopk, k = input_tensor.shape
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE Expert Quantization. This is used to prevent the kernel
     # from running out of memory. This value can also be increased to support
     # larger models.
     MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+    m_numtopk, k = input_tensor.shape
+
     assert (m_numtopk <= MAX_TOKENS_PER_EXPERT * topk), (
         f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
         f"{MAX_TOKENS_PER_EXPERT})"
@@ -1200,6 +1238,7 @@ def scaled_fp8_quant(
     num_token_padding: Optional[int] = None,
     scale_ub: Optional[torch.Tensor] = None,
     use_per_token_if_dynamic: bool = False,
+    output: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP8 and return quantized tensor and scale.
@@ -1231,7 +1270,12 @@ def scaled_fp8_quant(
     out_dtype: torch.dtype = current_platform.fp8_dtype()
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
-    output = torch.empty(shape, device=input.device, dtype=out_dtype)
+    if output is None:
+        output = torch.empty(shape, device=input.device, dtype=out_dtype)
+    else:
+        assert num_token_padding is None, \
+            "padding not supported if output passed in"
+        assert output.dtype == out_dtype
 
     if scale is None:
         if use_per_token_if_dynamic:
@@ -1239,7 +1283,7 @@ def scaled_fp8_quant(
                                 device=input.device,
                                 dtype=torch.float32)
             torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale, scale_ub)
+                output, input.contiguous(), scale, scale_ub)
         else:
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
@@ -1348,8 +1392,8 @@ def scaled_int8_quant(
                                dtype=torch.float32)
     input_azp = None if symmetric else torch.empty_like(input_scales,
                                                         dtype=torch.int32)
-    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
-                                           input_azp)
+    torch.ops._C.dynamic_scaled_int8_quant(output, input.contiguous(),
+                                           input_scales, input_azp)
     return output, input_scales, input_azp
 
 
@@ -1522,10 +1566,10 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 token_expert_indicies: torch.Tensor,
+                 token_expert_indices: torch.Tensor,
                  gating_output: torch.Tensor) -> None:
-    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
-                                  token_expert_indicies, gating_output)
+    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids, token_expert_indices,
+                                  gating_output)
 
 
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],

@@ -15,13 +15,8 @@ if TYPE_CHECKING:
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
-    VLLM_ROCM_PREFER_TORCH: bool = False
-    VLLM_ROCM_PREFER_TRITON: bool = True
-    VLLM_USE_SDPA_ATTENTION: bool = False
-    VLLM_USE_TRITON_FLASH_ATTN: bool = False
-    VLLM_USE_ROCM_SKINNY_GEMM: bool = True
+    VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
-    VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
@@ -50,6 +45,7 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_CPU_NUM_OF_RESERVED_CPU: int = 0
     VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
@@ -77,10 +73,10 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
+    VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
-    VLLM_RPD_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -90,9 +86,9 @@ if TYPE_CHECKING:
     VLLM_SYNC_SERVER_ENGINE_STEPS_BETWEEN_POLLS: int = 1
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
+    VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
-    VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
@@ -103,9 +99,9 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
-    Q_SCALE_CONSTANT: int = 20
-    K_SCALE_CONSTANT: int = 20
-    V_SCALE_CONSTANT: int = 10
+    Q_SCALE_CONSTANT: int = 200
+    K_SCALE_CONSTANT: int = 200
+    V_SCALE_CONSTANT: int = 100
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
@@ -120,6 +116,8 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_MOE_DP_CHUNK_SIZE: int = 256
+    VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -132,6 +130,9 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: str = "naive"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
+    VLLM_SLEEP_WHEN_IDLE: bool = False
+    VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_KV_CACHE_LAYOUT: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -295,21 +296,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "LD_LIBRARY_PATH":
     lambda: os.environ.get("LD_LIBRARY_PATH", None),
 
-    # flag to tell vllm to prefer torch on ROCm
-    "VLLM_ROCM_PREFER_TORCH":
-    lambda: (os.environ.get("VLLM_ROCM_PREFER_TORCH", "False").lower() in
-             ("true", "1")),
-
-    # flag to tell vllm to prefer triton on ROCm
-    "VLLM_ROCM_PREFER_TRITON":
-    lambda: (os.environ.get("VLLM_ROCM_PREFER_TRITON", "True").lower() in
-             ("true", "1")),
-
-    # flag to control if vllm should use naive scaled dot-product attention
-    "VLLM_USE_SDPA_ATTENTION":
-    lambda: (os.environ.get("VLLM_USE_SDPA_ATTENTION", "False").lower() in
-             ("true", "1")),
-
     # flag to control if vllm should use triton flash attention
     "VLLM_USE_TRITON_FLASH_ATTN":
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
@@ -342,11 +328,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda:
     (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT", "True").lower() in
      ("true", "1")),
-
-    # use quantized q,k,v,softmax(qk^T), attn output during prefill
-    "VLLM_USE_ROCM_FP8_FLASH_ATTN":
-    lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
-             ("true", "1")),
 
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
@@ -459,7 +440,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
-    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
+    lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "auto"),
+
+    # (CPU backend only) CPU cores not used by OMP threads .
+    # Those CPU cores will not be used by OMP threads of a rank.
+    "VLLM_CPU_NUM_OF_RESERVED_CPU":
+    lambda: int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0")),
 
     # (CPU backend only) whether to use prepack for MoE layer. This will be
     # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
@@ -595,6 +581,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RPC_TIMEOUT":
     lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
 
+    # Timeout in seconds for keeping HTTP connections alive in API server
+    "VLLM_HTTP_TIMEOUT_KEEP_ALIVE":
+    lambda: int(os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")),
+
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
     # if this is set to an empty string, no plugins will be loaded
@@ -613,12 +603,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
-
-    # Enables rpd profiler if set. Path to the directory where torch profiler
-    # traces are saved. Note that it must be an absolute path.
-    "VLLM_RPD_PROFILER_DIR":
-    lambda: (None if os.getenv("VLLM_RPD_PROFILER_DIR", None) is None else os.
-             path.expanduser(os.getenv("VLLM_RPD_PROFILER_DIR", "."))),
 
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":
@@ -662,6 +646,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
              ("true", "1")),
 
     # use aiter rms norm op if aiter ops are enabled.
+    "VLLM_ROCM_USE_AITER_LINEAR":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in
+             ("true", "1")),
+
+    # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
              ("true", "1")),
@@ -670,13 +659,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
-             ("true", "1")),
-
-    # use aiter linear op if aiter ops are enabled
-    # The following list of related ops
-    # - scaled_mm (per-tensor / rowwise)
-    "VLLM_ROCM_USE_AITER_LINEAR":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in
              ("true", "1")),
 
     # Whether to use aiter mla ops.
@@ -725,17 +707,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Divisor for dynamic query scale factor calculation for FP8 KV Cache
     "Q_SCALE_CONSTANT":
-    lambda: int(os.getenv("Q_SCALE_CONSTANT", "20")),
-
-    # Divisor for dynamic key scale factor calculation
-    # for FP8 KV Cache and attention
+    lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
+    # Divisor for dynamic key scale factor calculation for FP8 KV Cache
     "K_SCALE_CONSTANT":
-    lambda: int(os.getenv("K_SCALE_CONSTANT", "20")),
-
-    # Divisor for dynamic value scale factor calculation
-    # for FP8 KV Cache and attention
+    lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
+    # Divisor for dynamic value scale factor calculation for FP8 KV Cache
     "V_SCALE_CONSTANT":
-    lambda: int(os.getenv("V_SCALE_CONSTANT", "10")),
+    lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
+
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING":
     lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))),
@@ -822,6 +801,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_MASTER_PORT":
     lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
 
+    # In the context of executing MoE models with Data-Parallel, Expert-Parallel
+    # and Batched All-to-All dispatch/combine kernels, VLLM_MOE_DP_CHUNK_SIZE
+    # dictates the quantum of tokens that can be dispatched from a DP
+    # rank. All DP ranks process the activations in VLLM_MOE_DP_CHUNK_SIZE
+    # units.
+    "VLLM_MOE_DP_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
+
+    # Randomize inputs during dummy runs when using Data Parallel
+    "VLLM_RANDOMIZE_DP_DUMMY_INPUTS":
+    lambda: os.environ.get("VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0") == "1",
+
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
@@ -904,6 +895,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
     lambda: int(os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")),
+
+    # Reduce CPU usage when vLLM is idle. Enabling this will incur small
+    # latency penalty when a request eventually comes.
+    "VLLM_SLEEP_WHEN_IDLE":
+    lambda: bool(int(os.getenv("VLLM_SLEEP_WHEN_IDLE", "0"))),
+
+    # Control the max chunk bytes (in MB) for the rpc message queue.
+    # Object larger than this threshold will be broadcast to worker
+    # processes via zmq.
+    "VLLM_MQ_MAX_CHUNK_BYTES_MB":
+    lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
+
+    # KV Cache layout used throughout vllm.
+    # Some common values are:
+    # - NHD
+    # - HND
+    # Where N=num_blocks, H=num_heads and D=head_size. The default value will
+    # leave the layout choice to the backend. Mind that backends may only
+    # implement and support a subset of all possible layouts.
+    "VLLM_KV_CACHE_LAYOUT":
+    lambda: os.getenv("VLLM_KV_CACHE_LAYOUT", None)
 }
 
 # --8<-- [end:env-vars-definition]

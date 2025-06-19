@@ -47,8 +47,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step,"
-      "    int num_threads) -> ()");
+      "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v1", torch::kCUDA, &paged_attention_v1);
 
   // PagedAttention V2.
@@ -62,8 +61,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step,"
-      "    int num_threads) -> ()");
+      "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
 
 #ifndef USE_ROCM
@@ -442,7 +440,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_moe_mm(Tensor! out_tensors, Tensor a_tensors, Tensor b_tensors, "
       "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
       "               Tensor problem_sizes, Tensor a_strides, "
-      "               Tensor b_strides, Tensor c_strides) -> ()",
+      "               Tensor b_strides, Tensor c_strides, bool per_act_token, "
+      "               bool per_out_ch) -> ()",
       {stride_tag});
   ops.impl("cutlass_moe_mm", torch::kCUDA, &cutlass_moe_mm);
 
@@ -457,9 +456,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
       "                        Tensor! input_permutation, "
       "                        Tensor! output_permutation, int num_experts, "
-      "                        int n, int k) -> ()",
+      "                        int n, int k, Tensor? blockscale_offsets) -> ()",
       {stride_tag});
   ops.impl("get_cutlass_moe_mm_data", torch::kCUDA, &get_cutlass_moe_mm_data);
+
+  // A function that computes data required to run fused MoE with w8a8 grouped
+  // GEMM and PPLX. It takes expert_num_tokens and non_zero_expert_idxs
+  // as an input, and computes expert_offsets (token start indices of each
+  // expert). In addition to this, it computes problem sizes for each expert's
+  // multiplication used by the two mms called from fused MoE operation.
+  ops.def(
+      "get_cutlass_pplx_moe_mm_data(Tensor! expert_offsets, "
+      "                             Tensor! problem_sizes1, "
+      "                             Tensor! problem_sizes2, "
+      "                             Tensor expert_num_tokens, "
+      "                             int num_local_experts, int padded_m, "
+      "                             int n, int k) -> ()",
+      {stride_tag});
+  ops.impl("get_cutlass_pplx_moe_mm_data", torch::kCUDA,
+           &get_cutlass_pplx_moe_mm_data);
 
   // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
   ops.def(

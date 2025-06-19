@@ -71,6 +71,7 @@ from huggingface_hub import hf_hub_download
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
+from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -90,19 +91,19 @@ def get_wikitext2_text(tokenizer):
     return test_enc, test_text
 
 
-def get_flores_plus_text(tokenizer, lng_scrpt):
+def get_flores_plus_text(tokenizer, lng_script):
     hf_hub_download(
         repo_id="alexei-v-ivanov-amd/flores_plus",
         repo_type="dataset",
-        filename=lng_scrpt + ".parquet",
+        filename=lng_script + ".parquet",
         local_dir="./",
     )
 
-    df = pandas.read_parquet("./" + lng_scrpt + ".parquet")
+    df = pandas.read_parquet("./" + lng_script + ".parquet")
     test_text = "\n\n".join(line.strip() for line in df["text"])
     test_enc = tokenizer(test_text)
 
-    os.remove("./" + lng_scrpt + ".parquet")
+    os.remove("./" + lng_script + ".parquet")
 
     return test_enc, test_text
 
@@ -274,7 +275,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Measure the PPPL (P3L) score of a given model."
     )
     parser.add_argument(

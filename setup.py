@@ -647,7 +647,6 @@ if _is_cuda() or _is_hip():
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
-    ext_modules.append(CMakeExtension(name="vllm._gradlib_C"))
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
@@ -689,6 +688,7 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
+        "bench": ["pandas", "datasets"],
         "tensorizer": ["tensorizer>=2.9.0"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],

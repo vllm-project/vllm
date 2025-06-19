@@ -1,16 +1,16 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.4-complete
-ARG HIPBLASLT_BRANCH="0f5d6c6d"
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.4.1-complete
+ARG HIPBLASLT_BRANCH="aa0bda7b"
 ARG HIPBLAS_COMMON_BRANCH="9b80ba8e"
 ARG LEGACY_HIPBLASLT_OPTION=
-ARG TRITON_BRANCH="981e987e"
+ARG TRITON_BRANCH="e5be006"
 ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
-ARG PYTORCH_BRANCH="295f2ed4"
+ARG PYTORCH_BRANCH="f717b2af"
 ARG PYTORCH_VISION_BRANCH="v0.21.0"
-ARG PYTORCH_REPO="https://github.com/pytorch/pytorch.git"
+ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
 ARG FA_BRANCH="1a7f4dfa"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="c1debd8"
+ARG AITER_BRANCH="64876494"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
@@ -43,7 +43,7 @@ RUN apt-get update -y \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel setuptools pybind11 Cython
+RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
 
 FROM base AS build_hipblaslt
 ARG HIPBLASLT_BRANCH

@@ -38,7 +38,7 @@ void paged_attention_v1(
     torch::Tensor& v_scale, const int64_t tp_rank,
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step, const int64_t num_threads);
+    const int64_t blocksparse_head_sliding_step);
 
 void paged_attention_v2(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
@@ -50,7 +50,7 @@ void paged_attention_v2(
     torch::Tensor& v_scale, const int64_t tp_rank,
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step, const int64_t num_threads);
+    const int64_t blocksparse_head_sliding_step);
 
 #ifndef USE_ROCM
 void merge_attn_states(torch::Tensor& output,
@@ -239,7 +239,8 @@ void cutlass_moe_mm(
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides);
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch);
 
 void cutlass_fp4_group_mm(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
@@ -251,7 +252,16 @@ void get_cutlass_moe_mm_data(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
-    const int64_t num_experts, const int64_t n, const int64_t k);
+    const int64_t num_experts, const int64_t n, const int64_t k,
+    const std::optional<torch::Tensor>& blockscale_offsets);
+
+void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
+                                  torch::Tensor& problem_sizes1,
+                                  torch::Tensor& problem_sizes2,
+                                  const torch::Tensor& expert_num_tokens,
+                                  const int64_t num_local_experts,
+                                  const int64_t padded_m, const int64_t n,
+                                  const int64_t k);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,

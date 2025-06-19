@@ -58,6 +58,7 @@ from huggingface_hub import hf_hub_download
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
+from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -242,7 +243,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Measure the PPPL (P3L) score of a given model."
     )
     parser.add_argument("--context-size", type=int, default=4096)

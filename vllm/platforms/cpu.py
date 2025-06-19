@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import platform
 import sys
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
@@ -20,6 +21,15 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
+
+
+def get_max_threads(pid=0):
+    if hasattr(os, 'sched_getaffinity'):
+        return len(os.sched_getaffinity(pid))
+    elif platform.system() == 'Darwin':
+        return os.cpu_count()
+    else:
+        raise NotImplementedError("Unsupported OS")
 
 
 class CpuPlatform(Platform):
@@ -79,10 +89,6 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/features/compatibility_matrix.md
-        # If the feature combo become valid
-        if not model_config.enforce_eager:
-            model_config.enforce_eager = True
 
         model_config.disable_cascade_attn = True
 
@@ -161,9 +167,21 @@ class CpuPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_USE_V1 and vllm_config.compilation_config.level
                 == CompilationLevel.PIECEWISE):
+
+            # Note: vLLM V1 is using PIECEWISE level compilation, which will
+            # take time to compile kernels just-in-time with the inductor
+            # backend. For CPU CI tests, most of them are executed fast and
+            # compilations consume too much time, even with torch compile
+            # cache. So use VLLM_CPU_CI_ENV to indicate the CI environment,
+            # and just execute model with dynamo + eager mode to save time.
+            # VLLM_CPU_CI_ENV is only used as an internal variable.
+            if os.environ.get("VLLM_CPU_CI_ENV", "0") != "0":
+                backend = "eager"
+            else:
+                backend = "inductor"
+
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
-            compilation_config.backend = "eager"
-            compilation_config.custom_ops += ["none"]
+            compilation_config.backend = backend
             compilation_config.inductor_compile_config.update({
                 "dce":
                 True,
@@ -190,7 +208,7 @@ class CpuPlatform(Platform):
 
         # Note: to avoid the error 'nthreads cannot be larger than environment
         #  variable "NUMEXPR_MAX_THREADS" (64)'.
-        os.environ["NUMEXPR_MAX_THREADS"] = str(len(os.sched_getaffinity(0)))
+        os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
         # Set default threads num for OpenMP parallel
         os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())

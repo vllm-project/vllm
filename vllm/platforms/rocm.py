@@ -141,7 +141,8 @@ def use_rocm_custom_paged_attention(
                 and (head_size == 64 or head_size == 128)
                 and (block_size == 16 or block_size == 32)
                 and (gqa_ratio >= 1 and gqa_ratio <= 16)
-                and max_seq_len <= 32768 and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
+                and max_seq_len <= 128 * 1024
+                and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
                 and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
                          and envs.VLLM_ROCM_USE_AITER))
 

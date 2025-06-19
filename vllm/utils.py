@@ -190,6 +190,16 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.int64: np.int64,
 }
 
+
+@contextlib.contextmanager
+def set_default_torch_num_threads(num_threads: int):
+    """Sets the default number of threads for PyTorch to the given value."""
+    old_num_threads = torch.get_num_threads()
+    torch.set_num_threads(num_threads)
+    yield
+    torch.set_num_threads(old_num_threads)
+
+
 P = ParamSpec('P')
 T = TypeVar("T")
 U = TypeVar("U")
@@ -204,145 +214,6 @@ class _Sentinel:
 
 
 ALL_PINNED_SENTINEL = _Sentinel()
-
-
-class rpd_trace:
-
-    def __init__(self,
-                 filename=None,
-                 name=None,
-                 nvtx=False,
-                 args=None,
-                 skip=False):
-        self.skip = skip
-        if not self.skip:
-            self.name = name
-            self.args = args if args else ""
-            self.rpd = self.initialize_rpd_tracer(filename, nvtx)
-
-    def _recreate_cm(self):
-        return self
-
-    def __call__(self, func):
-        if not self.skip:
-            if self.name:
-                self.name += f"{func.__name__}"
-            else:
-                self.name = f"{func.__qualname__}"
-
-            @wraps(func)
-            def inner(*args, **kwds):
-                with self._recreate_cm():
-                    return func(*args, **kwds)
-
-            return inner
-        return func
-
-    def __enter__(self):
-        if not self.skip:
-            self.rpd.__enter__()
-            self.rpd.rangePush("python", f"{self.name}", f"{self.args}")
-        return self
-
-    def __exit__(self, *exc):
-        if not self.skip:
-            self.rpd.rangePop()
-            self.rpd.__exit__(None, None, None)
-        return False
-
-    @staticmethod
-    def setup_environment_variables(filename):
-        os.environ['RPDT_AUTOSTART'] = '0'
-        os.environ['RPDT_FILENAME'] = filename
-
-    def initialize_rpd_tracer(self, filename, nvtx):
-        try:
-            from rpdTracerControl import rpdTracerControl
-            rpd_trace.setup_environment_variables(filename)
-            rpdTracerControl.setFilename(name=filename, append=True)
-            return rpdTracerControl(nvtx=nvtx)
-        except Exception as e:
-            print(f"Error initializing rpdTracerControl: {e}")
-            raise
-
-    @staticmethod
-    def create_file(filename):
-        import sqlite3
-
-        from rocpd.schema import RocpdSchema
-        try:
-            print("Creating empty rpd schema file ...")
-            filename = str(filename)
-            with sqlite3.connect(filename) as connection:
-                schema = RocpdSchema()
-                schema.writeSchema(connection)
-                connection.commit()
-        except sqlite3.OperationalError as e:
-            print(f"SQLite operational error: {e}")
-        except Exception as e:
-            print(f"An error occurred while creating the filename: {e}")
-
-
-@cache
-def is_hipScopedMarker_available():
-    try:
-        from hipScopedMarker import hipScopedMarker
-    except ImportError:
-        hipScopedMarker = None
-    return hipScopedMarker is not None
-
-
-class rpd_mark:
-
-    def __init__(self, name=None):
-        self.name = name
-
-    def __call__(self, func):
-
-        if is_hipScopedMarker_available():
-            from hipScopedMarker import hipScopedMarker
-
-            @wraps(func)
-            def inner(*args, **kwds):
-                marker_name = self.name if self.name else f"{func.__name__}"
-                with hipScopedMarker(f"{marker_name}"):
-                    return func(*args, **kwds)
-
-            return inner
-
-        else:
-            return func
-
-
-class rpd_user_marker:
-
-    def __init__(self, name=None):
-        self.name = name
-        self.marker = None
-
-    def __enter__(self):
-        if is_hipScopedMarker_available():
-            from hipScopedMarker import hipScopedMarker
-            marker_name = self.name if self.name else "UserMarker Undefined"
-            self.marker = hipScopedMarker(f"{marker_name}")
-            self.marker.__enter__()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if is_hipScopedMarker_available() and self.marker:
-            self.marker.__exit__(exc_type, exc_val, exc_tb)
-
-    def start(self):
-        if is_hipScopedMarker_available():
-            from hipScopedMarker import hipScopedMarker
-            marker_name = self.name if self.name else "UserMarker Undefined"
-            self.marker = hipScopedMarker(f"{marker_name}")
-            self.marker.__enter__()
-        return self
-
-    def end(self, exc_type=0, exc_val=0, exc_tb=0):
-        if is_hipScopedMarker_available() and self.marker:
-            self.marker.__exit__(exc_type, exc_val, exc_tb)
 
 
 class Device(enum.Enum):
@@ -616,16 +487,6 @@ class PyObjectCache:
         """Makes all cached-objects available for the next scheduler iteration.
         """
         self._index = 0
-
-
-@cache
-def is_mi250() -> bool:
-    from vllm.platforms import current_platform
-    if not current_platform.is_rocm() or not torch.cuda.is_available():
-        return False
-    archName = torch.cuda.get_device_properties('cuda').gcnArchName
-    return (archName is not None) and \
-        ("gfx90a" in archName)
 
 
 @cache
@@ -1048,6 +909,7 @@ class DeviceMemoryProfiler:
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
         from vllm.platforms import current_platform
+        gc.collect()
         return current_platform.get_current_memory_usage(self.device)
 
     def __enter__(self):
@@ -1614,7 +1476,7 @@ class FlexibleArgumentParser(ArgumentParser):
         pattern = re.compile(r"(?<=--)[^\.]*")
 
         # Convert underscores to dashes and vice versa in argument names
-        processed_args = []
+        processed_args = list[str]()
         for arg in args:
             if arg.startswith('--'):
                 if '=' in arg:
@@ -1631,7 +1493,7 @@ class FlexibleArgumentParser(ArgumentParser):
             else:
                 processed_args.append(arg)
 
-        def create_nested_dict(keys: list[str], value: str):
+        def create_nested_dict(keys: list[str], value: str) -> dict[str, Any]:
             """Creates a nested dictionary from a list of keys and a value.
 
             For example, `keys = ["a", "b", "c"]` and `value = 1` will create:
@@ -1642,7 +1504,10 @@ class FlexibleArgumentParser(ArgumentParser):
                 nested_dict = {key: nested_dict}
             return nested_dict
 
-        def recursive_dict_update(original: dict, update: dict):
+        def recursive_dict_update(
+            original: dict[str, Any],
+            update: dict[str, Any],
+        ):
             """Recursively updates a dictionary with another dictionary."""
             for k, v in update.items():
                 if isinstance(v, dict) and isinstance(original.get(k), dict):
@@ -1650,19 +1515,25 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     original[k] = v
 
-        delete = set()
-        dict_args: dict[str, dict] = defaultdict(dict)
+        delete = set[int]()
+        dict_args = defaultdict[str, dict[str, Any]](dict)
         for i, processed_arg in enumerate(processed_args):
             if processed_arg.startswith("--") and "." in processed_arg:
                 if "=" in processed_arg:
-                    processed_arg, value = processed_arg.split("=", 1)
+                    processed_arg, value_str = processed_arg.split("=", 1)
                     if "." not in processed_arg:
                         # False positive, . was only in the value
                         continue
                 else:
-                    value = processed_args[i + 1]
+                    value_str = processed_args[i + 1]
                     delete.add(i + 1)
+
                 key, *keys = processed_arg.split(".")
+                try:
+                    value = json.loads(value_str)
+                except json.decoder.JSONDecodeError:
+                    value = value_str
+
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
                 recursive_dict_update(dict_args[key], arg_dict)
@@ -2092,26 +1963,6 @@ def aiter_enabled() -> bool:
 
 
 @cache
-def aiter_moe_enabled() -> bool:
-    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_MOE
-
-
-@cache
-def aiter_2stage_moe_enabled() -> bool:
-    return aiter_moe_enabled() and envs.VLLM_ROCM_USE_AITER_2STAGE_MOE
-
-
-@cache
-def aiter_paged_attn_enabled() -> bool:
-    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
-
-
-@cache
-def aiter_mla_enabled() -> bool:
-    return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_MLA
-
-
-@cache
 def aiter_linear_enabled() -> bool:
     return aiter_enabled() and envs.VLLM_ROCM_USE_AITER_LINEAR
 
@@ -2475,6 +2326,8 @@ def kill_process_tree(pid: int):
 class MemorySnapshot:
     """Memory snapshot."""
     torch_peak: int = 0
+    free_memory: int = 0
+    total_memory: int = 0
     cuda_memory: int = 0
     torch_memory: int = 0
     non_torch_memory: int = 0
@@ -2494,8 +2347,8 @@ class MemorySnapshot:
         self.torch_peak = torch.cuda.memory_stats().get(
             "allocated_bytes.all.peak", 0)
 
-        self.cuda_memory = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+        self.free_memory, self.total_memory = torch.cuda.mem_get_info()
+        self.cuda_memory = self.total_memory - self.free_memory
 
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
@@ -2508,6 +2361,8 @@ class MemorySnapshot:
     def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
+            free_memory=self.free_memory - other.free_memory,
+            total_memory=self.total_memory - other.total_memory,
             cuda_memory=self.cuda_memory - other.cuda_memory,
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
@@ -2528,6 +2383,16 @@ class MemoryProfilingResult:
     before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
+
+    def __repr__(self) -> str:
+        return (f"Memory profiling takes {self.profile_time:.2f} seconds. "
+                f"Total non KV cache memory: "
+                f"{(self.non_kv_cache_memory / GiB_bytes):.2f}GiB; "
+                f"torch peak memory increase: "
+                f"{(self.torch_peak_increase / GiB_bytes):.2f}GiB; "
+                f"non-torch forward increase memory: "
+                f"{(self.non_torch_increase / GiB_bytes):.2f}GiB; "
+                f"weights memory: {(self.weights_memory / GiB_bytes):.2f}GiB.")
 
 
 @contextlib.contextmanager
@@ -2668,7 +2533,7 @@ def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
     Returns:
         A properly formatted ZMQ path string.
     """
-    if not port:
+    if port is None:
         return f"{scheme}://{host}"
     if is_valid_ipv6_address(host):
         return f"{scheme}://[{host}]:{port}"
