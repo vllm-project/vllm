@@ -260,15 +260,6 @@ class KVConnectorBase_V1(ABC):
         """
         return KVTransferResult.empty()
 
-    def get_pending_handshake_req_ids(self) -> set[str]:
-        """
-        Get request IDs that are currently pending handshake completion.
-
-        Returns:
-            Set of request IDs waiting for handshake.
-        """
-        return set()
-
     # ==============================
     # Scheduler-side methods
     # ==============================

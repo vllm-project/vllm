@@ -135,15 +135,6 @@ class MultiConnector(KVConnectorBase_V1):
                                 finished_recving=finished_recving,
                                 pending_handshake=pending_handshake)
 
-    def get_pending_handshake_req_ids(self) -> set[str]:
-        """Get request IDs that are currently pending handshake completion."""
-        pending_handshake: set[str] = set()
-        for c in self._connectors:
-            connector_pending = c.get_pending_handshake_req_ids()
-            if connector_pending:
-                pending_handshake.update(connector_pending)
-        return pending_handshake
-
     # ==============================
     # Scheduler-side methods
     # ==============================

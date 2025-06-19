@@ -155,14 +155,7 @@ class NixlConnector(KVConnectorBase_V1):
                      finished_req_ids: set[str]) -> KVTransferResult:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_finished(finished_req_ids)
-
-    def get_pending_handshake_req_ids(self) -> set[str]:
-        """Get request IDs that are currently pending handshake completion."""
-        if self.connector_worker is not None:
-            result = self.connector_worker.get_finished(set())
-            return result.pending_handshake
-        return set()
+        return self.connector_worker.get_finished()
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -813,7 +806,7 @@ class NixlConnectorWorker:
                 engine_id] = self.nixl_wrapper.prep_xfer_dlist(
                     self._remote_agents[engine_id][remote_tp_rank], descs)
 
-    def get_finished(self, finished_req_ids: set[str]) -> KVTransferResult:
+    def get_finished(self) -> KVTransferResult:
         """
         Get requests that are done sending, done recving, and pending handshake.
 
