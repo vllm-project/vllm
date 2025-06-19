@@ -342,7 +342,6 @@ struct CodecQ6 : public CodecBase {
       int32x4_t w;
       {
         static uint constexpr kMask000F = 0x000F000F;
-        static uint constexpr kMask00FF = 0x00FF00FF;
         static uint constexpr kHalf2_1024 =
             0x64006400;  // {1024.0, 1024.0}, fp16x2_t
         static uint constexpr kHalf2_1056 =
@@ -567,7 +566,6 @@ struct AllReduceTwoshot {
 
     BufferResource src_buffer(const_cast<T*>(input), N * sizeof(T));
     uint32_t src_offset = block * kTileSize + thread * sizeof(int32x4_t);
-    int32x4_t* src = reinterpret_cast<int32x4_t*>(const_cast<T*>(input));
 
     for (int i = 0; i < kAtoms; i++) {
       tA[i] = buffer_load_dwordx4(src_buffer.descriptor, src_offset, 0, 0);
@@ -677,7 +675,6 @@ struct AllReduceTwoshot {
     // Write the result to output.
     BufferResource dst_buffer(output, N * sizeof(T));
     uint32_t dst_offset = block * kTileSize + thread * sizeof(int32x4_t);
-    int32x4_t* dst = reinterpret_cast<int32x4_t*>(output);
 
     for (int i = 0; i < kAtoms; i++) {
       if constexpr (cast_bf2half) {
