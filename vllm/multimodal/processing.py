@@ -1110,9 +1110,10 @@ class BaseProcessingInfo:
         each model can override this method to return pre-computed maximum token
         counts, avoiding the need for dummy input generation and processing.
 
-        NOTE: The result maximum number of tokens per item of each modality respect
-        to the model maximum sequence length and the maximum number of items of each 
-        modality allowed.
+        NOTE: The maximum number of tokens per item of each modality returned from 
+        this function should respect to the model maximum sequence length and the 
+        maximum number of items of each modality allowed, and agrees with dummy 
+        inputs (images/videos) at maximum possible sizes.
 
         """
         return None
