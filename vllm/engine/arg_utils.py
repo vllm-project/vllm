@@ -1041,7 +1041,7 @@ class EngineArgs:
 
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
-            self._set_default_args_v1(usage_context)
+            self._set_default_args_v1(usage_context, model_config)
         else:
             self._set_default_args_v0(model_config)
 
@@ -1349,13 +1349,7 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No Embedding Models so far.
-        if model_config.task not in ["generate"]:
-            _raise_or_fallback(feature_name=f"--task {model_config.task}",
-                               recommend_to_remove=False)
-            return False
-
-        # No Encoder-Decoder, not all Mamba so far.
+        # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
             _raise_or_fallback(feature_name=model_config.architectures,
                                recommend_to_remove=False)
@@ -1523,15 +1517,38 @@ class EngineArgs:
         if self.max_num_seqs is None:
             self.max_num_seqs = 256
 
-    def _set_default_args_v1(self, usage_context: UsageContext) -> None:
+    def _set_default_args_v1(self, usage_context: UsageContext,
+                             model_config: ModelConfig) -> None:
         """Set Default Arguments for V1 Engine."""
 
-        # V1 always uses chunked prefills.
-        self.enable_chunked_prefill = True
+        # V1 always uses chunked prefills and prefix caching
+        # for non-pooling tasks.
+        # For pooling tasks the default is False
+        if model_config.runner_type != "pooling":
+            self.enable_chunked_prefill = True
+            if self.enable_prefix_caching is None:
+                self.enable_prefix_caching = True
+        else:
 
-        # V1 enables prefix caching by default.
-        if self.enable_prefix_caching is None:
-            self.enable_prefix_caching = True
+            pooling_type = model_config.pooler_config.pooling_type
+
+            # TODO: when encoder models are supported we'll have to
+            # check for causal attention here.
+            incremental_prefill_supported = (pooling_type is not None and
+                                             pooling_type.lower() == "last")
+
+            action = "Enabling" if \
+                incremental_prefill_supported else "Disabling"
+
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = incremental_prefill_supported
+                logger.info("(%s) chunked prefill by default", action)
+            if self.enable_prefix_caching is None:
+                self.enable_prefix_caching = incremental_prefill_supported
+                logger.info("(%s) prefix caching by default", action)
+
+        if not self.enable_chunked_prefill:
+            self.max_num_batched_tokens = model_config.max_model_len
 
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default
