@@ -150,6 +150,13 @@ repos:
     types: [python]
     pass_filenames: false
     additional_dependencies: [pathspec, regex]
+  - id: check-cli-completion
+    name: Check if CLI completion script is up to date
+    entry: python scripts/cli_args_completion_generator.py
+    language: python
+    files: ^vllm/entrypoints/cli/|^vllm/engine/arg_utils\.py$|^benchmarks/benchmark_(latency|serving|throughput)\.py$
+    pass_filenames: false
+    additional_dependencies: [regex]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
