@@ -1100,7 +1100,9 @@ class BaseProcessingInfo:
 
         return allowed_limits
 
-    def get_max_tokens_per_item(self, seq_len: int, mm_counts: Mapping[str, int]) -> Optional[Mapping[str, int]]:
+    def get_max_tokens_per_item(
+            self, seq_len: int,
+            mm_counts: Mapping[str, int]) -> Optional[Mapping[str, int]]:
         """Return the maximum number of tokens per item of for each modality.
         By default, returns `None`. When `None` is returned, vLLM will generate
         dummy inputs (images/videos) at maximum possible sizes and process them
