@@ -116,6 +116,7 @@ class MultiprocExecutor(Executor):
         if self.max_concurrent_batches > 1:
             # Note: must use only 1 IO thread to keep dequeue sequence
             # from the response queue
+            # _async_aggregate_workers_output also assumes a single IO thread
             self.io_thread_pool = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="mp_exec_io")
 
@@ -160,13 +161,16 @@ class MultiprocExecutor(Executor):
         self,
         scheduler_output,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        (output, ) = self.collective_rpc("execute_model",
-                                         args=(scheduler_output, ),
-                                         unique_reply_rank=self.output_rank,
-                                         non_block=self.max_concurrent_batches
-                                         > 1,
-                                         timeout=EXECUTE_MODEL_TIMEOUT_S)
-        return output
+        non_block = self.max_concurrent_batches > 1
+        outputs = self.collective_rpc("execute_model",
+                                      args=(scheduler_output, ),
+                                      non_block=non_block,
+                                      timeout=EXECUTE_MODEL_TIMEOUT_S)
+
+        # aggregate all workers output to a single output
+        if non_block:
+            return self._async_aggregate_workers_output(outputs)
+        return self._aggregate_workers_output(outputs)
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -224,6 +228,52 @@ class MultiprocExecutor(Executor):
             return responses
         except TimeoutError as e:
             raise TimeoutError(f"RPC call to {method} timed out.") from e
+
+    def _aggregate_workers_output(
+            self, outputs: list[ModelRunnerOutput]) -> (ModelRunnerOutput):
+        # aggregate kv_connector_metadata from all workers
+        kv_connector_metadata = []
+        for i, output in enumerate(outputs):
+            kv_connector_metadata += output.kv_connector_metadata or []
+
+        # select output of the worker specified by output_rank
+        output = outputs[self.output_rank]
+
+        # set the aggregated kv_connector_metadata
+        if kv_connector_metadata:
+            output.kv_connector_metadata = kv_connector_metadata
+
+        return output
+
+    def _async_aggregate_workers_output(
+        self, output_futures: list[Future[ModelRunnerOutput]]
+    ) -> (Future[ModelRunnerOutput]):
+        """Takes a list of futures and returns a single future which resolves
+        to the respective list of outputs."""
+        result_future: Future[ModelRunnerOutput] = Future()
+
+        output_tuples = []
+
+        def make_callback(idx):
+
+            def callback(fut):
+                output_tuples.append((idx, fut.result()))
+
+                # this check assumes io_thread_pool uses a single thread
+                if len(output_tuples) != len(output_futures):
+                    return
+
+                # sort by idx and strip it off
+                outputs = [x[1] for x in sorted(output_tuples)]
+                result_future.set_result(
+                    self._aggregate_workers_output(outputs))
+
+            return callback
+
+        for i, output_future in enumerate(output_futures):
+            output_future.add_done_callback(make_callback(i))
+
+        return result_future
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):

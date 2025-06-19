@@ -17,6 +17,8 @@ The class provides the following primitives:
             Returns whether KV cache should be freed now or will be
             freed asynchronously and optionally returns KV transfer
             params.
+        get_finished() - returns ids of requests that have completed
+            async sending/recving.
 
     Worker-side: runs in each worker, loads/saves KV cache to/from
     the Connector based on the metadata.
@@ -26,8 +28,8 @@ The class provides the following primitives:
         save_kv_layer() - starts saving KV for layer i (maybe async)
         wait_for_save() - blocks until all saves are done
 
-        get_finished() - called with ids of finished requests, returns
-            ids of requests that have completed async sending/recving.
+        build_worker_connector_meta() - builds metadata to be sent
+            back to the scheduler.
 """
 
 import enum
@@ -38,6 +40,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -185,21 +188,21 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    def build_worker_connector_meta(
+        self, scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput
+    ) -> Optional[KVConnectorMetadata]:
         """
-        Notifies worker-side connector ids of requests that have
-        finished generating tokens.
+        Build the worker->scheduler connector metadata for this step.
 
-        Returns:
-            ids of requests that have finished asynchronous transfer
-            (requests that previously returned True from request_finished()),
-            tuple of (sending/saving ids, recving/loading ids).
-            The finished saves/sends req ids must belong to a set provided in a
-            call to this method (this call or a prior one).
+        This function should NOT modify fields of its arguments.
+
+        Args:
+            scheduler_output (SchedulerOutput): the scheduler output object.
+            model_runner_output (ModelRunnerOutput):
+                the model runner (worker) output object.
         """
-        return None, None
+        return None
 
     # ==============================
     # Scheduler-side methods
@@ -281,3 +284,21 @@ class KVConnectorBase_V1(ABC):
             returned by the engine.
         """
         return False, None
+
+    def get_finished(
+        self,
+        model_runner_output: ModelRunnerOutput,
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        """
+        Get request IDs that recently finished async transfer.
+
+        Args:
+            model_runner_output (ModelRunnerOutput):
+                the model runner (worker) output object.
+
+        Returns:
+            ids of requests that have finished asynchronous transfer
+            (requests that previously returned True from request_finished()),
+            tuple of (sending/saving ids, recving/loading ids).
+        """
+        return None, None

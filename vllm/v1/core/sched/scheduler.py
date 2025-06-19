@@ -825,8 +825,8 @@ class Scheduler(SchedulerInterface):
             if not stopped:
                 new_running.append(request)
 
-        # KV Connector: update state for finished KV Transfers.
-        self._update_from_kv_xfer_finished(model_runner_output)
+        # KV Connector: update state from KV connector metadata.
+        self._update_from_kv_connector_metadata(model_runner_output)
 
         # Return the cached request data to the queue so they can be reused.
         for req_data in scheduler_output.scheduled_cached_reqs:
@@ -1025,21 +1025,27 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids.remove(request.request_id)
         return True
 
-    def _update_from_kv_xfer_finished(self,
-                                      model_runner_output: ModelRunnerOutput):
+    def _update_from_kv_connector_metadata(
+            self, model_runner_output: ModelRunnerOutput):
         """
         KV Connector: update the scheduler state based on the output.
 
         The Worker side connectors add finished_recving and
         finished_sending reqs to the output.
-        * if finished_sending: free the blocks
-        # if finished_recving: add to state so we can
-            scheduler the request during the next step.
+        * for requests that finished sending: free the blocks
+        # for requests that finished receiving: add to state so we can
+            schedule the request during the next step.
         """
-        # KV Connector:: update recv and send status from last step.
-        for req_id in (model_runner_output.finished_recving or ()):
+        if not self.connector:
+            return
+
+        # get new requests that finished async transfers
+        finished_sending, finished_recving = \
+            self.connector.get_finished(model_runner_output)
+
+        for req_id in (finished_recving or []):
             logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_kv_req_ids.add(req_id)
-        for req_id in (model_runner_output.finished_sending or ()):
+        for req_id in (finished_sending or []):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])

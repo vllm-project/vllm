@@ -26,6 +26,7 @@ from vllm.logger import init_logger
 from vllm.platforms import _Backend
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
@@ -91,6 +92,15 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         )
 
 
+class NixlWorkerConnectorMetadata(KVConnectorMetadata):
+    finished_sending: set[str] = set()
+    finished_recving: set[str] = set()
+
+    def __init__(self, finished_sending, finished_recving):
+        self.finished_sending = finished_sending
+        self.finished_recving = finished_recving
+
+
 class NixlConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
@@ -139,18 +149,18 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
+    def get_finished(
+        self, model_runner_output: ModelRunnerOutput
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_finished(model_runner_output)
+
     ############################################################
     # Worker Side Methods
     ############################################################
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
-
-    def get_finished(self,
-                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
-        """Get the finished recving and sending requests."""
-        assert self.connector_worker is not None
-        return self.connector_worker.get_finished()
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -171,6 +181,16 @@ class NixlConnector(KVConnectorBase_V1):
         """NixlConnector does not save explicitly."""
         pass
 
+    def build_worker_connector_meta(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
+    ) -> Optional[NixlWorkerConnectorMetadata]:
+        assert self.connector_worker is not None
+        finished_sending, finished_recving = \
+            self.connector_worker.get_finished()
+        return NixlWorkerConnectorMetadata(finished_sending, finished_recving)
+
 
 class NixlConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -178,6 +198,7 @@ class NixlConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
+        self.world_size = vllm_config.parallel_config.tensor_parallel_size
         self.engine_id = engine_id
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
@@ -190,6 +211,14 @@ class NixlConnectorScheduler:
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+
+        # Complete transfer tracker. Used by to track finished
+        # transactions on ranks 0 to N-1.
+        # [req_id -> count]
+        self._done_recving_count: defaultdict[str, int] = \
+            defaultdict(lambda: 0)
+        self._done_sending_count: defaultdict[str, int] = \
+            defaultdict(lambda: 0)
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -313,6 +342,33 @@ class NixlConnectorScheduler:
             remote_port=self.side_channel_port,
         )
 
+    def get_finished(
+        self, model_runner_output: ModelRunnerOutput
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        if not model_runner_output.kv_connector_metadata:
+            return None, None
+        for kv_connector_metadata in model_runner_output.kv_connector_metadata:
+            assert isinstance(kv_connector_metadata,
+                              NixlWorkerConnectorMetadata)
+            for req_id in kv_connector_metadata.finished_sending:
+                self._done_sending_count[req_id] += 1
+            for req_id in kv_connector_metadata.finished_recving:
+                self._done_recving_count[req_id] += 1
+
+        all_done_sending: set[str] = set()
+        for req_id in list(self._done_sending_count.keys()):
+            if self._done_sending_count[req_id] == self.world_size:
+                del self._done_sending_count[req_id]
+                all_done_sending.add(req_id)
+
+        all_done_recving: set[str] = set()
+        for req_id in list(self._done_recving_count.keys()):
+            if self._done_recving_count[req_id] == self.world_size:
+                del self._done_recving_count[req_id]
+                all_done_recving.add(req_id)
+
+        return all_done_sending, all_done_recving
+
 
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
@@ -373,14 +429,6 @@ class NixlConnectorWorker:
         # In progress transfers.
         # [req_id -> list[handle]]
         self._recving_transfers = defaultdict[str, list[Transfer]](list)
-
-        # Complete transfer tracker. Used by the rank 0 to track finished
-        # transactions on ranks 1 to N-1.
-        # [req_id -> count]
-        self._done_recving_count: defaultdict[str,
-                                              int] = defaultdict(lambda: 0)
-        self._done_sending_count: defaultdict[str,
-                                              int] = defaultdict(lambda: 0)
 
         # Background thread for establishing new connections.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
@@ -745,14 +793,6 @@ class NixlConnectorWorker:
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving.
-
-        In TP>1 setup, each rank exchanges KVs with its counterpart
-        ranks independently. get_finished() runs in a worker creates
-        the done_sending and done_recving sets that are sent to the
-        scheduler via ModelRunnerOutput by Rank 0. To ensure trnxs
-        are done before adding to finished, Ranks 1 to N-1 communicate
-        to Rank 0 once their transaction is done + Rank 0 returns
-        finished sets to Scheduler only once all ranks are done.
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
@@ -762,50 +802,7 @@ class NixlConnectorWorker:
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
 
-        if self.world_size == 1:
-            return done_sending, done_recving
-
-        # Rank 0: get finished from all other ranks.
-        if self.tp_rank == 0:
-            for req_id in done_sending:
-                self._done_sending_count[req_id] += 1
-            for req_id in done_recving:
-                self._done_recving_count[req_id] += 1
-
-            # Keep track of how many other ranks have finished.
-            other_ranks_finished_ids: list[str] = []
-            for i in range(1, self.world_size):
-                other_ranks_finished_ids.extend(
-                    self.tp_group.recv_object(src=i))
-            for req_id in other_ranks_finished_ids:
-                if (req_id in self._done_recving_count
-                        or req_id in self._recving_transfers):
-                    self._done_recving_count[req_id] += 1
-                else:
-                    self._done_sending_count[req_id] += 1
-
-            # Return ids that finished on all ranks to the scheduler.
-            all_done_recving: set[str] = set()
-            for req_id in list(self._done_recving_count.keys()):
-                if self._done_recving_count[req_id] == self.world_size:
-                    del self._done_recving_count[req_id]
-                    all_done_recving.add(req_id)
-
-            all_done_sending: set[str] = set()
-            for req_id in list(self._done_sending_count.keys()):
-                if self._done_sending_count[req_id] == self.world_size:
-                    del self._done_sending_count[req_id]
-                    all_done_sending.add(req_id)
-
-            return all_done_sending, all_done_recving
-
-        # Ranks 1 to N-1: send finished ids to Rank 0.
-        else:
-            finished_req_ids = list(done_recving.union(done_sending))
-            self.tp_group.send_object(finished_req_ids, dst=0)
-
-            # Unused as only Rank 0 results are sent to scheduler.
-            return done_sending, done_recving
+        return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
         """

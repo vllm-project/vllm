@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from typing import Any, Optional
 
 import torch
@@ -7,10 +8,12 @@ import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    NixlWorkerConnectorMetadata)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -175,6 +178,14 @@ def create_model_runner_output(
     sampled_token = EOS_TOKEN_ID if use_eos else 0
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
+    # Make worker connector metadata
+    kv_connector_metadata = None
+    if finished_sending or finished_recving:
+        kv_connector_metadata = [
+            NixlWorkerConnectorMetadata(finished_sending or [],
+                                        finished_recving or [])
+        ]
+
     # Make output data structure.
     return ModelRunnerOutput(
         req_ids=req_ids,
@@ -183,6 +194,21 @@ def create_model_runner_output(
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        finished_sending=finished_sending,
-        finished_recving=finished_recving,
+        kv_connector_metadata=kv_connector_metadata,
     )
+
+
+def create_empty_model_runner_output(
+    finished_sending: Optional[list[str]] = None,
+    finished_recving: Optional[list[str]] = None,
+) -> ModelRunnerOutput:
+    """Make dummy empty model runner output for testing."""
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+
+    kv_connector_metadata = [
+        NixlWorkerConnectorMetadata(finished_sending or [], finished_recving
+                                    or [])
+    ]
+    model_runner_output.kv_connector_metadata = kv_connector_metadata
+
+    return model_runner_output
