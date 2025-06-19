@@ -371,6 +371,10 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        self.is_fp8 = self.kv_cache_dtype.startswith("fp8")
+        if self.is_fp8:
+            self.quant_fp8 = QuantFP8()
+
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -465,14 +469,12 @@ class FlashAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
 
-        if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(torch.float8_e4m3fn)
-            value_cache = value_cache.view(torch.float8_e4m3fn)
+        if self.is_fp8:
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
             num_tokens, num_heads, head_size = query.shape
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape(
-                    (num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale)
+            query = query.reshape((num_tokens, num_heads * head_size)).contiguous()
+            query, _ = self.quant_fp8(query, layer._q_scale)
             query = query.reshape((num_tokens, num_heads, head_size))
 
         # Compute attention and update output up to `num_actual_tokens`.

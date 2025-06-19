@@ -6,6 +6,7 @@ from typing import Callable, Optional
 import torch
 from torch.nn import Parameter
 
+from vllm.compilation.fusion import GroupShape
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, normalize_e4m3fn_to_e4m3fnuz, requantize_with_max_scale)
@@ -22,7 +23,8 @@ class QuarkW8A8Fp8(QuarkScheme):
     def __init__(self, qscheme: str, is_static_input_scheme: Optional[bool]):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
-        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=False)
+        self.fp8_linear = Fp8LinearOp(act_quant_static=self.is_static_input_scheme,
+                                      act_quant_group_shape=GroupShape.PER_TENSOR)
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -35,7 +37,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor
         if self.qscheme == "per_tensor":
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 input_scale = getattr(layer, 'input_scale', None)
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
                     weight=layer.weight,

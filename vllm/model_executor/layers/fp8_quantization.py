@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.compilation.fusion import GroupShape
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
@@ -94,3 +95,50 @@ class QuantFP8PerTensor(CustomOp):
                      scale: Optional[torch.Tensor] = None
                      ) -> tuple[torch.Tensor, torch.Tensor]:
         return ops.scaled_fp8_quant(x, scale=scale)
+
+@CustomOp.register("quant_fp8")
+class QuantFP8(CustomOp):
+    def __init__(self, static: bool, group_shape: GroupShape, num_token_padding: Optional[int] = None):
+        super().__init__()
+        self.num_token_padding = num_token_padding
+        assert group_shape in {GroupShape.PER_TOKEN, GroupShape.PER_TENSOR}
+        assert not static or group_shape == GroupShape.PER_TENSOR, \
+            "Only per-tensor scales supported for static quantization."
+        self.static = static
+        self.group_shape = group_shape
+        self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
+
+
+
+    def forward_cuda(self,
+                     x: torch.Tensor,
+                     scale: Optional[torch.Tensor] = None,
+                     scale_ub: Optional[torch.Tensor] = None,
+                     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert (scale is not None) == self.static
+        return ops.scaled_fp8_quant(x, scale,
+                                    num_token_padding=self.num_token_padding,
+                                    scale_ub=scale_ub,
+                                    use_per_token_if_dynamic=self.use_per_token_if_dynamic)
+
+    # @torch.compile(fullgraph=True) # TODO for attention?
+    def forward_native(self,
+                       x: torch.Tensor,
+                       scale: Optional[torch.Tensor] = None,
+                       scale_ub: Optional[torch.Tensor] = None,
+                       ):
+        # assert (scale is not None) == self.static
+
+        # TODO currently only dynamic per-token
+        # assert not self.static #and self.group_shape. == GroupShape.PER_TOKEN
+
+        x_token_max, _ = x.abs().max(dim=-1)
+        x_token_max = x_token_max.to(torch.float32)
+        if scale_ub is not None:
+            x_token_max = x_token_max.clamp(max=scale_ub)
+        scales = (x_token_max / _FP8_MAX).unsqueeze(-1)
+        scales = scales.clamp(min=_FP8_MIN_SCALING_FACTOR)
+
+        out = x.to(torch.float32) * scales.reciprocal()
+        out = out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
+        return out, scales
