@@ -137,17 +137,6 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
-    def bind_connector_metadata(
-            self, connector_metadata: KVConnectorMetadata) -> None:
-        super().bind_connector_metadata(connector_metadata)
-        # start_load_kv() doesn't use the forward_context, so we can pass a dummy one.
-        dummy_ctx = ForwardContext(
-            no_compile_layers={},
-            attn_metadata={},
-            virtual_engine=0,
-        )
-        self.start_load_kv(dummy_ctx)
-
     def request_finished(
         self,
         request: "Request",
