@@ -217,6 +217,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_chunking(self) -> bool:
         return False
 
+    def supports_expert_map(self) -> bool:
+        return False
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
