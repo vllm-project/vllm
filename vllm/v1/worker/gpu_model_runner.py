@@ -238,7 +238,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=torch.int64,
                                         device=self.device)
 
-        if self.lora_config.activated_lora_enabled:
+        if self.lora_config and self.lora_config.activated_lora_enabled:
             self.mask1d = torch.zeros(self.max_num_tokens,
                                       dtype=torch.int64,
                                       device=self.device)
@@ -762,7 +762,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
         # Compute a-LoRA metadata
-        if self.lora_config.activated_lora_enabled:
+        if self.lora_config and self.lora_config.activated_lora_enabled:
             invocation_start = np.empty(shape=(num_reqs, ), dtype=int)
             for req_id in self.input_batch.req_ids:
                 req_index = self.input_batch.req_id_to_index[req_id]
@@ -1967,7 +1967,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens, None, False)
 
             alora_metadata = None
-            if self.lora_config.activated_lora_enabled:
+            if self.lora_config and self.lora_config.activated_lora_enabled:
                 mask1d = self.mask1d[:num_tokens]
                 alora_metadata = ALoRAMetadata(mask1d=mask1d)
                 # needed to avoid guard failures

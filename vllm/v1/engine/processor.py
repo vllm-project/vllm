@@ -330,7 +330,8 @@ class Processor:
                 sorted_mm_inputs = orig_sorted_mm_inputs
 
         # Tokenize aLoRA invocation sequence if applicable.
-        if self.lora_config.activated_lora_enabled and lora_request is not None:
+        if (self.lora_config and self.lora_config.activated_lora_enabled
+                and lora_request is not None):
 
             text_config = self.model_config.hf_config.get_text_config()
 
