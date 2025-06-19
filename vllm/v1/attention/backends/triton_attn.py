@@ -379,7 +379,7 @@ class TritonAttentionImpl(AttentionImpl):
                 # Skip Q quantization on ROCm, since dequantizing back to
                 # f32 in the attention kernel is not supported.
                 query = query.reshape((num_tokens, -1)).contiguous()
-                query, _ = self.quant_fp8(query, layer._q_scale)
+                query, _ = ops.scaled_fp8_quant(query, layer._q_scale)
                 query = query.reshape((num_tokens, num_heads, head_size))
 
         use_local_attn = \

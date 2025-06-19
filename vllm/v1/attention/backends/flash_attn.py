@@ -474,7 +474,7 @@ class FlashAttentionImpl(AttentionImpl):
             value_cache = value_cache.view(current_platform.fp8_dtype())
             num_tokens, num_heads, head_size = query.shape
             query = query.reshape((num_tokens, num_heads * head_size)).contiguous()
-            query, _ = self.quant_fp8(query, layer._q_scale)
+            query, _ = ops.scaled_fp8_quant(query, layer._q_scale)
             query = query.reshape((num_tokens, num_heads, head_size))
 
         # Compute attention and update output up to `num_actual_tokens`.
