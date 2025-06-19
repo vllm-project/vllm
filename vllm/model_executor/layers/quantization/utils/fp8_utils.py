@@ -659,6 +659,7 @@ def w8a8_block_fp8_matmul(
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/0c88cd01392c1073c7049a97d6328c7bba9b3947
+# TODO(wentao): remove this function when DeepGEMM exposes this function
 def get_tma_aligned_size(x: int, element_size: int) -> int:
     """
     Global memory address of TMA must be 16-byte aligned.
