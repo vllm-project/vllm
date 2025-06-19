@@ -326,8 +326,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional kwargs to pass to the template renderer. "
-                     "Will be accessible by the chat template."),
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the chat template."),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
@@ -413,6 +414,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
+
+    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
+        default=None,
+        description=("Additional request parameters with string or "
+                     "numeric values, used by custom extensions."),
+    )
 
     # --8<-- [end:chat-completion-extra-params]
 
@@ -523,6 +530,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structural_tag=self.structural_tag,
         )
 
+        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            # Pass in kv_transfer_params via extra_args
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -553,8 +564,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
-            extra_args=({"kv_transfer_params": self.kv_transfer_params}
-                        if self.kv_transfer_params else None))
+            extra_args=extra_args or None,
+        )
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:
@@ -871,6 +882,12 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
 
+    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
+        default=None,
+        description=("Additional request parameters with string or "
+                     "numeric values, used by custom extensions."),
+    )
+
     # --8<-- [end:completion-extra-params]
 
     # Default sampling parameters for completion requests
@@ -968,6 +985,10 @@ class CompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
         )
 
+        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            # Pass in kv_transfer_params via extra_args
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -997,8 +1018,8 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            extra_args=({"kv_transfer_params": self.kv_transfer_params}
-                        if self.kv_transfer_params else None))
+            extra_args=extra_args or None,
+            )
 
     @model_validator(mode="before")
     @classmethod
@@ -1117,8 +1138,9 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional kwargs to pass to the template renderer. "
-                     "Will be accessible by the chat template."),
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the chat template."),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
@@ -1623,8 +1645,9 @@ class TokenizeChatRequest(OpenAIBaseModel):
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
-        description=("Additional kwargs to pass to the template renderer. "
-                     "Will be accessible by the chat template."),
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the chat template."),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
@@ -1736,6 +1759,12 @@ class TranscriptionRequest(OpenAIBaseModel):
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
     stream_continuous_usage_stats: Optional[bool] = False
+
+    vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
+        default=None,
+        description=("Additional request parameters with string or "
+                     "numeric values, used by custom extensions."),
+    )
     # --8<-- [end:transcription-extra-params]
 
     # --8<-- [start:transcription-sampling-params]
@@ -1823,7 +1852,8 @@ class TranscriptionRequest(OpenAIBaseModel):
                                             presence_penalty=self.presence_penalty,
                                             output_kind=RequestOutputKind.DELTA
                                             if self.stream \
-                                            else RequestOutputKind.FINAL_ONLY)
+                                            else RequestOutputKind.FINAL_ONLY,
+                                            extra_args=self.vllm_xargs)
 
     @model_validator(mode="before")
     @classmethod
