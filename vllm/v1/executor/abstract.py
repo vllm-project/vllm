@@ -30,12 +30,13 @@ class Executor(ExecutorBase):
         parallel_config = vllm_config.parallel_config
         distributed_executor_backend = (
             parallel_config.distributed_executor_backend)
-        # distributed_executor_backend must be set in VllmConfig.__post_init__
+        # distributed_executor_backend must be set in
+        # ParallelConfig.__post_init__
         if isinstance(distributed_executor_backend, type):
-            if not issubclass(distributed_executor_backend, ExecutorBase):
+            if not issubclass(distributed_executor_backend, Executor):
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
-                    f"ExecutorBase. Got {distributed_executor_backend}.")
+                    f"Executor. Got {distributed_executor_backend}.")
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
             from vllm.v1.executor.ray_distributed_executor import (  # noqa
