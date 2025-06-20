@@ -9,8 +9,8 @@ from collections.abc import Iterable, MutableSequence, Sequence
 from functools import partial
 
 import torch
-from torch.distributed import (P2POp, ProcessGroup, batch_isend_irecv,
-                               get_global_rank)
+from torch.distributed import (P2POp, ProcessGroup, all_gather,
+                               batch_isend_irecv, get_global_rank)
 
 
 def idx_local_to_global(
@@ -232,6 +232,7 @@ def rearrange_expert_weights_inplace(
     new_global_expert_indices: torch.Tensor,
     expert_weights: Sequence[Iterable[torch.Tensor]],
     ep_group: ProcessGroup,
+    is_profile: bool = False,
 ) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -247,6 +248,9 @@ def rearrange_expert_weights_inplace(
             For example, a linear layer may have up and down projection,
             so weight_count = 2. Each weight's hidden size can be different.
         ep_group: The device process group for expert parallelism.
+        is_profile (bool): If `True`, do not perform any actual weight copy.
+            This is used during profile run, where we only perform dummy
+            communications to reserve enough memory for the buffers.
     """
     num_moe_layers, num_physical_experts = old_global_expert_indices.shape
     assert len(expert_weights) == num_moe_layers
@@ -263,6 +267,22 @@ def rearrange_expert_weights_inplace(
     # NOTE: Currently we assume the same weights across different layers
     # have the same shape.
     expert_weights_buffer = [torch.empty_like(w) for w in expert_weights[0]]
+
+    if is_profile:
+        # Maximum send size is to send all local experts to all ranks,
+        # So we use a dummy `all_gather` to reserve enough communication buffer
+        for weight, buffer in zip(expert_weights[0], expert_weights_buffer):
+            # A `/dev/null`-like buffer to avoid real memory allocation
+            dummy_recv_buffer = [buffer for _ in range(ep_size)]
+            # NOTE(bowen): Needed this barrier to avoid OOM during actual
+            # execution. I'm not very sure why this is needed
+            torch.distributed.barrier()
+            all_gather(
+                dummy_recv_buffer,
+                weight,
+                group=ep_group,
+            )
+        return
 
     for layer in range(num_moe_layers):
         shuffle_layer(
