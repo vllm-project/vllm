@@ -85,17 +85,6 @@ logger = init_logger(__name__)
 
 class GPUModelRunner(LoRAModelRunnerMixin):
 
-    enable_eplb: bool = False
-    """
-    Whether the expert parallelism load balancer is enabled.
-    """
-    eplb_state: EplbState
-    """
-    State of the expert parallelism load balancer.
-
-    Will be lazily initialized when the model is loaded.
-    """
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -157,6 +146,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Sampler
         self.sampler = Sampler()
+
+        self.eplb_state: Optional[EplbState] = None
+        """
+        State of the expert parallelism load balancer.
+
+        Will be lazily initialized when the model is loaded.
+        """
 
         # Lazy initializations
         # self.model: nn.Module  # Set after load_model
@@ -1191,6 +1187,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not self.parallel_config.enable_eplb:
             return
 
+        assert self.eplb_state is not None
         assert is_mixture_of_experts(self.model)
         avg_tokens, max_tokens, balancedness = \
             self.eplb_state.step(self.model, is_dummy, is_profile)
@@ -1696,7 +1693,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if is_mixture_of_experts(
                 self.model) and self.parallel_config.enable_eplb:
-            self.enable_eplb = True
             logger.info("EPLB is enabled for model %s.",
                         self.model_config.model)
             self.eplb_state = EplbState.build(
