@@ -139,7 +139,7 @@ def _get_sliding_window_configs(
 
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() == 3
+    full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() >= 2
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):

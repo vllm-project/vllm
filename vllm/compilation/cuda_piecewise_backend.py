@@ -37,6 +37,8 @@ class ConcreteSizeEntry:
     # during capture, and check if they are the same during replay
     input_addresses: Optional[list[int]] = None
 
+    usage_type: Optional[str] = None
+
 
 class CUDAPiecewiseBackend:
 
