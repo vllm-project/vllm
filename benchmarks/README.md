@@ -264,15 +264,28 @@ python3 vllm/benchmarks/benchmark_serving.py \
 **`unsloth/LaTeX_OCR`**
 
 ``` bash
+# Serve the model
+vllm serve unsloth/Qwen2-VL-2B-Instruct \
+    --dtype bfloat16 \
+    --max-model-len 4096 \
+    --max-num-seqs 5 \
+    --limit-mm-per-prompt "image=1,video=0" \
+    --max-seq-len-to-capture 4096 \
+    --mm-processor-kwargs '{"min_pixels": 784, "max_pixels": 1003520}'
+```
+
+``` bash
 python3 vllm/benchmarks/benchmark_serving.py \
   --backend openai-chat \
-  --model Qwen/Qwen2-VL-7B-Instruct \
+  --request-rate 5 \
+  --max-concurrency 5 \
+  --model unsloth/Qwen2-VL-2B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
   --dataset-path unsloth/LaTeX_OCR \
   --hf-split train \
   --hf-output-len 256 \
-  --num-prompts 1000
+  --num-prompts 1000 
 ```
 
 **`unsloth/Radiology_mini`**
@@ -280,7 +293,9 @@ python3 vllm/benchmarks/benchmark_serving.py \
 ``` bash
 python3 vllm/benchmarks/benchmark_serving.py \
   --backend openai-chat \
-  --model Qwen/Qwen2-VL-7B-Instruct \
+  --request-rate 5 \
+  --max-concurrency 5 \
+  --model unsloth/Qwen2-VL-2B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
   --dataset-path unsloth/Radiology_mini \
@@ -432,19 +447,19 @@ python3 benchmarks/benchmark_throughput.py \
 
 ```bash
 python3 vllm/benchmarks/benchmark_throughput.py \
-  --model Qwen/Qwen2-VL-7B-Instruct \
+  --model unsloth/Qwen2-VL-2B-Instruct \
   --backend vllm-chat \
   --dataset-name hf \
   --dataset-path unsloth/LaTeX_OCR \
   --hf-split train \
-  --num-prompts 1000
+  --num-prompts 1000 
 ```
 
 **`unsloth/Radiology_mini`**
 
 ```bash
 python3 vllm/benchmarks/benchmark_throughput.py \
-  --model Qwen/Qwen2-VL-7B-Instruct \
+  --model unsloth/Qwen2-VL-2B-Instruct \
   --backend vllm-chat \
   --dataset-name hf \
   --dataset-path unsloth/Radiology_mini \
