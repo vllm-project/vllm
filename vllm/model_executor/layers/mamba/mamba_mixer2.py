@@ -157,7 +157,7 @@ def extra_groups_for_head_shards(ngroups: int, tp_size: int):
 
 
 def mamba_v2_sharded_weight_loader(
-    shard_spec: list[tuple[int, int, float]],
+    shard_spec: list[tuple[int, int, int, bool]],
     tp_size: int,
     tp_rank: int,
 ) -> LoaderFunction:
