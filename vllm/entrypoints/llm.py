@@ -1450,15 +1450,15 @@ class LLM:
             prompts = [prompts]
 
         num_requests = len(prompts)
-        if isinstance(params, list) and len(params) != num_requests:
+        if isinstance(params, Sequence) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")
         if isinstance(lora_request,
-                      list) and len(lora_request) != num_requests:
+                      Sequence) and len(lora_request) != num_requests:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
 
-        for sp in params if isinstance(params, list) else (params, ):
+        for sp in params if isinstance(params, Sequence) else (params, ):
             if isinstance(sp, SamplingParams):
                 self._add_guided_params(sp, guided_options)
 
