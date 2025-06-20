@@ -89,7 +89,7 @@ steps:
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
 - label: Chunked Prefill Test
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_chunked_prefill
@@ -177,6 +177,11 @@ steps:
   - tests/tracing
   commands:
   - pytest -v -s metrics
+  - "pip install \
+      'opentelemetry-sdk>=1.26.0' \
+      'opentelemetry-api>=1.26.0' \
+      'opentelemetry-exporter-otlp>=1.26.0' \
+      'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s tracing
 
 ##### fast check tests  #####
@@ -266,6 +271,15 @@ steps:
   commands:
     - pytest -v -s prefix_caching
 
+
+- label: Platform Tests (CUDA)
+  mirror_hardwares: [amdexperimental]
+  source_file_dependencies:
+  - vllm/
+  - tests/cuda
+  commands:
+    - pytest -v -s cuda/test_cuda_context.py
+
 - label: Samplers Test # 36min
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
@@ -305,6 +319,7 @@ steps:
   commands:
     - pytest -v -s compile/test_pass_manager.py
     - pytest -v -s compile/test_fusion.py
+    - pytest -v -s compile/test_fusion_attn.py
     - pytest -v -s compile/test_silu_mul_quant_fusion.py
     - pytest -v -s compile/test_sequence_parallelism.py
     - pytest -v -s compile/test_async_tp.py
@@ -669,7 +684,7 @@ steps:
   - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
 
 - label: Multi-step Tests (4 GPUs) # 36min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:

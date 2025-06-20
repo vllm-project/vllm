@@ -65,7 +65,6 @@ class BlocksparseParams:
         assert self.block_size > 0
         assert self.local_blocks >= 0
         assert self.vert_stride >= 1
-        assert self.num_heads % self.num_kv_heads == 0
 
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -329,9 +328,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.alibi_slopes = alibi_slopes
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.num_kv_heads = num_kv_heads
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.local_blocks = self.blocksparse_params.local_blocks
@@ -374,6 +372,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: BlocksparseFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -388,6 +387,11 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for BlocksparseFlashAttentionImpl")
+
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)

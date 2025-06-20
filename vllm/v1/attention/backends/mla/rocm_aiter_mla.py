@@ -66,7 +66,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
     def __init__(self, runner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
-        super().__init__(runner, kv_cache_spec, block_table)
+        super().__init__(runner, kv_cache_spec, block_table, AiterMLAMetadata)
         assert self.kv_cache_spec.block_size == 1, "AITER MLA" \
             "only supports block size 1."
 
@@ -201,16 +201,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
-        if self.num_heads == 16:
-            # AITER MLA decode kernel only supports
-            # max_seqlen_q=1 when using 16 heads.
-            max_seqlen_qo = 1
-        else:
-            # AITER MLA decode Kernel handles arbitrary
-            # max_seqlen_q values when using 128 heads.
-            assert attn_metadata.prefill is not None
-            max_seqlen_qo = attn_metadata.prefill.max_query_len
-
+        # max_seqlen_qo must be 1 except for MTP
+        # TODO: Find the best value for MTP
+        max_seqlen_qo = 1
         aiter_mla_decode_fwd(q, kv_buffer, o, self.scale,
                              attn_metadata.decode.qo_indptr, max_seqlen_qo,
                              attn_metadata.decode.paged_kv_indptr,

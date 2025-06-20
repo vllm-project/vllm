@@ -6,7 +6,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from datetime import timedelta
-from functools import wraps
+from functools import cache, wraps
 from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
 
 import torch
@@ -70,6 +70,17 @@ class CudaPlatformBase(Platform):
         # Kepler and Maxwell NVIDIA GPUs, only FP32 is supported,
         # though vLLM doesn't support these GPUs.
         return [torch.float32]
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        super().set_device(device)
+        # With this trick we can force the device to be set eagerly
+        # see https://github.com/pytorch/pytorch/issues/155668
+        # for why and when it is needed
+        _ = torch.zeros(1, device=device)
 
     @classmethod
     def get_device_capability(cls,
@@ -226,15 +237,21 @@ class CudaPlatformBase(Platform):
             if selected_backend == _Backend.FLASHINFER:
                 logger.info_once("Using FlashInfer backend on V1 engine.")
                 return "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
-            if selected_backend == _Backend.FLEX_ATTENTION:
+            elif selected_backend == _Backend.FLEX_ATTENTION:
                 logger.info("Using FlexAttenion backend on V1 engine.")
                 return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
-            if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+            elif selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
                 logger.info_once("Using Triton backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "triton_attn.TritonAttentionBackend")
+            elif selected_backend == _Backend.FLASH_ATTN:
+                logger.info_once("Using Flash Attention backend on V1 engine.")
+                return ("vllm.v1.attention.backends."
+                        "flash_attn.FlashAttentionBackend")
+
+            # Default backends for V1 engine
+            # Prefer FlashInfer for Blackwell GPUs if installed
             if cls.is_device_capability(100):
-                # Prefer FlashInfer for V1 on Blackwell GPUs if installed
                 try:
                     import flashinfer  # noqa: F401
                     logger.info_once(
@@ -248,10 +265,13 @@ class CudaPlatformBase(Platform):
                         "Blackwell (SM 10.0) GPUs; it is recommended to "
                         "install FlashInfer for better performance.")
                     pass
+            # FlashAttention is the default for SM 8.0+ GPUs
             if cls.has_device_capability(80):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "flash_attn.FlashAttentionBackend")
+
+        # Backends for V0 engine
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
@@ -389,6 +409,7 @@ class CudaPlatformBase(Platform):
 class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
+    @cache
     @with_nvml_context
     def get_device_capability(cls,
                               device_id: int = 0
@@ -486,6 +507,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
 class NonNvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
+    @cache
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)

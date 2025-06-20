@@ -80,6 +80,9 @@ class Attention(nn.Module):
             calculate_kv_scales = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
+        assert num_heads % num_kv_heads == 0, \
+            f"num_heads ({num_heads}) is not " \
+            f"divisible by num_kv_heads ({num_kv_heads})"
 
         # The default k/v_scale is set to 1.0. This is ignored
         # when kv-cache is not fp8, and should be used with
@@ -206,7 +209,7 @@ class Attention(nn.Module):
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
-            output = torch.empty(output_shape,
+            output = torch.zeros(output_shape,
                                  dtype=query.dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
@@ -291,7 +294,9 @@ class MultiHeadAttention(nn.Module):
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
-        assert self.num_heads % self.num_kv_heads == 0
+        assert self.num_heads % self.num_kv_heads == 0, \
+            f"num_heads ({self.num_heads}) is not " \
+            f"divisible by num_kv_heads ({self.num_kv_heads})"
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         dtype = torch.get_default_dtype()
@@ -430,6 +435,7 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -444,7 +450,8 @@ def unified_attention_with_output(
                       value,
                       kv_cache,
                       attn_metadata,
-                      output=output)
+                      output=output,
+                      output_scale=output_scale)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -455,6 +462,7 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
 ) -> None:
     return
 

@@ -1,6 +1,7 @@
 site_name: vLLM
 site_url: https://docs.vllm.ai
 repo_url: https://github.com/vllm-project/vllm
+edit_uri: edit/main/docs/
 exclude_docs: |
   *.inc.md
   *.template.md
@@ -29,10 +30,12 @@ theme:
         icon: material/brightness-2
         name: Switch to system preference
   features:
+    - content.action.edit
     - content.code.copy
     - content.tabs.link
     - navigation.tracking
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.prune
     - navigation.top
@@ -123,6 +126,7 @@ extra_css:
 extra_javascript:
   - mkdocs/javascript/run_llm_widget.js
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
+  - mkdocs/javascript/edit_and_feedback.js
 
 # Makes the url format end in .html rather than act as a dir
 # So index.md generates as index.html and is available under URL /index.html

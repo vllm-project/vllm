@@ -219,7 +219,7 @@ def per_token_group_quant_int8(
     quantized tensor along with the scaling factor used for quantization.
 
     Args:
-        x: The input tenosr with ndim >= 2.
+        x: The input tensor with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
         dtype: The dype of output tensor. Note that only `torch.int8`

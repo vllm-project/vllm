@@ -17,6 +17,7 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
@@ -37,11 +38,11 @@ def is_rocm_aiter_paged_attn_enabled() -> bool:
 @cache
 def _get_paged_attn_module() -> PagedAttention:
     """
-    Initializes the appropriate PagedAttention module from `attention/ops`, 
+    Initializes the appropriate PagedAttention module from `attention/ops`,
     which is used as helper function
     by `ROCmFlashAttentionImpl` and `ROCmFlashAttentionBackend`.
 
-    The choice of attention module depends on whether 
+    The choice of attention module depends on whether
     AITER paged attention is enabled:
     - If enabled, `ROCmFlashAttentionImpl` uses `AITERPagedAttention`.
     - Otherwise, it defaults to using the original `PagedAttention`.
@@ -527,7 +528,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                                if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.paged_attn_module = _get_paged_attn_module()
@@ -584,6 +584,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 logger.debug("Using naive (SDPA) attention in ROCmBackend")
 
         self.aiter_kv_scales_initialized = False
+        self.force_fp8_attention = (
+            get_current_vllm_config() is not None
+            and get_current_vllm_config().model_config.override_attention_dtype
+            == "fp8")
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
@@ -592,6 +596,15 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                   None, :].expand(tokens, n_kv_heads, n_rep,
                                   head_dim).reshape(tokens, n_kv_heads * n_rep,
                                                     head_dim))
+
+    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
+                                     group_shape: tuple[int, int]):
+        if self.use_triton_flash_attn:
+            return dtype == current_platform.fp8_dtype(
+            ) and static and group_shape == (-1, -1)  # per-tensor
+
+        # Only supported in the Triton backend
+        return False
 
     def forward(
         self,
@@ -602,6 +615,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -654,6 +668,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None and not self.use_triton_flash_attn:
+            raise NotImplementedError(
+                "fused output quantization only supported for Triton"
+                " implementation in ROCMFlashAttentionImpl for now")
 
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
@@ -770,9 +789,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             query.dtype,
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
+
                     use_fp8_scales = (layer._q_scale and layer._k_scale
                                       and layer._v_scale and layer._prob_scale
-                                      and self.kv_cache_dtype == "fp8")
+                                      and (self.kv_cache_dtype == "fp8"
+                                           or self.force_fp8_attention))
+
                     full_scales = (
                         layer._q_scale.item(), layer._k_scale.item(),
                         layer._v_scale.item(),
@@ -791,6 +813,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         attn_masks[0][None]
                         if attn_masks is not None else None,
                         full_scales,
+                        output_scale,
                     )
                 elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:
@@ -868,6 +891,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 decode_query.dtype, head_size, block_size, gqa_ratio,
                 decode_meta.max_decode_seq_len, self.sliding_window,
                 self.kv_cache_dtype, self.alibi_slopes)
+
             if use_custom:
                 max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
                                != AttentionType.ENCODER_DECODER else
@@ -879,7 +903,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 assert _PARTITION_SIZE_ROCM % block_size == 0
                 tmp_output = torch.empty(
                     size=(num_seqs, num_heads, max_num_partitions, head_size),
-                    dtype=output.dtype,
+                    dtype=query.dtype,
                     device=output.device,
                 )
                 exp_sums = torch.empty(
@@ -913,9 +937,17 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.kv_cache_dtype,
                     layer._k_scale,
                     layer._v_scale,
+                    output_scale,
                 )
             else:
-                output[num_prefill_tokens:] = paged_attn.forward_decode(
+                # PagedAttention does not support fused quant, manually quantize
+                if output_scale is None:
+                    out_pa = output[num_prefill_tokens:]
+                else:
+                    out_pa = torch.empty_like(output[num_prefill_tokens:],
+                                              dtype=query.dtype)
+
+                out_pa[:] = paged_attn.forward_decode(
                     decode_query,
                     key_cache,
                     value_cache,
@@ -935,6 +967,14 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                 )
+
+                # Manually perform quantization
+                if output_scale is not None:
+                    out_uq = out_pa.view(-1, self.num_heads * self.head_size)
+                    out_q = output.view(-1, self.num_heads * self.head_size)
+                    ops.scaled_fp8_quant(out_uq,
+                                         output_scale,
+                                         output=out_q[num_prefill_tokens:])
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)

@@ -131,7 +131,7 @@ class BaiChuanAttention(nn.Module):
         self.num_heads = (self.total_num_heads //
                           tensor_model_parallel_world_size)
         self.head_dim = hidden_size // self.total_num_heads
-        self.postion_embedding = position_embedding
+        self.position_embedding = position_embedding
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
@@ -151,7 +151,7 @@ class BaiChuanAttention(nn.Module):
             quant_config=quant_config,
         )
         # Create the alibi slopes and slice them.
-        if self.postion_embedding == "ALIBI":
+        if self.position_embedding == "ALIBI":
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
             head_end = (tp_rank + 1) * self.num_heads
@@ -187,7 +187,7 @@ class BaiChuanAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.W_pack(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        if self.postion_embedding != "ALIBI":
+        if self.position_embedding != "ALIBI":
             q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)

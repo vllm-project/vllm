@@ -39,9 +39,10 @@ client = OpenAI(
     base_url="http://localhost:8000/v1",
     api_key="-",
 )
+model = client.models.list().data[0].id
 
 completion = client.chat.completions.create(
-    model="Qwen/Qwen2.5-3B-Instruct",
+    model=model,
     messages=[
         {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
     ],
@@ -54,7 +55,7 @@ The next example shows how to use the `guided_regex`. The idea is to generate an
 
 ```python
 completion = client.chat.completions.create(
-    model="Qwen/Qwen2.5-3B-Instruct",
+    model=model,
     messages=[
         {
             "role": "user",
@@ -92,26 +93,32 @@ class CarDescription(BaseModel):
 json_schema = CarDescription.model_json_schema()
 
 completion = client.chat.completions.create(
-    model="Qwen/Qwen2.5-3B-Instruct",
+    model=model,
     messages=[
         {
             "role": "user",
             "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
         }
     ],
-    extra_body={"guided_json": json_schema},
+    "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "car-description",
+            "schema": CarDescription.model_json_schema()
+        },
+    },
 )
 print(completion.choices[0].message.content)
 ```
 
 !!! tip
     While not strictly necessary, normally it´s better to indicate in the prompt the
-    JSON schema and how the fields should be populated.  This can improve the
+    JSON schema and how the fields should be populated. This can improve the
     results notably in most cases.
 
 Finally we have the `guided_grammar` option, which is probably the most
 difficult to use, but it´s really powerful. It allows us to define complete
-languages like SQL queries.  It works by using a context free EBNF grammar.
+languages like SQL queries. It works by using a context free EBNF grammar.
 As an example, we can use to define a specific format of simplified SQL queries:
 
 ```python
@@ -130,7 +137,7 @@ simplified_sql_grammar = """
 """
 
 completion = client.chat.completions.create(
-    model="Qwen/Qwen2.5-3B-Instruct",
+    model=model,
     messages=[
         {
             "role": "user",
@@ -142,7 +149,48 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-Full example: <gh-file:examples/online_serving/openai_chat_completion_structured_outputs.py>
+See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
+
+## Reasoning Outputs
+
+You can also use structured outputs with <project:#reasoning-outputs> for reasoning models.
+
+```bash
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r1
+```
+
+Note that you can use reasoning with any provided structured outputs feature. The following uses one with JSON schema:
+
+```python
+from pydantic import BaseModel
+
+
+class People(BaseModel):
+    name: str
+    age: int
+
+
+completion = client.chat.completions.create(
+    model=model,
+    messages=[
+        {
+            "role": "user",
+            "content": "Generate a JSON with the name and age of one random person.",
+        }
+    ],
+    response_format={
+        "type": "json_schema",
+        "json_schema": {
+            "name": "people",
+            "schema": People.model_json_schema()
+        }
+    },
+)
+print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+print("content: ", completion.choices[0].message.content)
+```
+
+See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)
 
 ## Experimental Automatic Parsing (OpenAI API)
 
@@ -163,14 +211,14 @@ class Info(BaseModel):
     age: int
 
 client = OpenAI(base_url="http://0.0.0.0:8000/v1", api_key="dummy")
+model = client.models.list().data[0].id
 completion = client.beta.chat.completions.parse(
-    model="meta-llama/Llama-3.1-8B-Instruct",
+    model=model,
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "My name is Cameron, I'm 28. What's my name and age?"},
     ],
     response_format=Info,
-    extra_body=dict(guided_decoding_backend="outlines"),
 )
 
 message = completion.choices[0].message
@@ -203,15 +251,13 @@ class MathResponse(BaseModel):
     steps: list[Step]
     final_answer: str
 
-client = OpenAI(base_url="http://0.0.0.0:8000/v1", api_key="dummy")
 completion = client.beta.chat.completions.parse(
-    model="meta-llama/Llama-3.1-8B-Instruct",
+    model=model,
     messages=[
         {"role": "system", "content": "You are a helpful expert math tutor."},
         {"role": "user", "content": "Solve 8x + 31 = 2."},
     ],
     response_format=MathResponse,
-    extra_body=dict(guided_decoding_backend="outlines"),
 )
 
 message = completion.choices[0].message
@@ -232,11 +278,11 @@ Step #2: explanation="Next, let's isolate 'x' by dividing both sides of the equa
 Answer: x = -29/8
 ```
 
-An example of using `structural_tag` can be found here: <gh-file:examples/online_serving/openai_chat_completion_structured_outputs_structural_tag.py>
+An example of using `structural_tag` can be found here: <gh-file:examples/online_serving/structured_outputs>
 
 ## Offline Inference
 
-Offline inference allows for the same types of guided decoding.
+Offline inference allows for the same types of structured outputs.
 To use it, we´ll need to configure the guided decoding using the class `GuidedDecodingParams` inside `SamplingParams`.
 The main available options inside `GuidedDecodingParams` are:
 
@@ -247,7 +293,7 @@ The main available options inside `GuidedDecodingParams` are:
 - `structural_tag`
 
 These parameters can be used in the same way as the parameters from the Online
-Serving examples above.  One example for the usage of the `choice` parameter is
+Serving examples above. One example for the usage of the `choice` parameter is
 shown below:
 
 ```python
@@ -265,4 +311,4 @@ outputs = llm.generate(
 print(outputs[0].outputs[0].text)
 ```
 
-Full example: <gh-file:examples/offline_inference/structured_outputs.py>
+See also: [full example](https://docs.vllm.ai/en/latest/examples/online_serving/structured_outputs.html)

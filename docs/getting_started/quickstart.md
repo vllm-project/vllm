@@ -61,7 +61,8 @@ from vllm import LLM, SamplingParams
 ```
 
 The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here][sampling-params].
-!!! warning
+
+!!! important
     By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the Hugging Face model repository if it exists. In most cases, this will provide you with the best results by default if [SamplingParams][vllm.SamplingParams] is not specified.
 
     However, if vLLM's default sampling parameters are preferred, please set `generation_config="vllm"` when creating the [LLM][vllm.LLM] instance.
@@ -116,7 +117,7 @@ vllm serve Qwen/Qwen2.5-1.5B-Instruct
 !!! note
     By default, the server uses a predefined chat template stored in the tokenizer.
     You can learn about overriding it [here][chat-template].
-!!! warning
+!!! important
     By default, the server applies `generation_config.json` from the huggingface model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
 
     To disable this behavior, please pass `--generation-config vllm` when launching the server.

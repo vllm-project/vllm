@@ -307,7 +307,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
                                if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if sliding_window is not None:
             # NOTE(woosuk): flash-attn's sliding window does not work with
@@ -370,6 +369,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: DualChunkFlashAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with DualChunkFlashAttention.
         Args:
@@ -383,6 +384,13 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        assert output is None, "Output tensor not supported for DualChunk"
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashAttentionImpl")
+
         (
             query,
             query_succ,

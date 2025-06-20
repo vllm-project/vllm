@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Optional
+
 import pytest
 import torch
 
-from tests.pplx_utils import ProcessGroupInfo, parallel_launch
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -13,6 +14,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
 from vllm.platforms import current_platform
+
+from .deepep_utils import ProcessGroupInfo, parallel_launch
 
 try:
     from pplx_kernels import AllToAll
@@ -64,6 +67,7 @@ def pplx_cutlass_moe(
     out_dtype,
     per_act_token: bool,
     per_out_ch: bool,
+    group_name: Optional[str],
 ):
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize)
@@ -84,7 +88,7 @@ def pplx_cutlass_moe(
     else:
         scale_elems = (hidden_dim + block_size - 1) // block_size
 
-    ata = AllToAll.internode(
+    args = dict(
         max_num_tokens=max_num_tokens,
         num_experts=num_experts,
         experts_per_token=topk,
@@ -95,6 +99,12 @@ def pplx_cutlass_moe(
         hidden_dim_bytes=hidden_dim,  # because a.dtype.itemsize == 1
         hidden_dim_scale_bytes=scale_elems * torch.float32.itemsize,
     )
+
+    if group_name is None:
+        ata = AllToAll.internode(**args)
+    else:
+        args["group_name"] = group_name
+        ata = AllToAll.intranode(**args)
 
     w1 = w1.to(device)
     w2 = w2.to(device)
@@ -113,7 +123,10 @@ def pplx_cutlass_moe(
     )
 
     experts = CutlassExpertsFp8((num_experts + world_size - 1) // world_size,
-                                out_dtype, per_act_token, per_out_ch)
+                                out_dtype,
+                                per_act_token,
+                                per_out_ch,
+                                use_batched_format=True)
 
     fused_cutlass_experts = FusedMoEModularKernel(
         prepare_finalize,
@@ -184,11 +197,17 @@ def _pplx_moe(
     w2_full: torch.Tensor,
     per_act_token: bool,
     per_out_ch: bool,
+    use_internode: bool,
 ):
-    uid = nvshmem_get_unique_id(
-    ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
-    torch.distributed.broadcast(uid, src=0)
-    nvshmem_init(uid, pgi.rank, pgi.world_size)
+    if use_internode:
+        uid = nvshmem_get_unique_id(
+        ) if pgi.rank == 0 else nvshmem_alloc_empty_unique_id()
+        torch.distributed.broadcast(uid, src=0)
+        nvshmem_init(uid, pgi.rank, pgi.world_size)
+    else:
+        group_ranks = list(range(pgi.world_size))
+        cpu_group = torch.distributed.new_group(group_ranks, backend="gloo")
+        group_name = cpu_group.group_name
 
     with set_current_vllm_config(vllm_config):
         torch_output = torch_moe2(a_full, w1_full, w2_full, topk_weights,
@@ -196,7 +215,7 @@ def _pplx_moe(
         pplx_output = pplx_cutlass_moe(pgi, dp_size, a, w1, w2, w1_scale,
                                        w2_scale, topk_weights, topk_ids,
                                        a1_scale, out_dtype, per_act_token,
-                                       per_out_ch)
+                                       per_out_ch, group_name)
 
         torch_output = chunk_by_rank(torch_output, pgi.rank,
                                      pgi.world_size).to(pplx_output.device)
@@ -207,7 +226,8 @@ def _pplx_moe(
 
     torch.testing.assert_close(pplx_output, torch_output, atol=0.05, rtol=0)
 
-    nvshmem_finalize()
+    if use_internode:
+        nvshmem_finalize()
 
 
 @pytest.mark.parametrize("m", [2, 224])
@@ -218,6 +238,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [4, 2]])
+@pytest.mark.parametrize("use_internode", [False])
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
@@ -232,6 +253,7 @@ def test_cutlass_moe_pplx(
     per_act_token: bool,
     per_out_ch: bool,
     world_dp_size: tuple[int, int],
+    use_internode: bool,
 ):
     current_platform.seed_everything(7)
 
@@ -284,4 +306,5 @@ def test_cutlass_moe_pplx(
 
         parallel_launch(world_size, _pplx_moe, dp_size, a, w1_q, w2_q,
                         w1_scale, w2_scale, topk_weights, topk_ids, a_scale1,
-                        dtype, a, w1_d, w2_d, per_act_token, per_out_ch)
+                        dtype, a, w1_d, w2_d, per_act_token, per_out_ch,
+                        use_internode)

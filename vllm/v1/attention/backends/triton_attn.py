@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import torch
 
@@ -15,8 +16,10 @@ from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.flash_attn import (
-    FlashAttentionMetadata, FlashAttentionMetadataBuilder)
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.utils import (
+    AttentionMetadataBuilder, CommonAttentionMetadata,
+    make_local_attention_virtual_batches)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -26,12 +29,161 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class TritonAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+@dataclass
+class TritonAttentionMetadata:
+    # NOTE(sang): Definition of context_len, query_len, and seq_len.
+    # |---------- N-1 iteration --------|
+    # |---------------- N iteration ---------------------|
+    # |- tokenA -|......................|-- newTokens ---|
+    # |---------- context_len ----------|
+    # |-------------------- seq_len ---------------------|
+    #                                   |-- query_len ---|
+
+    num_actual_tokens: int  # Number of tokens excluding padding.
+    max_query_len: int
+    query_start_loc: torch.Tensor
+    max_seq_len: int
+    seq_lens: torch.Tensor
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
+
+    # For cascade attention.
+    use_cascade: bool
+    common_prefix_len: int
+    cu_prefix_query_lens: Optional[torch.Tensor]
+    prefix_kv_lens: Optional[torch.Tensor]
+    suffix_kv_lens: Optional[torch.Tensor]
+
+    # Optional aot scheduling
+    scheduler_metadata: Optional[torch.Tensor] = None
+    prefix_scheduler_metadata: Optional[torch.Tensor] = None
+
+    # for local attention
+    @dataclass
+    class LocalAttentionMetadata:
+        local_query_start_loc: torch.Tensor
+        local_seqused_k: torch.Tensor
+        local_block_table: torch.Tensor
+        local_max_query_len: int
+        local_max_seq_len: int
+        local_scheduler_metadata: Optional[torch.Tensor]
+
+    local_attn_metadata: Optional[LocalAttentionMetadata] = None
+
+
+class TritonAttentionMetadataBuilder(
+        AttentionMetadataBuilder[TritonAttentionMetadata]):
+    full_cudagraph_supported: ClassVar[bool] = True
 
     def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
-        super().__init__(runner, kv_cache_spec, block_table)
-        self.aot_schedule = False
+        self.runner = runner
+        self.block_size = kv_cache_spec.block_size
+        self.kv_cache_spec = kv_cache_spec
+        self.block_table = block_table
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> TritonAttentionMetadata:
+        attn_metadata = self.build(0, common_attn_metadata)
+        # When doing full graph capture, setting seq_lens to
+        # max_model_len will cause graph capture to be extremely
+        # slow, so here we set it to 1.
+        attn_metadata.seq_lens.fill_(1)
+        return attn_metadata
+
+    def build(
+        self, common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata
+    ) -> TritonAttentionMetadata:
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
+        max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
+        block_table = self.block_table
+        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
+
+        block_table.slot_mapping[:num_actual_tokens].copy_(
+            block_table.slot_mapping_cpu[:num_actual_tokens],
+            non_blocking=True)
+        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
+        # mode.
+        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
+
+        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
+
+        # for local attention
+        local_attn_metadata = None
+        if self.runner.attention_chunk_size is not None:
+            seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
+                virt_block_table_tensor = make_local_attention_virtual_batches(
+                    self.runner.attention_chunk_size,
+                    self.runner.query_start_loc_np[:num_reqs + 1],
+                    self.runner.seq_lens_np[:num_reqs],
+                    block_table_tensor,
+                    self.block_size,
+                )
+            local_query_start_loc = torch.from_numpy(virt_q_cu_seqlens_np).to(
+                self.runner.device, non_blocking=True)
+            local_seqused_k = torch.from_numpy(virt_k_seqlens_np).to(
+                self.runner.device, non_blocking=True)
+            local_max_query_len = seqlens_q_local_np.max()
+            local_max_seq_len = virt_k_seqlens_np.max()
+
+            local_attn_metadata = TritonAttentionMetadata \
+                        .LocalAttentionMetadata(
+                local_query_start_loc=local_query_start_loc,
+                local_seqused_k=local_seqused_k,
+                local_block_table=virt_block_table_tensor,
+                local_max_query_len=local_max_query_len,
+                local_max_seq_len=local_max_seq_len,
+                local_scheduler_metadata=None,
+            )
+
+        use_cascade = common_prefix_len > 0
+
+        if use_cascade:
+            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
+                                                dtype=torch.int32,
+                                                device=self.runner.device)
+            prefix_kv_lens = torch.tensor([common_prefix_len],
+                                          dtype=torch.int32,
+                                          device=self.runner.device)
+            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
+                              common_prefix_len)
+            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
+                self.runner.device)
+        else:
+            cu_prefix_query_lens = None
+            prefix_kv_lens = None
+            suffix_kv_lens = None
+            prefix_scheduler_metadata = None
+
+        attn_metadata = TritonAttentionMetadata(
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=max_query_len,
+            query_start_loc=query_start_loc,
+            max_seq_len=max_seq_len,
+            seq_lens=seq_lens,
+            block_table=block_table_tensor,
+            slot_mapping=slot_mapping,
+            use_cascade=use_cascade,
+            common_prefix_len=common_prefix_len,
+            cu_prefix_query_lens=cu_prefix_query_lens,
+            prefix_kv_lens=prefix_kv_lens,
+            suffix_kv_lens=suffix_kv_lens,
+            local_attn_metadata=local_attn_metadata,
+            prefix_scheduler_metadata=prefix_scheduler_metadata,
+        )
+        return attn_metadata
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        # Full CUDA Graph always supported
+        return True
 
 
 class TritonAttentionBackend(AttentionBackend):
@@ -52,7 +204,7 @@ class TritonAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
-        return FlashAttentionMetadata
+        return TritonAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -114,7 +266,6 @@ class TritonAttentionImpl(AttentionImpl):
 
         self.use_irope = use_irope
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         support_head_sizes = TritonAttentionBackend.get_supported_head_sizes()
@@ -142,6 +293,7 @@ class TritonAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -155,6 +307,11 @@ class TritonAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for TritonAttentionImpl")
 
         if attn_metadata is None:
             # Profiling run.
@@ -219,7 +376,7 @@ class TritonAttentionImpl(AttentionImpl):
                     query.reshape(
                         (num_tokens, num_heads * head_size)).contiguous(),
                     layer._q_scale)
-            query = query.reshape((num_tokens, num_heads, head_size))
+                query = query.reshape((num_tokens, num_heads, head_size))
 
         use_local_attn = \
             (self.use_irope and attn_metadata.local_attn_metadata is not None)

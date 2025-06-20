@@ -272,6 +272,15 @@ def test_dict_args(parser):
         "val5",
         "--hf_overrides.key-7.key_8",
         "val6",
+        # Test data type detection
+        "--hf_overrides.key9",
+        "100",
+        "--hf_overrides.key10",
+        "100.0",
+        "--hf_overrides.key11",
+        "true",
+        "--hf_overrides.key12.key13",
+        "null",
     ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.model_name == "something.something"
@@ -285,6 +294,12 @@ def test_dict_args(parser):
         "key_6": "val5",
         "key-7": {
             "key_8": "val6",
+        },
+        "key9": 100,
+        "key10": 100.0,
+        "key11": True,
+        "key12": {
+            "key13": None,
         },
     }
 

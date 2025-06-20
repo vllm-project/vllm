@@ -68,11 +68,11 @@ def convert_mapping(
                 LoRA indices.
             sampler_indices: Tensor of shape [batch_size] mapping requests to
                 LoRA indices for sampler. For generation, this will be the
-                same as base_indicies. For prefill, this will map requests
+                same as base_indices. For prefill, this will map requests
                 to LoRA indices.
             sampler_indices_padded: Tensor of shape [batch_size] mapping
                 requests to LoRA indices for sampler with padding.
-                Same as sampler_indicies, but -1 is replaced with
+                Same as sampler_indices, but -1 is replaced with
                 max_loras.
             embeddings_indices: Tensor of shape [2, batch_size] mapping
                 requests to embedding indices. First row is for embeddings

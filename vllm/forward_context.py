@@ -94,6 +94,7 @@ class ForwardContext:
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
+    skip_cuda_graphs: bool = False
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -108,11 +109,14 @@ def get_forward_context() -> ForwardContext:
 
 
 @contextmanager
-def set_forward_context(attn_metadata: Any,
-                        vllm_config: VllmConfig,
-                        virtual_engine: int = 0,
-                        num_tokens: Optional[int] = None,
-                        num_tokens_across_dp: Optional[torch.Tensor] = None):
+def set_forward_context(
+    attn_metadata: Any,
+    vllm_config: VllmConfig,
+    virtual_engine: int = 0,
+    num_tokens: Optional[int] = None,
+    num_tokens_across_dp: Optional[torch.Tensor] = None,
+    skip_cuda_graphs: bool = False,
+):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -135,7 +139,9 @@ def set_forward_context(attn_metadata: Any,
         static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
-        dp_metadata=dp_metadata)
+        dp_metadata=dp_metadata,
+        skip_cuda_graphs=skip_cuda_graphs,
+    )
 
     try:
         yield

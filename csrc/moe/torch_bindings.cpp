@@ -22,15 +22,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor! num_tokens_post_pad) -> ()");
   m.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
 
-  // temporarily adapted from
-  // https://github.com/sgl-project/sglang/commit/ded9fcd09a43d5e7d5bb31a2bc3e9fc21bf65d2a
-  m.def(
-      "sgl_moe_align_block_size(Tensor topk_ids, int num_experts,"
-      "                         int block_size, Tensor! sorted_token_ids,"
-      "                         Tensor! experts_ids,"
-      "                         Tensor! num_tokens_post_pad) -> ()");
-  m.impl("sgl_moe_align_block_size", torch::kCUDA, &sgl_moe_align_block_size);
-
 #ifndef USE_ROCM
   m.def(
       "moe_wna16_gemm(Tensor input, Tensor! output, Tensor b_qweight, "
@@ -66,7 +57,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   m.def(
       "moe_permute(Tensor input, Tensor topk_weight, Tensor! topk_ids,"
-      "Tensor token_expert_indicies, Tensor? expert_map, int n_expert,"
+      "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
       "int n_local_expert,"
       "int topk, int? align_block_size,Tensor! permuted_input, Tensor! "
       "expert_first_token_offset, Tensor! src_row_id2dst_row_id_map, Tensor! "

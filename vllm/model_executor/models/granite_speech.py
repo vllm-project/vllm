@@ -706,10 +706,11 @@ class GraniteSpeechForConditionalGeneration(
     def get_multimodal_embeddings(
         self,
         **kwargs: object,
-    ) -> Optional[MultiModalEmbeddings]:
+    ) -> MultiModalEmbeddings:
         """Compute the audio embeddings if audio inputs are present."""
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
+            return []
             return None
         audio_features = self._process_audio_input(audio_input)
         return audio_features
@@ -720,7 +721,8 @@ class GraniteSpeechForConditionalGeneration(
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         """Compute the merged LLM / audio embeddings."""
-        if multimodal_embeddings is None:
+        if multimodal_embeddings is None \
+            or len(multimodal_embeddings) == 0:
             return self.language_model.get_input_embeddings(input_ids)
 
         inputs_embeds = embed_multimodal(
