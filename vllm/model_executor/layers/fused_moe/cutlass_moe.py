@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_dequantize)
 from vllm.scalar_type import scalar_types
 
-def validate_mul(mul_res, w_q, w_scale, a_q, a_scale, block_size, dtype,
+def verify_mul(mul_res, w_q, w_scale, a_q, a_scale, block_size, dtype,
                  expert_offsets):
     def block_dequant_w(w, w_q, scale, block_size):
         for expert in range(w.size(0)):
@@ -273,9 +273,9 @@ def run_blocked_cutlass_moe_fp8(
                                  problem_sizes1, ab_strides1,
                                  ab_strides1, c_strides1, per_act_token)
 
-    validate_mul(c1, w1, w1_scale, a1q,
-                 a1q_scale if per_act_token else a1q_scale.t(),
-                 (128, 128), out_dtype, expert_offsets)
+    # verify_mul(c1, w1, w1_scale, a1q,
+    #              a1q_scale if per_act_token else a1q_scale.t(),
+    #              (128, 128), out_dtype, expert_offsets)
 
     # print("out c1:", c1[:, 0:1])
     # print("out c1:", c1[c_map][:, 0:5])
@@ -317,9 +317,9 @@ def run_blocked_cutlass_moe_fp8(
                                  problem_sizes2, ab_strides2,
                                  ab_strides2, c_strides2, per_act_token)
 
-    validate_mul(c3, w2, w2_scale, a2q,
-                 a2q_scale if per_act_token else a2q_scale.t(),
-                 (128, 128), out_dtype, expert_offsets)
+    # verify_mul(c3, w2, w2_scale, a2q,
+    #              a2q_scale if per_act_token else a2q_scale.t(),
+    #              (128, 128), out_dtype, expert_offsets)
 
     # print("out c3:", c3[:, 0:5])
 

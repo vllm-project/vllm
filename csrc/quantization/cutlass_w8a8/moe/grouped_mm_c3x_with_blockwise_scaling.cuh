@@ -114,8 +114,6 @@ void cutlass_blockwise_group_gemm_caller(
   int n_scale_size = b_scales.size(2);
   int k_scale_size = b_scales.size(1);
 
-  std::cout << "scale sizes: " << n_scale_size << " " << k_scale_size << std::endl;
-
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 
   auto options_int =
