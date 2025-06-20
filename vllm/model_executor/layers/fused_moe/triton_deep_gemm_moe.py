@@ -24,7 +24,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         allow_deep_gemm: bool = False,
     ):
         super().__init__(
-            FusedMoEQuantConfig(
+            FusedMoEQuantConfig.make(
                 use_fp8_w8a8=use_fp8_w8a8,
                 use_int8_w8a8=use_int8_w8a8,
                 use_int8_w8a16=use_int8_w8a16,
