@@ -151,7 +151,8 @@ def extra_groups_for_head_shards(ngroups: int, tp_size: int):
     if ngroups % tp_size == 0:
         return 0
 
-    # for n_groups == 1 or tp_size % ngroups == 0, this is exactly tp_size - n_groups
+    # for n_groups == 1 or tp_size % ngroups == 0, 
+    # this is exactly tp_size - n_groups
     return tp_size - ngroups
 
 
@@ -194,8 +195,8 @@ def mamba_v2_sharded_weight_loader(
             else:
                 assert (
                     tp_size % n_groups == 0
-                ), "num groups must divide TP size if TP size does not divide n_groups"
-                " and n_groups is not equal to 1."
+                ), "num groups must divide TP size if TP size does not divide"
+                " n_groups and n_groups is not equal to 1."
                 rank = tp_rank // n_groups
             # - leftmost boundary index into loaded weight.
             loaded_skip = rank * shard_size
