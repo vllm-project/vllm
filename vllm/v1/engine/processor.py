@@ -49,8 +49,8 @@ class Processor:
                                                     self.tokenizer,
                                                     mm_registry)
 
-        self.mm_input_cache_client = MultiModalInputCacheClient(
-            self.model_config, mm_registry)
+        self.mm_input_cache_client = MultiModalInputCacheClient.from_config(
+            self.vllm_config, mm_registry)
 
     @property
     def mm_registry(self):
