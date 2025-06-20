@@ -52,14 +52,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             return None
         return deep_ep.Buffer.get_combine_config(self.dp_size)
 
-    def _do_quant(self, tokens: torch.Tensor,
-                  token_scales: Optional[torch.Tensor], per_act_token: bool):
-        tokens, token_scales = moe_kernel_quantize_input(
-            tokens, token_scales, self.quant_dtype, per_act_token,
-            self.block_shape)
-
-        return tokens, token_scales
-
     def _do_dispatch(self, tokens: torch.Tensor,
                      token_scales: Optional[torch.Tensor],
                      rank_topk_ids: torch.Tensor,
