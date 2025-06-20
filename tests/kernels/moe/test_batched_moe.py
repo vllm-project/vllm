@@ -77,6 +77,9 @@ def ref_impl(
     B_scale: Optional[torch.Tensor],
     block_shape: Optional[list[int]],
 ) -> torch.Tensor:
+    assert (A.dtype.itemsize > 1
+            or (A_scale is not None and B_scale is not None))
+
     num_expert_tokens_cpu = num_expert_tokens.clone()
     num_expert_tokens_cpu = num_expert_tokens_cpu.to(device="cpu")
     num_experts = num_expert_tokens.size(0)

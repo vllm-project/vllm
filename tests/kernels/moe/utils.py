@@ -167,31 +167,31 @@ def make_test_weights(
         assert quant_dtype == torch.float8_e4m3fn, "only fp8 supported"
         w1_l = [None] * e
         w2_l = [None] * e
-        w1_s = [None] * e
-        w2_s = [None] * e
+        w1_s_l = [None] * e
+        w2_s_l = [None] * e
         for idx in range(e):
             if block_shape is not None:
-                w1_l[idx], w1_s[idx] = per_block_cast_to_fp8(
+                w1_l[idx], w1_s_l[idx] = per_block_cast_to_fp8(
                     w1_16[idx],
                     block_shape[1],
                 )
-                w2_l[idx], w2_s[idx] = per_block_cast_to_fp8(
+                w2_l[idx], w2_s_l[idx] = per_block_cast_to_fp8(
                     w2_16[idx],
                     block_shape[1],
                 )
             else:
-                tmp, w1_s[idx] = per_token_group_quant_fp8(
+                tmp, w1_s_l[idx] = per_token_group_quant_fp8(
                     w1_16[idx].view(1, -1), w1_16[idx].numel())
                 w1_l[idx] = tmp.view(*w1_16[idx].shape)
 
-                tmp, w2_s[idx] = per_token_group_quant_fp8(
+                tmp, w2_s_l[idx] = per_token_group_quant_fp8(
                     w2_16[idx].view(1, -1), w2_16[idx].numel())
                 w2_l[idx] = tmp.view(*w2_16[idx].shape)
 
         w1 = torch.stack(w1_l)
         w2 = torch.stack(w2_l)
-        w1_s = torch.stack(w1_s)
-        w2_s = torch.stack(w2_s)
+        w1_s = torch.stack(w1_s_l)
+        w2_s = torch.stack(w2_s_l)
         if w1_s.ndim == 2:
             assert w1_s.shape[-1] == 1
             w1_s = w1_s.view(-1, 1, 1)
