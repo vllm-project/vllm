@@ -918,6 +918,23 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         # using llama4's load_weights routine.
         language_model_weights, other_weights = self.separate_weights(
             weights, prefix="language_model.")
+
+        # If no language_model weights found, try with "model." prefix and rename
+        language_model_weights_list = list(language_model_weights)
+        if not language_model_weights_list:
+            # No language_model.* weights found, try model.* weights
+            def rename_model_weights():
+                for name, weight in weights:
+                    if name.startswith("model."):
+                        # Rename model.* to language_model.model.*
+                        yield (name.replace("model.", "language_model.model.", 1), weight)
+                    else:
+                        # Keep other weights as is
+                        yield (name, weight)
+
+            language_model_weights, other_weights = self.separate_weights(
+                rename_model_weights(), prefix="language_model.")
+
         loader = AutoWeightsLoader(self)
         loaded_language_model_params = loader.load_weights(
             language_model_weights)
