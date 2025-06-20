@@ -2,7 +2,7 @@ default_install_hook_types:
   - pre-commit
   - commit-msg
 default_stages:
-  - pre-commit # Run locally
+  - commit # Run locally (changed from pre-commit)
   - manual # Run in CI
 exclude: 'vllm/third_party/.*'
 repos:
@@ -13,21 +13,26 @@ repos:
     args: [--in-place, --verbose]
     # Keep the same list from yapfignore here to avoid yapf failing without any inputs
     exclude: '(.buildkite|benchmarks|build|examples)/.*'
+    stages: [commit]
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.11.7
   hooks:
   - id: ruff
     args: [--output-format, github, --fix]
+    stages: [commit]
   - id: ruff-format
     files: ^(.buildkite|benchmarks|examples)/.*
+    stages: [commit]
 - repo: https://github.com/crate-ci/typos
   rev: v1.32.0
   hooks:
   - id: typos
+    stages: [commit]
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
   hooks:
   - id: isort
+    stages: [commit]
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v20.1.3
   hooks:
@@ -35,22 +40,26 @@ repos:
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
+    stages: [commit]
 - repo: https://github.com/jackdewinter/pymarkdown
   rev: v0.9.29
   hooks:
   - id: pymarkdown
     exclude: '.*\.inc\.md'
     args: [fix]
+    stages: [commit]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
   - id: actionlint
+    stages: [commit]
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.6.17
   hooks:
     - id: pip-compile
       args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128]
       files: ^requirements/test\.(in|txt)$
+      stages: [commit]
 - repo: local
   hooks:
   - id: mypy-local
@@ -59,7 +68,7 @@ repos:
     language: python
     types: [python]
     additional_dependencies: &mypy_deps [mypy==1.11.1, types-cachetools, types-setuptools, types-PyYAML, types-requests, pydantic]
-    stages: [pre-commit] # Don't run in CI
+    stages: [commit] # Don't run in CI (changed from pre-commit)
   - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.9
     entry: tools/mypy.sh 1 "3.9"
