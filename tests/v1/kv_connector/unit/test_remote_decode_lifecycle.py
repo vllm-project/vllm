@@ -50,6 +50,7 @@ def test_basic_lifecycle():
 
     # Request freed in Scheduler and in Persistent Batch ...
     assert request_id in scheduler.finished_req_ids
+    assert request_id in scheduler.pending_kv_free_req_ids
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 0
 
@@ -179,4 +180,62 @@ def test_prefix_cache_lifecycle():
     model_runner_output.finished_sending = [request_remote.request_id]
     scheduler.update_from_output(scheduler_output, model_runner_output)
     _ = scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+def test_abort():
+    """Test lifecycle of an aborted Remote Decode request."""
+
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    request = create_request(request_id=1,
+                             max_tokens=1,
+                             num_tokens=1000,
+                             do_remote_decode=True)
+
+    scheduler.add_request(request)
+    request_id = request.request_id
+
+    # STEP (1): Prefill.
+    # (1a): schedule()
+    scheduler_output = scheduler.schedule()
+    assert len(scheduler.running) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 1
+
+    # (1b): execute_model()
+    model_runner_output = create_model_runner_output(reqs=[request])
+
+    # (1c): update_from_output()
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert request_id in scheduler.pending_kv_free_req_ids
+    assert request_id in scheduler.finished_req_ids
+    blocks = scheduler.kv_cache_manager.coordinator.get_blocks(request_id)[0]
+    for block in blocks:
+        assert block.ref_cnt == 1
+
+    # STEP (2): Send Finished to PB.
+    # (2a): schedule() - pass finished request to PB.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(reqs=[])
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # SIMULATE ABORT.
+    scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+    # Connector aborts request, and marks request_id as sent so it can be freed
+    model_runner_output = create_model_runner_output(
+        reqs=[], finished_sending=[request_id])
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert_scheduler_empty(scheduler)
+
+    # SIMULATE ABORT on empty scheduler (should be allowed).
+    scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+    assert_scheduler_empty(scheduler)
+
+    # SIMULATE Got Free After Abort.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(
+        reqs=[], finished_sending=[request_id])
+    # This should not double free!!!
+    scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)

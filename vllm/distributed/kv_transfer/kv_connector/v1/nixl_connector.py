@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import copy
 import math
 import threading
 import time
@@ -74,7 +75,9 @@ class ReqMeta:
 class NixlConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
-        self.requests: dict[str, ReqMeta] = {}
+        self.reqs_to_recv: dict[str, ReqMeta] = {}
+        self.reqs_to_send: set[str] = set()
+        self.reqs_to_abort: set[str] = set()
 
     def add_new_req(
         self,
@@ -82,7 +85,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
     ):
-        self.requests[request_id] = ReqMeta(
+        self.reqs_to_recv[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
@@ -150,7 +153,9 @@ class NixlConnector(KVConnectorBase_V1):
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_finished()
+        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        return self.connector_worker.get_finished(
+            self._connector_metadata.reqs_to_abort)
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -186,10 +191,20 @@ class NixlConnectorScheduler:
             vllm_config.parallel_config.tensor_parallel_size)
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
-        # Requests that need to start recv.
+        # Requests that need to be sent or start to recv.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+        self._reqs_need_send: set[str] = set()
+
+        # Requests that are aborted.
+        # Requests with pending sends are added by finish_requests
+        # in the scheduler. Use to finish the request in the worker
+        # to avoid memory leks from unpulled blocks.
+        self._reqs_need_abort: set[int] = set()
+
+    def abort_request(self, req_id: str) -> None:
+        self._reqs_need_abort.add(req_id)
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -258,6 +273,9 @@ class NixlConnectorScheduler:
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
 
+        elif params is not None and params.get("do_remote_decode"):
+            self._reqs_need_send.add(request.request_id)
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -273,8 +291,14 @@ class NixlConnectorScheduler:
                 kv_transfer_params=req.kv_transfer_params,
             )
 
-        # Clear the list once workers start the transfers
+        # Add the reqs to send and to abort.
+        meta.reqs_to_send = copy.copy(self._reqs_need_send)
+        meta.reqs_to_abort = copy.copy(self._reqs_need_abort)
+
+        # Clear the list once workers start the transfers.
         self._reqs_need_recv.clear()
+        self._reqs_need_send.clear()
+        self._reqs_need_abort.clear()
 
         return meta
 
@@ -373,14 +397,12 @@ class NixlConnectorWorker:
         # In progress transfers.
         # [req_id -> list[handle]]
         self._recving_transfers = defaultdict[str, list[Transfer]](list)
+        self._reqs_to_send: dict[str, int] = {}
 
-        # Complete transfer tracker. Used by the rank 0 to track finished
-        # transactions on ranks 1 to N-1.
+        # Completed xfers. Rank 0 tracks finished on remote ranks.
         # [req_id -> count]
-        self._done_recving_count: defaultdict[str,
-                                              int] = defaultdict(lambda: 0)
-        self._done_sending_count: defaultdict[str,
-                                              int] = defaultdict(lambda: 0)
+        self._done_recving_count: dict[str, int] = {}
+        self._done_sending_count: dict[str, int] = {}
 
         # Background thread for establishing new connections.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
@@ -742,7 +764,8 @@ class NixlConnectorWorker:
                 engine_id] = self.nixl_wrapper.prep_xfer_dlist(
                     self._remote_agents[engine_id][remote_tp_rank], descs)
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(self,
+                     aborted_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving.
 
@@ -753,6 +776,11 @@ class NixlConnectorWorker:
         are done before adding to finished, Ranks 1 to N-1 communicate
         to Rank 0 once their transaction is done + Rank 0 returns
         finished sets to Scheduler only once all ranks are done.
+
+        args:
+            aborted_req_ids: list of req_ids that were
+                aborted in the scheduler while sending that need
+                to be finished in the worker.
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
@@ -762,15 +790,40 @@ class NixlConnectorWorker:
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
 
-        if self.world_size == 1:
-            return done_sending, done_recving
+        # Handle timeout
+        now = time.perf_counter()
+        for req_id, finish_time in self._reqs_to_send.items():
+            if finish_time == -1:
+                # Request just finished, start timeout.
+                self._reqs_to_send[req_id] = now
+            elif now - finish_time >= envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT:
+                # Timeout exceed, abort request and clear.
+                aborted_req_ids.add(req_id)
+
+        # Handle aborted requests.
+        for req_id in aborted_req_ids:
+            # Set done counts to work size so we will mark as done.
+            if req_id in self._done_sending_count:
+                self._done_sending_count[req_id] += self.world_size
+            if req_id in self._done_recving_count:
+                self._done_recving_count[req_id] += self.world_size
+
+            # Free the ongoing xfer transfers.
+            if (handle := self._recving_transfers.get(req_id)):
+                self.nixl_wrapper.release_xfer_handle(handle)
+                del self._recving_transfers[req_id]
+
+            if req_id in self._reqs_to_send:
+                del self._reqs_to_send[req_id]
 
         # Rank 0: get finished from all other ranks.
         if self.tp_rank == 0:
             for req_id in done_sending:
-                self._done_sending_count[req_id] += 1
+                if req_id in self._done_sending_count:
+                    self._done_sending_count[req_id] += 1
             for req_id in done_recving:
-                self._done_recving_count[req_id] += 1
+                if req_id in self._done_recving_count:
+                    self._done_recving_count[req_id] += 1
 
             # Keep track of how many other ranks have finished.
             other_ranks_finished_ids: list[str] = []
@@ -778,22 +831,21 @@ class NixlConnectorWorker:
                 other_ranks_finished_ids.extend(
                     self.tp_group.recv_object(src=i))
             for req_id in other_ranks_finished_ids:
-                if (req_id in self._done_recving_count
-                        or req_id in self._recving_transfers):
-                    self._done_recving_count[req_id] += 1
-                else:
+                if req_id in self._done_sending_count:
                     self._done_sending_count[req_id] += 1
+                elif req_id in self._done_recving_count:
+                    self._done_recving_count[req_id] += 1
 
             # Return ids that finished on all ranks to the scheduler.
             all_done_recving: set[str] = set()
             for req_id in list(self._done_recving_count.keys()):
-                if self._done_recving_count[req_id] == self.world_size:
+                if self._done_recving_count[req_id] >= self.world_size:
                     del self._done_recving_count[req_id]
                     all_done_recving.add(req_id)
 
             all_done_sending: set[str] = set()
             for req_id in list(self._done_sending_count.keys()):
-                if self._done_sending_count[req_id] == self.world_size:
+                if self._done_sending_count[req_id] >= self.world_size:
                     del self._done_sending_count[req_id]
                     all_done_sending.add(req_id)
 
@@ -823,6 +875,7 @@ class NixlConnectorWorker:
                         tp_ratio):
                     notified_req_ids.add(req_id)
                     del self.consumer_notification_counts_by_req[req_id]
+                    del self._reqs_to_send[req_id]
         return notified_req_ids
 
     def _pop_done_transfers(
@@ -854,7 +907,8 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        for req_id, meta in metadata.requests.items():
+        # Start RECV.
+        for req_id, meta in metadata.reqs_to_recv.items():
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
@@ -868,6 +922,12 @@ class NixlConnectorWorker:
                 remote_host=meta.remote_host,
                 remote_port=meta.remote_port,
             )
+            self._done_recving_count[req_id] = 0
+
+        # Await SEND (triggered by corresponding RECV on remote).
+        for req_id in metadata.reqs_to_send:
+            self._done_sending_count[req_id] = 0
+            self._reqs_to_send[req_id] = -1
 
     def _read_blocks(
         self,
