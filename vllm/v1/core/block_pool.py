@@ -95,7 +95,7 @@ class BlockPool:
 
     def cache_full_blocks(
         self,
-        request: RequestGenerationState,
+        request_id: str,
         blocks: list[KVCacheBlock],
         block_hashes: list[BlockHash],
         num_cached_blocks: int,
@@ -112,7 +112,7 @@ class BlockPool:
         and caching them in the `cached_block_hash_to_block`.
 
         Args:
-            request: The request to cache the blocks.
+            request_id: The request ID to cache the blocks.
             blocks: All blocks in the request.
             block_hashes: Block hashes of the blocks in the request. Note that
             this list may be shorter than the blocks list. In this case the
@@ -153,28 +153,12 @@ class BlockPool:
                 # In this case we simply reuse the block hash.
                 block_hash = new_block_hashes[i]
             else:
-                # Otherwise compute the block hash and cache it in the request
-                # in case it will be preempted in the future.
-                blk_idx = num_cached_blocks + i
-                start_token_idx = blk_idx * block_size
-                end_token_idx = (blk_idx + 1) * block_size
-                block_tokens = request.all_token_ids[
-                    start_token_idx:end_token_idx]
-                assert len(block_tokens) == block_size, (
-                    f"Expected {block_size} tokens, got "
-                    f"{len(block_tokens)} at {blk_idx}th block for request "
-                    f"{request.request_id}({request})")
-
-                # Generate extra keys for multi-modal inputs. Note that since
-                # we reach to this branch only when the block is completed with
-                # generated tokens, we only need to consider the last mm input.
-                extra_keys, _ = generate_block_hash_extra_keys(
-                    request, start_token_idx, end_token_idx, -1)
-
-                # Compute the hash of the current block.
-                block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
-                                               block_tokens, extra_keys)
-                block_hashes.append(block_hash)
+                # We cannot compute block hash without request object
+                # This branch should not be reached with the new API
+                raise NotImplementedError(
+                    "Cannot compute block hash without request object. "
+                    "Block hashes must be pre-computed."
+                )
 
             # Update and added the full block to the cache.
             block_hash_with_group_id = BlockHashWithGroupId(
@@ -191,12 +175,9 @@ class BlockPool:
                 BlockStored(
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
-                    token_ids=request.
-                    all_token_ids[num_cached_blocks *
-                                  block_size:num_full_blocks * block_size],
+                    token_ids=[],  # Cannot get token IDs without request object
                     block_size=block_size,
-                    lora_id=request.lora_request.id
-                    if request.lora_request else None,
+                    lora_id=None,  # Cannot get lora_id without request object
                 ))
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:

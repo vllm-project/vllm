@@ -238,17 +238,22 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            num_draft_tokens = max(
+                num_new_tokens + request.num_computed_tokens -
+                request.num_tokens, 0)
+
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request.request_id,
                     request.num_computed_tokens,
                     num_new_tokens,
+                    num_draft_tokens=num_draft_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
-                    self.kv_cache_manager.free(preempted_req)
+                    self.kv_cache_manager.free(preempted_req.request_id)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
@@ -421,7 +426,9 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens + num_external_computed_tokens,
                     num_new_local_computed_tokens,
                     new_computed_blocks,
+                    num_draft_tokens=0,
                     num_lookahead_tokens=self.num_lookahead_tokens,
+                    delay_cache_blocks=load_kv_async,
                 )
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -858,9 +865,7 @@ class Scheduler(SchedulerInterface):
 
             # Check min with `num_computed_tokens` to guard against the case
             #  where we get preempted before we can cache the blocks.
-            self.kv_cache_manager.cache_blocks(
-                request_state, 
-                min(request_scheduler_state.num_computed_tokens, request_state.num_tokens))
+            # NOTE: Caching now happens in allocate_slots, not here
 
             if stopped:
                 assert status is not None
@@ -1001,7 +1006,7 @@ class Scheduler(SchedulerInterface):
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
         if free_blocks:
-            self._free_blocks(request.request_id)
+            self._free_blocks(request_id)
         else:
             # if we are not freeing the blocks its assumed someone else is using
             # them; namely the KV connector. We should make sure that they
@@ -1014,6 +1019,7 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.free(request_id)
         self.kv_cache_manager.free_block_hashes(request_id)
         del self.requests[request_id]
+        del self.request_states[request_id]
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
@@ -1092,7 +1098,7 @@ class Scheduler(SchedulerInterface):
             blocks=block_ids,
         )
 
-    def _update_waiting_for_remote_kv(self, request: RequestGenerationState) -> bool:
+    def _update_waiting_for_remote_kv(self, request: RequestSchedulerState) -> bool:
         """
         KV Connector: check if the request_id is finished_recving.
 
@@ -1112,10 +1118,14 @@ class Scheduler(SchedulerInterface):
         (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
         num_computed_tokens = len(block_ids) * self.block_size
         # Handle the case where num request tokens less then one block.
-        num_computed_tokens = min(num_computed_tokens, request.num_tokens)
-        if num_computed_tokens == request.num_tokens:
+        request_state = self.request_states[request.request_id]
+        num_computed_tokens = min(num_computed_tokens, request_state.num_tokens)
+        if num_computed_tokens == request_state.num_tokens:
             num_computed_tokens -= 1
-        self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
+        
+        # Cache the blocks - note that we need block_hashes for this
+        block_hashes = self.kv_cache_manager.req_to_block_hashes[request.request_id]
+        self.kv_cache_manager.cache_blocks(request.request_id, block_hashes, num_computed_tokens)
 
         # Update the request state for scheduling.
         request.num_computed_tokens = num_computed_tokens
@@ -1141,4 +1151,4 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
+            self._free_blocks(req_id)

@@ -189,9 +189,11 @@ class KVCacheManager:
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
+        num_draft_tokens: int = 0,
         num_lookahead_tokens: int = 0,
+        delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
-        """Add slots for a request with new tokens to append.
+        """
 
         Args:
             request_id: The id of the request to allocate slots for.
@@ -202,6 +204,7 @@ class KVCacheManager:
                 hitting the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed 
                 tokens.
+            num_draft_tokens: The number of speculative draft tokens.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
@@ -277,8 +280,17 @@ class KVCacheManager:
         new_blocks = self.coordinator.allocate_new_blocks(
             request_id, num_tokens_need_slot)
 
-        print("would have called cache_blocks: ", request_id, self.req_to_block_hashes[request_id],
-             num_computed_tokens + num_new_tokens - 0)
+        # P/D: delay caching blocks if we have to recv from
+        # remote. Update state for locally cached blocks.
+        if not self.enable_caching or delay_cache_blocks:
+            return KVCacheBlocks(new_blocks)
+
+        # Speculated tokens might be rejected in the future, so we do not
+        # cache any speculated tokens. We only cache blocks with
+        # generated (accepted) tokens.
+        self.coordinator.cache_blocks(
+            request_id, self.req_to_block_hashes[request_id],
+            num_computed_tokens + num_new_tokens - num_draft_tokens)
 
         return KVCacheBlocks(new_blocks)
 
@@ -372,13 +384,10 @@ class KVCacheManager:
         return KVCacheBlocks(
             self.coordinator.get_blocks(request_id)).get_block_ids()
 
-    def cache_blocks(self, request: RequestSchedulerState, num_computed_tokens: int) -> None:
+    def cache_blocks(self, request_id: str, block_hashes: list[BlockHash],
+                     num_computed_tokens: int) -> None:
         """Cache the blocks for the request."""
-        block_hashes = self.req_to_block_hashes[request.request_id]
-        
-        print("calling cache_blocks: ", request.request_id, self.req_to_block_hashes[request.request_id],
-            num_computed_tokens)
-        self.coordinator.cache_blocks(request, block_hashes,
+        self.coordinator.cache_blocks(request_id, block_hashes,
                                       num_computed_tokens)
 
     def create_empty_block_list(self) -> KVCacheBlocks:

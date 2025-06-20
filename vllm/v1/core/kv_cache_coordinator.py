@@ -96,19 +96,19 @@ class KVCacheCoordinator(ABC):
             manager.allocate_new_blocks(request_id, num_tokens)
             for manager in self.single_type_managers)
 
-    def cache_blocks(self, request: RequestGenerationState, block_hashes: list[BlockHash],
+    def cache_blocks(self, request_id: str, block_hashes: list[BlockHash],
                      num_computed_tokens: int) -> None:
         """
         Cache the blocks for the request.
 
         Args:
-            request: The request.
+            request_id: The request ID.
             block_hashes: The block hashes of the request.
-            num_tokens: The total number of tokens that need to be cached 
+            num_computed_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
         """
         for manager in self.single_type_managers:
-            manager.cache_blocks(request, block_hashes, num_computed_tokens)
+            manager.cache_blocks(request_id, block_hashes, num_computed_tokens)
 
     def free(self, request_id: str) -> None:
         """

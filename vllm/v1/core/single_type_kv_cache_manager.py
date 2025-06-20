@@ -127,24 +127,24 @@ class SingleTypeKVCacheManager(ABC):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: RequestGenerationState, block_hashes: list[BlockHash],
+    def cache_blocks(self, request_id: str, block_hashes: list[BlockHash],
                      num_tokens: int) -> None:
         """
         Cache the blocks for the request.
 
         Args:
-            request: The request.
+            request_id: The request ID.
             block_hashes: The block hashes of the request.
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
         """
-        num_cached_blocks = self.num_cached_block[request.request_id]
+        num_cached_blocks = self.num_cached_block[request_id]
         num_full_blocks = num_tokens // self.block_size
         
 
         self.block_pool.cache_full_blocks(
-            request=request,
-            blocks=self.req_to_blocks[request.request_id],
+            request_id=request_id,
+            blocks=self.req_to_blocks[request_id],
             block_hashes=block_hashes,
             num_cached_blocks=num_cached_blocks,
             num_full_blocks=num_full_blocks,
@@ -153,7 +153,7 @@ class SingleTypeKVCacheManager(ABC):
             hash_fn=self.caching_hash_fn,
         )
 
-        self.num_cached_block[request.request_id] = num_full_blocks
+        self.num_cached_block[request_id] = num_full_blocks
 
     def free(self, request_id: str) -> None:
         """
