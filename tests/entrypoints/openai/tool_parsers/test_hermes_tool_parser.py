@@ -63,8 +63,7 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
 
 TEXT_AND_TOOL_CALL_OUTPUT = ("Today's weather is nice. " +
                              SIMPLE_FUNCTION_OUTPUT)
-PARALLEL_CALLS_OUTPUT = (SIMPLE_FUNCTION_OUTPUT +
-                         MORE_TYPES_FUNCTION_OUTPUT)
+PARALLEL_CALLS_OUTPUT = (SIMPLE_FUNCTION_OUTPUT + MORE_TYPES_FUNCTION_OUTPUT)
 
 
 @pytest.fixture
@@ -196,8 +195,8 @@ def test_streaming_tool_call_with_fragmented_tags(mock_tokenizer: MagicMock):
     # Split <tool_call> into "<", "tool", "_", "call", ">"
     model_output_deltas = [
         "<", "tool", "_", "call", ">",
-        '{"name": "get_weather", "arguments": {"city": "SF"}}',
-        "<", "/", "tool", "_", "call", ">"
+        '{"name": "get_weather", "arguments": {"city": "SF"}}', "<", "/",
+        "tool", "_", "call", ">"
     ]
 
     reconstructor = run_tool_extraction_streaming(
@@ -258,13 +257,9 @@ def test_streaming_with_mixed_content(mock_tokenizer: MagicMock):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("hermes")(
         mock_tokenizer)
     model_output_deltas = [
-        "Thinking... ",
-        "I should call a tool. ",
-        "<tool_call>",
-        '{"name": "get_weather", ',
-        '"arguments": {"city": "Seoul"}}',
-        "</tool_call>",
-        " The tool call is complete."
+        "Thinking... ", "I should call a tool. ", "<tool_call>",
+        '{"name": "get_weather", ', '"arguments": {"city": "Seoul"}}',
+        "</tool_call>", " The tool call is complete."
     ]
 
     reconstructor = run_tool_extraction_streaming(
