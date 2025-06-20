@@ -97,6 +97,10 @@ class Request:
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
 
+        # The number of NaNs in logits. A value greater than 0
+        # indicates that the output is corrupted
+        self.num_nans_in_logits = 0
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         if request.mm_inputs is not None:
@@ -131,6 +135,10 @@ class Request:
         else:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
+
+    @property
+    def is_output_corrupted(self) -> bool:
+        return self.num_nans_in_logits > 0
 
     @property
     def num_tokens(self) -> int:

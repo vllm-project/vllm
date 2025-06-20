@@ -717,6 +717,7 @@ class Scheduler(SchedulerInterface):
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
+        num_nans_in_logits = model_runner_output.num_nans_in_logits
 
         new_running: list[Request] = []
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
@@ -809,6 +810,10 @@ class Scheduler(SchedulerInterface):
                 # check above, so safe to ignore type warning
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
+
+            # spec_token_ids comes from the model runner output
+            if num_nans_in_logits is not None and req_id in num_nans_in_logits:
+                request.num_nans_in_logits = num_nans_in_logits[req_id]
 
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
@@ -972,6 +977,8 @@ class Scheduler(SchedulerInterface):
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
+            num_corrupted_reqs=sum(req.is_output_corrupted
+                                   for req in self.running),
         )
 
     def make_spec_decoding_stats(
