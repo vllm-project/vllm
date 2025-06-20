@@ -60,7 +60,6 @@ class EngineCore:
                  executor_class: type[Executor],
                  log_stats: bool,
                  executor_fail_callback: Optional[Callable] = None):
-        assert vllm_config.model_config.runner_type != "pooling"
 
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
@@ -84,6 +83,8 @@ class EngineCore:
 
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.collective_rpc("initialize_cache",
+                            args=(num_gpu_blocks, num_cpu_blocks))
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
@@ -209,11 +210,14 @@ class EngineCore:
     def execute_model(self, scheduler_output: SchedulerOutput):
         try:
             return self.model_executor.execute_model(scheduler_output)
-        except BaseException as err:
+        except Exception as err:
+            # We do not want to catch BaseException here since we're only
+            # interested in dumping info when the exception is due to an
+            # error from execute_model itself.
+
             # NOTE: This method is exception-free
             dump_engine_exception(self.vllm_config, scheduler_output,
                                   self.scheduler.make_stats())
-            # Re-raise exception
             raise err
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:

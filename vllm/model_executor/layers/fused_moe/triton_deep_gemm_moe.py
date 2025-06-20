@@ -34,6 +34,12 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.deep_gemm_expert = DeepGemmExperts(
         ) if self.allow_deep_gemm else None
 
+    def supports_chunking(self) -> bool:
+        dge = self.deep_gemm_expert
+        te = self.triton_expert
+        return ((dge is None or dge.supports_chunking())
+                and (te is None or te.supports_chunking()))
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -42,21 +48,24 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         N: int,
         K: int,
         topk: int,
-        num_experts: int,
-    ) -> tuple[int, int, torch.dtype]:
+        global_num_experts: int,
+        local_num_experts: int,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
         if self.allow_deep_gemm and _valid_deep_gemm_shape(M, N, K):
             assert self.deep_gemm_expert is not None
             return self.deep_gemm_expert.workspace_shapes(
-                a, aq, M, N, K, topk, num_experts)
+                a, aq, M, N, K, topk, global_num_experts, local_num_experts)
         else:
             return self.triton_expert.workspace_shapes(a, aq, M, N, K, topk,
-                                                       num_experts)
+                                                       global_num_experts,
+                                                       local_num_experts)
 
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
@@ -73,45 +82,31 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_num_tokens: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ):
         N = w1.size(1)
-        if (self.allow_deep_gemm and self.use_fp8_w8a8 and N > 512
-                and _valid_deep_gemm(hidden_states, w1, w2)):
-            assert self.deep_gemm_expert is not None
-            return self.deep_gemm_expert.apply(
-                hidden_states,
-                w1,
-                w2,
-                topk_ids,
-                activation,
-                global_num_experts,
-                expert_map,
-                w1_scale,
-                w2_scale,
-                w1_zp,
-                w2_zp,
-                a1q_scale,
-                a2_scale,
-                workspace13,
-                workspace2,
-                expert_num_tokens,
-            )
-        else:
-            return self.triton_expert.apply(
-                hidden_states,
-                w1,
-                w2,
-                topk_ids,
-                activation,
-                global_num_experts,
-                expert_map,
-                w1_scale,
-                w2_scale,
-                w1_zp,
-                w2_zp,
-                a1q_scale,
-                a2_scale,
-                workspace13,
-                workspace2,
-                expert_num_tokens,
-            )
+
+        use_deep_gemm = (self.allow_deep_gemm and self.use_fp8_w8a8 and N > 512
+                         and _valid_deep_gemm(hidden_states, w1, w2))
+
+        experts = self.deep_gemm_expert if use_deep_gemm else self.triton_expert
+        assert experts is not None
+
+        experts.apply(
+            output,
+            hidden_states,
+            w1,
+            w2,
+            topk_ids,
+            activation,
+            global_num_experts,
+            expert_map,
+            w1_scale,
+            w2_scale,
+            w1_zp,
+            w2_zp,
+            a1q_scale,
+            a2_scale,
+            workspace13,
+            workspace2,
+            expert_num_tokens,
+        )

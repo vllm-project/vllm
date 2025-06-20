@@ -32,7 +32,7 @@ def test_prompt_logprobs_e2e():
             ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-def test_promt_logprobs_e2e_server():
+def test_prompt_logprobs_e2e_server():
     with RemoteOpenAIServer(MODEL, SERVER_ARGS) as remote_server:
         url = f"{remote_server.url_for('v1')}/completions"
 

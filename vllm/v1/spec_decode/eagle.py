@@ -138,15 +138,17 @@ class EagleProposer:
             max_query_len = query_lens.max().item()
 
             common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=cu_num_tokens, seq_lens=seq_lens)
+                query_start_loc=cu_num_tokens,
+                seq_lens=seq_lens,
+                num_reqs=batch_size,
+                num_actual_tokens=num_tokens,
+                max_query_len=max_query_len,
+            )
 
             assert self.runner is not None
 
             # FIXME: need to consider multiple kv_cache_groups
             attn_metadata = self.runner.attn_metadata_builder.build(
-                num_reqs=batch_size,
-                num_actual_tokens=num_tokens,
-                max_query_len=max_query_len,
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
             )
@@ -320,8 +322,10 @@ class EagleProposer:
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
-        self.model = get_model(vllm_config=self.vllm_config,
-                               model_config=draft_model_config)
+        from vllm.compilation.backends import set_model_tag
+        with set_model_tag("eagle_head"):
+            self.model = get_model(vllm_config=self.vllm_config,
+                                   model_config=draft_model_config)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
@@ -329,16 +333,24 @@ class EagleProposer:
 
         self.attn_layer_names = list(draft_attn_layer_names)
 
+        if supports_multimodal(target_model):
+            # handle multimodality
+            self.model.config.image_token_index = (
+                target_model.config.image_token_index)
+            target_language_model = target_model.get_language_model()
+        else:
+            target_language_model = target_model
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1 \
             and self.model.model.embed_tokens.weight.shape \
-                == target_model.model.embed_tokens.weight.shape:
+                == target_language_model.model.embed_tokens.weight.shape:
             logger.info(
                 "Assuming the EAGLE head shares the same vocab embedding" \
                 " with the target model."
             )
             del self.model.model.embed_tokens
-            self.model.model.embed_tokens = target_model.model.embed_tokens
+            self.model.model.embed_tokens = (
+                target_language_model.model.embed_tokens)
         else:
             logger.info(
                 "The EAGLE head's vocab embedding will be loaded separately" \
@@ -349,12 +361,9 @@ class EagleProposer:
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
         if self.vllm_config.speculative_config.method != "eagle3" and \
-                hasattr(target_model, "lm_head"):
+                hasattr(target_language_model, "lm_head"):
             logger.info("Loading EAGLE LM head weights from the target model.")
-            if supports_multimodal(target_model):
-                self.model.lm_head = target_model.get_language_model().lm_head
-            else:
-                self.model.lm_head = target_model.lm_head
+            self.model.lm_head = target_language_model.lm_head
 
     @torch.inference_mode()
     def dummy_run(
