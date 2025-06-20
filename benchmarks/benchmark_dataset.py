@@ -353,7 +353,7 @@ class RandomDataset(BenchmarkDataset):
                 : input_lens[i]
             ]
             prompt = tokenizer.decode(re_encoded_sequence)
-            total_input_len = prefix_len + int(input_lens[i])
+            total_input_len = len(re_encoded_sequence)
             requests.append(
                 SampleRequest(
                     prompt=prompt,
