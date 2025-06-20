@@ -273,7 +273,8 @@ class Worker(WorkerBase):
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
-    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig,
+                               reinit: bool = False) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
@@ -282,7 +283,7 @@ class Worker(WorkerBase):
             from contextlib import nullcontext
             context = nullcontext()
         with context:
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+            self.model_runner.initialize_kv_cache(kv_cache_config, reinit)
 
     def compile_or_warm_up_model(self) -> None:
         # warm up sizes that are not in cudagraph capture sizes,

@@ -62,9 +62,9 @@ class Executor(ExecutorBase):
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        if not reinit:
-            self.collective_rpc("initialize_from_config",
-                                args=(kv_cache_configs, ))
+        # if not reinit:
+        self.collective_rpc("initialize_from_config",
+                            args=(kv_cache_configs, reinit))
         self.collective_rpc("compile_or_warm_up_model")
 
     def register_failure_callback(self, callback: FailureCallback):

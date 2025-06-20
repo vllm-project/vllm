@@ -760,22 +760,23 @@ def bind_kv_cache(
         runner_kv_caches: The kv_cache declared by ModelRunner.
     """
     # Bind kv_caches to ModelRunner
-    assert len(runner_kv_caches) == 0
+    bind_runner = len(runner_kv_caches) == 0
 
     # Convert kv_caches dict to a list of tensors in the order of layer_index.
     index2name = defaultdict(list)
     for layer_name in kv_caches:
         index2name[extract_layer_index(layer_name)].append(layer_name)
 
-    for layer_index in sorted(index2name.keys()):
-        layer_names = index2name[layer_index]
-        if len(layer_names) > 1:
-            # One typical case is encoder-decoder model, e.g., bart.
-            # The cross attention and self attention in the same decoder layer
-            # has different layer_name but the same layer_index.
-            raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
+    if bind_runner:
+        for layer_index in sorted(index2name.keys()):
+            layer_names = index2name[layer_index]
+            if len(layer_names) > 1:
+                # One typical case is encoder-decoder model, e.g., bart.
+                # The cross attention and self attention in the same decoder layer
+                # has different layer_name but the same layer_index.
+                raise NotImplementedError
+            layer_name = layer_names[0]
+            runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():

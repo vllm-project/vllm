@@ -2442,7 +2442,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                       self.kv_caches)
         return kv_caches
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig, reinit: bool = False) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
@@ -2451,7 +2451,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         self.kv_cache_config = kv_cache_config
         self.may_reinitialize_input_batch(kv_cache_config)
-        self.initialize_attn_backend(kv_cache_config)
+        if not reinit:
+            self.initialize_attn_backend(kv_cache_config)
+        else:
+            del self.kv_caches
+            self.kv_caches = []
+            torch.cuda.empty_cache()
+            gc.collect()
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if self.speculative_config and self.speculative_config.use_eagle():

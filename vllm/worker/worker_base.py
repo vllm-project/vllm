@@ -595,10 +595,11 @@ class WorkerWrapperBase:
             self.worker = worker_class(**kwargs)
             assert self.worker is not None
 
-    def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
+    def initialize_from_config(self, kv_cache_configs: List[Any],
+                               reinit: bool = False) -> None:
         kv_cache_config = kv_cache_configs[self.rpc_rank]
         with set_current_vllm_config(self.vllm_config):
-            self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+            self.worker.initialize_from_config(kv_cache_config, reinit)  # type: ignore
 
     def init_device(self):
         with set_current_vllm_config(self.vllm_config):

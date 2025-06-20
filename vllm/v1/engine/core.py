@@ -1041,9 +1041,9 @@ class DPEngineCoreActor(DPEngineCoreProc):
         # This is needed because we need to call get_dp_padding() on the old workers
         # so that the EngineCore.init()|get_dp_padding()|all_reduce() can proceed
         logger.info("Calling determine_available_memory()")
-        self.vllm_config.parallel_config.data_parallel_size = new_dp_size
         self.model_executor.determine_available_memory()
         logger.info("Calling initialize_from_config()")
         self.model_executor.initialize_from_config(self.kv_cache_configs,
                                                    reinit=True)
         logger.info("initialize_from_config() called")
+        # self._initialize_kv_caches(self.vllm_config)
