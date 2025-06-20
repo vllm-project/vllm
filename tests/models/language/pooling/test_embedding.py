@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import pytest
 
 from vllm.config import PoolerConfig
@@ -33,7 +35,7 @@ def v1(run_with_both_engines):
         # To avoid this problem, for now we skip v0 since it will be
         # deprecated anyway.
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base",
-                     marks=[pytest.mark.skip_v0]),
+                     marks=[pytest.mark.skip_v0, pytest.mark.cpu_model]),
         # [Encoder-only]
         pytest.param("BAAI/bge-base-en-v1.5",
                      marks=[
@@ -58,6 +60,9 @@ def test_models(
     model,
     monkeypatch,
 ) -> None:
+    if model == "intfloat/e5-mistral-7b-instruct" and current_platform.is_cpu(
+    ) and os.environ.get("VLLM_USE_V1", "0") == "1":
+        pytest.skip("CPU V1 doesn't support sliding window")
 
     if model == "BAAI/bge-multilingual-gemma2" and current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
