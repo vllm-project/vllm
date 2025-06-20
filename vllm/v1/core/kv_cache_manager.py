@@ -190,7 +190,6 @@ class KVCacheManager:
         num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
-        delay_cache_blocks: bool = False,
     ) -> Optional[KVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
@@ -278,10 +277,8 @@ class KVCacheManager:
         new_blocks = self.coordinator.allocate_new_blocks(
             request_id, num_tokens_need_slot)
 
-        # P/D: delay caching blocks if we have to recv from
-        # remote. Update state for locally cached blocks.
-        if not self.enable_caching or delay_cache_blocks:
-            return KVCacheBlocks(new_blocks)
+        print("would have called cache_blocks: ", request_id, self.req_to_block_hashes[request_id],
+             num_computed_tokens + num_new_tokens - 0)
 
         return KVCacheBlocks(new_blocks)
 
@@ -378,6 +375,9 @@ class KVCacheManager:
     def cache_blocks(self, request: RequestSchedulerState, num_computed_tokens: int) -> None:
         """Cache the blocks for the request."""
         block_hashes = self.req_to_block_hashes[request.request_id]
+        
+        print("calling cache_blocks: ", request.request_id, self.req_to_block_hashes[request.request_id],
+            num_computed_tokens)
         self.coordinator.cache_blocks(request, block_hashes,
                                       num_computed_tokens)
 

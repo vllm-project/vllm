@@ -238,10 +238,6 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            num_draft_tokens = max(
-                num_new_tokens + request.num_computed_tokens -
-                request.num_tokens, 0)
-
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request.request_id,
@@ -304,7 +300,7 @@ class Scheduler(SchedulerInterface):
                     encoder_inputs_to_schedule)
                 # Allocate the encoder cache.
                 for i in encoder_inputs_to_schedule:
-                    self.encoder_cache_manager.allocate(request, i)
+                    self.encoder_cache_manager.allocate(request.params, i)
                 encoder_budget = new_encoder_budget
 
         # Record the LoRAs in scheduled_running_reqs
@@ -369,7 +365,7 @@ class Scheduler(SchedulerInterface):
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
                     new_computed_blocks, num_new_local_computed_tokens = \
-                        self.kv_cache_manager.get_computed_blocks(request)
+                        self.kv_cache_manager.get_computed_blocks(request.params)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -413,7 +409,7 @@ class Scheduler(SchedulerInterface):
                         (encoder_inputs_to_schedule, num_new_tokens,
                          new_encoder_budget
                          ) = self._try_schedule_encoder_inputs(
-                             request, num_computed_tokens, num_new_tokens,
+                             request.params, num_computed_tokens, num_new_tokens,
                              encoder_budget)
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
@@ -426,7 +422,6 @@ class Scheduler(SchedulerInterface):
                     num_new_local_computed_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=self.num_lookahead_tokens,
-                    delay_cache_blocks=load_kv_async,
                 )
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -484,7 +479,7 @@ class Scheduler(SchedulerInterface):
                         encoder_inputs_to_schedule)
                     # Allocate the encoder cache.
                     for i in encoder_inputs_to_schedule:
-                        self.encoder_cache_manager.allocate(request, i)
+                        self.encoder_cache_manager.allocate(request.params, i)
                     encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
@@ -668,7 +663,9 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
 
-            if num_encoder_tokens > encoder_budget:
+            # Only enforce cache capacity on initial prefill (num_computed_tokens == 0); always enforce encoder budget.
+            if (not self.encoder_cache_manager.can_allocate(request, i)
+                    or num_encoder_tokens > encoder_budget):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
@@ -777,7 +774,7 @@ class Scheduler(SchedulerInterface):
                 req_index = model_output.req_id_to_index[req_id]
                 generated_token_ids = model_output.sampled_token_ids[req_index]
 
-                if generated_token_ids is not None and self.structured_output_manager.should_advance(generated_token_ids, request):
+                if generated_token_ids is not None and self.structured_output_manager.should_advance(generated_token_ids, request.params):
                     # NOTE: structured_output_request
                     # should not be None if use_structured_output, we have
                     # check above, so safe to ignore type warning
@@ -824,6 +821,7 @@ class Scheduler(SchedulerInterface):
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        spec_decoding_stats = None
 
         for req_id in model_runner_output.req_ids:
             idx = model_runner_output.req_id_to_index[req_id]
@@ -987,15 +985,7 @@ class Scheduler(SchedulerInterface):
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
             else:
-                # TODO(lucas): clean-up, this is caused by _update_from_output
-                #  stopping a request that hits a max length and then being
-                #  later in the process_model_output_tasks.
-                try:
-                    self.waiting.remove(request)
-                except ValueError:
-                    # Request already removed from waiting
-                    pass
-
+                self.waiting.remove(request)
             request.status = finished_status
             self._free_request(request)
 
@@ -1024,7 +1014,6 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.free(request_id)
         self.kv_cache_manager.free_block_hashes(request_id)
         del self.requests[request_id]
-        del self.request_states[request_id]
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)

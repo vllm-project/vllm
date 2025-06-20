@@ -104,7 +104,7 @@ class SingleTypeKVCacheManager(ABC):
             assert len(new_computed_blocks) == 0
 
     def allocate_new_blocks(self, request_id: str,
-                             num_tokens: int) -> list[KVCacheBlock]:
+                            num_tokens: int) -> list[KVCacheBlock]:
         """
         Allocate new blocks for the request to give it at least `num_tokens` 
         token slots.

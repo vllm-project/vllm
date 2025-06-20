@@ -142,7 +142,7 @@ def create_scheduler(
 
 def create_requests(num_requests: int,
                     num_tokens: int = 10,
-                    mm_positions: Optional[list[PlaceholderRange]] = None,
+                    mm_positions: Optional[list[list[PlaceholderRange]]] = None,
                     max_tokens: int = 16,
                     stop_token_ids: Optional[list[int]] = None,
                     prompt_logprobs: Optional[int] = None):
@@ -155,17 +155,20 @@ def create_requests(num_requests: int,
         if mm_positions is not None:
             mm_position = mm_positions[i]
             mm_inputs = [MultiModalKwargs({})] * len(mm_position)
+            # Generate mock hashes for each multimodal position
+            mm_hashes = [f"mock-hash-{i}-{j}" for j in range(len(mm_position))]
         else:
             mm_position = None
             mm_inputs = None
-        # Create RequestParams first
+            mm_hashes = None
+
         request = RequestParams(
             request_id=f"{i}",
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
             multi_modal_inputs=mm_inputs,
             multi_modal_placeholders=mm_position,
-            multi_modal_hashes=None,
+            multi_modal_hashes=mm_hashes,
             eos_token_id=EOS_TOKEN_ID,
         )
         requests.append(request)
