@@ -20,8 +20,9 @@ from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized, get_pp_group,
-                              get_tp_group, ensure_kv_transfer_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized, get_dp_group,
+                              get_pp_group, get_tp_group,
+                              ensure_kv_transfer_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -308,6 +309,12 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             self, execute_model_req)
         return output
 
+    def align_dp_groups(self, value, op) -> int:
+        group = get_dp_group().cpu_group
+        value_t = torch.tensor(value, device="cpu", dtype=torch.int32)
+        torch.distributed.all_reduce(value_t, op=op, group=group)
+        return value_t.item()
+
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
@@ -367,6 +374,11 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                              cache_block_size)
         num_hpu_blocks = max(num_hpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
+
+        num_hpu_blocks = self.align_dp_groups(
+            num_hpu_blocks, torch.distributed.ReduceOp.MIN)
+        num_cpu_blocks = self.align_dp_groups(
+            num_cpu_blocks, torch.distributed.ReduceOp.MIN)
 
         self.model_runner.bucketing_ctx.num_hpu_blocks = num_hpu_blocks
 
